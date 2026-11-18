@@ -1,11 +1,13 @@
 //! The owner loop: start one child, follow it to an ending, settle cleanup,
 //! and build the single report.
 
+use std::panic::AssertUnwindSafe;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
+use futures_util::FutureExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -13,11 +15,10 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::capture::{Bounded, Captured};
-use super::limits::{FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
-use super::owner::{OwnedProcess, Settled};
+use super::limits::{FAR_FUTURE, FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
+use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
-use super::sys::Signal;
 
 /// Warning recorded when the owner closed pipes that something still held.
 pub const PIPE_WARNING: &str =
@@ -42,49 +43,111 @@ fn command(spec: &ProcessSpec) -> tokio::process::Command {
     command
 }
 
-/// Run one child to its single terminal report. Owns the child throughout; if
-/// this future is dropped or panics, the owner's `Drop` sends SIGKILL to the
-/// child's group.
+/// What the owner loop concluded, before cleanup.
+struct Driven {
+    ending: Option<Ending>,
+    stdout: Captured,
+    stderr: Captured,
+    term_at: Option<Instant>,
+    /// Kill at once instead of the polite stop first.
+    hard_stop: bool,
+}
+
+/// Run one child to its single terminal report. Owns the child throughout. The
+/// loop runs inside a panic boundary and the owner lives outside it, so a panic
+/// in the loop is followed by a hard stop and a report, as an error would be. If
+/// this future is dropped instead, the owner's `Drop` sends SIGKILL to the
+/// child's group and to the descendants seen at the latest scan.
 pub(super) async fn run_owned(
     spec: ProcessSpec,
     stop: CancellationToken,
-    pid_slot: Arc<AtomicU32>,
+    registry: Arc<Registry>,
 ) -> ProcessReport {
     let started_wall = SystemTime::now();
     let started = Instant::now();
     let mut command = command(&spec);
-    let mut owner = match OwnedProcess::spawn(&mut command, &spec) {
+    let mut owner = match OwnedProcess::spawn(&mut command, &spec, &registry) {
         Ok(owner) => owner,
         Err(error) => return failed_to_start(&spec, error),
     };
     let shared = owner.shared.clone();
-    pid_slot.store(u32::try_from(shared.pid).unwrap_or(0), Ordering::SeqCst);
+    registry
+        .pid
+        .store(u32::try_from(shared.pid).unwrap_or(0), Ordering::SeqCst);
+    let cleanup_deadline = spec.effective_cleanup_deadline();
+    if cleanup_deadline > spec.cleanup_deadline {
+        shared.warn(format!(
+            "cleanup_deadline {:?} is shorter than stop_grace plus drain_bound plus the margin; \
+             {cleanup_deadline:?} was used",
+            spec.cleanup_deadline
+        ));
+    }
 
+    let driven = AssertUnwindSafe(drive(
+        &mut owner,
+        &spec,
+        &stop,
+        &shared,
+        started,
+        cleanup_deadline,
+    ))
+    .catch_unwind()
+    .await;
+    let driven = match driven {
+        Ok(driven) => driven,
+        Err(_) => Driven {
+            ending: Some(Ending::WaitFailed {
+                message: "the owner loop panicked; the child was stopped".into(),
+            }),
+            stdout: Captured::default(),
+            stderr: Captured::default(),
+            term_at: None,
+            hard_stop: true,
+        },
+    };
+    let deadline = driven
+        .term_at
+        .map_or_else(Instant::now, |t| t + cleanup_deadline);
+    let deadline = deadline.max(Instant::now() + FINAL_CLEANUP_PASS.min(cleanup_deadline));
+    let settled = owner
+        .cleanup(spec.stop_grace, deadline, driven.hard_stop, driven.term_at)
+        .await;
+    build_report(
+        &spec,
+        Some(shared.pid),
+        driven.ending,
+        settled,
+        driven.stdout,
+        driven.stderr,
+        started_wall,
+        started,
+        &shared,
+    )
+}
+
+/// Follow the child to an ending: its output, the time limit, a stop request
+/// and its exit. Returns before cleanup.
+async fn drive(
+    owner: &mut OwnedProcess,
+    spec: &ProcessSpec,
+    stop: &CancellationToken,
+    shared: &Arc<Shared>,
+    started: Instant,
+    cleanup_deadline: Duration,
+) -> Driven {
     let Some(mut exit_rx) = owner.exit_rx.take() else {
         // The exit watcher could not start. Stop the child and say so.
         let message = format!(
             "the exit watcher could not be started: {}",
             owner.watch_error.clone().unwrap_or_default()
         );
-        let settled = owner
-            .cleanup(
-                spec.stop_grace,
-                Instant::now() + spec.cleanup_deadline,
-                true,
-                None,
-            )
-            .await;
-        return build_report(
-            &spec,
-            Some(shared.pid),
-            Some(Ending::WaitFailed { message }),
-            settled,
-            Captured::default(),
-            Captured::default(),
-            started_wall,
-            started,
-            &shared,
-        );
+        return Driven {
+            ending: Some(Ending::WaitFailed { message }),
+            stdout: Captured::default(),
+            stderr: Captured::default(),
+            term_at: None,
+            hard_stop: true,
+        };
     };
 
     let child = owner.child.as_mut().expect("a new owner holds its child");
@@ -105,13 +168,17 @@ pub(super) async fn run_owned(
             }
         }));
     }
+    #[cfg(test)]
+    if spec.panic_in_loop {
+        panic!("injected owner loop panic");
+    }
 
     let mut out = Bounded::new(spec.stdout);
     let mut err = Bounded::new(spec.stderr);
     let mut out_buf = vec![0u8; STDOUT_READ_CHUNK];
     let mut err_buf = vec![0u8; STDERR_READ_CHUNK];
     let limit_at = started + spec.time_limit;
-    let far = || Instant::now() + Duration::from_secs(86_400);
+    let far = || Instant::now() + FAR_FUTURE;
 
     let mut ending: Option<Ending> = None;
     let mut exited = false;
@@ -130,24 +197,30 @@ pub(super) async fn run_owned(
             _ = stop.cancelled(), if !stop_seen => {
                 stop_seen = true;
                 if !exited && term_at.is_none() && !shared.leader_has_exited() {
-                    ending = Some(Ending::Interrupted);
                     shared.before_stop().await;
-                    term_at = Some(Instant::now());
-                    shared.signal_group(Signal::TERM);
+                    // The child may have exited while the scan ran. Then it
+                    // ended on its own and is reported as it exited.
+                    if !shared.leader_has_exited() {
+                        ending = Some(Ending::Interrupted);
+                        term_at = Some(Instant::now());
+                        shared.terminate().await;
+                    }
                 }
             },
             _ = tokio::time::sleep_until(limit_at), if !limit_seen && !exited => {
                 limit_seen = true;
                 if term_at.is_none() && !shared.leader_has_exited() {
-                    ending = Some(Ending::TimedOut { limit: spec.time_limit });
                     shared.before_stop().await;
-                    term_at = Some(Instant::now());
-                    shared.signal_group(Signal::TERM);
+                    if !shared.leader_has_exited() {
+                        ending = Some(Ending::TimedOut { limit: spec.time_limit });
+                        term_at = Some(Instant::now());
+                        shared.terminate().await;
+                    }
                 }
             },
             _ = tokio::time::sleep_until(term_at.map(|t| t + spec.stop_grace).unwrap_or_else(far)),
                 if term_at.is_some() && !kill_sent => {
-                shared.signal_group(Signal::KILL);
+                shared.kill_all().await;
                 kill_sent = true;
                 drain_deadline = Some(Instant::now() + spec.drain_bound);
             },
@@ -161,7 +234,7 @@ pub(super) async fn run_owned(
                 // without changing how the run is reported.
                 if term_at.is_none() {
                     term_at = Some(Instant::now());
-                    shared.signal_group(Signal::TERM);
+                    shared.terminate().await;
                 }
             },
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
@@ -182,7 +255,7 @@ pub(super) async fn run_owned(
                 shared.warn(PIPE_WARNING.into());
             },
             _ = tokio::time::sleep_until(
-                    term_at.map(|t| t + spec.cleanup_deadline).unwrap_or_else(far)),
+                    term_at.map(|t| t + cleanup_deadline).unwrap_or_else(far)),
                 if term_at.is_some() => {
                 // Nothing may keep the owner here without bound: report what
                 // is known, with cleanup unconfirmed if it is.
@@ -193,31 +266,18 @@ pub(super) async fn run_owned(
     if !exited {
         owner.exit_rx = Some(exit_rx);
     }
-    drop(stdout);
-    drop(stderr);
-    let deadline = term_at.map_or_else(Instant::now, |t| t + spec.cleanup_deadline);
-    let deadline = deadline.max(Instant::now() + FINAL_CLEANUP_PASS.min(spec.cleanup_deadline));
-    let settled = owner
-        .cleanup(spec.stop_grace, deadline, false, term_at)
-        .await;
-    let ending = if watch_failed && ending.is_none() {
-        Some(Ending::WaitFailed {
+    if watch_failed && ending.is_none() {
+        ending = Some(Ending::WaitFailed {
             message: "the leader's exit could not be observed".into(),
-        })
-    } else {
-        ending
-    };
-    build_report(
-        &spec,
-        Some(shared.pid),
+        });
+    }
+    Driven {
         ending,
-        settled,
-        out.finish(),
-        err.finish(),
-        started_wall,
-        started,
-        &shared,
-    )
+        stdout: out.finish(),
+        stderr: err.finish(),
+        term_at,
+        hard_stop: false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,7 +290,7 @@ fn build_report(
     stderr: Captured,
     started_wall: SystemTime,
     started: Instant,
-    shared: &super::owner::Shared,
+    shared: &Shared,
 ) -> ProcessReport {
     let Settled { exit, cleanup } = settled;
     let ending = ending.unwrap_or_else(|| match &exit {
@@ -297,7 +357,7 @@ fn failed_to_start(spec: &ProcessSpec, error: std::io::Error) -> ProcessReport {
             capture_gap_observed: false,
             post_exit_group_signal: false,
             pipes_closed_by_owner: false,
-            unobserved_descendants_possible: false,
+            session_members_swept: Vec::new(),
         },
     }
 }

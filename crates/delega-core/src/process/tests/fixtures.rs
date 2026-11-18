@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::process::sys::{self, Signal};
-use crate::process::{EnvPolicy, ProcessReport, ProcessSpec};
+use crate::process::{EnvPolicy, ProcessHandle, ProcessReport, ProcessSpec};
 
 /// A private directory per test for pid files and markers.
 pub(super) struct Scratch {
@@ -106,4 +106,57 @@ pub(super) fn assert_confirmed(report: &ProcessReport) {
         crate::contract::result::Cleanup::Confirmed,
         "{report:#?}"
     );
+}
+
+/// A background-able command: `sleep 60` in a process group of its own, in the
+/// session of whoever starts it.
+pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sleep), q(60)'";
+
+/// `sleep 60` in a session of its own, beyond what the session sweep reaches.
+pub(super) const OWN_SESSION: &str = "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)'";
+
+pub(super) fn perl_available() -> bool {
+    std::process::Command::new("perl")
+        .arg("-e")
+        .arg("1")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Start a run, wait until the scripts have written the named pid files, guard
+/// those pids, then wait for the report. The guard must be kept by the test:
+/// it stops leftovers only if an assertion fails afterwards.
+pub(super) async fn run_guarded(
+    scratch: &Scratch,
+    spec: ProcessSpec,
+    files: &[&str],
+) -> (ProcessReport, Vec<i32>, Reaper) {
+    let handle = ProcessHandle::start(spec);
+    let mut pids = Vec::new();
+    for file in files {
+        pids.push(scratch.pid(file).await);
+    }
+    let reaper = Reaper(pids.clone());
+    (handle.wait().await, pids, reaper)
+}
+
+/// Shell: after starting a background command with `&`, wait until it has
+/// become the leader of its own group (so it has run `setsid` or `setpgid`).
+pub(super) const WAIT_ESCAPED: &str =
+    "until [ \"$(ps -o pgid= -p $! | tr -d ' ')\" = \"$!\" ]; do sleep 0.02; done;";
+
+/// Wait until a process leads its own group, for tests that must not race the
+/// descendant's own `setsid`.
+pub(super) async fn wait_own_group(pid: i32) {
+    for _ in 0..500 {
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        if String::from_utf8_lossy(&out.stdout).trim() == pid.to_string() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("process {pid} never became a group leader");
 }

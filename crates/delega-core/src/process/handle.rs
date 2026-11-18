@@ -1,7 +1,7 @@
 //! The caller's side of a running child: wait, interrupt, drop.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::capture::Captured;
+use super::owner::Registry;
 use super::report::{Diagnostics, Ending, ProcessReport, ProcessTiming};
 use super::run::run_owned;
 use super::spec::ProcessSpec;
@@ -40,7 +41,7 @@ impl Interrupter {
 #[derive(Debug)]
 pub struct ProcessHandle {
     stop: CancellationToken,
-    pid: Arc<AtomicU32>,
+    registry: Arc<Registry>,
     join: Option<JoinHandle<ProcessReport>>,
     started_wall: SystemTime,
     started: Instant,
@@ -57,15 +58,15 @@ impl ProcessHandle {
     /// Panics if called outside a Tokio runtime.
     pub fn start(spec: ProcessSpec) -> Self {
         let stop = CancellationToken::new();
-        let pid = Arc::new(AtomicU32::new(0));
+        let registry = Arc::new(Registry::default());
         let started_wall = SystemTime::now();
         let started = Instant::now();
         let time_limit = spec.time_limit;
         let tracking = spec.track_descendants;
-        let join = tokio::spawn(run_owned(spec, stop.clone(), pid.clone()));
+        let join = tokio::spawn(run_owned(spec, stop.clone(), registry.clone()));
         Self {
             stop,
-            pid,
+            registry,
             join: Some(join),
             started_wall,
             started,
@@ -76,7 +77,7 @@ impl ProcessHandle {
 
     /// The child's pid once it has started.
     pub fn pid(&self) -> Option<u32> {
-        match self.pid.load(Ordering::SeqCst) {
+        match self.registry.pid.load(Ordering::SeqCst) {
             0 => None,
             pid => Some(pid),
         }
@@ -137,7 +138,10 @@ impl ProcessHandle {
                 time_limit: self.time_limit,
             },
             cleanup: Cleanup::Unconfirmed {
-                pids: pid.into_iter().collect(),
+                pids: pid
+                    .into_iter()
+                    .chain(self.registry.tracked_pids())
+                    .collect(),
                 process_groups: pid.into_iter().collect(),
                 reason: format!(
                     "{why}; a best-effort SIGKILL was sent to the process group but \
@@ -153,7 +157,7 @@ impl ProcessHandle {
                 capture_gap_observed: true,
                 post_exit_group_signal: false,
                 pipes_closed_by_owner: false,
-                unobserved_descendants_possible: true,
+                session_members_swept: Vec::new(),
             },
         }
     }

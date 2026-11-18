@@ -20,45 +20,76 @@
 //!
 //! # How a child is owned
 //!
-//! The child is started in a process group of its own, so its pid is the group
-//! id. One owner task holds the child until a single reap at the end and is the
-//! only sender of signals. While the child runs, a periodic `ps` scan records
-//! the descendants with their start times, so a descendant that left the group
-//! is still found and a recycled pid is never signalled. A stop is SIGTERM to
-//! the group, SIGKILL after the grace period (repeated on a timer that does
-//! not wait for inspection), and individual signals to tracked descendants
-//! until the group is empty and every tracked descendant is gone. The
-//! leader's exit is observed without reaping it. A descendant that keeps the
-//! output pipes open after the kill does not hold the report: the owner closes
-//! its ends after the drain bound and says so in the diagnostics.
+//! The child is started as the leader of a new session (`setsid`), so its pid
+//! is also its process group id and its session id, and it has no controlling
+//! terminal. One owner task holds the child until a single reap at the end and
+//! is the only sender of signals. While the child runs, a periodic `ps` scan
+//! records its descendants with their start times, so a descendant that left
+//! the group or the session is still found and a recycled pid is never
+//! signalled. A stop is SIGTERM to the group, then SIGCONT (so a stopped
+//! process receives it), then the same to everything a sweep finds outside the
+//! group; SIGKILL follows after the grace period, and the group KILL repeats on
+//! a timer that does not wait for inspection. A leader that is only stopped has
+//! not exited and is stopped like any other. The leader's exit is observed
+//! without reaping it.
 //!
-//! Dropping a [`ProcessHandle`] interrupts the run. If the owner is dropped
-//! (the runtime shuts down, or a panic), its `Drop` sends SIGKILL to the group.
+//! Cleanup is a sweep, repeated until it finds nothing: every live process in
+//! the child's group, every live process whose session id is the child's (read
+//! with `getsid` for each row of the table, because `ps` has no session keyword
+//! that works on both macOS and Linux), and every tracked descendant with a
+//! matching start time. The sweep signals what it finds. A descendant that
+//! keeps the output pipes open after the kill does not hold the report: the
+//! owner closes its ends after the drain bound and says so in the diagnostics.
+//! If process listing is unavailable (no `ps`, or repeated failures) cleanup
+//! does not wait out its deadline: it kills the group, reaps the leader,
+//! checks the group with `kill(-pgid, 0)`, and reports `Unconfirmed` saying
+//! that.
 //!
-//! # What cleanup does not cover
+//! Dropping a [`ProcessHandle`] interrupts the run. If the owner is dropped (the
+//! runtime shuts down) its `Drop` sends SIGKILL to the group and to the
+//! descendants seen at the latest scan; a panic in the owner loop is followed by
+//! a hard stop and a report.
 //!
-//! `Cleanup::Confirmed` covers the child's process group and the descendants
-//! the scan observed. Known gaps, which this layer does not close:
+//! # What `Confirmed` means
 //!
-//! - A child that starts a detached grandchild (its own process group) and
-//!   exits at once leaves that grandchild running, because it was never
-//!   observed, and the report still says `Confirmed`. Tracked as delega issue
-//!   1; see the ignored tests in `tests/gaps.rs`.
-//! - The same hole opens when a crash lands between two scans: a descendant
-//!   that left the group after the last scan and before the crash is unknown.
-//!   The pre-stop scan only runs for a stop the owner starts, not for a crash.
+//! `Cleanup::Confirmed` means a final sweep, taken after the leader exited and
+//! before it was reaped, found no live process in the child's group, none in
+//! its session, and no tracked descendant. It does not cover a descendant that
+//! left the session with its own `setsid` and was never seen by a scan.
+//! Anything else is `Unconfirmed`, naming the pids and groups.
 //!
-//! [`Diagnostics::unobserved_descendants_possible`] is always true for a
-//! started child, and [`Diagnostics::capture_gap_observed`] says when the scan
-//! is known to have missed its budget or failed.
+//! # What remains possible
+//!
+//! One gap remains, tracked as delega issue 1: a descendant that calls `setsid`
+//! and is orphaned before any scan saw it while its parent lived (a detached
+//! grandchild whose parent exits at once, or a crash before the next scan). It
+//! is in no group or session of the child and has no known ancestry, so
+//! nothing here can find it, and the report says `Confirmed`. The scan runs
+//! every 500 ms and once more, within a budget, before a stop the owner
+//! starts; it does not run for a crash. [`Diagnostics::capture_gap_observed`]
+//! says when the scan is known to have missed its budget or failed, which
+//! widens that window. The ignored tests in `tests/gaps.rs` state the wanted
+//! behaviour. A descendant that stays in the session, even in a group of its
+//! own, is not part of the gap.
 //!
 //! # Platform
 //!
-//! Unix only; the module is empty elsewhere. The group is made with
-//! `process_group(0)` (a new process group in the same session) rather than
-//! `setsid`, because `setsid` needs `pre_exec`, which is `unsafe`, and the
-//! workspace forbids `unsafe`. A child therefore keeps its controlling
-//! terminal, which only matters when delega itself runs on one.
+//! Unix only; the module is empty elsewhere. It has the workspace's one
+//! `unsafe`: a `pre_exec` hook in `sys.rs` that calls only `setsid`.
+//!
+//! Verified on macOS only. Not yet verified on Linux, for the Linux run to
+//! check:
+//!
+//! - `ps -o lstart` of one process can differ by a second between calls on
+//!   older procps, which would break pid identity matching.
+//! - `kill(-pgid, 0)` and group signals when only a zombie leader remains
+//!   (macOS answers EPERM, Linux succeeds), and the EPERM path in cleanup.
+//! - `waitid` with `WNOWAIT` for a stopped leader: macOS reports a stop as a
+//!   result; the code accepts only exit, kill and core dump, which is the
+//!   Linux behaviour too, but the stopped-leader tests have not run there.
+//! - `getsid` of processes in other sessions and of other users' processes.
+//! - Fixtures use `perl` to start descendants in their own group or session and
+//!   skip with a printed message when it is missing.
 
 #![cfg(unix)]
 

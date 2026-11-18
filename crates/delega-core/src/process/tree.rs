@@ -12,13 +12,14 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
-use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_TIMEOUT};
+use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
 use super::sys::{self, Signal, SignalError};
 
 /// Why a process table could not be read.
@@ -26,6 +27,9 @@ use super::sys::{self, Signal, SignalError};
 pub(crate) enum InspectError {
     /// `ps` did not finish within its deadline.
     TimedOut,
+    /// `ps` could not be started at all (missing or not executable), so
+    /// retrying will not help.
+    Unavailable(String),
     /// Any other failure, as text.
     Failed(String),
 }
@@ -34,6 +38,7 @@ impl fmt::Display for InspectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             InspectError::TimedOut => f.write_str("process listing timed out"),
+            InspectError::Unavailable(message) => f.write_str(message),
             InspectError::Failed(message) => f.write_str(message),
         }
     }
@@ -72,24 +77,48 @@ pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
         .collect()
 }
 
-/// Run bounded process inspection.
-pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
+/// Where `ps` is looked for, in order.
+const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
+
+/// Run bounded process inspection with the first of `programs` that starts.
+pub(crate) async fn list_processes_from(
+    programs: &[PathBuf],
+) -> Result<Vec<ProcessRow>, InspectError> {
     let failed = |e: std::io::Error| InspectError::Failed(format!("ps: {e}"));
-    let mut child = tokio::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,stat=,lstart="])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(failed)?;
+    let mut spawned = None;
+    let mut last_error = None;
+    for program in programs {
+        match tokio::process::Command::new(program)
+            .args(["-axo", "pid=,ppid=,pgid=,stat=,lstart="])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => {
+                spawned = Some(child);
+                break;
+            }
+            Err(error) => last_error = Some((program.clone(), error)),
+        }
+    }
+    let Some(mut child) = spawned else {
+        let detail = last_error.map_or_else(
+            || "no ps program configured".to_string(),
+            |(program, error)| format!("{}: {error}", program.display()),
+        );
+        return Err(InspectError::Unavailable(format!(
+            "ps could not be started ({detail})"
+        )));
+    };
     let mut stdout = child
         .stdout
         .take()
         .ok_or_else(|| InspectError::Failed("ps: no stdout pipe".into()))?;
     let read = async {
         let mut bytes = Vec::new();
-        let mut chunk = [0u8; 65536];
+        let mut chunk = vec![0u8; PS_READ_CHUNK];
         loop {
             let n = stdout.read(&mut chunk).await.map_err(failed)?;
             if n == 0 {
@@ -122,6 +151,16 @@ pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
     result
 }
 
+/// Run bounded process inspection with the system `ps`.
+#[cfg(test)]
+pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
+    list_processes_from(&system_programs()).await
+}
+
+fn system_programs() -> Vec<PathBuf> {
+    PS_PROGRAMS.iter().map(PathBuf::from).collect()
+}
+
 /// Source of process rows; injectable for deterministic tests.
 pub(crate) type Lister = Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<ProcessRow>, InspectError>> + Send>>
@@ -130,7 +169,16 @@ pub(crate) type Lister = Arc<
 >;
 
 pub(crate) fn system_lister() -> Lister {
-    Arc::new(|| Box::pin(list_processes()))
+    lister_for(system_programs())
+}
+
+/// A lister that runs the first of `programs` that starts. Tests point it at a
+/// missing program to exercise unavailable inspection.
+pub(crate) fn lister_for(programs: Vec<PathBuf>) -> Lister {
+    Arc::new(move || {
+        let programs = programs.clone();
+        Box::pin(async move { list_processes_from(&programs).await })
+    })
 }
 
 /// Constant-space inspection receipts, shared outside the async tree lock.
@@ -179,7 +227,6 @@ pub(crate) fn push_warning(warnings: &Warnings, warning: String) {
 fn clip(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
 }
-
 pub(crate) struct ProcessTree {
     pid: i32,
     root_started: Option<String>,
@@ -188,17 +235,46 @@ pub(crate) struct ProcessTree {
     /// loses warnings while a capture holds the tree.
     pub warnings: Warnings,
     pub observations: SharedObservations,
+    /// The tracked descendants alive at the latest snapshot, readable without
+    /// the tree lock, for the paths that cannot run a scan (an owner that is
+    /// dropped, a report written after the owner was lost).
+    mirror: Arc<Mutex<Vec<i32>>>,
     lister: Lister,
     enabled: bool,
 }
 
-/// What one cleanup inspection found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CleanupView {
-    /// Whether the child's group has a live (non-zombie) member.
-    pub group_live: bool,
-    /// Live tracked descendants, by pid.
-    pub live: Vec<i32>,
+/// What one cleanup sweep found alive. Zombies are not alive: they have run to
+/// their end and wait for a parent to collect them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SweepView {
+    /// Members of the child's process group.
+    pub group: Vec<i32>,
+    /// Processes whose session id is the child's, outside the group.
+    pub session: Vec<i32>,
+    /// Tracked descendants with a matching start identity, outside the group
+    /// and the session.
+    pub tracked: Vec<i32>,
+}
+
+impl SweepView {
+    /// Whether the sweep found nothing alive.
+    pub fn is_empty(&self) -> bool {
+        self.group.is_empty() && self.session.is_empty() && self.tracked.is_empty()
+    }
+
+    /// Every pid found, once.
+    pub fn all(&self) -> Vec<i32> {
+        let mut all: Vec<i32> = self
+            .group
+            .iter()
+            .chain(&self.session)
+            .chain(&self.tracked)
+            .copied()
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
 }
 
 impl ProcessTree {
@@ -209,9 +285,17 @@ impl ProcessTree {
             known: HashMap::new(),
             warnings: Default::default(),
             observations: Default::default(),
+            mirror: Default::default(),
             lister,
             enabled,
         }
+    }
+
+    /// Publish the live tracked descendants to `mirror` after each snapshot.
+    #[must_use]
+    pub fn with_mirror(mut self, mirror: Arc<Mutex<Vec<i32>>>) -> Self {
+        self.mirror = mirror;
+        self
     }
 
     fn warn(&self, error: &InspectError) {
@@ -230,11 +314,17 @@ impl ProcessTree {
         }
         // The production inspector owns its timeout and async reap. Run it as
         // its own task so cancelling this future never cancels it, and so a
-        // panicking injected inspector is caught here and reported as a failure.
-        let future = (self.lister)();
-        let result = match tokio::spawn(future).await {
-            Ok(rows) => rows,
-            Err(_) => Err(InspectError::Failed("process inspector panicked".into())),
+        // panicking inspector, or a panicking factory, is caught here and
+        // reported as a failure.
+        let lister = self.lister.clone();
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lister())) {
+            Ok(future) => match tokio::spawn(future).await {
+                Ok(rows) => rows,
+                Err(_) => Err(InspectError::Failed("process inspector panicked".into())),
+            },
+            Err(_) => Err(InspectError::Failed(
+                "process inspector factory panicked".into(),
+            )),
         };
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
         let finished = Instant::now();
@@ -295,6 +385,12 @@ impl ProcessTree {
     async fn snapshot(&mut self) -> Result<Vec<ProcessRow>, InspectError> {
         let rows = self.rows().await?;
         self.adopt(&rows);
+        let tracked: Vec<i32> = rows
+            .iter()
+            .filter(|r| !r.zombie && self.known.get(&r.pid) == Some(&r.started))
+            .map(|r| r.pid)
+            .collect();
+        *self.mirror.lock().unwrap_or_else(|e| e.into_inner()) = tracked;
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
         obs.stats.root_identity_observed = self.root_started.is_some();
         obs.stats.retained_descendant_identities = self.known.len();
@@ -302,24 +398,70 @@ impl ProcessTree {
         Ok(rows)
     }
 
-    /// Decide both parts of cleanup from the same fresh snapshot, after
-    /// adopting descendants still attached to an identified owned process.
-    pub async fn cleanup_state(&mut self) -> Result<CleanupView, InspectError> {
-        let rows = self.snapshot().await?;
-        let group_live = rows.iter().any(|r| r.group == self.pid && !r.zombie);
-        let live = rows
-            .iter()
-            .filter(|r| !r.zombie && self.known.get(&r.pid) == Some(&r.started))
-            .map(|r| r.pid)
-            .collect();
-        Ok(CleanupView { group_live, live })
+    /// Classify the live processes in one table. The child is the session
+    /// leader, so its pid is the session id; a process outside its group that
+    /// still reports that session id was started by the child and never left.
+    /// The session id is read per pid with `getsid`, because `ps` keywords for
+    /// it differ between systems (macOS reports 0 for every process).
+    fn view(&self, rows: &[ProcessRow]) -> SweepView {
+        let mut view = SweepView::default();
+        for row in rows.iter().filter(|r| !r.zombie) {
+            if row.group == self.pid {
+                view.group.push(row.pid);
+            } else if sys::session_of(row.pid) == Some(self.pid) {
+                view.session.push(row.pid);
+            } else if self.known.get(&row.pid) == Some(&row.started) {
+                view.tracked.push(row.pid);
+            }
+        }
+        view
     }
 
-    /// Group ownership is pinned by the unreaped leader. A fresh table can
-    /// distinguish live members from the zombie-only macOS EPERM case.
+    /// One sweep from a fresh snapshot, adopting descendants still attached to
+    /// an identified owned process. With `signal`, everything the sweep found
+    /// is signalled from that same snapshot; a TERM is followed by CONT so a
+    /// stopped process receives it.
+    pub async fn sweep(&mut self, signal: Option<Signal>) -> Result<SweepView, InspectError> {
+        let rows = self.snapshot().await?;
+        let view = self.view(&rows);
+        if let Some(signal) = signal {
+            for pid in view.all() {
+                // A session member is checked again just before it is signalled.
+                if view.session.contains(&pid) && sys::session_of(pid) != Some(self.pid) {
+                    continue;
+                }
+                self.deliver(pid, signal);
+            }
+        }
+        Ok(view)
+    }
+
+    fn deliver(&self, pid: i32, signal: Signal) {
+        for signal in [
+            Some(signal),
+            (signal == Signal::TERM).then_some(Signal::CONT),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            match sys::signal_process(pid, signal) {
+                Ok(()) | Err(SignalError::NoSuchProcess) => {}
+                Err(error) => push_warning(
+                    &self.warnings,
+                    format!("Descendant signal failed: {error:?}"),
+                ),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn cleanup_state(&mut self) -> Result<SweepView, InspectError> {
+        self.sweep(None).await
+    }
+
     #[cfg(test)]
     pub async fn group_live(&mut self) -> Result<bool, InspectError> {
-        self.cleanup_state().await.map(|view| view.group_live)
+        self.sweep(None).await.map(|view| !view.group.is_empty())
     }
 
     #[cfg(test)]
@@ -327,7 +469,7 @@ impl ProcessTree {
         if !self.enabled {
             return Ok(0);
         }
-        self.cleanup_state().await.map(|view| view.live.len())
+        self.sweep(None).await.map(|view| view.tracked.len())
     }
 
     #[cfg(test)]
@@ -351,34 +493,6 @@ impl ProcessTree {
                 }
             }
         }
-    }
-
-    /// Signal every known descendant whose start identity still matches.
-    /// Returns the number signalled.
-    pub async fn signal(&mut self, signal: Signal) -> usize {
-        if !self.enabled {
-            return 0;
-        }
-        let mut sent = 0;
-        match self.snapshot().await {
-            Ok(rows) => {
-                for row in rows {
-                    if row.zombie || self.known.get(&row.pid) != Some(&row.started) {
-                        continue;
-                    }
-                    match sys::signal_process(row.pid, signal) {
-                        Ok(()) => sent += 1,
-                        Err(SignalError::NoSuchProcess) => {}
-                        Err(error) => push_warning(
-                            &self.warnings,
-                            format!("Descendant signal failed: {error:?}"),
-                        ),
-                    }
-                }
-            }
-            Err(error) => self.warn(&error),
-        }
-        sent
     }
 }
 
@@ -463,7 +577,8 @@ mod tests {
                     .map(|(pid, parent, started)| ProcessRow {
                         pid,
                         parent,
-                        group: 10,
+                        // Not the child's group, so these count as tracked.
+                        group: 99,
                         zombie: false,
                         started: started.into(),
                     })
@@ -502,7 +617,7 @@ mod tests {
         let mut tree = ProcessTree::new(10, lister, true);
         tree.capture().await;
         let view = tree.cleanup_state().await.unwrap();
-        assert_eq!(view.live.len(), 2);
+        assert_eq!(view.tracked.len(), 2);
         assert_eq!(tree.known.get(&13).map(String::as_str), Some("new-child"));
         assert_eq!(tree.known.get(&12).map(String::as_str), Some("old"));
         assert!(!tree.known.contains_key(&14));
@@ -575,11 +690,11 @@ mod tests {
         let mut tree = ProcessTree::new(10, lister, true);
         tree.capture().await;
         assert!(tree.group_live().await.unwrap());
-        assert_eq!(tree.alive_known().await.unwrap(), 1);
+        assert_eq!(tree.cleanup_state().await.unwrap().all(), vec![11]);
         zombie.store(true, Ordering::SeqCst);
         assert!(!tree.group_live().await.unwrap());
-        assert_eq!(tree.alive_known().await.unwrap(), 0);
-        assert_eq!(tree.signal(Signal::TERM).await, 0);
+        assert!(tree.cleanup_state().await.unwrap().is_empty());
+        assert!(tree.sweep(Some(Signal::TERM)).await.unwrap().is_empty());
     }
 
     #[tokio::test]

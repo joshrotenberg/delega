@@ -193,10 +193,14 @@ async fn dropping_the_handle_stops_the_child_and_its_descendants() {
 async fn cancelling_the_run_future_stops_the_child() {
     let s = Scratch::new();
     let spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
-    let waited = tokio::time::timeout(Duration::from_millis(600), run(spec)).await;
-    assert!(waited.is_err(), "the run should still be going");
-    let leader = s.pid_now("leader");
+    let mut future = Box::pin(run(spec));
+    // Wait for the child to exist, however slow the machine, then cancel.
+    let leader = tokio::select! {
+        _ = &mut future => panic!("the run should still be going"),
+        pid = s.pid("leader") => pid,
+    };
     let _reaper = Reaper(vec![leader]);
+    drop(future);
     assert_gone("leader after the run future was dropped", &[leader]).await;
 }
 

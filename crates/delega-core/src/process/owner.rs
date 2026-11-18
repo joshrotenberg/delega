@@ -18,19 +18,40 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::limits::{
-    CAPTURE_INTERVAL, CLEANUP_POLL_INTERVAL, KILL_REPEAT_INTERVAL, MAX_SIGNAL_RECORDS,
-    PRE_STOP_CAPTURE_BUDGET, PRE_STOP_POLL_INTERVAL,
+    CAPTURE_INTERVAL, CLEANUP_POLL_INTERVAL, DESCENDANT_SIGNAL_BUDGET, EXIT_POLL_INTERVAL,
+    INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS,
+    MAX_SWEPT_RECORDS, PRE_STOP_CAPTURE_BUDGET, PRE_STOP_POLL_INTERVAL,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
 use super::sys::{self, Signal, SignalError};
 use super::tree::{
-    CleanupView, InspectionStats, ProcessTree, SharedObservations, Warnings, push_warning,
-    system_lister,
+    InspectError, InspectionStats, ProcessTree, SharedObservations, SweepView, Warnings,
+    push_warning, system_lister,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// What the handle and the owner share so a report can be written even when
+/// the owner is gone.
+#[derive(Debug, Default)]
+pub(super) struct Registry {
+    /// The child's pid, 0 until it has started.
+    pub pid: std::sync::atomic::AtomicU32,
+    /// Tracked descendants alive at the latest scan.
+    pub tracked: Arc<Mutex<Vec<i32>>>,
+}
+
+impl Registry {
+    /// The tracked descendants as pids.
+    pub(super) fn tracked_pids(&self) -> Vec<u32> {
+        lock(&self.tracked)
+            .iter()
+            .filter_map(|p| u32::try_from(*p).ok())
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -59,7 +80,11 @@ pub(super) struct Shared {
     budget_exceeded: AtomicU64,
     pipes_closed_by_owner: AtomicBool,
     pub(super) leader_exited: Arc<AtomicBool>,
-    last_view: Mutex<Option<Result<CleanupView, String>>>,
+    last_view: Mutex<Option<Result<SweepView, String>>>,
+    swept: Mutex<Vec<u32>>,
+    tracked_mirror: Arc<Mutex<Vec<i32>>>,
+    #[cfg(test)]
+    swallow_kills: std::sync::atomic::AtomicU32,
 }
 
 impl Shared {
@@ -94,6 +119,18 @@ impl Shared {
     pub(super) fn signal_group(&self, signal: Signal) {
         if self.signals_closed.load(Ordering::SeqCst) {
             return;
+        }
+        #[cfg(test)]
+        if signal == Signal::KILL {
+            let left = self.swallow_kills.load(Ordering::SeqCst);
+            if left > 0
+                && self
+                    .swallow_kills
+                    .compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                return;
+            }
         }
         let already_exited = self.leader_has_exited();
         match sys::signal_group(self.pid, signal) {
@@ -148,12 +185,56 @@ impl Shared {
         }
     }
 
-    async fn signal_descendants(&self, signal: Signal) -> usize {
-        let count = self.tree.lock().await.signal(signal).await;
-        if count > 0 {
-            self.record_signal(signal, SignalTarget::Descendants { count });
+    /// The polite stop: TERM to the group, then CONT so a stopped process
+    /// receives it, then TERM (and CONT) to everything a sweep finds outside
+    /// the group. The group is signalled first and without waiting.
+    pub(super) async fn terminate(&self) {
+        self.signal_group(Signal::TERM);
+        self.signal_group(Signal::CONT);
+        self.signal_swept(Signal::TERM).await;
+    }
+
+    /// The hard stop: KILL to the group, then to everything a sweep finds.
+    pub(super) async fn kill_all(&self) {
+        self.signal_group(Signal::KILL);
+        self.signal_swept(Signal::KILL).await;
+    }
+
+    /// Signal what a fresh sweep finds, within a budget so a slow or hung
+    /// listing cannot hold the owner. A cleanup pass signals again later.
+    async fn signal_swept(&self, signal: Signal) {
+        let _ = tokio::time::timeout(DESCENDANT_SIGNAL_BUDGET, async {
+            let result = self.tree.lock().await.sweep(Some(signal)).await;
+            self.note_sweep(signal, result);
+        })
+        .await;
+    }
+
+    /// Record a sweep that signalled: the signal log, the session members
+    /// found, and the view for a later unconfirmed verdict.
+    fn note_sweep(&self, signal: Signal, result: Result<SweepView, InspectError>) {
+        match result {
+            Ok(view) => {
+                let outside = view.session.len() + view.tracked.len();
+                if outside > 0 {
+                    self.record_signal(signal, SignalTarget::Descendants { count: outside });
+                }
+                let mut swept = lock(&self.swept);
+                for pid in &view.session {
+                    let Ok(pid) = u32::try_from(*pid) else {
+                        continue;
+                    };
+                    if swept.len() < MAX_SWEPT_RECORDS && !swept.contains(&pid) {
+                        swept.push(pid);
+                    }
+                }
+                *lock(&self.last_view) = Some(Ok(view));
+            }
+            Err(error) => {
+                self.warn(format!("Process sweep unavailable: {error}"));
+                *lock(&self.last_view) = Some(Err(error.to_string()));
+            }
         }
-        count
     }
 
     pub(super) fn diagnostics(&self) -> Diagnostics {
@@ -171,7 +252,7 @@ impl Shared {
             capture_gap_observed,
             post_exit_group_signal: self.post_exit_group_signal.load(Ordering::SeqCst),
             pipes_closed_by_owner: self.pipes_closed_by_owner.load(Ordering::SeqCst),
-            unobserved_descendants_possible: true,
+            session_members_swept: lock(&self.swept).clone(),
         }
     }
 }
@@ -205,8 +286,14 @@ impl Drop for OwnedProcess {
         if self.child.is_some() && !self.shared.signals_closed.load(Ordering::SeqCst) {
             // Runtime shutdown or a panic is best effort, not a settlement.
             // The child is still unreaped here, so the group id is still ours
-            // and no other task can send a later group signal.
+            // and no other task can send a later group signal. Descendants
+            // that were alive at the latest scan are signalled too; a scan
+            // cannot run here, so a pid that was reused since is a risk this
+            // accepts.
             let _ = sys::signal_group(self.shared.pid, Signal::KILL);
+            for pid in lock(&self.shared.tracked_mirror).iter() {
+                let _ = sys::signal_process(*pid, Signal::KILL);
+            }
         }
     }
 }
@@ -217,11 +304,13 @@ impl OwnedProcess {
     pub(super) fn spawn(
         command: &mut tokio::process::Command,
         spec: &ProcessSpec,
+        registry: &Registry,
     ) -> Result<Self, std::io::Error> {
         command.kill_on_drop(true);
-        // A process group of its own, with the child as leader: its pid is the
-        // group id. Safe, unlike `setsid` in `pre_exec`; see the module docs.
-        command.process_group(0);
+        // A session of its own, with the child as leader: its pid is the
+        // session id and the process group id, and it has no controlling
+        // terminal.
+        sys::new_session(command);
         let child = command.spawn()?;
         let pid = child
             .id()
@@ -230,7 +319,8 @@ impl OwnedProcess {
                 std::io::Error::other("the child exited before its pid could be read")
             })?;
         let lister = spec.lister.clone().unwrap_or_else(system_lister);
-        let tree = ProcessTree::new(pid, lister, spec.track_descendants);
+        let tree = ProcessTree::new(pid, lister, spec.track_descendants)
+            .with_mirror(registry.tracked.clone());
         let shared = Arc::new(Shared {
             pid,
             tracking_enabled: spec.track_descendants,
@@ -251,6 +341,10 @@ impl OwnedProcess {
             pipes_closed_by_owner: AtomicBool::new(false),
             leader_exited: Arc::new(AtomicBool::new(false)),
             last_view: Mutex::new(None),
+            swept: Mutex::new(Vec::new()),
+            tracked_mirror: registry.tracked.clone(),
+            #[cfg(test)]
+            swallow_kills: std::sync::atomic::AtomicU32::new(spec.swallow_group_kills),
         });
         let mut owner = OwnedProcess {
             child: Some(child),
@@ -290,9 +384,13 @@ impl OwnedProcess {
 
     /// Stop everything and settle. With `hard_stop` the group is killed at
     /// once; otherwise TERM goes first (unless `term_at` says it already did)
-    /// and KILL follows after `grace`. KILL is repeated on a timer that does
-    /// not depend on process inspection. The leader is reaped last. When
-    /// `deadline` passes first, what remains is reported, not waited for.
+    /// and KILL follows after `grace`. KILL to the group is repeated on a timer
+    /// that does not depend on process inspection. Each pass of the sweep
+    /// signals whatever it finds in the group, in the child's session, or among
+    /// tracked descendants, until a pass finds nothing and the leader has
+    /// exited. The leader is reaped last. When `deadline` passes first, or
+    /// inspection is unavailable, what could not be checked is reported, not
+    /// waited for.
     pub(super) async fn cleanup(
         &mut self,
         grace: Duration,
@@ -306,7 +404,7 @@ impl OwnedProcess {
         }
         let first_term = term_at.unwrap_or_else(Instant::now);
         if term_at.is_none() && !hard_stop {
-            shared.signal_group(Signal::TERM);
+            shared.terminate().await;
         }
         let mut next_kill = if hard_stop {
             Instant::now()
@@ -314,7 +412,7 @@ impl OwnedProcess {
             first_term + grace
         };
         if next_kill <= Instant::now() {
-            shared.signal_group(Signal::KILL);
+            shared.kill_all().await;
             next_kill = Instant::now() + KILL_REPEAT_INTERVAL;
         }
         self.capture_stop.cancel();
@@ -332,72 +430,159 @@ impl OwnedProcess {
                 shared.warn(format!("Process capture task failed: {error}"));
             }
             shared.tree.lock().await.capture().await;
+            let mut failures = 0u32;
             loop {
-                let snapshot = shared.tree.lock().await.cleanup_state().await;
-                *lock(&shared.last_view) = Some(
-                    snapshot
-                        .clone()
-                        .map_err(|error: super::tree::InspectError| error.to_string()),
-                );
-                let leader_exited = shared.leader_has_exited();
-                match &snapshot {
-                    Ok(view) if !view.group_live && view.live.is_empty() && leader_exited => {
-                        shared.pending_eperm.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                    Err(error) => {
-                        shared.warn(format!("Process cleanup inspection unavailable: {error}"))
-                    }
-                    _ => {}
-                }
-                if shared.pending_eperm.load(Ordering::SeqCst)
-                    && matches!(&snapshot, Ok(view) if view.group_live)
-                {
-                    lock(&shared.signal_error).get_or_insert_with(|| "kill EPERM".into());
-                    shared
-                        .warn("Process-group signal failed: EPERM with live group members".into());
-                }
                 let signal = if hard_stop || first_term.elapsed() >= grace {
                     Signal::KILL
                 } else {
                     Signal::TERM
                 };
-                shared.signal_descendants(signal).await;
+                let pass = shared.tree.lock().await.sweep(Some(signal)).await;
+                match pass {
+                    Ok(view) => {
+                        failures = 0;
+                        let leader_exited = shared.leader_has_exited();
+                        let clean = view.is_empty() && leader_exited;
+                        if shared.pending_eperm.load(Ordering::SeqCst) && !view.group.is_empty() {
+                            lock(&shared.signal_error).get_or_insert_with(|| "kill EPERM".into());
+                            shared.warn(
+                                "Process-group signal failed: EPERM with live group members".into(),
+                            );
+                        }
+                        if !view.is_empty() {
+                            shared.note_sweep(signal, Ok(view));
+                        } else {
+                            *lock(&shared.last_view) = Some(Ok(view));
+                        }
+                        if clean {
+                            shared.pending_eperm.store(false, Ordering::SeqCst);
+                            break Ended::Clean;
+                        }
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        *lock(&shared.last_view) = Some(Err(error.to_string()));
+                        shared.warn(format!("Process cleanup inspection unavailable: {error}"));
+                        if matches!(error, InspectError::Unavailable(_))
+                            || failures >= INSPECTION_FAILURE_LIMIT
+                        {
+                            break Ended::InspectionUnavailable(error.to_string());
+                        }
+                    }
+                }
                 tokio::time::sleep(CLEANUP_POLL_INTERVAL).await;
             }
         };
         tokio::pin!(settle);
-        let confirmed = loop {
+        let ended = loop {
             tokio::select! {
-                _ = &mut settle => break true,
+                ended = &mut settle => break ended,
                 _ = tokio::time::sleep_until(next_kill) => {
                     shared.signal_group(Signal::KILL);
                     next_kill = Instant::now() + KILL_REPEAT_INTERVAL;
                 },
-                _ = tokio::time::sleep_until(deadline) => break false,
+                _ = tokio::time::sleep_until(deadline) => break Ended::DeadlinePassed,
             }
         };
-        if confirmed {
-            // All signal-capable work is above. No task can signal this group
-            // after this single reap.
-            shared.signals_closed.store(true, Ordering::SeqCst);
-            let exit = self.reap().await;
-            return Settled {
-                exit,
-                cleanup: Cleanup::Confirmed,
-            };
+        match ended {
+            Ended::Clean => {
+                // All signal-capable work is above. No task can signal this
+                // group after this single reap.
+                shared.signals_closed.store(true, Ordering::SeqCst);
+                let exit = self.reap().await;
+                Settled {
+                    exit,
+                    cleanup: Cleanup::Confirmed,
+                }
+            }
+            Ended::DeadlinePassed => {
+                let leader_gone = shared.leader_has_exited();
+                let exit = if leader_gone {
+                    shared.signals_closed.store(true, Ordering::SeqCst);
+                    self.reap().await
+                } else {
+                    // The leader is still running and unreaped. Dropping the
+                    // owner sends one last group SIGKILL while the group id is
+                    // still ours.
+                    Err("the child had not exited when cleanup gave up".into())
+                };
+                let cleanup = shared.unconfirmed(leader_gone, deadline_text(first_term, deadline));
+                Settled { exit, cleanup }
+            }
+            Ended::InspectionUnavailable(error) => {
+                self.finish_without_inspection(error, next_kill, deadline)
+                    .await
+            }
+        }
+    }
+
+    /// Process listing does not work, so the sweep cannot run. Kill the group,
+    /// reap the leader, and check the one thing that needs no listing: whether
+    /// any process still has the child's group id. The verdict is always
+    /// unconfirmed, and says what was checked.
+    async fn finish_without_inspection(
+        &mut self,
+        error: String,
+        next_kill: Instant,
+        deadline: Instant,
+    ) -> Settled {
+        let shared = self.shared.clone();
+        if next_kill > Instant::now() && next_kill < deadline {
+            tokio::time::sleep_until(next_kill).await;
+        }
+        shared.signal_group(Signal::KILL);
+        let wait_until = (Instant::now() + LEADER_EXIT_WAIT).min(deadline.max(Instant::now()));
+        while !shared.leader_has_exited() && Instant::now() < wait_until {
+            tokio::time::sleep(EXIT_POLL_INTERVAL).await;
         }
         let leader_gone = shared.leader_has_exited();
-        let exit = if leader_gone {
+        let pid = u32::try_from(shared.pid).unwrap_or(0);
+        let mut pids: Vec<u32> = lock(&shared.tracked_mirror)
+            .iter()
+            .filter_map(|p| u32::try_from(*p).ok())
+            .collect();
+        let mut groups = Vec::new();
+        let (exit, checked) = if leader_gone {
             shared.signals_closed.store(true, Ordering::SeqCst);
-            self.reap().await
+            let exit = self.reap().await;
+            // After the reap the group id is no longer pinned; the probe only
+            // asks, it never signals.
+            let checked = match sys::probe_group(shared.pid) {
+                sys::GroupProbe::Empty => "no process has the child's group id".to_string(),
+                sys::GroupProbe::Present => {
+                    groups.push(pid);
+                    "a process may still have the child's group id".to_string()
+                }
+            };
+            (exit, checked)
         } else {
-            // The leader is still running and unreaped. Dropping the owner
-            // sends one last group SIGKILL while the group id is still ours.
-            Err("the child had not exited when cleanup gave up".into())
+            pids.push(pid);
+            groups.push(pid);
+            (
+                Err("the child had not exited after the final kill".into()),
+                "the child had not exited".to_string(),
+            )
         };
-        let cleanup = shared.unconfirmed(leader_gone, deadline_text(first_term, deadline));
-        Settled { exit, cleanup }
+        pids.sort_unstable();
+        pids.dedup();
+        let tracked_note = if pids.is_empty() {
+            String::new()
+        } else {
+            " Descendants seen at the latest scan are listed because they cannot be checked."
+                .to_string()
+        };
+        Settled {
+            exit,
+            cleanup: Cleanup::Unconfirmed {
+                pids,
+                process_groups: groups,
+                reason: format!(
+                    "process inspection was unavailable ({error}); only the child's process \
+                     group was checked with kill(-pgid, 0): {checked}. Descendants outside \
+                     the group and session could not be checked.{tracked_note}"
+                ),
+            },
+        }
     }
 
     async fn reap(&mut self) -> Result<LeaderExit, String> {
@@ -422,6 +607,13 @@ fn deadline_text(first_term: Instant, deadline: Instant) -> String {
     )
 }
 
+/// How the settle loop ended.
+enum Ended {
+    Clean,
+    DeadlinePassed,
+    InspectionUnavailable(String),
+}
+
 impl Shared {
     /// The verdict when cleanup could not be confirmed, from the last view.
     fn unconfirmed(&self, leader_gone: bool, waited: String) -> Cleanup {
@@ -431,13 +623,15 @@ impl Shared {
         let pid = u32::try_from(self.pid).unwrap_or(0);
         let detail = match view {
             Some(Ok(view)) => {
-                pids.extend(view.live.iter().filter_map(|p| u32::try_from(*p).ok()));
-                if view.group_live {
+                pids.extend(view.all().iter().filter_map(|p| u32::try_from(*p).ok()));
+                if !view.group.is_empty() {
                     groups.push(pid);
                 }
-                if view.group_live {
+                if !view.group.is_empty() {
                     "the child's process group still had live members".to_string()
-                } else if !view.live.is_empty() {
+                } else if !view.session.is_empty() {
+                    "processes in the child's session were still running".to_string()
+                } else if !view.tracked.is_empty() {
                     "tracked descendants were still running".to_string()
                 } else {
                     "the child had not exited".to_string()

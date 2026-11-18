@@ -205,10 +205,10 @@ pub struct Diagnostics {
     /// The owner closed its ends of the output pipes because something still
     /// held them after the kill and the drain bound.
     pub pipes_closed_by_owner: bool,
-    /// Always true. The cleanup verdict covers the child's process group and
-    /// the descendants that were observed. A descendant that was never
-    /// observed and left the group is not covered. This is a known gap.
-    pub unobserved_descendants_possible: bool,
+    /// Processes the cleanup sweep found in the child's session, outside its
+    /// process group and not tracked, and stopped: descendants that moved to
+    /// another group but never called `setsid`. Bounded.
+    pub session_members_swept: Vec<u32>,
 }
 
 /// The terminal report for one child. Every started child produces exactly
@@ -228,9 +228,13 @@ pub struct ProcessReport {
     /// Start, finish, duration and limit.
     pub timing: ProcessTiming,
     /// Whether every process the owner started is known to be gone, and if
-    /// not, which pids and groups may remain and why. See
-    /// [`Diagnostics::unobserved_descendants_possible`] for what `Confirmed`
-    /// does not cover.
+    /// not, which pids and groups may remain and why.
+    ///
+    /// `Confirmed` means a final scan, taken after the leader exited and before
+    /// it was reaped, found no live process in the child's process group, none
+    /// whose session id is the child's, and no tracked descendant with a
+    /// matching start identity. It does not cover a descendant that called
+    /// `setsid` (or otherwise left the session) and was never seen by a scan.
     pub cleanup: Cleanup,
     /// Observations behind the report.
     pub diagnostics: Diagnostics,

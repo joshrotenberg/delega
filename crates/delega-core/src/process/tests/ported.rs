@@ -1,4 +1,4 @@
-//! Tests carried over from the source project, adapted to this interface.
+//! Tests carried over from the project this layer came from, adapted to this interface.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

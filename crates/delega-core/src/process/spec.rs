@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::limits::{
-    DEFAULT_CLEANUP_DEADLINE, DEFAULT_DRAIN_BOUND, DEFAULT_STDERR_CAPTURE_BYTES,
-    DEFAULT_STDOUT_CAPTURE_BYTES, DEFAULT_STOP_GRACE,
+    CLEANUP_DEADLINE_MARGIN, DEFAULT_CLEANUP_DEADLINE, DEFAULT_DRAIN_BOUND,
+    DEFAULT_STDERR_CAPTURE_BYTES, DEFAULT_STDOUT_CAPTURE_BYTES, DEFAULT_STOP_GRACE,
 };
 use super::tree::Lister;
 
@@ -134,12 +134,22 @@ pub struct ProcessSpec {
     pub stop_grace: Duration,
     /// How long output pipes may stay open after the kill.
     pub drain_bound: Duration,
-    /// How long cleanup keeps signalling before it reports what remains.
+    /// How long cleanup keeps signalling, from the first stop signal, before
+    /// it reports what remains. A value below `stop_grace + drain_bound` plus
+    /// [`CLEANUP_DEADLINE_MARGIN`](super::limits::CLEANUP_DEADLINE_MARGIN) is
+    /// raised to that sum when the run starts, and the report carries a
+    /// warning saying so.
     pub cleanup_deadline: Duration,
     /// Whether to track descendants with `ps`. Without it only the child's own
     /// process group is signalled.
     pub track_descendants: bool,
     pub(crate) lister: Option<Lister>,
+    /// Test seam: make the first N group SIGKILLs do nothing.
+    #[cfg(test)]
+    pub(crate) swallow_group_kills: u32,
+    /// Test seam: panic in the owner loop right after the child starts.
+    #[cfg(test)]
+    pub(crate) panic_in_loop: bool,
 }
 
 impl ProcessSpec {
@@ -167,7 +177,18 @@ impl ProcessSpec {
             cleanup_deadline: DEFAULT_CLEANUP_DEADLINE,
             track_descendants: true,
             lister: None,
+            #[cfg(test)]
+            swallow_group_kills: 0,
+            #[cfg(test)]
+            panic_in_loop: false,
         }
+    }
+
+    /// The cleanup deadline in force: `cleanup_deadline`, raised to
+    /// `stop_grace + drain_bound` plus the margin when it is smaller.
+    pub(crate) fn effective_cleanup_deadline(&self) -> Duration {
+        let least = self.stop_grace + self.drain_bound + CLEANUP_DEADLINE_MARGIN;
+        self.cleanup_deadline.max(least)
     }
 
     /// Set the arguments.
@@ -232,6 +253,20 @@ impl std::fmt::Debug for ProcessSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cleanup_deadline_shorter_than_the_stop_sequence_is_raised() {
+        let mut spec = ProcessSpec::new("x", Duration::from_secs(1));
+        spec.stop_grace = Duration::from_secs(2);
+        spec.drain_bound = Duration::from_secs(3);
+        spec.cleanup_deadline = Duration::from_secs(1);
+        assert_eq!(
+            spec.effective_cleanup_deadline(),
+            Duration::from_secs(5) + CLEANUP_DEADLINE_MARGIN
+        );
+        spec.cleanup_deadline = Duration::from_secs(60);
+        assert_eq!(spec.effective_cleanup_deadline(), Duration::from_secs(60));
+    }
 
     fn parent() -> Vec<(OsString, OsString)> {
         vec![

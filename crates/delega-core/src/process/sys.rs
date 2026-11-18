@@ -1,11 +1,13 @@
 //! The operating system calls the process layer needs, through `rustix`.
 //!
-//! The workspace forbids `unsafe`, so signals and non-reaping waits go through
-//! a safe wrapper crate instead of `libc`. Nothing else in the module touches
+//! The workspace denies `unsafe`, so signals and non-reaping waits go through
+//! a safe wrapper crate instead of `libc`; the one exception is `new_session`. Nothing else in the module touches
 //! the OS about processes except `ps` in `tree.rs`.
 
 use rustix::io::Errno;
-use rustix::process::{Pid, WaitId, WaitIdOptions};
+use rustix::process::{Pid, WaitId, WaitIdOptions, WaitIdStatus};
+
+use super::limits::EXIT_POLL_INTERVAL;
 
 pub(super) use rustix::process::Signal;
 
@@ -47,7 +49,14 @@ pub(super) fn signal_process(target: i32, signal: Signal) -> Result<(), SignalEr
     rustix::process::kill_process(pid(target)?, signal).map_err(SignalError::from)
 }
 
+/// Whether a wait status is an ending. A stopped or continued child is still
+/// running: `waitid` with `WEXITED | WNOWAIT` reports a stop on macOS.
+fn is_ending(status: &WaitIdStatus) -> bool {
+    status.exited() || status.killed() || status.dumped()
+}
+
 /// Whether `child` has exited, without reaping it (`waitid` with `WNOWAIT`).
+/// A child that is only stopped has not exited.
 pub(super) fn leader_has_exited(child: i32) -> bool {
     let Some(child) = Pid::from_raw(child) else {
         return false;
@@ -55,12 +64,13 @@ pub(super) fn leader_has_exited(child: i32) -> bool {
     let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
     matches!(
         rustix::process::waitid(WaitId::Pid(child), options),
-        Ok(Some(_))
+        Ok(Some(status)) if is_ending(&status)
     )
 }
 
 /// Block until `child` has exited, without reaping it. Used on a dedicated
-/// thread so the owner never waits behind process inspection.
+/// thread so the owner never waits behind process inspection. A stopped child
+/// keeps the thread polling, since the stop is reported again at once.
 pub(super) fn wait_for_exit(child: i32) -> Result<(), String> {
     let Some(child) = Pid::from_raw(child) else {
         return Err(format!("invalid pid {child}"));
@@ -70,10 +80,60 @@ pub(super) fn wait_for_exit(child: i32) -> Result<(), String> {
             WaitId::Pid(child),
             WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
         ) {
-            Ok(_) => return Ok(()),
+            Ok(Some(status)) if is_ending(&status) => return Ok(()),
+            Ok(_) => std::thread::sleep(EXIT_POLL_INTERVAL),
             Err(Errno::INTR) => {}
             Err(errno) => return Err(std::io::Error::from(errno).to_string()),
         }
+    }
+}
+
+/// The session id of a process, when it can be read.
+pub(super) fn session_of(target: i32) -> Option<i32> {
+    let target = Pid::from_raw(target)?;
+    rustix::process::getsid(Some(target))
+        .ok()
+        .map(|pid| pid.as_raw_nonzero().get())
+}
+
+/// What `kill(-pgid, 0)` says about a process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupProbe {
+    /// No process has this group id.
+    Empty,
+    /// A process exists in the group, or the OS would not say (EPERM).
+    Present,
+}
+
+/// Probe a process group without signalling it.
+pub(super) fn probe_group(pgid: i32) -> GroupProbe {
+    let Some(pgid) = Pid::from_raw(pgid) else {
+        return GroupProbe::Present;
+    };
+    match rustix::process::test_kill_process_group(pgid) {
+        Err(Errno::SRCH) => GroupProbe::Empty,
+        _ => GroupProbe::Present,
+    }
+}
+
+/// Make the child lead a new session, so it has no controlling terminal and
+/// every descendant that does not call `setsid` itself shares its session id.
+///
+/// This is the only `unsafe` in the workspace: `Command::pre_exec` is unsafe
+/// because the closure runs in the forked child before `exec`.
+#[allow(unsafe_code)]
+pub(super) fn new_session(command: &mut tokio::process::Command) {
+    // SAFETY: the closure calls only `setsid(2)`, which is async-signal-safe,
+    // through rustix's direct syscall. It allocates nothing, takes no locks and
+    // touches no state of the parent; a failure becomes an `io::Error` built
+    // from the raw errno, which does not allocate either. Between fork and
+    // exec nothing else runs in the child.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid()
+                .map(|_| ())
+                .map_err(std::io::Error::from)
+        });
     }
 }
 
