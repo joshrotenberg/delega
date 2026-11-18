@@ -5,7 +5,12 @@
   "type": "object",
   "properties": {
     "answer_schema": {
-      "description": "A JSON Schema the final answer must satisfy; asks for a structured\nanswer and validates it."
+      "description": "A JSON Schema the final answer must satisfy; asks for a structured\nanswer and validates it.",
+      "type": [
+        "object",
+        "boolean",
+        "null"
+      ]
     },
     "cwd": {
       "description": "Working directory of the worker. Absent means the working directory of\nthe process that receives the request. A relative path resolves against\nthat same directory: the caller's working directory for the command\nline, the MCP server's working directory for MCP.",

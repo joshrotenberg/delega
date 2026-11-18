@@ -54,6 +54,9 @@ fn version_json_has_name_version_and_schema_version() {
     assert_eq!(value["name"], "delega");
     assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["schema_version"], 1);
+    let revision = value["revision"].as_str().expect("revision is a string");
+    assert!(!revision.is_empty());
+    assert!(value["features"].is_array());
 }
 
 #[test]

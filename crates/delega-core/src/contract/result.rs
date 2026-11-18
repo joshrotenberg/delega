@@ -39,29 +39,86 @@ pub struct ErrorDetail {
 }
 
 /// Whether the provider process and its descendants are gone.
+///
+/// Serialized as `{"confirmed": true}`, or as `{"confirmed": false, "pids":
+/// [...], "process_groups": [...], "reason": "..."}`. A confirmed cleanup with
+/// leftovers cannot be expressed, and reading one is an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Cleanup {
-    /// True when everything started for the run is confirmed stopped.
-    pub confirmed: bool,
-    /// Process ids that could not be confirmed stopped.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pids: Vec<u32>,
-    /// Process group ids that could not be confirmed stopped.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub process_groups: Vec<u32>,
-    /// Why stopping could not be confirmed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+#[serde(try_from = "CleanupWire", into = "CleanupWire")]
+#[schemars(with = "CleanupWire")]
+pub enum Cleanup {
+    /// Everything started for the run is confirmed stopped.
+    Confirmed,
+    /// Stopping could not be confirmed for what is listed.
+    Unconfirmed {
+        /// Process ids that could not be confirmed stopped.
+        pids: Vec<u32>,
+        /// Process group ids that could not be confirmed stopped.
+        process_groups: Vec<u32>,
+        /// Why stopping could not be confirmed.
+        reason: String,
+    },
 }
 
-impl Cleanup {
-    /// Everything started for the run is confirmed stopped.
-    pub fn confirmed() -> Self {
-        Self {
-            confirmed: true,
-            pids: Vec::new(),
-            process_groups: Vec::new(),
-            reason: None,
+/// The documented JSON shape of [`Cleanup`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "Cleanup", transform = super::schema::refine_cleanup)]
+struct CleanupWire {
+    /// True when everything started for the run is confirmed stopped.
+    confirmed: bool,
+    /// Process ids that could not be confirmed stopped. Empty when confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pids: Vec<u32>,
+    /// Process group ids that could not be confirmed stopped. Empty when
+    /// confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    process_groups: Vec<u32>,
+    /// Why stopping could not be confirmed. Required when not confirmed,
+    /// absent when confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl From<Cleanup> for CleanupWire {
+    fn from(cleanup: Cleanup) -> Self {
+        match cleanup {
+            Cleanup::Confirmed => CleanupWire {
+                confirmed: true,
+                pids: Vec::new(),
+                process_groups: Vec::new(),
+                reason: None,
+            },
+            Cleanup::Unconfirmed {
+                pids,
+                process_groups,
+                reason,
+            } => CleanupWire {
+                confirmed: false,
+                pids,
+                process_groups,
+                reason: Some(reason),
+            },
+        }
+    }
+}
+
+impl TryFrom<CleanupWire> for Cleanup {
+    type Error = String;
+
+    fn try_from(wire: CleanupWire) -> Result<Self, String> {
+        match (wire.confirmed, wire.reason) {
+            (true, None) if wire.pids.is_empty() && wire.process_groups.is_empty() => {
+                Ok(Cleanup::Confirmed)
+            }
+            (true, _) => {
+                Err("confirmed cleanup must have no pids, process_groups or reason".into())
+            }
+            (false, Some(reason)) => Ok(Cleanup::Unconfirmed {
+                pids: wire.pids,
+                process_groups: wire.process_groups,
+                reason,
+            }),
+            (false, None) => Err("unconfirmed cleanup must give a reason".into()),
         }
     }
 }
@@ -141,6 +198,7 @@ pub struct Provenance {
 
 /// The result of one run. Every run produces exactly one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transform = super::schema::refine_result)]
 pub struct RunResult {
     /// The contract version of this result.
     pub schema_version: u32,
@@ -150,8 +208,8 @@ pub struct RunResult {
     /// as a refused request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<WorkerRef>,
-    /// The provider that ran it. Absent when the request named none or an
-    /// unknown one.
+    /// The provider that ran it. Absent only on a refused result for a request
+    /// that named none or an unknown one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
     /// How the run ended.
@@ -192,18 +250,18 @@ pub struct RunResult {
     pub provenance: Provenance,
 }
 
-/// What every constructor of [`RunResult`] needs, whatever the outcome.
+/// What the constructors for a run that started need.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunContext {
     /// Run id.
     pub run: String,
     /// The worker, if one exists.
     pub worker: Option<WorkerRef>,
-    /// The provider, if the request named a known one.
-    pub provider: Option<Provider>,
+    /// The provider that ran it.
+    pub provider: Provider,
     /// The permissions that applied.
     pub permissions: AppliedPermissions,
-    /// Whether cleanup is confirmed.
+    /// Whether cleanup is confirmed, and what remains if not.
     pub cleanup: Cleanup,
     /// When the run was queued, started and finished.
     pub timing: Timing,
@@ -211,13 +269,56 @@ pub struct RunContext {
     pub provenance: Provenance,
 }
 
+/// What [`RunResult::refused_before_start`] and [`RunResult::refused_invalid`]
+/// need. Nothing was started, so there is no cleanup to report and the
+/// provider may be unknown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefusalContext {
+    /// Run id.
+    pub run: String,
+    /// The worker, if one was created.
+    pub worker: Option<WorkerRef>,
+    /// The provider, if the request named a known one.
+    pub provider: Option<Provider>,
+    /// The permissions that would have applied.
+    pub permissions: AppliedPermissions,
+    /// Queue and finish times and the limit. `started_at` and `duration_ms`
+    /// are overwritten: the run never started.
+    pub timing: Timing,
+    /// The build behind the result.
+    pub provenance: Provenance,
+}
+
+/// [`RunResult::refused_invalid`] was given no problems, so there is nothing
+/// to refuse for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoProblems;
+
+impl std::fmt::Display for NoProblems {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a refusal for an invalid request needs at least one problem")
+    }
+}
+
+impl std::error::Error for NoProblems {}
+
+fn error_detail(kind: impl Into<String>, message: impl Into<String>) -> ErrorDetail {
+    ErrorDetail {
+        kind: kind.into(),
+        message: message.into(),
+        provider_exit_code: None,
+    }
+}
+
+// Every constructor returns a result that passes `RunResult::validate`, for
+// any input its types allow.
 impl RunResult {
     fn build(ctx: RunContext, outcome: Outcome, text: String, error: Option<ErrorDetail>) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             run: ctx.run,
             worker: ctx.worker,
-            provider: ctx.provider,
+            provider: Some(ctx.provider),
             outcome,
             text,
             structured: None,
@@ -246,11 +347,7 @@ impl RunResult {
 
     /// The time limit passed. The error kind is `timed_out`.
     pub fn timed_out(ctx: RunContext, message: impl Into<String>, text: impl Into<String>) -> Self {
-        let error = ErrorDetail {
-            kind: "timed_out".into(),
-            message: message.into(),
-            provider_exit_code: None,
-        };
+        let error = error_detail("timed_out", message);
         Self::build(ctx, Outcome::TimedOut, text.into(), Some(error))
     }
 
@@ -261,38 +358,65 @@ impl RunResult {
         message: impl Into<String>,
         text: impl Into<String>,
     ) -> Self {
-        let error = ErrorDetail {
-            kind: "interrupted".into(),
-            message: message.into(),
-            provider_exit_code: None,
-        };
+        let error = error_detail("interrupted", message);
         Self::build(ctx, Outcome::Interrupted, text.into(), Some(error))
     }
 
-    /// The run did not go ahead, for the stated reason. The provider never
-    /// started, so `timing.started_at` is cleared and `text` is empty.
-    pub fn refused(
-        mut ctx: RunContext,
+    /// A started run stopped because a permission it needed was denied. Timing
+    /// and any partial `text` are kept.
+    pub fn refused_after_start(
+        ctx: RunContext,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        let error = error_detail(kind, message);
+        Self::build(ctx, Outcome::Refused, text.into(), Some(error))
+    }
+
+    /// The run did not go ahead, for the stated reason, such as a limit. The
+    /// provider never started: `started_at` is absent, `duration_ms` is zero
+    /// and `text` is empty.
+    pub fn refused_before_start(
+        ctx: RefusalContext,
         kind: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        ctx.timing.started_at = None;
-        let error = ErrorDetail {
-            kind: kind.into(),
-            message: message.into(),
-            provider_exit_code: None,
-        };
-        Self::build(ctx, Outcome::Refused, String::new(), Some(error))
+        let mut timing = ctx.timing;
+        timing.started_at = None;
+        timing.duration_ms = 0;
+        Self {
+            schema_version: SCHEMA_VERSION,
+            run: ctx.run,
+            worker: ctx.worker,
+            provider: ctx.provider,
+            outcome: Outcome::Refused,
+            text: String::new(),
+            structured: None,
+            structured_valid: None,
+            error: Some(error_detail(kind, message)),
+            cleanup: Cleanup::Confirmed,
+            permissions: ctx.permissions,
+            provider_notes: Vec::new(),
+            session_id: None,
+            usage: None,
+            timing,
+            provenance: ctx.provenance,
+        }
     }
 
-    /// A refusal because the request failed validation. The error kind is
-    /// `invalid_request` and the message lists every problem.
-    pub fn refused_invalid(ctx: RunContext, problems: &[Problem]) -> Self {
+    /// A refusal before start because the request failed validation. The
+    /// error kind is `invalid_request` and the message lists every problem.
+    /// Fails if `problems` is empty.
+    pub fn refused_invalid(ctx: RefusalContext, problems: &[Problem]) -> Result<Self, NoProblems> {
+        if problems.is_empty() {
+            return Err(NoProblems);
+        }
         let message = problems
             .iter()
             .map(Problem::to_string)
             .collect::<Vec<_>>()
             .join("; ");
-        Self::refused(ctx, "invalid_request", message)
+        Ok(Self::refused_before_start(ctx, "invalid_request", message))
     }
 }

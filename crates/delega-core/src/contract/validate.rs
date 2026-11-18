@@ -197,8 +197,10 @@ impl RunResult {
     /// Check that the result does not contradict itself and return every
     /// problem found.
     ///
-    /// The constructors on [`RunResult`] produce results that pass; this
-    /// catches a result edited or read from elsewhere.
+    /// Every constructor on [`RunResult`] produces a result that passes. This
+    /// catches a result edited by hand or read from elsewhere. Cleanup needs no
+    /// check here: [`super::result::Cleanup`] cannot hold leftovers when
+    /// confirmed, and reading such JSON fails.
     pub fn validate(&self) -> Result<(), Vec<Problem>> {
         let mut problems = Vec::new();
 
@@ -216,27 +218,6 @@ impl RunResult {
             (_, Some(_)) => {}
         }
 
-        if self.cleanup.confirmed {
-            if !self.cleanup.pids.is_empty() {
-                problems.push(Problem::new(
-                    "cleanup.pids",
-                    "must be empty when cleanup is confirmed",
-                ));
-            }
-            if !self.cleanup.process_groups.is_empty() {
-                problems.push(Problem::new(
-                    "cleanup.process_groups",
-                    "must be empty when cleanup is confirmed",
-                ));
-            }
-            if self.cleanup.reason.is_some() {
-                problems.push(Problem::new(
-                    "cleanup.reason",
-                    "must be absent when cleanup is confirmed",
-                ));
-            }
-        }
-
         if self.structured_valid.is_some() && self.structured.is_none() {
             problems.push(Problem::new(
                 "structured_valid",
@@ -244,10 +225,10 @@ impl RunResult {
             ));
         }
 
-        if self.outcome == Outcome::Refused && self.timing.started_at.is_some() {
+        if self.outcome != Outcome::Refused && self.provider.is_none() {
             problems.push(Problem::new(
-                "timing.started_at",
-                "must be absent when the run was refused",
+                "provider",
+                "is required unless the outcome is refused",
             ));
         }
 
@@ -296,6 +277,12 @@ fn check_nul(problems: &mut Vec<Problem>, field: &str, value: &str) {
 
 fn check_path(problems: &mut Vec<Problem>, field: &str, path: &Path) {
     let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.first() == Some(&b'-') {
+        problems.push(Problem::new(
+            field,
+            "must not start with '-': it would be read as a provider option",
+        ));
+    }
     if bytes.len() > MAX_PATH_BYTES {
         problems.push(too_long(field, bytes.len(), MAX_PATH_BYTES));
     }

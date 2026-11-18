@@ -55,11 +55,10 @@ fn full_result() -> RunResult {
             message: "exited".into(),
             provider_exit_code: Some(3),
         }),
-        cleanup: Cleanup {
-            confirmed: false,
+        cleanup: Cleanup::Unconfirmed {
             pids: vec![10, 11],
             process_groups: vec![10],
-            reason: Some("permission denied".into()),
+            reason: "permission denied".into(),
         },
         permissions: AppliedPermissions {
             mode: Mode::Read,
@@ -535,12 +534,54 @@ fn context() -> RunContext {
     RunContext {
         run: "run-1".into(),
         worker: None,
-        provider: None,
+        provider: Provider::Codex,
         permissions: AppliedPermissions::default(),
-        cleanup: Cleanup::confirmed(),
+        cleanup: Cleanup::Confirmed,
         timing: full_result().timing,
         provenance: full_result().provenance,
     }
+}
+
+/// Contexts that stress the constructors: leftovers, a worker, denials, no
+/// start time, a long duration.
+fn awkward_contexts() -> Vec<RunContext> {
+    let mut unconfirmed = context();
+    unconfirmed.cleanup = Cleanup::Unconfirmed {
+        pids: vec![],
+        process_groups: vec![],
+        reason: String::new(),
+    };
+    let mut busy = context();
+    busy.worker = full_result().worker;
+    busy.permissions = full_result().permissions;
+    busy.cleanup = full_result().cleanup;
+    busy.timing.duration_ms = u64::MAX;
+    let mut never_started = context();
+    never_started.timing.started_at = None;
+    vec![context(), unconfirmed, busy, never_started]
+}
+
+fn refusal_context() -> RefusalContext {
+    let ctx = context();
+    RefusalContext {
+        run: ctx.run,
+        worker: None,
+        provider: None,
+        permissions: ctx.permissions,
+        timing: ctx.timing,
+        provenance: ctx.provenance,
+    }
+}
+
+fn awkward_refusal_contexts() -> Vec<RefusalContext> {
+    let mut with_start = refusal_context();
+    with_start.timing.started_at = Some("2026-11-18T10:00:01Z".into());
+    with_start.timing.duration_ms = 99;
+    let mut known = refusal_context();
+    known.provider = Some(Provider::Claude);
+    known.worker = full_result().worker;
+    known.permissions = full_result().permissions;
+    vec![refusal_context(), with_start, known]
 }
 
 fn result_fields(result: &RunResult) -> Vec<String> {
@@ -554,61 +595,87 @@ fn result_fields(result: &RunResult) -> Vec<String> {
 }
 
 #[test]
-fn every_constructor_builds_a_result_that_validates_with_its_outcome() {
-    let error = ErrorDetail {
-        kind: "x".into(),
-        message: "m".into(),
-        provider_exit_code: None,
+fn every_constructor_builds_a_valid_result_for_every_awkward_context() {
+    let error = || ErrorDetail {
+        kind: String::new(),
+        message: String::new(),
+        provider_exit_code: Some(-1),
     };
-    let built = [
-        (
-            RunResult::completed(context(), "answer"),
-            Outcome::Completed,
-        ),
-        (RunResult::failed(context(), error, ""), Outcome::Failed),
-        (
-            RunResult::timed_out(context(), "late", "partial"),
-            Outcome::TimedOut,
-        ),
-        (
-            RunResult::interrupted(context(), "stopped", ""),
-            Outcome::Interrupted,
-        ),
-        (
-            RunResult::refused(context(), "limit", "full"),
-            Outcome::Refused,
-        ),
-        (RunResult::refused_invalid(context(), &[]), Outcome::Refused),
-    ];
-    for (result, outcome) in built {
-        assert_eq!(result.outcome, outcome);
-        assert_eq!(result.validate(), Ok(()), "{outcome:?}");
+    for ctx in awkward_contexts() {
+        let built = [
+            (RunResult::completed(ctx.clone(), ""), Outcome::Completed),
+            (
+                RunResult::failed(ctx.clone(), error(), "x"),
+                Outcome::Failed,
+            ),
+            (RunResult::timed_out(ctx.clone(), "", ""), Outcome::TimedOut),
+            (
+                RunResult::interrupted(ctx.clone(), "", "x"),
+                Outcome::Interrupted,
+            ),
+            (
+                RunResult::refused_after_start(ctx.clone(), "denied", "m", "partial"),
+                Outcome::Refused,
+            ),
+        ];
+        for (result, outcome) in built {
+            assert_eq!(result.outcome, outcome);
+            assert_eq!(result.validate(), Ok(()), "{outcome:?} with {ctx:?}");
+            let text = serde_json::to_string(&result).unwrap();
+            let back: RunResult = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, result, "{outcome:?} does not round-trip");
+        }
     }
+    for ctx in awkward_refusal_contexts() {
+        let a = RunResult::refused_before_start(ctx.clone(), "limit", "full");
+        let b = RunResult::refused_invalid(ctx.clone(), &[Problem::new("a", "b")]).unwrap();
+        for result in [a, b] {
+            assert_eq!(result.outcome, Outcome::Refused);
+            assert_eq!(result.validate(), Ok(()), "{ctx:?}");
+        }
+    }
+}
+
+#[test]
+fn refused_before_start_has_no_start_time_no_duration_and_no_text() {
+    for ctx in awkward_refusal_contexts() {
+        let r = RunResult::refused_before_start(ctx, "limit", "full");
+        assert_eq!(r.timing.started_at, None);
+        assert_eq!(r.timing.duration_ms, 0);
+        assert_eq!(r.text, "");
+        assert_eq!(r.cleanup, Cleanup::Confirmed);
+    }
+}
+
+#[test]
+fn refused_after_start_keeps_timing_and_partial_text() {
+    let mut ctx = context();
+    ctx.timing.duration_ms = 1234;
+    let r = RunResult::refused_after_start(ctx, "permission_denied", "needed a write", "so far");
+    assert_eq!(r.timing.started_at, full_result().timing.started_at);
+    assert_eq!(r.timing.duration_ms, 1234);
+    assert_eq!(r.text, "so far");
+    assert_eq!(r.validate(), Ok(()));
+}
+
+#[test]
+fn refused_invalid_with_no_problems_is_an_error() {
+    assert_eq!(
+        RunResult::refused_invalid(refusal_context(), &[]),
+        Err(NoProblems)
+    );
 }
 
 #[test]
 fn refused_result_for_an_unparseable_request_has_no_provider_or_worker() {
     let problems = vec![Problem::new("provider", "is required")];
-    let result = RunResult::refused_invalid(context(), &problems);
+    let result = RunResult::refused_invalid(refusal_context(), &problems).unwrap();
     let value = serde_json::to_value(&result).unwrap();
     assert!(value.get("provider").is_none());
     assert!(value.get("worker").is_none());
     assert_eq!(value["outcome"], "refused");
     assert_eq!(value["error"]["kind"], "invalid_request");
     assert_eq!(value["error"]["message"], "provider: is required");
-}
-
-#[test]
-fn refused_constructor_clears_started_at() {
-    let mut ctx = context();
-    assert!(ctx.timing.started_at.is_some());
-    ctx.timing.started_at = Some("2026-11-18T10:00:01Z".into());
-    assert!(
-        RunResult::refused(ctx, "k", "m")
-            .timing
-            .started_at
-            .is_none()
-    );
 }
 
 #[test]
@@ -636,28 +703,41 @@ fn non_completed_result_without_an_error_is_a_problem() {
     ] {
         let mut r = RunResult::completed(context(), "a");
         r.outcome = outcome;
-        r.timing.started_at = None;
         assert_eq!(result_fields(&r), ["error"], "{outcome:?}");
     }
 }
 
 #[test]
-fn confirmed_cleanup_with_leftovers_is_a_problem() {
-    let mut r = RunResult::completed(context(), "a");
-    r.cleanup.pids = vec![1];
-    r.cleanup.process_groups = vec![1];
-    r.cleanup.reason = Some("why".into());
-    assert_eq!(
-        result_fields(&r),
-        ["cleanup.pids", "cleanup.process_groups", "cleanup.reason"]
-    );
+fn reading_a_confirmed_cleanup_with_leftovers_fails() {
+    for text in [
+        r#"{"confirmed":true,"pids":[1]}"#,
+        r#"{"confirmed":true,"process_groups":[1]}"#,
+        r#"{"confirmed":true,"reason":"why"}"#,
+    ] {
+        assert!(serde_json::from_str::<Cleanup>(text).is_err(), "{text}");
+    }
 }
 
 #[test]
-fn unconfirmed_cleanup_may_list_leftovers() {
-    let mut r = RunResult::completed(context(), "a");
-    r.cleanup = full_result().cleanup;
-    assert_eq!(r.validate(), Ok(()));
+fn reading_an_unconfirmed_cleanup_without_a_reason_fails() {
+    assert!(serde_json::from_str::<Cleanup>(r#"{"confirmed":false,"pids":[1]}"#).is_err());
+}
+
+#[test]
+fn cleanup_serializes_to_the_documented_shape() {
+    assert_eq!(
+        serde_json::to_value(Cleanup::Confirmed).unwrap(),
+        json!({"confirmed": true})
+    );
+    let c = Cleanup::Unconfirmed {
+        pids: vec![1],
+        process_groups: vec![],
+        reason: "r".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(c).unwrap(),
+        json!({"confirmed": false, "pids": [1], "reason": "r"})
+    );
 }
 
 #[test]
@@ -668,10 +748,21 @@ fn structured_valid_without_structured_is_a_problem() {
 }
 
 #[test]
-fn refused_result_with_started_at_is_a_problem() {
-    let mut r = RunResult::refused(context(), "k", "m");
+fn refused_result_may_carry_a_start_time() {
+    let mut r = RunResult::refused_after_start(context(), "k", "m", "");
     r.timing.started_at = Some("2026-11-18T10:00:01Z".into());
-    assert_eq!(result_fields(&r), ["timing.started_at"]);
+    assert_eq!(r.validate(), Ok(()));
+}
+
+#[test]
+fn started_run_without_a_provider_is_a_problem() {
+    for mut r in [
+        RunResult::completed(context(), "a"),
+        RunResult::timed_out(context(), "m", ""),
+    ] {
+        r.provider = None;
+        assert_eq!(result_fields(&r), ["provider"]);
+    }
 }
 
 #[test]
@@ -679,6 +770,14 @@ fn result_with_an_unknown_schema_version_is_a_problem() {
     let mut r = RunResult::completed(context(), "a");
     r.schema_version = SCHEMA_VERSION + 1;
     assert_eq!(result_fields(&r), ["schema_version"]);
+}
+
+#[test]
+fn leading_dash_in_cwd_or_a_directory_is_a_validation_problem() {
+    let mut r = minimal();
+    r.cwd = Some(PathBuf::from("-rf"));
+    r.permissions.directories = vec![PathBuf::from("-x")];
+    assert_eq!(problem_fields(&r), ["cwd", "permissions.directories[0]"]);
 }
 
 // Partial requests.
@@ -750,4 +849,45 @@ fn into_request_applies_request_defaults() {
         .into_request()
         .unwrap();
     assert_eq!(request, Request::new(Provider::Claude, "x"));
+}
+
+#[test]
+fn explicit_resume_clears_ephemeral_from_the_file() {
+    let profile = partial(r#"{"session":{"ephemeral":true}}"#);
+    let merged = profile.merge(partial(r#"{"session":{"resume":"s1"}}"#));
+    let session = merged.session.unwrap();
+    assert_eq!(session.ephemeral, None);
+    assert_eq!(session.resume.as_deref(), Some("s1"));
+}
+
+#[test]
+fn explicit_ephemeral_clears_resume_from_the_file() {
+    let profile = partial(r#"{"session":{"resume":"s1"}}"#);
+    let merged = profile.merge(partial(r#"{"session":{"ephemeral":true}}"#));
+    let session = merged.session.unwrap();
+    assert_eq!(session.ephemeral, Some(true));
+    assert_eq!(session.resume, None);
+}
+
+#[test]
+fn merge_keeps_both_session_fields_when_the_override_does_not_touch_them() {
+    let profile = partial(r#"{"session":{"resume":"s1"}}"#);
+    let merged = profile.merge(partial(r#"{"session":{"ephemeral":false}}"#));
+    let session = merged.session.unwrap();
+    assert_eq!(session.resume.as_deref(), Some("s1"));
+    assert_eq!(session.ephemeral, Some(false));
+}
+
+#[test]
+fn explicit_conflicting_overrides_still_fail_validation() {
+    let both =
+        partial(r#"{"provider":"claude","prompt":"x","session":{"ephemeral":true,"resume":"s"}}"#);
+    let merged = PartialRequest::default().merge(both);
+    let fields: Vec<String> = merged
+        .into_request()
+        .unwrap_err()
+        .into_iter()
+        .map(|p| p.field)
+        .collect();
+    assert_eq!(fields, ["session"]);
 }

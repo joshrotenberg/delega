@@ -113,7 +113,9 @@ impl PartialRequest {
 
     /// Combine two partial requests; a value set in `overrides` wins over the
     /// one in `self`. Lists replace, they are not concatenated. Within
-    /// `permissions` and `session` the choice is made field by field.
+    /// `permissions` and `session` the choice is made field by field, except
+    /// that an explicit `resume` clears `ephemeral` from `self` and an explicit
+    /// `ephemeral: true` clears `resume` from `self`.
     pub fn merge(self, overrides: PartialRequest) -> PartialRequest {
         let permissions = match (self.permissions, overrides.permissions) {
             (None, None) => None,
@@ -131,10 +133,17 @@ impl PartialRequest {
             (None, None) => None,
             (a, b) => {
                 let (a, b) = (a.unwrap_or_default(), b.unwrap_or_default());
-                Some(PartialSession {
-                    ephemeral: pick(b.ephemeral, a.ephemeral),
-                    resume: pick(b.resume, a.resume),
-                })
+                // `ephemeral` and `resume` exclude each other, so the later,
+                // explicit choice wins over the other one from the file.
+                let mut ephemeral = pick(b.ephemeral, a.ephemeral);
+                let mut resume = pick(b.resume.clone(), a.resume);
+                if b.resume.is_some() && b.ephemeral.is_none() {
+                    ephemeral = None;
+                }
+                if b.ephemeral == Some(true) && b.resume.is_none() {
+                    resume = None;
+                }
+                Some(PartialSession { ephemeral, resume })
             }
         };
         PartialRequest {

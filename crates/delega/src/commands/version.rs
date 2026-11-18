@@ -7,6 +7,17 @@ use delega_core::contract::SCHEMA_VERSION;
 
 use super::OutputFormat;
 
+/// The source revision recorded by `build.rs`, or `unknown`.
+const REVISION: &str = env!("DELEGA_GIT_REVISION");
+
+/// The Cargo features this binary was built with.
+fn features() -> Vec<&'static str> {
+    env!("DELEGA_FEATURES")
+        .split(',')
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Print as text or as JSON
@@ -23,6 +34,8 @@ pub fn run(args: Args) -> ExitCode {
                 "name": "delega",
                 "version": delega_core::VERSION,
                 "schema_version": SCHEMA_VERSION,
+                "revision": REVISION,
+                "features": features(),
             })
         ),
     }
