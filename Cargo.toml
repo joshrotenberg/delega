@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 delega-core = { path = "crates/delega-core" }
 delega-mcp = { path = "crates/delega-mcp" }
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
