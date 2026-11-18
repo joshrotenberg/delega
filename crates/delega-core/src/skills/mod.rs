@@ -4,6 +4,9 @@
 //! time by `build.rs`, which lists the directories and generates the
 //! `include_str!` calls. Nothing is read from disk at run time. The CLI, the
 //! MCP server and the plugin installer all serve this one catalog.
+//!
+//! `build.rs` validates every skill with the parser in `frontmatter.rs`, which
+//! documents exactly what is accepted, so an invalid skill cannot be built in.
 
 mod frontmatter;
 
@@ -24,8 +27,11 @@ pub struct Skill {
 }
 
 impl Skill {
-    fn parse(directory: &str, content: &'static str) -> Result<Self, SkillError> {
-        let front = frontmatter::parse(directory, content)?;
+    pub(crate) fn parse(directory: &str, content: &'static str) -> Result<Self, SkillError> {
+        let front = frontmatter::parse(directory, content).map_err(|error| SkillError {
+            skill: directory.to_string(),
+            message: error.message,
+        })?;
         Ok(Self {
             name: front.name,
             description: front.description,
@@ -87,13 +93,19 @@ fn parse_all(embedded: &[(&str, &'static str)]) -> Result<Vec<Skill>, SkillError
         .map(|(directory, content)| Skill::parse(directory, content))
         .collect::<Result<Vec<_>, _>>()?;
     skills.sort_by(|a, b| a.name.cmp(&b.name));
+    if let Some(pair) = skills.windows(2).find(|pair| pair[0].name == pair[1].name) {
+        return Err(SkillError {
+            skill: pair[0].name.clone(),
+            message: "duplicate skill name".into(),
+        });
+    }
     Ok(skills)
 }
 
 /// All embedded skills, sorted by name.
 ///
-/// Parsing happens once. A skill file that fails strict parsing is a build
-/// defect, caught by this crate's tests, so this panics with the error.
+/// Parsing happens once. `build.rs` already rejected any skill that fails
+/// strict parsing, so the panic is unreachable in a built binary.
 pub fn catalog() -> &'static [Skill] {
     static CATALOG: OnceLock<Vec<Skill>> = OnceLock::new();
     CATALOG.get_or_init(|| match parse_all(EMBEDDED) {
@@ -118,6 +130,15 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills")
     }
 
+    fn doc(name: &str) -> &'static str {
+        match name {
+            "alpha" => "---\nname: alpha\ndescription: a\n---\n",
+            "beta" => "---\nname: beta\ndescription: b\n---\n",
+            "gamma" => "---\nname: gamma\ndescription: c\n---\n",
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn every_embedded_skill_parses() {
         parse_all(EMBEDDED).expect("every embedded skill parses");
@@ -131,21 +152,25 @@ mod tests {
     }
 
     #[test]
-    fn skill_names_are_unique_and_equal_their_directory_names() {
-        let directories: Vec<&str> = EMBEDDED.iter().map(|(directory, _)| *directory).collect();
-        let names: Vec<&str> = catalog().iter().map(Skill::name).collect();
-        let unique: BTreeSet<&str> = names.iter().copied().collect();
-        assert_eq!(unique.len(), names.len(), "duplicate skill names");
-        let directories: BTreeSet<&str> = directories.into_iter().collect();
-        assert_eq!(unique, directories);
+    fn unsorted_input_comes_back_sorted_by_name() {
+        let input = [
+            ("gamma", doc("gamma")),
+            ("alpha", doc("alpha")),
+            ("beta", doc("beta")),
+        ];
+        let names: Vec<String> = parse_all(&input)
+            .expect("parses")
+            .iter()
+            .map(|skill| skill.name().to_string())
+            .collect();
+        assert_eq!(names, ["alpha", "beta", "gamma"]);
     }
 
     #[test]
-    fn the_catalog_is_sorted_by_name() {
-        let names: Vec<&str> = catalog().iter().map(Skill::name).collect();
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        assert_eq!(names, sorted);
+    fn two_skills_with_the_same_name_are_an_error() {
+        let input = [("alpha", doc("alpha")), ("alpha", doc("alpha"))];
+        let error = parse_all(&input).expect_err("duplicate");
+        assert!(error.message.contains("duplicate"));
     }
 
     #[test]
@@ -155,35 +180,25 @@ mod tests {
     }
 
     #[test]
-    fn a_digest_is_the_lowercase_hex_sha256_of_the_embedded_bytes() {
-        for skill in catalog() {
-            let expected = hex(&Sha256::digest(skill.content().as_bytes()));
-            assert_eq!(skill.digest(), expected, "{}", skill.name());
-            assert_eq!(skill.digest().len(), 64);
-            assert!(
-                skill
-                    .digest()
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            );
-        }
-    }
-
-    #[test]
-    fn the_digest_function_matches_a_known_sha256_vector() {
+    fn a_digest_is_the_pinned_sha256_of_the_exact_bytes() {
+        // printf '---\nname: run\ndescription: Does a thing.\n---\nbody\n' | shasum -a 256
+        let skill = Skill::parse(
+            "run",
+            "---\nname: run\ndescription: Does a thing.\n---\nbody\n",
+        )
+        .expect("parses");
         assert_eq!(
-            hex(&Sha256::digest(b"abc")),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            skill.digest(),
+            "d5545b25e17d6ec2a185b947357ec6e9356d9529d46e2703baf23efcf24f8e8a"
         );
     }
 
     #[test]
-    fn embedded_content_equals_the_file_on_disk() {
-        for skill in catalog() {
-            let path = skills_dir().join(skill.name()).join("SKILL.md");
-            let disk = std::fs::read_to_string(&path).expect("read skill file");
-            assert_eq!(skill.content(), disk, "{}", skill.name());
-        }
+    fn the_digest_covers_every_byte_including_line_endings() {
+        let lf = Skill::parse("run", "---\nname: run\ndescription: x\n---\n").expect("lf");
+        let crlf =
+            Skill::parse("run", "---\r\nname: run\r\ndescription: x\r\n---\r\n").expect("crlf");
+        assert_ne!(lf.digest(), crlf.digest());
     }
 
     #[test]
@@ -191,7 +206,8 @@ mod tests {
         let on_disk: BTreeSet<String> = std::fs::read_dir(skills_dir())
             .expect("read skills directory")
             .map(|entry| entry.expect("entry"))
-            .filter(|entry| entry.file_type().expect("file type").is_dir())
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .filter(|entry| std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir()))
             .map(|entry| entry.file_name().into_string().expect("UTF-8"))
             .collect();
         let embedded: BTreeSet<String> = catalog()

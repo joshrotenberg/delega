@@ -41,9 +41,13 @@ The worker starts with the narrowest permission and gets only what you grant.
 | `--allow-command CMD` | `permissions.commands` | One exact shell command the worker may run. Repeat the flag for more. |
 | `--add-dir DIR` | `permissions.directories` | One extra directory the worker may read. Repeat for more. |
 
-Prefer `--read` for questions and reviews, `--write` for edits, and
-`--allow-command` for the specific commands a task needs, such as the test
-command. Use `--full` only when you accept that delega adds no restriction.
+Prefer `--read` for questions and reviews and `--write` for edits. In `read`
+mode the worker may read the working directory, with no writes and no commands.
+`permissions.commands` lists the shell commands the worker may run, matched
+exactly, so list the exact command string a task needs, such as the test
+command. The docs do not say whether a listed command runs under `read`, so
+after a run check `permissions.denied` to see whether a command was refused.
+Use `--full` only when you accept that delega adds no restriction.
 
 A permission the worker asks for and was not granted is answered no at once. It
 is listed in `permissions.denied` in the result.
@@ -78,9 +82,10 @@ To know what happened, read `outcome`, `text`, `error` and `cleanup`:
 - `text` is the final answer, or empty.
 - `error` has `kind`, `message` and `provider_exit_code`, and is present unless
   the run `completed`.
-- `cleanup.confirmed` is false when delega could not confirm that the provider
-  process and its descendants stopped. The result then says what remains. Treat
-  that as a problem to resolve, not a detail.
+- `cleanup.confirmed` is false when delega could not confirm that everything it
+  started has stopped. The result then lists what could not be confirmed (pids
+  and process groups) and why. Treat that as a problem to resolve, not a
+  detail.
 
 Also check `permissions.denied` and `provider_notes`. A run that was denied a
 permission but still answered is `completed`, so a denial can hide inside a

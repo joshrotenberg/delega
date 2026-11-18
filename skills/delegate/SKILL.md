@@ -41,14 +41,18 @@ run and `permissions.directories` for extra directories it may read. A request
 the worker makes that was not granted is answered no and listed in
 `permissions.denied` in the result.
 
+Do not point several `write` workers at the same `cwd`; their edits can collide.
+Give each its own working directory.
+
 ## Collect results
 
 1. Start the workers you need. Keep each worker's id and run id.
 2. Do your own work.
 3. Call `wait` with the `runs` or `workers` you are waiting on and a `timeout`.
-   It returns when any of them finishes. Pass the returned cursor as `after` on
-   the next call to see only what is new.
-4. Call `read` with the `run` to get its result.
+   It returns when any of them finishes, or on timeout, with their current
+   states and a cursor. Pass the returned cursor as `after` on the next call.
+4. Call `read` with the `run` to get its result. `read` also takes an `after`
+   cursor.
 
 Responses are compact by default. Pass `detail: "full"` to `read` only when you
 need process diagnostics, activity history or every field of the result.
@@ -59,6 +63,8 @@ need process diagnostics, activity history or every field of the result.
   Use it instead of starting a new worker when the context helps.
 - `interrupt` stops a run you no longer need. The result comes back with the
   outcome `interrupted`.
+- `read` the result before you `close` the worker. Results already produced
+  stay readable only for a bounded time after `close`.
 - `close` the worker when you are finished with it. Closing frees its slot and
   discards queued assignments. Workers also stop when the connection that
   started them closes, so a worker does not outlive your session.
@@ -70,11 +76,14 @@ Worker states are `queued`, `running`, `idle` and `closed`. A run is `queued`,
 
 | Outcome | What to do |
 | --- | --- |
-| `completed` | The provider finished. Check the work yourself. |
+| `completed` | The provider finished. It can still contain denied requests, so check `permissions.denied` and `provider_notes`, then check the work yourself. |
 | `failed` | Read `error.kind` and `error.message`. Retry only if the cause is fixed. |
 | `timed_out` | The time limit passed. The result states the limit applied. Retry with a larger `timeout` or a smaller assignment. |
 | `interrupted` | You or the connection stopped it. |
 | `refused` | The run did not go ahead: invalid request, a limit reached, or a needed permission denied. A limit is named in the result. `close` a finished worker to free a slot. |
+
+`list` reports the limits on live workers and running runs. Reaching one is a
+`refused` outcome, so check `list` before starting many workers.
 
 Check `cleanup.confirmed` on every result. When it is false, the result lists
 what could not be confirmed stopped.
