@@ -48,6 +48,11 @@ Out of scope:
 - A JavaScript harness and a JSON-RPC surface. due has both; they are left out
   until the core is solid and then reconsidered.
 
+## The API
+
+[docs/api.md](docs/api.md) is the proposed CLI and MCP surface, with open
+questions marked. It is a proposal, not a description of something built.
+
 ## Where the parts come from
 
 | Part | Starting point | Why |
