@@ -1,0 +1,12 @@
+[package]
+name = "delega-core"
+description = "Run Claude Code and Codex agents from a program: the contract and the engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
