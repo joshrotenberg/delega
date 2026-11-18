@@ -13,8 +13,11 @@ name = "delega"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
 delega-core.workspace = true
-delega-mcp.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
