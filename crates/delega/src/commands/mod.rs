@@ -4,6 +4,7 @@
 mod doctor;
 mod init;
 mod mcp;
+pub(crate) mod output;
 mod run;
 mod schema;
 mod skill;

@@ -196,6 +196,33 @@ fn skill_show_unknown_name_exits_two_naming_the_known_skills() {
 }
 
 #[test]
+fn printing_commands_into_a_closed_pipe_exit_zero_without_panicking() {
+    for args in [
+        &["skill", "list"][..],
+        &["skill", "list", "--output", "json"],
+        &["skill", "show", "run"],
+        &["skill", "show", "run", "--output", "json"],
+        &["schema", "request"],
+        &["schema", "result"],
+        &["version"],
+        &["version", "--output", "json"],
+    ] {
+        // The reader end is closed before the command starts, so every write
+        // fails with a broken pipe.
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        drop(reader);
+        let out = Command::new(env!("CARGO_BIN_EXE_delega"))
+            .args(args)
+            .stdout(writer)
+            .output()
+            .expect("run delega");
+        let err = text(&out.stderr);
+        assert!(!err.contains("panicked"), "{args:?}: {err}");
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {err}");
+    }
+}
+
+#[test]
 fn unknown_subcommand_is_a_usage_error_with_exit_two() {
     let out = delega(&["frobnicate"]);
     assert_eq!(out.status.code(), Some(2));

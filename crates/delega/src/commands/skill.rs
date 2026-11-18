@@ -2,8 +2,6 @@
 
 use std::process::ExitCode;
 
-use std::io::Write;
-
 use clap::{Parser, Subcommand};
 use delega_core::contract::SCHEMA_VERSION;
 use delega_core::skills::{self, Skill};
@@ -54,21 +52,20 @@ pub fn run(args: Args) -> ExitCode {
 
 fn list(output: OutputFormat) -> ExitCode {
     let catalog = skills::catalog();
-    match output {
-        OutputFormat::Text => {
-            for skill in catalog {
-                println!("{}  {}", skill.name(), skill.description());
-            }
-        }
-        OutputFormat::Json => println!(
-            "{}",
+    let text = match output {
+        OutputFormat::Text => catalog
+            .iter()
+            .map(|skill| format!("{}  {}\n", skill.name(), skill.description()))
+            .collect(),
+        OutputFormat::Json => format!(
+            "{}\n",
             json!({
                 "schema_version": SCHEMA_VERSION,
                 "skills": catalog.iter().map(summary).collect::<Vec<_>>(),
             })
         ),
-    }
-    ExitCode::SUCCESS
+    };
+    super::output::emit("skill list", text.as_bytes())
 }
 
 fn show(name: &str, output: OutputFormat) -> ExitCode {
@@ -81,15 +78,12 @@ fn show(name: &str, output: OutputFormat) -> ExitCode {
         return ExitCode::from(super::EXIT_REFUSED);
     };
     match output {
-        OutputFormat::Text => {
-            // The exact bytes, with no newline added. A closed pipe is not an error.
-            let _ = std::io::stdout().write_all(skill.content().as_bytes());
-        }
+        // The exact bytes, with no newline added.
+        OutputFormat::Text => super::output::emit("skill show", skill.content().as_bytes()),
         OutputFormat::Json => {
             let mut value = summary(skill);
             value["content"] = Value::String(skill.content().to_string());
-            println!("{value}");
+            super::output::emit("skill show", format!("{value}\n").as_bytes())
         }
     }
-    ExitCode::SUCCESS
 }

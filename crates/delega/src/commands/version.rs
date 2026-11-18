@@ -26,10 +26,10 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> ExitCode {
-    match args.output {
-        OutputFormat::Text => println!("{}", delega_core::VERSION),
-        OutputFormat::Json => println!(
-            "{}",
+    let text = match args.output {
+        OutputFormat::Text => format!("{}\n", delega_core::VERSION),
+        OutputFormat::Json => format!(
+            "{}\n",
             serde_json::json!({
                 "name": "delega",
                 "version": delega_core::VERSION,
@@ -38,6 +38,6 @@ pub fn run(args: Args) -> ExitCode {
                 "features": features(),
             })
         ),
-    }
-    ExitCode::SUCCESS
+    };
+    super::output::emit("version", text.as_bytes())
 }
