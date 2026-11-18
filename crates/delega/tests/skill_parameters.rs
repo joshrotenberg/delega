@@ -4,22 +4,30 @@
 //!
 //! - Inline code spans and fenced blocks are found by the markdown rules for
 //!   backtick runs. A span or fence that is never closed is a failure.
-//! - A span or fenced line that starts with `delega ` is read as a command
-//!   line. The subcommand path must exist, nested ones included. Every flag
-//!   before a `--` must belong to that subcommand. A value that follows a flag
-//!   with a fixed set of values must be one of them. Tokens after `--` are
-//!   provider options and are not checked.
+//! - A span or fenced line that starts with `delega ` is split like a shell
+//!   (quotes are honored) and read as a command line. The subcommand path must
+//!   exist, nested ones included. Every flag before a `--` must belong to that
+//!   subcommand. The value of a flag that takes one is consumed, and must be
+//!   one of the possible values when the flag has a fixed set. A positional
+//!   with a fixed set of values must be one of them, and the name after
+//!   `delega skill show` must be a skill in the catalog (a placeholder such as
+//!   `<name>` or `NAME` is accepted). Tokens after `--` are provider options
+//!   and are not checked.
 //! - A span that begins with a flag (`--timeout 20m`, `-C`) names a flag that
-//!   exists on some subcommand.
+//!   exists on some subcommand, and its value is checked when the flag has a
+//!   fixed set of values.
 //! - A dotted span whose first part is a top-level request or result field
-//!   (`permissions.mode`) must exist in the schema, following `$ref`s. Dotted
-//!   spans that start with anything else (`result.json`, `0.1.0`) are ignored.
+//!   (`permissions.mode`) must exist in the schema, following `$ref`s, down to
+//!   a property with no declared sub-properties (`structured.answer` is
+//!   accepted). Dotted spans that start with anything else (`result.json`,
+//!   `0.1.0`) are ignored.
 //! - A bare snake_case span (`timeout_secs`) must be a schema property, an
 //!   enum value, an MCP tool or argument, a subcommand or skill name, or be in
 //!   `OTHER_WORDS`.
 //! - Table cells in a column headed `Outcome` must be `Outcome` values, and so
-//!   must a snake_case word written as "outcome `word`" unless it is a known
-//!   field.
+//!   must a snake_case word written as "outcome `word`" unless it is any word
+//!   this build knows (a field, tool, enum value or command), which is what
+//!   keeps "the outcome `text`" from being flagged.
 //! - Table cells in a column headed `Request field` start with a request field.
 //!   Spans after "request fields ...:" are request fields.
 //! - In the `delegate` skill, the first column of a table headed `Tool` holds
@@ -27,8 +35,11 @@
 //!
 //! What is not checked: prose without backticks, whether a described behavior
 //! is true, spans that mix several of these shapes (such as `detail: "full"`),
-//! the words after a flag that takes free text, and anything in a fenced
-//! command line after the first `|`, `;`, `&&` or `>`.
+//! the words after a flag that takes free text, positional values beyond those
+//! listed above, command lines that do not start with `delega` (after an
+//! environment assignment or a pipe, for example), anything in a command line
+//! after the first `|`, `;`, `&&` or `>`, exit status numbers, and prose that
+//! is not in backticks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,13 +66,23 @@ const OTHER_WORDS: [&str; 4] = [
     "queued", "running", "idle", "closed",
 ];
 
+/// A flag of one command.
+#[derive(Default, Clone)]
+struct Flag {
+    /// Whether the flag is followed by a value.
+    takes_value: bool,
+    /// The possible values; empty when free-form.
+    values: Vec<String>,
+}
+
 /// One command in the clap tree.
 #[derive(Default)]
 struct Cmd {
-    /// Long flags, each with its possible values (empty when free-form).
-    longs: BTreeMap<String, Vec<String>>,
-    shorts: BTreeMap<char, Vec<String>>,
+    longs: BTreeMap<String, Flag>,
+    shorts: BTreeMap<char, Flag>,
     subs: BTreeSet<String>,
+    /// Possible values of each positional, in order; empty when free-form.
+    positionals: Vec<Vec<String>>,
 }
 
 struct Known {
@@ -70,6 +91,10 @@ struct Known {
     outcomes: BTreeSet<String>,
     request: Value,
     result: Value,
+    skills: BTreeSet<String>,
+    /// Every flag on any command, merged: values are the union.
+    longs: BTreeMap<String, Flag>,
+    shorts: BTreeMap<char, Flag>,
     /// Every bare word a snake_case span may be.
     words: BTreeSet<String>,
 }
@@ -83,11 +108,19 @@ fn walk(cmd: &clap::Command, path: Vec<String>, out: &mut BTreeMap<Vec<String>, 
             .filter(|v| !v.is_hide_set())
             .map(|v| v.get_name().to_string())
             .collect();
+        if arg.get_long().is_none() && arg.get_short().is_none() {
+            info.positionals.push(values);
+            continue;
+        }
+        let flag = Flag {
+            takes_value: arg.get_action().takes_values(),
+            values,
+        };
         if let Some(long) = arg.get_long() {
-            info.longs.insert(long.to_string(), values.clone());
+            info.longs.insert(long.to_string(), flag.clone());
         }
         if let Some(short) = arg.get_short() {
-            info.shorts.insert(short, values);
+            info.shorts.insert(short, flag);
         }
     }
     for sub in cmd.get_subcommands() {
@@ -131,6 +164,15 @@ fn schema_words(value: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
+fn merge(into: &mut Flag, from: &Flag) {
+    into.takes_value |= from.takes_value;
+    for value in &from.values {
+        if !into.values.contains(value) {
+            into.values.push(value.clone());
+        }
+    }
+}
+
 fn known() -> Known {
     let mut root = delega::command();
     root.build(); // adds the generated help flags and the `help` subcommand
@@ -158,18 +200,31 @@ fn known() -> Known {
     words.extend(OTHER_WORDS.iter().map(|w| w.to_string()));
     for info in cmds.values() {
         words.extend(info.subs.iter().cloned());
-        words.extend(info.longs.values().flatten().cloned());
+        words.extend(info.longs.values().flat_map(|f| f.values.iter().cloned()));
     }
-    words.extend(
-        delega_core::skills::catalog()
-            .iter()
-            .map(|s| s.name().to_string()),
-    );
+    let skills: BTreeSet<String> = delega_core::skills::catalog()
+        .iter()
+        .map(|s| s.name().to_string())
+        .collect();
+    words.extend(skills.iter().cloned());
+    let mut longs: BTreeMap<String, Flag> = BTreeMap::new();
+    let mut shorts: BTreeMap<char, Flag> = BTreeMap::new();
+    for info in cmds.values() {
+        for (name, flag) in &info.longs {
+            merge(longs.entry(name.clone()).or_default(), flag);
+        }
+        for (name, flag) in &info.shorts {
+            merge(shorts.entry(*name).or_default(), flag);
+        }
+    }
     Known {
         cmds,
         outcomes,
         request,
         result,
+        skills,
+        longs,
+        shorts,
         words,
     }
 }
@@ -349,7 +404,18 @@ fn variants<'a>(root: &'a Value, schema: &'a Value) -> Vec<&'a Value> {
 
 fn has_property(root: &Value, path: &str) -> bool {
     let mut current = vec![root];
-    for segment in path.split('.') {
+    for (index, segment) in path.split('.').enumerate() {
+        // A property with no declared sub-properties is free-form: anything
+        // below it is the caller's data.
+        if index > 0
+            && current.iter().all(|s| {
+                variants(root, s)
+                    .iter()
+                    .all(|v| v.get("properties").is_none())
+            })
+        {
+            return true;
+        }
         let mut next = Vec::new();
         for schema in current {
             for variant in variants(root, schema) {
@@ -413,28 +479,65 @@ fn flag_parts(token: &str) -> Option<(bool, String, Option<String>)> {
     ))
 }
 
+/// Split a line into words like a POSIX shell: whitespace separates, single
+/// and double quotes group, and a backslash escapes outside single quotes.
+fn shell_split(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') | (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if started || !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+fn check_value(context: &str, flag: &str, value: &str, values: &[String], out: &mut Vec<String>) {
+    if !values.is_empty() && !is_placeholder(value) && !values.iter().any(|v| v == value) {
+        out.push(format!(
+            "{context}: {value} is not a value of {flag} ({})",
+            values.join(", ")
+        ));
+    }
+}
+
 /// Check one command line that starts with `delega`.
 fn check_command_line(line: &str, known: &Known, out: &mut Vec<String>) {
-    let mut tokens = line.split_whitespace();
+    let context = format!("`{line}`");
+    let mut tokens = shell_split(line).into_iter();
     tokens.next(); // delega
     let mut path: Vec<String> = Vec::new();
-    let mut pending: Option<(String, Vec<String>)> = None;
-    for token in tokens {
-        if matches!(token, "|" | ";" | "&&" | ">" | ">>" | "<" | "--") {
+    let mut positional = 0;
+    while let Some(token) = tokens.next() {
+        if matches!(token.as_str(), "|" | ";" | "&&" | ">" | ">>" | "<" | "--") {
             break; // after `--` come provider options
         }
-        if let Some((flag, values)) = pending.take() {
-            if !is_placeholder(token) && !values.iter().any(|v| v == token) {
-                out.push(format!(
-                    "`{line}`: {token} is not a value of {flag} ({})",
-                    values.join(", ")
-                ));
-            }
-            continue;
-        }
         let cmd = &known.cmds[&path];
-        if let Some((long, name, inline)) = flag_parts(token) {
-            let values = if long {
+        if let Some((long, name, inline)) = flag_parts(&token) {
+            let flag = if long {
                 cmd.longs.get(&name)
             } else {
                 name.chars().next().and_then(|c| cmd.shorts.get(&c))
@@ -444,44 +547,53 @@ fn check_command_line(line: &str, known: &Known, out: &mut Vec<String>) {
             } else {
                 format!("-{name}")
             };
-            let Some(values) = values else {
+            let Some(flag) = flag else {
                 let at = if path.is_empty() {
                     "delega".to_string()
                 } else {
                     format!("delega {}", path.join(" "))
                 };
-                out.push(format!("`{line}`: {shown} is not an option of `{at}`"));
+                out.push(format!("{context}: {shown} is not an option of `{at}`"));
                 continue;
             };
-            if !values.is_empty() {
-                match inline {
-                    Some(v) if is_placeholder(&v) || values.contains(&v) => {}
-                    Some(v) => out.push(format!(
-                        "`{line}`: {v} is not a value of {shown} ({})",
-                        values.join(", ")
-                    )),
-                    None => pending = Some((shown, values.clone())),
+            if flag.takes_value {
+                // The value belongs to the flag and is not read as anything else.
+                match inline.or_else(|| tokens.next()) {
+                    Some(value) => check_value(&context, &shown, &value, &flag.values, out),
+                    None => out.push(format!("{context}: {shown} needs a value")),
                 }
             }
             continue;
         }
         if !cmd.subs.is_empty() {
-            if is_placeholder(token) {
+            if is_placeholder(&token) {
                 break;
             }
-            if !cmd.subs.contains(token) {
+            if !cmd.subs.contains(&token) {
                 out.push(format!(
-                    "`{line}`: {token:?} is not a subcommand of `delega {}`",
+                    "{context}: {token:?} is not a subcommand of `delega {}`",
                     path.join(" ")
                 ));
                 break;
             }
-            path.push(token.to_string());
+            path.push(token.clone());
             if token == "help" {
                 break; // the rest are names of other subcommands
             }
+            continue;
         }
-        // Otherwise a positional value; not checked.
+        if let Some(values) = cmd.positionals.get(positional) {
+            check_value(&context, "this argument", &token, values, out);
+            let is_skill_name = path == ["skill", "show"];
+            if is_skill_name
+                && !is_placeholder(&token)
+                && !token.starts_with('<')
+                && !known.skills.contains(&token)
+            {
+                out.push(format!("{context}: {token} is not a skill in the catalog"));
+            }
+        }
+        positional += 1;
     }
 }
 
@@ -491,28 +603,31 @@ fn check_command_line(line: &str, known: &Known, out: &mut Vec<String>) {
 /// `skill` is the skill's name; only `delegate` has a tool table.
 fn problems(text: &str, skill: &str, known: &Known) -> Vec<String> {
     let (spans, fences, mut out) = tokenize(text);
-    let longs: BTreeSet<&String> = known.cmds.values().flat_map(|c| c.longs.keys()).collect();
-    let shorts: BTreeSet<char> = known
-        .cmds
-        .values()
-        .flat_map(|c| c.shorts.keys().copied())
-        .collect();
 
     for span in &spans {
         if span.starts_with("delega ") {
             check_command_line(span, known, &mut out);
         } else if span.starts_with('-') {
-            for token in span.split_whitespace() {
-                if let Some((long, name, _)) = flag_parts(token) {
-                    let exists = if long {
-                        longs.contains(&name)
-                    } else {
-                        name.chars().next().is_some_and(|c| shorts.contains(&c))
-                    };
-                    if !exists {
-                        out.push(format!(
-                            "flag {token} in `{span}` is not an option of any command"
-                        ));
+            let mut tokens = shell_split(span).into_iter();
+            while let Some(token) = tokens.next() {
+                let Some((long, name, inline)) = flag_parts(&token) else {
+                    continue;
+                };
+                let flag = if long {
+                    known.longs.get(&name)
+                } else {
+                    name.chars().next().and_then(|c| known.shorts.get(&c))
+                };
+                let Some(flag) = flag else {
+                    out.push(format!(
+                        "flag {token} in `{span}` is not an option of any command"
+                    ));
+                    continue;
+                };
+                if flag.takes_value && !flag.values.is_empty() {
+                    let value = inline.or_else(|| tokens.next());
+                    if let Some(value) = value {
+                        check_value(&format!("`{span}`"), &token, &value, &flag.values, &mut out);
                     }
                 }
             }
@@ -524,7 +639,8 @@ fn problems(text: &str, skill: &str, known: &Known) -> Vec<String> {
             }
         } else if is_snake(span) && !known.words.contains(span.as_str()) {
             out.push(format!(
-                "`{span}` is not a field, value, tool, argument or command of this build"
+                "`{span}` is not a field, value, tool, argument or command of this build; \
+                 if it is a legitimate other word, add it to OTHER_WORDS with a comment"
             ));
         }
     }
@@ -720,4 +836,51 @@ fn text_that_names_only_real_things_passes() {
         let all = found(fine);
         assert!(all.is_empty(), "{fine:?}: {all:#?}");
     }
+}
+
+#[test]
+fn quoted_values_are_one_word_and_flag_values_are_not_read_as_flags() {
+    assert!(found("Run `delega run --allow-command \"cargo test --workspace\" -p hi`.").is_empty());
+    assert!(found("Run `delega run --allow-command 'git diff --stat' --write`.").is_empty());
+    // The value after a value flag is consumed, so a dash word there is a value.
+    assert!(found("Run `delega run --name -odd`.").is_empty());
+    // A quoted flag-like word is still a real flag problem when it is not a value.
+    only(
+        "Run `delega run --write \"--nonexistent\"`.",
+        "--nonexistent",
+    );
+    // A missing value is reported.
+    only("Run `delega run --effort`.", "needs a value");
+}
+
+#[test]
+fn a_flag_leading_span_checks_the_value_of_a_fixed_set_flag() {
+    only("Pass `--provider gemini`.", "gemini");
+    only("Pass `--output yaml`.", "yaml");
+    assert!(found("Pass `--provider claude` or `--output json`.").is_empty());
+}
+
+#[test]
+fn positionals_are_checked_against_their_possible_values_and_the_catalog() {
+    only("Run `delega schema bogus`.", "bogus");
+    only("Run `delega skill show nope`.", "not a skill");
+    assert!(found("Run `delega schema request`.").is_empty());
+    assert!(found("Run `delega skill show run`.").is_empty());
+    assert!(found("Run `delega skill show <name>` or `delega skill show NAME`.").is_empty());
+}
+
+#[test]
+fn an_unknown_bare_word_message_says_how_to_allow_it() {
+    let all = found("Check `mystery_word`.");
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert!(all[0].contains("OTHER_WORDS"), "{all:#?}");
+}
+
+#[test]
+fn paths_below_a_free_form_property_are_not_checked() {
+    assert!(found("Read `structured.answer` and `answer_schema.type`.").is_empty());
+    only(
+        "Read `permissions.nothing.deeper`.",
+        "permissions.nothing.deeper",
+    );
 }

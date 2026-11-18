@@ -1,8 +1,8 @@
 //! The `delega` command line.
 //!
 //! `main.rs` calls [`main`]; tests read the command definition through
-//! [`command`]. This file only parses arguments and hands off. Each subcommand lives in its
-//! own module under `commands/`.
+//! [`command`]. This file only parses arguments and hands off. Each subcommand
+//! lives in its own module under `commands/`.
 
 mod commands;
 mod duration;
