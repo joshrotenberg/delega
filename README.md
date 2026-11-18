@@ -6,8 +6,8 @@ Run Claude Code and Codex agents from a program, for any purpose, reliably.
 definite result. It is reached from a command line, from Rust, and over MCP.
 
 This repository is new. Only the request and result contract exists so far:
-`delega schema request|result` and `delega version` work, and the other
-commands print "not implemented yet". It merges two earlier
+`delega schema request|result`, `delega skill list|show NAME` and
+`delega version` work, and the other commands print "not implemented yet". It merges two earlier
 projects, [due](https://github.com/joshrotenberg/due) and
 [counterpart](https://github.com/joshrotenberg/counterpart), and the first work
 is deciding what to carry over and proving the core. The design record that led

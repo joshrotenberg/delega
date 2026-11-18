@@ -1,6 +1,5 @@
 //! `delega schema request|result`: print a contract schema.
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
@@ -26,11 +25,5 @@ pub fn run(args: Args) -> ExitCode {
         Which::Request => REQUEST_SCHEMA,
         Which::Result => RESULT_SCHEMA,
     };
-    match std::io::stdout().write_all(text.as_bytes()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("delega schema: cannot write to stdout: {err}");
-            ExitCode::from(1)
-        }
-    }
+    super::output::emit("schema", text.as_bytes())
 }
