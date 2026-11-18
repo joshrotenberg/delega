@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/delega", "crates/delega-core", "crates/delega-mcp"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshrotenberg/delega"
+publish = false
+
+[workspace.dependencies]
+delega-core = { path = "crates/delega-core" }
+delega-mcp = { path = "crates/delega-mcp" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

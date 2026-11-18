@@ -48,6 +48,23 @@ Out of scope:
 - A JavaScript harness and a JSON-RPC surface. due has both; they are left out
   until the core is solid and then reconsidered.
 
+## Layout
+
+| Path | Holds |
+| --- | --- |
+| `crates/delega-core` | The library: the request and result contract and, later, the engine. |
+| `crates/delega-mcp` | The MCP adapter over the core. |
+| `crates/delega` | The `delega` binary. |
+| `docs/api.md` | The agreed design for the CLI and MCP surface. |
+
+Run Cargo from the repository root:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
 ## The API
 
 [docs/api.md](docs/api.md) is the agreed design for the CLI and MCP surface,
