@@ -54,7 +54,7 @@ Out of scope:
 
 | Path | Holds |
 | --- | --- |
-| `crates/delega-core` | The library: the request and result contract and, later, the engine. |
+| `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup) and, later, the rest of the engine. |
 | `schemas` | JSON Schemas for the request and result, generated from the core types. |
 | `crates/delega-mcp` | The MCP adapter over the core. |
 | `crates/delega` | The `delega` binary. |
