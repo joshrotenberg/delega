@@ -35,18 +35,17 @@ The worker starts with the narrowest permission and gets only what you grant.
 
 | Flag | Request field | Grants |
 | --- | --- | --- |
-| `--read` (default) | `permissions.mode` = `read` | Read the working directory. No writes, no commands. |
-| `--write` | `permissions.mode` = `write` | Edit files in the working directory. |
+| `--read` (default) | `permissions.mode` = `read` | Read the working directory. No writes. No commands except those allowed with `--allow-command`. |
+| `--write` | `permissions.mode` = `write` | Also edit files in the working directory. Commands as for `--read`. |
 | `--full` | `permissions.mode` = `full` | No restriction from delega. |
 | `--allow-command CMD` | `permissions.commands` | One exact shell command the worker may run. Repeat the flag for more. |
 | `--add-dir DIR` | `permissions.directories` | One extra directory the worker may read. Repeat for more. |
 
-Prefer `--read` for questions and reviews and `--write` for edits. In `read`
-mode the worker may read the working directory, with no writes and no commands.
-`permissions.commands` lists the shell commands the worker may run, matched
-exactly, so list the exact command string a task needs, such as the test
-command. The docs do not say whether a listed command runs under `read`, so
-after a run check `permissions.denied` to see whether a command was refused.
+Prefer `--read` for questions and reviews and `--write` for edits. Neither
+mode allows shell commands on its own. `permissions.commands` adds the commands
+the worker may run, matched exactly, to either mode, so list the exact command
+string a task needs, such as the test command. A command that is not listed is
+refused and appears in `permissions.denied`.
 Use `--full` only when you accept that delega adds no restriction.
 
 A permission the worker asks for and was not granted is answered no at once. It
