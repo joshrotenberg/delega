@@ -1,18 +1,27 @@
 //! The `delega` command line.
 //!
-//! Nothing is implemented yet, so every invocation says so and exits with the
-//! status `docs/api.md` assigns to a refused run. Printing a fixed message here
-//! keeps a half-built binary from looking like a working one.
+//! This file only parses arguments and hands off. Each subcommand lives in its
+//! own module under `commands/`.
+
+mod commands;
+mod duration;
 
 use std::process::ExitCode;
 
-/// Exit status for a refused run, as `docs/api.md` defines it.
-const REFUSED: u8 = 2;
+use clap::Parser;
+
+use commands::Command;
+
+/// Run Claude Code and Codex agents from a program.
+#[derive(Debug, Parser)]
+#[command(name = "delega", version = delega_core::VERSION, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
 fn main() -> ExitCode {
-    eprintln!(
-        "delega {}: no commands are implemented yet; see docs/api.md for the design",
-        delega_mcp::VERSION
-    );
-    ExitCode::from(REFUSED)
+    // clap exits with status 2 on a usage error, as docs/api.md requires.
+    let cli = Cli::parse();
+    cli.command.run()
 }

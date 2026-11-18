@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Request",
+  "description": "One request: starts a worker and its first run.\n\nUnknown fields are rejected, so a misspelled field is an error and not a\nsilently ignored setting.",
+  "type": "object",
+  "properties": {
+    "answer_schema": {
+      "description": "A JSON Schema the final answer must satisfy; asks for a structured\nanswer and validates it.",
+      "type": [
+        "object",
+        "boolean",
+        "null"
+      ]
+    },
+    "cwd": {
+      "description": "Working directory of the worker. Absent means the working directory of\nthe process that receives the request. A relative path resolves against\nthat same directory: the caller's working directory for the command\nline, the MCP server's working directory for MCP.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "effort": {
+      "description": "Reasoning effort. Absent keeps the provider default.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Effort"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "instructions": {
+      "description": "Extra system instructions for the worker.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "description": "Provider model name or alias. Absent keeps the provider default.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "A label for the worker, unique among live workers.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "native_args": {
+      "description": "Provider options passed through, restricted by an allowlist.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64
+    },
+    "permissions": {
+      "description": "What the worker may do.",
+      "$ref": "#/$defs/Permissions",
+      "default": {
+        "mode": "read",
+        "on_request": "deny"
+      }
+    },
+    "prompt": {
+      "description": "The assignment, sent to the provider on stdin.",
+      "type": "string"
+    },
+    "provider": {
+      "description": "Which provider runs the assignment.",
+      "$ref": "#/$defs/Provider"
+    },
+    "schema_version": {
+      "description": "The contract version this request was written against. Defaults to the\ncurrent version, so tool arguments need not carry it. A request file\nmust carry it; that is enforced by [`super::partial::PartialRequest`].",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "default": 1,
+      "minimum": 0
+    },
+    "session": {
+      "description": "Whether to keep or continue provider history.",
+      "$ref": "#/$defs/Session"
+    },
+    "timeout_secs": {
+      "description": "Limit for the run, in whole seconds. Defaults to 600 (10 minutes).",
+      "type": "integer",
+      "format": "uint64",
+      "default": 600,
+      "maximum": 86400,
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "provider",
+    "prompt"
+  ],
+  "$defs": {
+    "Effort": {
+      "description": "How much reasoning effort to ask the provider for.",
+      "oneOf": [
+        {
+          "description": "Least effort.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Moderate effort.",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "Most effort.",
+          "type": "string",
+          "const": "high"
+        }
+      ]
+    },
+    "Mode": {
+      "description": "How much a worker may do in its working directory.",
+      "oneOf": [
+        {
+          "description": "May read the working directory; no writes and no commands.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "May edit files in the working directory.",
+          "type": "string",
+          "const": "write"
+        },
+        {
+          "description": "No restriction from delega.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "OnRequest": {
+      "description": "What happens when the provider asks for something that was not granted.",
+      "oneOf": [
+        {
+          "description": "Answer no at once and record the request in the result. The only\nchoice in this version; asking the caller comes later.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "Permissions": {
+      "description": "The permissions part of a request.",
+      "type": "object",
+      "properties": {
+        "commands": {
+          "description": "Shell commands the worker may run, matched exactly.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256
+        },
+        "directories": {
+          "description": "Extra directories the worker may read.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64
+        },
+        "mode": {
+          "description": "How much the worker may do. Defaults to `read`.",
+          "$ref": "#/$defs/Mode",
+          "default": "read"
+        },
+        "on_request": {
+          "description": "What happens to a request that was not granted. Defaults to `deny`.",
+          "$ref": "#/$defs/OnRequest",
+          "default": "deny"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Provider": {
+      "description": "The provider CLI that runs the assignment.",
+      "oneOf": [
+        {
+          "description": "Claude Code.",
+          "type": "string",
+          "const": "claude"
+        },
+        {
+          "description": "Codex CLI.",
+          "type": "string",
+          "const": "codex"
+        }
+      ]
+    },
+    "Session": {
+      "description": "How the provider session is kept or continued.",
+      "type": "object",
+      "properties": {
+        "ephemeral": {
+          "description": "Do not keep provider history for this worker.",
+          "type": "boolean"
+        },
+        "resume": {
+          "description": "Continue saved history, by the provider's own session id, in a new\nworker. Cannot be combined with `ephemeral`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "not": {
+        "properties": {
+          "ephemeral": {
+            "const": true
+          },
+          "resume": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ephemeral",
+          "resume"
+        ]
+      }
+    }
+  }
+}

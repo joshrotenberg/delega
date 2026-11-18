@@ -1,0 +1,542 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunResult",
+  "description": "The result of one run. Every run produces exactly one.",
+  "type": "object",
+  "properties": {
+    "cleanup": {
+      "description": "Whether the processes started for the run are gone.",
+      "$ref": "#/$defs/Cleanup"
+    },
+    "error": {
+      "description": "Why the run did not complete. Present unless `completed`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ErrorDetail"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "outcome": {
+      "description": "How the run ended.",
+      "$ref": "#/$defs/Outcome"
+    },
+    "permissions": {
+      "description": "The permissions that applied and what was denied.",
+      "$ref": "#/$defs/AppliedPermissions",
+      "default": {
+        "mode": "read"
+      }
+    },
+    "provenance": {
+      "description": "The build and provider executable behind the result.",
+      "$ref": "#/$defs/Provenance"
+    },
+    "provider": {
+      "description": "The provider that ran it. Absent only on a refused result for a request\nthat named none or an unknown one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provider"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provider_notes": {
+      "description": "Where the provider did not do what the request asked, or did it\ndifferently.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "run": {
+      "description": "Run id.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "The contract version of this result.",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "session_id": {
+      "description": "The provider's own session id, for the provider's `resume`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "structured": {
+      "description": "The structured answer, when the request gave an `answer_schema`.\n\nA JSON `null` answer is not representable: it reads back as absent,\nbecause absent and null share one representation here. Report such an\nanswer in `text` with `structured_valid` left out."
+    },
+    "structured_valid": {
+      "description": "Whether `structured` satisfied the schema. Present with `structured`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "text": {
+      "description": "The final answer, or empty.",
+      "type": "string"
+    },
+    "timing": {
+      "description": "When the run was queued, started and finished.",
+      "$ref": "#/$defs/Timing"
+    },
+    "usage": {
+      "description": "Token counts and cost.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "worker": {
+      "description": "The worker the run belonged to. Absent when no worker was created, such\nas a refused request.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkerRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "else": {
+        "properties": {
+          "error": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "completed"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "else": {
+        "properties": {
+          "provider": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "refused"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "structured_valid": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "structured_valid"
+        ]
+      },
+      "then": {
+        "properties": {
+          "structured": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "structured"
+        ]
+      }
+    }
+  ],
+  "required": [
+    "schema_version",
+    "run",
+    "outcome",
+    "text",
+    "cleanup",
+    "timing",
+    "provenance"
+  ],
+  "$defs": {
+    "AppliedPermissions": {
+      "description": "The permissions that applied and what was refused under them.",
+      "type": "object",
+      "properties": {
+        "denied": {
+          "description": "Requests answered no.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeniedRequest"
+          }
+        },
+        "mode": {
+          "description": "The mode that was applied. `read` when the run never started.",
+          "$ref": "#/$defs/Mode",
+          "default": "read"
+        }
+      }
+    },
+    "Cleanup": {
+      "description": "Whether the provider process and its descendants are gone.\n\nSerialized as `{\"confirmed\": true}`, or as `{\"confirmed\": false, \"pids\":\n[...], \"process_groups\": [...], \"reason\": \"...\"}`. A confirmed cleanup with\nleftovers cannot be expressed, and reading one is an error.",
+      "type": "object",
+      "properties": {
+        "confirmed": {
+          "description": "True when everything started for the run is confirmed stopped.",
+          "type": "boolean"
+        },
+        "pids": {
+          "description": "Process ids that could not be confirmed stopped. Empty when confirmed.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "process_groups": {
+          "description": "Process group ids that could not be confirmed stopped. Empty when\nconfirmed.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "reason": {
+          "description": "Why stopping could not be confirmed. Required when not confirmed,\nabsent when confirmed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "else": {
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "if": {
+        "properties": {
+          "confirmed": {
+            "const": true
+          }
+        },
+        "required": [
+          "confirmed"
+        ]
+      },
+      "required": [
+        "confirmed"
+      ],
+      "then": {
+        "properties": {
+          "pids": {
+            "maxItems": 0
+          },
+          "process_groups": {
+            "maxItems": 0
+          },
+          "reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "DeniedRequest": {
+      "description": "A request the provider made that was answered no.",
+      "type": "object",
+      "properties": {
+        "request": {
+          "description": "What the provider asked to do.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request"
+      ]
+    },
+    "ErrorDetail": {
+      "description": "Why a run did not complete. Present unless the outcome is `completed`.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "A short machine-readable label for the kind of error. Free text, so a\nreader must tolerate values it does not know. The values used so far:\n`invalid_request` (a refused run whose request failed validation),\n`timed_out` and `interrupted` (set by the matching constructors).",
+          "type": "string"
+        },
+        "message": {
+          "description": "A human-readable description.",
+          "type": "string"
+        },
+        "provider_exit_code": {
+          "description": "The provider process exit code, when it exited with one.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ]
+    },
+    "Mode": {
+      "description": "How much a worker may do in its working directory.",
+      "oneOf": [
+        {
+          "description": "May read the working directory; no writes and no commands.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "May edit files in the working directory.",
+          "type": "string",
+          "const": "write"
+        },
+        {
+          "description": "No restriction from delega.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "Outcome": {
+      "description": "How a run ended. Every run ends in exactly one of these.",
+      "oneOf": [
+        {
+          "description": "The provider finished the assignment and returned a final answer.",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "The provider or delega hit an error; `error.kind` says which.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The run's time limit passed.",
+          "type": "string",
+          "const": "timed_out"
+        },
+        {
+          "description": "The caller stopped the run, or went away.",
+          "type": "string",
+          "const": "interrupted"
+        },
+        {
+          "description": "The run did not go ahead: invalid request, a limit, or a denied\npermission that stopped it.",
+          "type": "string",
+          "const": "refused"
+        }
+      ]
+    },
+    "Provenance": {
+      "description": "Which build and which provider executable produced the result.",
+      "type": "object",
+      "properties": {
+        "build": {
+          "description": "The build identity, such as a source revision, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delega_version": {
+          "description": "The delega version.",
+          "type": "string"
+        },
+        "provider_executable": {
+          "description": "Path of the provider executable that was used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_version": {
+          "description": "Version the provider executable reported.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "delega_version"
+      ]
+    },
+    "Provider": {
+      "description": "The provider CLI that runs the assignment.",
+      "oneOf": [
+        {
+          "description": "Claude Code.",
+          "type": "string",
+          "const": "claude"
+        },
+        {
+          "description": "Codex CLI.",
+          "type": "string",
+          "const": "codex"
+        }
+      ]
+    },
+    "Timing": {
+      "description": "When the run was queued, started and finished.\n\nTimes are RFC 3339 strings in UTC.",
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "description": "Time from start to finish, in milliseconds. Zero if it never started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "finished_at": {
+          "description": "When the run finished.",
+          "type": "string"
+        },
+        "queued_at": {
+          "description": "When the run was queued.",
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When the provider was started. Absent if the run never started.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "description": "The time limit that applied, in seconds. Same name and unit as the\nrequest's `timeout_secs`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "queued_at",
+        "finished_at",
+        "duration_ms",
+        "timeout_secs"
+      ]
+    },
+    "Usage": {
+      "description": "Token counts and cost, where the provider reports them.",
+      "type": "object",
+      "properties": {
+        "cached_tokens": {
+          "description": "Input tokens served from a cache.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "description": "Cost in US dollars, when the provider reports it.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "input_tokens": {
+          "description": "Tokens sent to the model.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "description": "Tokens the model produced.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "description": "Tokens spent on reasoning.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "WorkerRef": {
+      "description": "The worker a run belonged to.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Worker id.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The worker's name, if the request gave one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+}

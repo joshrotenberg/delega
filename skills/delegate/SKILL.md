@@ -18,8 +18,8 @@ run ends in exactly one outcome and produces one result.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides | At once: worker id, run id, and state `queued` or `running`. |
-| `follow_up` | `worker`, `prompt`, optional `timeout` | At once: the new run id. It queues behind a running run. |
-| `wait` | `runs` or `workers` (a list), `timeout`, `after` (cursor) | When any of them finishes, or on timeout: their current states and a cursor. A timeout is not an error. |
+| `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. It queues behind a running run. |
+| `wait` | `runs` or `workers` (a list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: their current states and a cursor. A timeout is not an error. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor) | The result if finished; otherwise state, partial text and recent activity. |
 | `list` | none | Workers on this connection, their state, queue length and session ids. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: the result, with `interrupted`. |
@@ -31,7 +31,7 @@ both are bounded.
 ## Start a worker
 
 `start` takes the same request fields as a run: `provider`, `prompt`, `cwd`,
-`name`, `instructions`, `model`, `effort`, `timeout`, `permissions`,
+`name`, `instructions`, `model`, `effort`, `timeout_secs`, `permissions`,
 `answer_schema`, `session` and `native_args`. The worker does not see your
 conversation, so write each `prompt` as a standalone assignment.
 
@@ -48,7 +48,7 @@ Give each its own working directory.
 
 1. Start the workers you need. Keep each worker's id and run id.
 2. Do your own work.
-3. Call `wait` with the `runs` or `workers` you are waiting on and a `timeout`.
+3. Call `wait` with the `runs` or `workers` you are waiting on and a `timeout_secs`.
    It returns when any of them finishes, or on timeout, with their current
    states and a cursor. Pass the returned cursor as `after` on the next call.
 4. Call `read` with the `run` to get its result. `read` also takes an `after`
@@ -78,7 +78,7 @@ Worker states are `queued`, `running`, `idle` and `closed`. A run is `queued`,
 | --- | --- |
 | `completed` | The provider finished. It can still contain denied requests, so check `permissions.denied` and `provider_notes`, then check the work yourself. |
 | `failed` | Read `error.kind` and `error.message`. Retry only if the cause is fixed. |
-| `timed_out` | The time limit passed. The result states the limit applied. Retry with a larger `timeout` or a smaller assignment. |
+| `timed_out` | The time limit passed. The result states the limit applied. Retry with a larger `timeout_secs` or a smaller assignment. |
 | `interrupted` | You or the connection stopped it. |
 | `refused` | The run did not go ahead: invalid request, a limit reached, or a needed permission denied. A limit is named in the result. `close` a finished worker to free a slot. |
 

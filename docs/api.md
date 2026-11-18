@@ -60,7 +60,7 @@ arguments, and the library from a struct. A partial request saved as a file is a
 | `instructions` | string | Extra system instructions for the worker. |
 | `model` | string | Provider model name or alias. Absent keeps the provider default. |
 | `effort` | `low`, `medium`, `high` | Absent keeps the provider default. |
-| `timeout` | duration | Limit for the run. Default 10 minutes. The limit applied is stated in the result. |
+| `timeout_secs` | integer | Limit for the run in whole seconds, 1 to 86400. Default 600 (10 minutes). The limit applied is stated in the result as `timing.timeout_secs`. |
 | `permissions` | object | See below. |
 | `answer_schema` | JSON Schema | Ask for a structured answer and validate it. |
 | `session` | object | `ephemeral: bool`, or `resume: <provider session id>` to continue saved history in a new worker. |
@@ -106,7 +106,7 @@ One JSON object, versioned, the same from every surface.
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
 | `usage` | Tokens in and out, cached, reasoning; `cost_usd` when the provider reports it. |
-| `timing` | Queued, started and finished times, duration, and the time limit applied. |
+| `timing` | Queued, started and finished times, duration, and the time limit applied as `timeout_secs`. |
 | `provenance` | delega version and build, provider executable path and version. |
 
 A caller that only needs to know what happened reads `outcome`, `text`, `error`
@@ -142,6 +142,8 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 
 Behavior:
 
+- **Timeout.** `--timeout` accepts `90s`, `20m`, `2h` or a plain number of
+  seconds, and the CLI converts it to the request's `timeout_secs`.
 - **Exit status** follows the outcome: 0 `completed`, 1 `failed`, 2 `refused`
   (including usage errors), 124 `timed_out`, 130 `interrupted`. With
   `--output json` the result is always printed, whatever the exit status.
@@ -164,8 +166,8 @@ eighth, `respond`, when live asking is added.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides | At once: worker id, run id, state `queued` or `running`. |
-| `follow_up` | `worker`, `prompt`, optional `timeout` | At once: the new run id. Queues behind a running run. |
-| `wait` | `runs` or `workers` (list), `timeout`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
+| `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. Queues behind a running run. |
+| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor) | The result if finished; otherwise state, partial text and recent activity. |
 | `list` | none | Workers on this connection, their state, queue length and session ids. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
@@ -286,7 +288,7 @@ Settled by Josh on 2026-11-18.
 | Question | Decision |
 | --- | --- |
 | Live permission asking in the first version | No. The first version only denies; asking comes later. |
-| Default `timeout` | 10 minutes, stated in the result. |
+| Default `timeout_secs` | 600 (10 minutes), stated in the result. |
 | A run denied a permission that still finished | `completed`, with the denial listed. `refused` only when the run stopped because of it. |
 | Names | `worker` and `run`; tools `start`, `follow_up`, `wait`, `read`, `list`, `interrupt`, `close`, and later `respond`. |
 | Permission modes | `read`, `write`, `full`. |
