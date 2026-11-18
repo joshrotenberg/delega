@@ -5,6 +5,7 @@
 
 pub mod limits;
 pub mod outcome;
+pub mod partial;
 pub mod permissions;
 pub mod request;
 pub mod result;

@@ -16,6 +16,15 @@ use clap::Subcommand;
 /// Exit status for a refused run and for usage errors, from `docs/api.md`.
 pub const EXIT_REFUSED: u8 = delega_core::contract::outcome::Outcome::Refused.exit_status();
 
+/// How a command prints its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// Plain text
+    Text,
+    /// JSON
+    Json,
+}
+
 /// The planned command surface from `docs/api.md`.
 #[derive(Debug, Subcommand)]
 pub enum Command {

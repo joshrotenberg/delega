@@ -35,6 +35,7 @@ pub enum Effort {
 /// How the provider session is kept or continued.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_session)]
 pub struct Session {
     /// Do not keep provider history for this worker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -58,15 +59,21 @@ impl Session {
 /// silently ignored setting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_request)]
 pub struct Request {
-    /// The contract version this request was written against. Required.
+    /// The contract version this request was written against. Defaults to the
+    /// current version, so tool arguments need not carry it. A request file
+    /// must carry it; that is enforced by [`super::partial::PartialRequest`].
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     /// Which provider runs the assignment.
     pub provider: Provider,
     /// The assignment, sent to the provider on stdin.
     pub prompt: String,
-    /// Working directory of the worker. Absent means the directory of the
-    /// process that receives the request.
+    /// Working directory of the worker. Absent means the working directory of
+    /// the process that receives the request. A relative path resolves against
+    /// that same directory: the caller's working directory for the command
+    /// line, the MCP server's working directory for MCP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     /// A label for the worker, unique among live workers.
@@ -82,8 +89,8 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
     /// Limit for the run, in whole seconds. Defaults to 600 (10 minutes).
-    #[serde(default = "default_timeout")]
-    pub timeout: u64,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
     /// What the worker may do.
     #[serde(default)]
     pub permissions: Permissions,
@@ -99,8 +106,12 @@ pub struct Request {
     pub native_args: Vec<String>,
 }
 
-fn default_timeout() -> u64 {
+fn default_timeout_secs() -> u64 {
     DEFAULT_TIMEOUT_SECS
+}
+
+fn default_schema_version() -> u32 {
+    SCHEMA_VERSION
 }
 
 impl Request {
@@ -115,7 +126,7 @@ impl Request {
             instructions: None,
             model: None,
             effort: None,
-            timeout: DEFAULT_TIMEOUT_SECS,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
             permissions: Permissions::default(),
             answer_schema: None,
             session: Session::default(),

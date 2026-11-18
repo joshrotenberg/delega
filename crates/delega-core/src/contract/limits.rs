@@ -19,6 +19,11 @@ pub const MAX_NAME_CHARS: usize = 64;
 /// The longest accepted model name or session id, in bytes.
 pub const MAX_IDENTIFIER_BYTES: usize = 256;
 
+/// The longest accepted `cwd` or `permissions.directories` entry, in bytes.
+pub const MAX_PATH_BYTES: usize = 4096;
+/// The largest accepted `answer_schema`, as serialized JSON, in bytes.
+pub const MAX_ANSWER_SCHEMA_BYTES: usize = 256 * 1024;
+
 /// The most entries accepted in `permissions.commands`.
 pub const MAX_COMMANDS: usize = 256;
 /// The longest accepted single command string, in bytes.

@@ -5,9 +5,11 @@ use serde_json::{Value, json};
 use super::SCHEMA_VERSION;
 use super::limits::*;
 use super::outcome::Outcome;
+use super::partial::PartialRequest;
 use super::permissions::{Mode, OnRequest, Permissions};
 use super::request::{Effort, Provider, Request, Session};
 use super::result::*;
+use super::validate::Problem;
 
 fn full_request() -> Request {
     Request {
@@ -19,7 +21,7 @@ fn full_request() -> Request {
         instructions: Some("Be brief.".into()),
         model: Some("gpt-5".into()),
         effort: Some(Effort::High),
-        timeout: 1200,
+        timeout_secs: 1200,
         permissions: Permissions {
             mode: Mode::Write,
             commands: vec!["cargo test".into()],
@@ -39,11 +41,11 @@ fn full_result() -> RunResult {
     RunResult {
         schema_version: SCHEMA_VERSION,
         run: "run-1".into(),
-        worker: WorkerRef {
+        worker: Some(WorkerRef {
             id: "w-1".into(),
             name: Some("summarizer".into()),
-        },
-        provider: Provider::Claude,
+        }),
+        provider: Some(Provider::Claude),
         outcome: Outcome::Failed,
         text: "partial".into(),
         structured: Some(json!({"a": 1})),
@@ -79,7 +81,7 @@ fn full_result() -> RunResult {
             started_at: Some("2026-11-18T10:00:01Z".into()),
             finished_at: "2026-11-18T10:00:05Z".into(),
             duration_ms: 4000,
-            time_limit_secs: 600,
+            timeout_secs: 600,
         },
         provenance: Provenance {
             delega_version: "0.1.0".into(),
@@ -148,26 +150,40 @@ fn unknown_provider_fails_to_parse() {
 }
 
 #[test]
-fn request_without_a_schema_version_fails_to_parse() {
+fn request_without_a_schema_version_gets_the_current_one() {
     let text = r#"{"provider":"claude","prompt":"x"}"#;
+    let request: Request = serde_json::from_str(text).unwrap();
+    assert_eq!(request.schema_version, SCHEMA_VERSION);
+}
+
+#[test]
+fn unknown_field_inside_session_is_rejected() {
+    let text = r#"{"provider":"claude","prompt":"x","session":{"keep":true}}"#;
     assert!(serde_json::from_str::<Request>(text).is_err());
+}
+
+#[test]
+fn result_reader_ignores_unknown_fields_in_nested_objects() {
+    let mut value = serde_json::to_value(full_result()).unwrap();
+    value["cleanup"]["added_later"] = json!(1);
+    value["timing"]["added_later"] = json!(1);
+    value["error"]["added_later"] = json!(1);
+    value["permissions"]["added_later"] = json!(1);
+    value["provenance"]["added_later"] = json!(1);
+    assert!(serde_json::from_value::<RunResult>(value).is_ok());
 }
 
 #[test]
 fn omitted_fields_get_the_documented_defaults() {
     let text = r#"{"schema_version":1,"provider":"claude","prompt":"x"}"#;
     let request: Request = serde_json::from_str(text).unwrap();
-    assert_eq!(request.timeout, 600);
-    assert_eq!(request.timeout, DEFAULT_TIMEOUT_SECS);
+    assert_eq!(request.timeout_secs, 600);
+    assert_eq!(request.timeout_secs, DEFAULT_TIMEOUT_SECS);
     assert_eq!(request.permissions.mode, Mode::Read);
     assert_eq!(request.permissions.on_request, OnRequest::Deny);
     assert!(request.permissions.commands.is_empty());
     assert!(request.session.is_default());
-    assert_eq!(request, minimal_with_prompt("x"));
-}
-
-fn minimal_with_prompt(prompt: &str) -> Request {
-    Request::new(Provider::Claude, prompt)
+    assert_eq!(request, Request::new(Provider::Claude, "x"));
 }
 
 #[test]
@@ -188,7 +204,7 @@ fn absent_optional_fields_are_left_out_of_the_json() {
             "prompt",
             "provider",
             "schema_version",
-            "timeout"
+            "timeout_secs"
         ]
     );
 }
@@ -250,16 +266,16 @@ fn oversized_prompt_is_a_validation_problem() {
 #[test]
 fn zero_timeout_is_a_validation_problem() {
     let mut r = minimal();
-    r.timeout = 0;
-    assert_eq!(problem_fields(&r), ["timeout"]);
+    r.timeout_secs = 0;
+    assert_eq!(problem_fields(&r), ["timeout_secs"]);
 }
 
 #[test]
 fn timeout_above_the_maximum_is_a_validation_problem() {
     let mut r = minimal();
-    r.timeout = MAX_TIMEOUT_SECS + 1;
-    assert_eq!(problem_fields(&r), ["timeout"]);
-    r.timeout = MAX_TIMEOUT_SECS;
+    r.timeout_secs = MAX_TIMEOUT_SECS + 1;
+    assert_eq!(problem_fields(&r), ["timeout_secs"]);
+    r.timeout_secs = MAX_TIMEOUT_SECS;
     assert_eq!(r.validate(), Ok(()));
 }
 
@@ -365,13 +381,13 @@ fn too_many_native_args_is_a_validation_problem() {
 fn validate_reports_every_problem_not_only_the_first() {
     let mut r = minimal();
     r.prompt = String::new();
-    r.timeout = 0;
+    r.timeout_secs = 0;
     r.name = Some(String::new());
     r.permissions.commands = vec![String::new()];
     let fields = problem_fields(&r);
     assert_eq!(
         fields,
-        ["prompt", "name", "timeout", "permissions.commands[0]"]
+        ["prompt", "name", "timeout_secs", "permissions.commands[0]"]
     );
 }
 
@@ -393,15 +409,345 @@ fn exit_status_follows_the_documented_mapping() {
 }
 
 #[test]
-fn every_outcome_has_a_distinct_exit_status() {
-    let mut codes: Vec<u8> = Outcome::ALL.iter().map(|o| o.exit_status()).collect();
-    codes.sort_unstable();
-    codes.dedup();
-    assert_eq!(codes.len(), Outcome::ALL.len());
-}
-
-#[test]
 fn request_schema_forbids_unknown_properties() {
     let value: Value = serde_json::from_str(super::schema::REQUEST_SCHEMA).unwrap();
     assert_eq!(value["additionalProperties"], json!(false));
+}
+
+#[test]
+fn outcome_all_lists_exactly_the_variants_of_the_schema() {
+    // Adding a variant changes the generated schema, which fails this test
+    // until `Outcome::ALL` lists it. `exit_status` is an exhaustive match, so
+    // a new variant also fails to compile until it has a status.
+    let schema = serde_json::to_value(schemars::schema_for!(Outcome)).unwrap();
+    let mut from_schema: Vec<String> = schema["oneOf"]
+        .as_array()
+        .or_else(|| schema["enum"].as_array())
+        .expect("variants in schema")
+        .iter()
+        .map(|v| {
+            v["const"]
+                .as_str()
+                .or_else(|| v.as_str())
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    let mut from_all: Vec<String> = Outcome::ALL
+        .iter()
+        .map(|o| {
+            serde_json::to_value(o)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    from_schema.sort();
+    from_all.sort();
+    assert_eq!(from_all, from_schema);
+}
+
+// Validation gaps.
+
+type Edit = Box<dyn Fn(&mut Request)>;
+
+fn nul() -> String {
+    "a\0b".to_string()
+}
+
+#[test]
+fn nul_byte_in_any_string_field_is_a_validation_problem() {
+    let cases: Vec<(&str, Edit)> = vec![
+        ("prompt", Box::new(|r| r.prompt = nul())),
+        ("instructions", Box::new(|r| r.instructions = Some(nul()))),
+        ("name", Box::new(|r| r.name = Some("n\0".into()))),
+        ("model", Box::new(|r| r.model = Some(nul()))),
+        (
+            "session.resume",
+            Box::new(|r| r.session.resume = Some(nul())),
+        ),
+        ("cwd", Box::new(|r| r.cwd = Some(PathBuf::from(nul())))),
+        (
+            "permissions.commands[0]",
+            Box::new(|r| r.permissions.commands = vec![nul()]),
+        ),
+        (
+            "permissions.directories[0]",
+            Box::new(|r| r.permissions.directories = vec![PathBuf::from(nul())]),
+        ),
+        ("native_args[0]", Box::new(|r| r.native_args = vec![nul()])),
+    ];
+    for (field, edit) in cases {
+        let mut r = minimal();
+        edit(&mut r);
+        let problems = r.validate().unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.field == field && p.message.contains("NUL")),
+            "no NUL problem for {field}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn values_that_become_provider_arguments_must_not_start_with_a_dash() {
+    for field in ["model", "session.resume", "name"] {
+        let mut r = minimal();
+        match field {
+            "model" => r.model = Some("--yolo".into()),
+            "name" => r.name = Some("-x".into()),
+            _ => r.session.resume = Some("-s".into()),
+        }
+        assert_eq!(problem_fields(&r), [field]);
+    }
+}
+
+#[test]
+fn oversized_answer_schema_is_a_validation_problem() {
+    let mut r = minimal();
+    r.answer_schema = Some(json!({"description": "x".repeat(MAX_ANSWER_SCHEMA_BYTES)}));
+    assert_eq!(problem_fields(&r), ["answer_schema"]);
+}
+
+#[test]
+fn oversized_paths_are_validation_problems() {
+    let long = || PathBuf::from("/".to_string() + &"d".repeat(MAX_PATH_BYTES));
+    let mut r = minimal();
+    r.cwd = Some(long());
+    r.permissions.directories = vec![long()];
+    assert_eq!(problem_fields(&r), ["cwd", "permissions.directories[0]"]);
+}
+
+#[test]
+fn problem_serializes_with_field_and_message() {
+    let problem = Problem::new("prompt", "must not be empty");
+    assert_eq!(
+        serde_json::to_value(problem).unwrap(),
+        json!({"field": "prompt", "message": "must not be empty"})
+    );
+}
+
+// Results.
+
+fn context() -> RunContext {
+    RunContext {
+        run: "run-1".into(),
+        worker: None,
+        provider: None,
+        permissions: AppliedPermissions::default(),
+        cleanup: Cleanup::confirmed(),
+        timing: full_result().timing,
+        provenance: full_result().provenance,
+    }
+}
+
+fn result_fields(result: &RunResult) -> Vec<String> {
+    result
+        .validate()
+        .err()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.field)
+        .collect()
+}
+
+#[test]
+fn every_constructor_builds_a_result_that_validates_with_its_outcome() {
+    let error = ErrorDetail {
+        kind: "x".into(),
+        message: "m".into(),
+        provider_exit_code: None,
+    };
+    let built = [
+        (
+            RunResult::completed(context(), "answer"),
+            Outcome::Completed,
+        ),
+        (RunResult::failed(context(), error, ""), Outcome::Failed),
+        (
+            RunResult::timed_out(context(), "late", "partial"),
+            Outcome::TimedOut,
+        ),
+        (
+            RunResult::interrupted(context(), "stopped", ""),
+            Outcome::Interrupted,
+        ),
+        (
+            RunResult::refused(context(), "limit", "full"),
+            Outcome::Refused,
+        ),
+        (RunResult::refused_invalid(context(), &[]), Outcome::Refused),
+    ];
+    for (result, outcome) in built {
+        assert_eq!(result.outcome, outcome);
+        assert_eq!(result.validate(), Ok(()), "{outcome:?}");
+    }
+}
+
+#[test]
+fn refused_result_for_an_unparseable_request_has_no_provider_or_worker() {
+    let problems = vec![Problem::new("provider", "is required")];
+    let result = RunResult::refused_invalid(context(), &problems);
+    let value = serde_json::to_value(&result).unwrap();
+    assert!(value.get("provider").is_none());
+    assert!(value.get("worker").is_none());
+    assert_eq!(value["outcome"], "refused");
+    assert_eq!(value["error"]["kind"], "invalid_request");
+    assert_eq!(value["error"]["message"], "provider: is required");
+}
+
+#[test]
+fn refused_constructor_clears_started_at() {
+    let mut ctx = context();
+    assert!(ctx.timing.started_at.is_some());
+    ctx.timing.started_at = Some("2026-11-18T10:00:01Z".into());
+    assert!(
+        RunResult::refused(ctx, "k", "m")
+            .timing
+            .started_at
+            .is_none()
+    );
+}
+
+#[test]
+fn result_without_permissions_reads_with_the_default_mode() {
+    let mut value = serde_json::to_value(RunResult::completed(context(), "a")).unwrap();
+    value.as_object_mut().unwrap().remove("permissions");
+    let result: RunResult = serde_json::from_value(value).unwrap();
+    assert_eq!(result.permissions.mode, Mode::Read);
+}
+
+#[test]
+fn completed_result_with_an_error_is_a_problem() {
+    let mut r = RunResult::completed(context(), "a");
+    r.error = full_result().error;
+    assert_eq!(result_fields(&r), ["error"]);
+}
+
+#[test]
+fn non_completed_result_without_an_error_is_a_problem() {
+    for outcome in [
+        Outcome::Failed,
+        Outcome::TimedOut,
+        Outcome::Interrupted,
+        Outcome::Refused,
+    ] {
+        let mut r = RunResult::completed(context(), "a");
+        r.outcome = outcome;
+        r.timing.started_at = None;
+        assert_eq!(result_fields(&r), ["error"], "{outcome:?}");
+    }
+}
+
+#[test]
+fn confirmed_cleanup_with_leftovers_is_a_problem() {
+    let mut r = RunResult::completed(context(), "a");
+    r.cleanup.pids = vec![1];
+    r.cleanup.process_groups = vec![1];
+    r.cleanup.reason = Some("why".into());
+    assert_eq!(
+        result_fields(&r),
+        ["cleanup.pids", "cleanup.process_groups", "cleanup.reason"]
+    );
+}
+
+#[test]
+fn unconfirmed_cleanup_may_list_leftovers() {
+    let mut r = RunResult::completed(context(), "a");
+    r.cleanup = full_result().cleanup;
+    assert_eq!(r.validate(), Ok(()));
+}
+
+#[test]
+fn structured_valid_without_structured_is_a_problem() {
+    let mut r = RunResult::completed(context(), "a");
+    r.structured_valid = Some(true);
+    assert_eq!(result_fields(&r), ["structured_valid"]);
+}
+
+#[test]
+fn refused_result_with_started_at_is_a_problem() {
+    let mut r = RunResult::refused(context(), "k", "m");
+    r.timing.started_at = Some("2026-11-18T10:00:01Z".into());
+    assert_eq!(result_fields(&r), ["timing.started_at"]);
+}
+
+#[test]
+fn result_with_an_unknown_schema_version_is_a_problem() {
+    let mut r = RunResult::completed(context(), "a");
+    r.schema_version = SCHEMA_VERSION + 1;
+    assert_eq!(result_fields(&r), ["schema_version"]);
+}
+
+// Partial requests.
+
+fn partial(text: &str) -> PartialRequest {
+    serde_json::from_str(text).unwrap()
+}
+
+#[test]
+fn profile_file_without_a_schema_version_is_rejected() {
+    let err = PartialRequest::from_profile_json(r#"{"provider":"codex"}"#).unwrap_err();
+    assert!(err.to_string().contains("schema_version"), "{err}");
+}
+
+#[test]
+fn profile_file_with_a_schema_version_is_read() {
+    let p =
+        PartialRequest::from_profile_json(r#"{"schema_version":1,"provider":"codex"}"#).unwrap();
+    assert_eq!(p.provider, Some(Provider::Codex));
+}
+
+#[test]
+fn partial_request_rejects_unknown_fields_at_every_level() {
+    for text in [
+        r#"{"nope":1}"#,
+        r#"{"permissions":{"nope":1}}"#,
+        r#"{"session":{"nope":1}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<PartialRequest>(text).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn merge_lets_explicit_values_override_the_profile() {
+    let profile = partial(
+        r#"{"schema_version":1,"provider":"codex","prompt":"from file","timeout_secs":60,
+            "permissions":{"mode":"write","commands":["a"]},"session":{"resume":"s1"}}"#,
+    );
+    let flags = partial(
+        r#"{"prompt":"from flags","permissions":{"commands":["b"]},"session":{"ephemeral":false}}"#,
+    );
+    let request = profile.merge(flags).into_request().unwrap();
+    assert_eq!(request.provider, Provider::Codex);
+    assert_eq!(request.prompt, "from flags");
+    assert_eq!(request.timeout_secs, 60);
+    assert_eq!(request.permissions.mode, Mode::Write);
+    assert_eq!(request.permissions.commands, ["b"]);
+    assert_eq!(request.session.resume.as_deref(), Some("s1"));
+}
+
+#[test]
+fn into_request_reports_missing_provider_and_prompt_together_with_other_problems() {
+    let p = partial(r#"{"timeout_secs":0}"#);
+    let fields: Vec<String> = p
+        .into_request()
+        .unwrap_err()
+        .into_iter()
+        .map(|p| p.field)
+        .collect();
+    assert_eq!(fields, ["provider", "prompt", "timeout_secs"]);
+}
+
+#[test]
+fn into_request_applies_request_defaults() {
+    let request = partial(r#"{"provider":"claude","prompt":"x"}"#)
+        .into_request()
+        .unwrap();
+    assert_eq!(request, Request::new(Provider::Claude, "x"));
 }

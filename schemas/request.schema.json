@@ -8,7 +8,7 @@
       "description": "A JSON Schema the final answer must satisfy; asks for a structured\nanswer and validates it."
     },
     "cwd": {
-      "description": "Working directory of the worker. Absent means the directory of the\nprocess that receives the request.",
+      "description": "Working directory of the worker. Absent means the working directory of\nthe process that receives the request. A relative path resolves against\nthat same directory: the caller's working directory for the command\nline, the MCP server's working directory for MCP.",
       "type": [
         "string",
         "null"
@@ -51,7 +51,8 @@
       "type": "array",
       "items": {
         "type": "string"
-      }
+      },
+      "maxItems": 64
     },
     "permissions": {
       "description": "What the worker may do.",
@@ -70,26 +71,28 @@
       "$ref": "#/$defs/Provider"
     },
     "schema_version": {
-      "description": "The contract version this request was written against. Required.",
+      "description": "The contract version this request was written against. Defaults to the\ncurrent version, so tool arguments need not carry it. A request file\nmust carry it; that is enforced by [`super::partial::PartialRequest`].",
       "type": "integer",
       "format": "uint32",
+      "const": 1,
+      "default": 1,
       "minimum": 0
     },
     "session": {
       "description": "Whether to keep or continue provider history.",
       "$ref": "#/$defs/Session"
     },
-    "timeout": {
+    "timeout_secs": {
       "description": "Limit for the run, in whole seconds. Defaults to 600 (10 minutes).",
       "type": "integer",
       "format": "uint64",
       "default": 600,
-      "minimum": 0
+      "maximum": 86400,
+      "minimum": 1
     }
   },
   "additionalProperties": false,
   "required": [
-    "schema_version",
     "provider",
     "prompt"
   ],
@@ -153,14 +156,16 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "maxItems": 256
         },
         "directories": {
           "description": "Extra directories the worker may read.",
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "maxItems": 64
         },
         "mode": {
           "description": "How much the worker may do. Defaults to `read`.",
@@ -206,7 +211,21 @@
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "not": {
+        "properties": {
+          "ephemeral": {
+            "const": true
+          },
+          "resume": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ephemeral",
+          "resume"
+        ]
+      }
     }
   }
 }

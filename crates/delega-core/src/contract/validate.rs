@@ -1,16 +1,22 @@
-//! Checks on a request that do not need the filesystem or a provider.
+//! Checks on a request or a result that need neither the filesystem nor a
+//! provider.
 //!
 //! Whether the working directory exists, and whether `native_args` pass the
 //! allowlist, are decided where the run starts, not here.
 
 use std::fmt;
+use std::path::Path;
+
+use serde::Serialize;
 
 use super::SCHEMA_VERSION;
 use super::limits::*;
+use super::outcome::Outcome;
 use super::request::{Request, Session};
+use super::result::RunResult;
 
-/// One problem found in a request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One problem found in a request or a result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
     /// The field the problem is about, such as `permissions.commands[2]`.
     pub field: String,
@@ -19,7 +25,7 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(super) fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             field: field.into(),
             message: message.into(),
@@ -33,6 +39,23 @@ impl fmt::Display for Problem {
     }
 }
 
+fn finish(problems: Vec<Problem>) -> Result<(), Vec<Problem>> {
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+fn check_version(problems: &mut Vec<Problem>, version: u32) {
+    if version != SCHEMA_VERSION {
+        problems.push(Problem::new(
+            "schema_version",
+            format!("unsupported version {version}; this build supports {SCHEMA_VERSION}"),
+        ));
+    }
+}
+
 impl Request {
     /// Check the request and return every problem found, not only the first.
     ///
@@ -42,26 +65,20 @@ impl Request {
     pub fn validate(&self) -> Result<(), Vec<Problem>> {
         let mut problems = Vec::new();
 
-        if self.schema_version != SCHEMA_VERSION {
-            problems.push(Problem::new(
-                "schema_version",
-                format!(
-                    "unsupported version {}; this build supports {}",
-                    self.schema_version, SCHEMA_VERSION
-                ),
-            ));
-        }
+        check_version(&mut problems, self.schema_version);
 
         if self.prompt.trim().is_empty() {
             problems.push(Problem::new("prompt", "must not be empty"));
         } else if self.prompt.len() > MAX_PROMPT_BYTES {
             problems.push(too_long("prompt", self.prompt.len(), MAX_PROMPT_BYTES));
         }
+        check_nul(&mut problems, "prompt", &self.prompt);
 
-        if let Some(cwd) = &self.cwd
-            && cwd.as_os_str().is_empty()
-        {
-            problems.push(Problem::new("cwd", "must not be empty"));
+        if let Some(cwd) = &self.cwd {
+            if cwd.as_os_str().is_empty() {
+                problems.push(Problem::new("cwd", "must not be empty"));
+            }
+            check_path(&mut problems, "cwd", cwd);
         }
 
         if let Some(name) = &self.name {
@@ -73,41 +90,48 @@ impl Request {
             } else if name.chars().any(char::is_control) {
                 problems.push(Problem::new("name", "must not contain control characters"));
             }
+            check_nul(&mut problems, "name", name);
+            check_not_option_like(&mut problems, "name", name);
         }
 
-        if let Some(instructions) = &self.instructions
-            && instructions.len() > MAX_INSTRUCTIONS_BYTES
-        {
-            problems.push(too_long(
-                "instructions",
-                instructions.len(),
-                MAX_INSTRUCTIONS_BYTES,
-            ));
+        if let Some(instructions) = &self.instructions {
+            if instructions.len() > MAX_INSTRUCTIONS_BYTES {
+                problems.push(too_long(
+                    "instructions",
+                    instructions.len(),
+                    MAX_INSTRUCTIONS_BYTES,
+                ));
+            }
+            check_nul(&mut problems, "instructions", instructions);
         }
 
         if let Some(model) = &self.model {
             check_identifier(&mut problems, "model", model);
         }
 
-        if !(MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&self.timeout) {
+        if !(MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&self.timeout_secs) {
             problems.push(Problem::new(
-                "timeout",
+                "timeout_secs",
                 format!(
-                    "{} seconds is outside the allowed range of {} to {} seconds",
-                    self.timeout, MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS
+                    "{} is outside the allowed range of {} to {} seconds",
+                    self.timeout_secs, MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS
                 ),
             ));
         }
 
         self.validate_permissions(&mut problems);
 
-        if let Some(schema) = &self.answer_schema
-            && !(schema.is_object() || schema.is_boolean())
-        {
-            problems.push(Problem::new(
-                "answer_schema",
-                "must be a JSON Schema: an object or a boolean",
-            ));
+        if let Some(schema) = &self.answer_schema {
+            if !(schema.is_object() || schema.is_boolean()) {
+                problems.push(Problem::new(
+                    "answer_schema",
+                    "must be a JSON Schema: an object or a boolean",
+                ));
+            }
+            let size = schema.to_string().len();
+            if size > MAX_ANSWER_SCHEMA_BYTES {
+                problems.push(too_long("answer_schema", size, MAX_ANSWER_SCHEMA_BYTES));
+            }
         }
 
         validate_session(&mut problems, &self.session);
@@ -122,17 +146,14 @@ impl Request {
         for (i, arg) in self.native_args.iter().enumerate() {
             let field = format!("native_args[{i}]");
             if arg.is_empty() {
-                problems.push(Problem::new(field, "must not be empty"));
+                problems.push(Problem::new(&field, "must not be empty"));
             } else if arg.len() > MAX_NATIVE_ARG_BYTES {
                 problems.push(too_long(&field, arg.len(), MAX_NATIVE_ARG_BYTES));
             }
+            check_nul(&mut problems, &field, arg);
         }
 
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(problems)
-        }
+        finish(problems)
     }
 
     fn validate_permissions(&self, problems: &mut Vec<Problem>) {
@@ -148,10 +169,11 @@ impl Request {
         for (i, command) in perms.commands.iter().enumerate() {
             let field = format!("permissions.commands[{i}]");
             if command.trim().is_empty() {
-                problems.push(Problem::new(field, "must not be empty"));
+                problems.push(Problem::new(&field, "must not be empty"));
             } else if command.len() > MAX_COMMAND_BYTES {
                 problems.push(too_long(&field, command.len(), MAX_COMMAND_BYTES));
             }
+            check_nul(problems, &field, command);
         }
 
         if perms.directories.len() > MAX_DIRECTORIES {
@@ -162,13 +184,74 @@ impl Request {
             ));
         }
         for (i, dir) in perms.directories.iter().enumerate() {
+            let field = format!("permissions.directories[{i}]");
             if dir.as_os_str().is_empty() {
+                problems.push(Problem::new(&field, "must not be empty"));
+            }
+            check_path(problems, &field, dir);
+        }
+    }
+}
+
+impl RunResult {
+    /// Check that the result does not contradict itself and return every
+    /// problem found.
+    ///
+    /// The constructors on [`RunResult`] produce results that pass; this
+    /// catches a result edited or read from elsewhere.
+    pub fn validate(&self) -> Result<(), Vec<Problem>> {
+        let mut problems = Vec::new();
+
+        check_version(&mut problems, self.schema_version);
+
+        match (self.outcome, &self.error) {
+            (Outcome::Completed, Some(_)) => {
+                problems.push(Problem::new("error", "must be absent when completed"));
+            }
+            (Outcome::Completed, None) => {}
+            (_, None) => problems.push(Problem::new(
+                "error",
+                "is required when the outcome is not completed",
+            )),
+            (_, Some(_)) => {}
+        }
+
+        if self.cleanup.confirmed {
+            if !self.cleanup.pids.is_empty() {
                 problems.push(Problem::new(
-                    format!("permissions.directories[{i}]"),
-                    "must not be empty",
+                    "cleanup.pids",
+                    "must be empty when cleanup is confirmed",
+                ));
+            }
+            if !self.cleanup.process_groups.is_empty() {
+                problems.push(Problem::new(
+                    "cleanup.process_groups",
+                    "must be empty when cleanup is confirmed",
+                ));
+            }
+            if self.cleanup.reason.is_some() {
+                problems.push(Problem::new(
+                    "cleanup.reason",
+                    "must be absent when cleanup is confirmed",
                 ));
             }
         }
+
+        if self.structured_valid.is_some() && self.structured.is_none() {
+            problems.push(Problem::new(
+                "structured_valid",
+                "is only allowed together with structured",
+            ));
+        }
+
+        if self.outcome == Outcome::Refused && self.timing.started_at.is_some() {
+            problems.push(Problem::new(
+                "timing.started_at",
+                "must be absent when the run was refused",
+            ));
+        }
+
+        finish(problems)
     }
 }
 
@@ -184,11 +267,40 @@ fn validate_session(problems: &mut Vec<Problem>, session: &Session) {
     }
 }
 
+/// A value that may become a provider argument: not empty, bounded, free of
+/// NUL, and not starting with `-` so it cannot be read as an option.
 fn check_identifier(problems: &mut Vec<Problem>, field: &str, value: &str) {
     if value.trim().is_empty() {
         problems.push(Problem::new(field, "must not be empty"));
     } else if value.len() > MAX_IDENTIFIER_BYTES {
         problems.push(too_long(field, value.len(), MAX_IDENTIFIER_BYTES));
+    }
+    check_nul(problems, field, value);
+    check_not_option_like(problems, field, value);
+}
+
+fn check_not_option_like(problems: &mut Vec<Problem>, field: &str, value: &str) {
+    if value.starts_with('-') {
+        problems.push(Problem::new(
+            field,
+            "must not start with '-': it would be read as a provider option",
+        ));
+    }
+}
+
+fn check_nul(problems: &mut Vec<Problem>, field: &str, value: &str) {
+    if value.contains('\0') {
+        problems.push(Problem::new(field, "must not contain NUL bytes"));
+    }
+}
+
+fn check_path(problems: &mut Vec<Problem>, field: &str, path: &Path) {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.len() > MAX_PATH_BYTES {
+        problems.push(too_long(field, bytes.len(), MAX_PATH_BYTES));
+    }
+    if bytes.contains(&0) {
+        problems.push(Problem::new(field, "must not contain NUL bytes"));
     }
 }
 

@@ -31,23 +31,29 @@ fn schema_result_prints_the_result_schema_and_exits_zero() {
 }
 
 #[test]
-fn schema_output_equals_the_committed_file() {
-    let out = delega(&["schema", "request"]);
-    let committed = include_str!("../../../schemas/request.schema.json");
-    assert_eq!(text(&out.stdout), committed);
+fn schema_output_equals_the_committed_files() {
+    let request = include_str!("../../../schemas/request.schema.json");
+    let result = include_str!("../../../schemas/result.schema.json");
+    assert_eq!(text(&delega(&["schema", "request"]).stdout), request);
+    assert_eq!(text(&delega(&["schema", "result"]).stdout), result);
 }
 
 #[test]
 fn version_prints_the_core_version_and_exits_zero() {
     let out = delega(&["version"]);
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(text(&out.stdout).trim(), delega_core_version());
+    // The workspace version is shared by every crate.
+    assert_eq!(text(&out.stdout).trim(), env!("CARGO_PKG_VERSION"));
 }
 
-fn delega_core_version() -> &'static str {
-    // The workspace version is shared by every crate, so this crate's version
-    // is the one the binary must report.
-    env!("CARGO_PKG_VERSION")
+#[test]
+fn version_json_has_name_version_and_schema_version() {
+    let out = delega(&["version", "--output", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_str(&text(&out.stdout)).expect("JSON");
+    assert_eq!(value["name"], "delega");
+    assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["schema_version"], 1);
 }
 
 #[test]
@@ -56,7 +62,8 @@ fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
         &["run", "--provider", "codex", "-p", "hi"][..],
         &["mcp"],
         &["init", "--dry-run"],
-        &["skill", "list"],
+        &["skill", "list", "--output", "json"],
+        &["skill", "show", "run"],
         &["doctor"],
     ] {
         let out = delega(args);
@@ -80,12 +87,40 @@ fn unknown_subcommand_is_a_usage_error_with_exit_two() {
 fn bad_schema_argument_is_a_usage_error_with_exit_two() {
     let out = delega(&["schema", "response"]);
     assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("invalid value"));
 }
 
 #[test]
 fn conflicting_permission_flags_are_a_usage_error_with_exit_two() {
     let out = delega(&["run", "--write", "--full"]);
     assert_eq!(out.status.code(), Some(2));
+    let err = text(&out.stderr);
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(!err.contains("not implemented"), "{err}");
+}
+
+#[test]
+fn resume_with_ephemeral_is_a_usage_error_with_exit_two() {
+    let out = delega(&["run", "--resume", "s1", "--ephemeral"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn malformed_timeout_is_a_usage_error_naming_the_accepted_forms() {
+    let out = delega(&["run", "--timeout", "soon"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = text(&out.stderr);
+    assert!(err.contains("invalid duration"), "{err}");
+    assert!(!err.contains("not implemented"), "{err}");
+}
+
+#[test]
+fn timeout_forms_are_accepted_before_the_command_reports_not_implemented() {
+    for t in ["90s", "20m", "2h", "45"] {
+        let out = delega(&["run", "--timeout", t]);
+        assert!(text(&out.stderr).contains("not implemented yet"), "{t}");
+    }
 }
 
 #[test]

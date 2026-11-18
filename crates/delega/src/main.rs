@@ -4,6 +4,7 @@
 //! own module under `commands/`.
 
 mod commands;
+mod duration;
 
 use std::process::ExitCode;
 

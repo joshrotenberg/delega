@@ -25,15 +25,25 @@
     },
     "permissions": {
       "description": "The permissions that applied and what was denied.",
-      "$ref": "#/$defs/AppliedPermissions"
+      "$ref": "#/$defs/AppliedPermissions",
+      "default": {
+        "mode": "read"
+      }
     },
     "provenance": {
       "description": "The build and provider executable behind the result.",
       "$ref": "#/$defs/Provenance"
     },
     "provider": {
-      "description": "The provider that ran it.",
-      "$ref": "#/$defs/Provider"
+      "description": "The provider that ran it. Absent when the request named none or an\nunknown one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provider"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "provider_notes": {
       "description": "Where the provider did not do what the request asked, or did it\ndifferently.",
@@ -60,7 +70,7 @@
       ]
     },
     "structured": {
-      "description": "The structured answer, when the request gave an `answer_schema`."
+      "description": "The structured answer, when the request gave an `answer_schema`.\n\nA JSON `null` answer is not representable: it reads back as absent,\nbecause absent and null share one representation here. Report such an\nanswer in `text` with `structured_valid` left out."
     },
     "structured_valid": {
       "description": "Whether `structured` satisfied the schema. Present with `structured`.",
@@ -89,19 +99,23 @@
       ]
     },
     "worker": {
-      "description": "The worker the run belonged to.",
-      "$ref": "#/$defs/WorkerRef"
+      "description": "The worker the run belonged to. Absent when no worker was created, such\nas a refused request.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkerRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "schema_version",
     "run",
-    "worker",
-    "provider",
     "outcome",
     "text",
     "cleanup",
-    "permissions",
     "timing",
     "provenance"
   ],
@@ -118,13 +132,11 @@
           }
         },
         "mode": {
-          "description": "The mode that was applied.",
-          "$ref": "#/$defs/Mode"
+          "description": "The mode that was applied. `read` when the run never started.",
+          "$ref": "#/$defs/Mode",
+          "default": "read"
         }
-      },
-      "required": [
-        "mode"
-      ]
+      }
     },
     "Cleanup": {
       "description": "Whether the provider process and its descendants are gone.",
@@ -182,7 +194,7 @@
       "type": "object",
       "properties": {
         "kind": {
-          "description": "A short machine-readable label for the kind of error.",
+          "description": "A short machine-readable label for the kind of error. Free text, so a\nreader must tolerate values it does not know. The values used so far:\n`invalid_request` (a refused run whose request failed validation),\n`timed_out` and `interrupted` (set by the matching constructors).",
           "type": "string"
         },
         "message": {
@@ -327,8 +339,8 @@
             "null"
           ]
         },
-        "time_limit_secs": {
-          "description": "The time limit that applied, in seconds.",
+        "timeout_secs": {
+          "description": "The time limit that applied, in seconds. Same name and unit as the\nrequest's `timeout_secs`.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -338,7 +350,7 @@
         "queued_at",
         "finished_at",
         "duration_ms",
-        "time_limit_secs"
+        "timeout_secs"
       ]
     },
     "Usage": {

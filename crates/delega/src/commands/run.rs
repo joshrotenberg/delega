@@ -5,6 +5,9 @@ use std::process::ExitCode;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
+use super::OutputFormat;
+use crate::duration::parse_duration_secs;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Provider {
     Claude,
@@ -16,12 +19,6 @@ pub enum Effort {
     Low,
     Medium,
     High,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Output {
-    Text,
-    Json,
 }
 
 /// Options from `docs/api.md`. They are parsed and checked now so that the
@@ -54,9 +51,9 @@ pub struct Args {
     /// Reasoning effort
     #[arg(long, value_enum)]
     effort: Option<Effort>,
-    /// Time limit for the run, such as 20m
-    #[arg(long, value_name = "DURATION")]
-    timeout: Option<String>,
+    /// Time limit for the run: 90s, 20m, 2h, or a plain number of seconds
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration_secs)]
+    timeout: Option<u64>,
     /// Read-only permissions (the default)
     #[arg(long)]
     read: bool,
@@ -76,14 +73,14 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     schema: Option<PathBuf>,
     /// Continue a saved provider session
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", conflicts_with = "ephemeral")]
     resume: Option<String>,
     /// Do not keep provider history
     #[arg(long)]
     ephemeral: bool,
     /// Print the answer as text or the whole result as JSON
     #[arg(long, value_enum)]
-    output: Option<Output>,
+    output: Option<OutputFormat>,
     /// Validate and show what would run, without starting anything
     #[arg(long)]
     dry_run: bool,

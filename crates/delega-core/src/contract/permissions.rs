@@ -31,6 +31,7 @@ pub enum OnRequest {
 /// The permissions part of a request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_permissions)]
 pub struct Permissions {
     /// How much the worker may do. Defaults to `read`.
     #[serde(default)]
