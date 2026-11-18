@@ -83,8 +83,6 @@ fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
         &["run", "--provider", "codex", "-p", "hi"][..],
         &["mcp"],
         &["init", "--dry-run"],
-        &["skill", "list", "--output", "json"],
-        &["skill", "show", "run"],
         &["doctor"],
     ] {
         let out = delega(args);
@@ -95,6 +93,106 @@ fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
         );
         assert!(out.stdout.is_empty(), "{args:?} wrote to stdout");
     }
+}
+
+#[test]
+fn skill_list_shows_both_embedded_skills_one_per_line() {
+    let out = delega(&["skill", "list"]);
+    assert_eq!(out.status.code(), Some(0));
+    let listing = text(&out.stdout);
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 2, "{listing}");
+    assert!(lines[0].starts_with("delegate "), "{listing}");
+    assert!(lines[1].starts_with("run "), "{listing}");
+    assert!(
+        lines[1].contains("delega run"),
+        "description missing: {listing}"
+    );
+}
+
+#[test]
+fn skill_list_json_is_a_versioned_catalog_with_sha256_digests() {
+    let out = delega(&["skill", "list", "--output", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_str(&text(&out.stdout)).expect("JSON");
+    assert_eq!(value["schema_version"], 1);
+    let skills = value["skills"].as_array().expect("skills array");
+    let names: Vec<&str> = skills
+        .iter()
+        .map(|s| s["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, ["delegate", "run"]);
+    for skill in skills {
+        let digest = skill["digest"].as_str().expect("digest");
+        assert_eq!(digest.len(), 64, "{digest}");
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{digest}"
+        );
+        let name = skill["name"].as_str().expect("name");
+        assert_eq!(skill["uri"], format!("skill://delega/{name}/SKILL.md"));
+        assert!(
+            !skill["description"]
+                .as_str()
+                .expect("description")
+                .is_empty()
+        );
+        assert!(skill.get("content").is_none());
+    }
+}
+
+fn skill_file(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../skills")
+        .join(name)
+        .join("SKILL.md");
+    std::fs::read(path).expect("read skill file")
+}
+
+#[test]
+fn skill_show_prints_the_skill_file_byte_for_byte() {
+    for name in ["run", "delegate"] {
+        let out = delega(&["skill", "show", name]);
+        assert_eq!(out.status.code(), Some(0), "{name}");
+        assert_eq!(out.stdout, skill_file(name), "{name}");
+    }
+}
+
+#[test]
+fn skill_show_json_carries_the_content_and_catalog_fields() {
+    let out = delega(&["skill", "show", "run", "--output", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_str(&text(&out.stdout)).expect("JSON");
+    assert_eq!(value["name"], "run");
+    assert_eq!(value["uri"], "skill://delega/run/SKILL.md");
+    assert_eq!(
+        value["content"].as_str().expect("content").as_bytes(),
+        skill_file("run")
+    );
+    let listed: serde_json::Value = serde_json::from_str(&text(
+        &delega(&["skill", "list", "--output", "json"]).stdout,
+    ))
+    .expect("JSON");
+    let entry = listed["skills"]
+        .as_array()
+        .expect("skills")
+        .iter()
+        .find(|s| s["name"] == "run")
+        .expect("run listed");
+    assert_eq!(value["digest"], entry["digest"]);
+    assert_eq!(value["description"], entry["description"]);
+}
+
+#[test]
+fn skill_show_unknown_name_exits_two_naming_the_known_skills() {
+    let out = delega(&["skill", "show", "nope"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let err = text(&out.stderr);
+    assert!(err.contains("nope"), "{err}");
+    assert!(err.contains("delegate") && err.contains("run"), "{err}");
 }
 
 #[test]
