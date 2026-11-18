@@ -130,6 +130,7 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 | `delega mcp` | Serve the MCP tools over stdio. |
 | `delega init` | Install the plugin and skill into Claude Code, Codex or both, through the hosts' own commands. `--dry-run` shows what it would do. |
 | `delega schema request\|result` | Print the contracts built into this executable. |
+| `delega skill list\|show NAME` | List the skills built into this executable, or print one. See [Skills](#skills). |
 | `delega doctor` | Report providers found, their versions, limits in force and anything that would stop a run. |
 | `delega version` | Version, source revision and features; `--output json`. |
 
@@ -195,6 +196,51 @@ add work to a worker, `send_message` and `followup_task`; here there is one,
 session; here there is one `close`, and finished runs are kept for a bounded
 time and count.
 
+## Skills
+
+delega carries its own guidance: short documents that tell a calling agent how
+to use it well. They ship inside the executable, so the guidance always matches
+the behavior installed, with no source checkout or network.
+
+There is one source and three doors.
+
+- **Source.** Each skill is a directory in the repository, `skills/<name>/`,
+  holding a `SKILL.md` with name and description frontmatter and any supporting
+  files. The build embeds them as one catalog. Nothing is read from disk at run
+  time.
+- **CLI.** `delega skill list` prints names and descriptions, and
+  `delega skill show NAME` prints one. `--output json` gives a versioned
+  catalog a program can select from.
+- **MCP.** The server offers the same catalog through the MCP Skills extension
+  (SEP-2640): each skill is discoverable and readable as a resource at
+  `skill://delega/<name>/SKILL.md`, with its supporting files beside it. A host
+  without the extension can still read them as ordinary resources.
+- **Plugin.** `delega init` installs the same files as a plugin into Claude Code
+  and Codex, for hosts that load skills from disk.
+
+Rules:
+
+- **Same bytes everywhere.** The three doors serve identical content. The build
+  identity (`delega version`, and the server's identity over MCP) carries a
+  digest of each skill, so a caller can tell which guidance it has.
+- **Skills only describe what exists.** A test fails if a skill names a command,
+  flag, tool or argument that this build does not offer. A build without the MCP
+  server does not ship the skill that describes it.
+- **Reading is not permission.** Reading a skill does not activate it, grant a
+  tool, or allow a bundled script to run. That stays with the host.
+- **No project policy.** Skills describe how to use delega. Rules that belong to
+  one project or one person stay in that project's own instructions.
+
+First skills, one per way of using delega:
+
+| Skill | For |
+| --- | --- |
+| `run` | Calling `delega run` from a script or another agent: writing the assignment, choosing permissions and a time limit, reading the result, checking the work. |
+| `delegate` | Supervising workers over MCP: start, wait, read, follow up, interrupt, close, and what each outcome means. |
+
+More are added with the features they describe, such as a review skill with the
+review layer.
+
 ## Library
 
 The CLI and the MCP server are thin layers over one Rust API with the same
@@ -229,6 +275,7 @@ surfaces compute lives in the library.
 | Compact and full responses | none | `detail: summary\|full` with a field audit | Take counterpart's idea, simpler. |
 | Trace files and summaries | `--trace`, `--trace-file`, `due trace summarize` | Activity history in `read_agent` | Start with stderr progress and `read`. |
 | Install into hosts | `due init` | `counterpart init` | One `init`, through the hosts' commands. |
+| Onboard skills | `due skills list\|show` over skills embedded in the binary | One catalog served as `skill://counterpart/<name>/SKILL.md` and installed as a plugin; digests in the identity | One embedded catalog behind the CLI, the MCP Skills extension and the plugin. |
 | Usage and cost | In the result | In the result, with scope notes | Take both. |
 | Provider executable identity | `--binary`, provenance in the result | Identity resource | Provenance in the result and `doctor`. |
 
@@ -246,6 +293,7 @@ Settled by Josh on 2026-11-18.
 | CLI scope | Foreground `run` only. |
 | Tracing | Stderr progress only in the first version. |
 | Exit status | 0 `completed`, 1 `failed`, 2 `refused`, 124 `timed_out`, 130 `interrupted`. |
+| Onboard skills | Yes: one embedded catalog, reached by `delega skill`, by MCP resources through the Skills extension, and by the installed plugin. |
 
 ## Deferred
 
