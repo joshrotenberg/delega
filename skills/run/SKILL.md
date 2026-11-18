@@ -42,10 +42,9 @@ The worker starts with the narrowest permission and gets only what you grant.
 | `--add-dir DIR` | `permissions.directories` | One extra directory the worker may read. Repeat for more. |
 
 Prefer `--read` for questions and reviews and `--write` for edits. Neither
-mode allows shell commands on its own. `permissions.commands` adds the commands
-the worker may run, matched exactly, to either mode, so list the exact command
-string a task needs, such as the test command. A command that is not listed is
-refused and appears in `permissions.denied`.
+mode allows shell commands on its own. `--allow-command` adds a command the
+worker may run, matched exactly, to either mode, so pass the exact command
+string a task needs, such as the test command.
 Use `--full` only when you accept that delega adds no restriction.
 
 A permission the worker asks for and was not granted is answered no at once. It
