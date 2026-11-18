@@ -285,7 +285,9 @@
           "process_groups": {
             "maxItems": 0
           },
-          "reason": false
+          "reason": {
+            "type": "null"
+          }
         }
       }
     },

@@ -54,8 +54,26 @@ fn version_json_has_name_version_and_schema_version() {
     assert_eq!(value["name"], "delega");
     assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["schema_version"], 1);
-    let revision = value["revision"].as_str().expect("revision is a string");
-    assert!(!revision.is_empty());
+    // The revision is the commit this tree is at, or `unknown` outside the
+    // repository. A stale value from an earlier commit fails here.
+    let head = Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let prefix = Command::new("git")
+        .args(["rev-parse", "--show-prefix"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let expected = match (head, prefix.as_deref()) {
+        (Some(head), Some("crates/delega/")) => head,
+        _ => "unknown".to_string(),
+    };
+    assert_eq!(value["revision"], expected.as_str());
     assert!(value["features"].is_array());
 }
 

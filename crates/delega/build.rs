@@ -13,13 +13,34 @@ fn git(args: &[&str]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// The revision of this workspace, or `None` when the build is not inside this
+/// repository. A source archive unpacked inside some other repository must not
+/// report that repository's revision, so the crate has to sit at its expected
+/// place below the repository root.
+fn revision() -> Option<String> {
+    let prefix = git(&["rev-parse", "--show-prefix"])?;
+    if prefix != "crates/delega/" {
+        return None;
+    }
+    git(&["rev-parse", "--short=12", "HEAD"])
+}
+
 fn main() {
-    let revision = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let revision = revision().unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=DELEGA_GIT_REVISION={revision}");
 
-    // `--git-path` follows a worktree's `.git` file to the real location.
-    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
-        println!("cargo:rerun-if-changed={head}");
+    // A commit changes the branch ref, not `HEAD`, which only names the branch.
+    // Watch `HEAD` for a switch, the ref it names for a commit, and
+    // `packed-refs` for a ref that was packed. `--git-path` resolves each to
+    // the right directory in a linked worktree.
+    let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watched.push(branch);
+    }
+    for name in watched {
+        if let Some(path) = git(&["rev-parse", "--git-path", &name]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
     }
     println!("cargo:rerun-if-changed=build.rs");
 

@@ -89,7 +89,7 @@ pub(super) fn refine_cleanup(schema: &mut Schema) {
         json!({"properties": {
             "pids": {"maxItems": 0},
             "process_groups": {"maxItems": 0},
-            "reason": false
+            "reason": {"type": "null"}
         }}),
     );
     schema.insert(
