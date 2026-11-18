@@ -73,8 +73,8 @@ result reports what happened.
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands. `write`: may edit files in the working directory. `full`: no restriction from delega. |
-| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly. |
+| `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `full`: no restriction from delega. |
+| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly. They add to `read` and `write`; `full` already allows every command. |
 | `permissions.directories` | list of paths | Extra directories the worker may read. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
 
