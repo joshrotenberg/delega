@@ -1,8 +1,11 @@
-//! `delega skill list|show NAME`: the embedded skills. Not built yet.
+//! `delega skill list|show NAME`: the skills embedded in this executable.
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use delega_core::contract::SCHEMA_VERSION;
+use delega_core::skills::{self, Skill};
+use serde_json::{Value, json};
 
 use super::OutputFormat;
 
@@ -13,7 +16,6 @@ pub struct Args {
 }
 
 #[derive(Debug, Subcommand)]
-#[allow(dead_code)]
 enum Action {
     /// List the skills built into this executable
     List {
@@ -31,6 +33,57 @@ enum Action {
     },
 }
 
-pub fn run(_args: Args) -> ExitCode {
-    super::not_implemented("skill")
+/// The catalog fields shared by the list and show JSON.
+fn summary(skill: &Skill) -> Value {
+    json!({
+        "name": skill.name(),
+        "description": skill.description(),
+        "uri": skill.uri(),
+        "digest": skill.digest(),
+    })
+}
+
+pub fn run(args: Args) -> ExitCode {
+    match args.action {
+        Action::List { output } => list(output),
+        Action::Show { name, output } => show(&name, output),
+    }
+}
+
+fn list(output: OutputFormat) -> ExitCode {
+    let catalog = skills::catalog();
+    let text = match output {
+        OutputFormat::Text => catalog
+            .iter()
+            .map(|skill| format!("{}  {}\n", skill.name(), skill.description()))
+            .collect(),
+        OutputFormat::Json => format!(
+            "{}\n",
+            json!({
+                "schema_version": SCHEMA_VERSION,
+                "skills": catalog.iter().map(summary).collect::<Vec<_>>(),
+            })
+        ),
+    };
+    super::output::emit("skill list", text.as_bytes())
+}
+
+fn show(name: &str, output: OutputFormat) -> ExitCode {
+    let Some(skill) = skills::find(name) else {
+        let known: Vec<&str> = skills::catalog().iter().map(Skill::name).collect();
+        eprintln!(
+            "delega skill show: no skill named {name:?}; known skills: {}",
+            known.join(", ")
+        );
+        return ExitCode::from(super::EXIT_REFUSED);
+    };
+    match output {
+        // The exact bytes, with no newline added.
+        OutputFormat::Text => super::output::emit("skill show", skill.content().as_bytes()),
+        OutputFormat::Json => {
+            let mut value = summary(skill);
+            value["content"] = Value::String(skill.content().to_string());
+            super::output::emit("skill show", format!("{value}\n").as_bytes())
+        }
+    }
 }
