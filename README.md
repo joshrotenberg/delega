@@ -50,8 +50,8 @@ Out of scope:
 
 ## The API
 
-[docs/api.md](docs/api.md) is the proposed CLI and MCP surface, with open
-questions marked. It is a proposal, not a description of something built.
+[docs/api.md](docs/api.md) is the agreed design for the CLI and MCP surface,
+with what is deferred listed at the end. It is not built yet.
 
 ## Where the parts come from
 

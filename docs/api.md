@@ -1,7 +1,8 @@
 # The delega API: a proposal
 
-Status: proposal, nothing here is implemented. It exists to be argued with.
-Open questions are collected at the end and marked **Open** where they arise.
+Status: agreed design, nothing here is implemented yet. Josh settled the open
+questions on 2026-11-18; the decisions and what was deferred are listed at the
+end. Parts marked **Later** are not in the first version.
 
 The aim is to fix the surface first, then work backwards from it to the engine
 and forwards from the parts [due](https://github.com/joshrotenberg/due) and
@@ -39,10 +40,9 @@ not stay open without a deadline.
 `completed` says the provider finished. It does not say the work is correct;
 checking that belongs to the caller.
 
-**Open:** whether a run that finishes after being denied one permission is
-`completed` with the denial listed, or `refused`. Proposal: `completed` if the
-provider returned a final answer, with the denial in `permissions.denied`;
-`refused` only when the run stopped because of it.
+A run that was denied a permission but still returned a final answer is
+`completed`, with the denial listed in `permissions.denied`. It is `refused`
+only when the run stopped because of the denial.
 
 ## The request
 
@@ -60,7 +60,7 @@ arguments, and the library from a struct. A partial request saved as a file is a
 | `instructions` | string | Extra system instructions for the worker. |
 | `model` | string | Provider model name or alias. Absent keeps the provider default. |
 | `effort` | `low`, `medium`, `high` | Absent keeps the provider default. |
-| `timeout` | duration | Limit for the run. **Open:** due has no default; counterpart defaults to 10 minutes. Proposal: a default, stated in the result. |
+| `timeout` | duration | Limit for the run. Default 10 minutes. The limit applied is stated in the result. |
 | `permissions` | object | See below. |
 | `answer_schema` | JSON Schema | Ask for a structured answer and validate it. |
 | `session` | object | `ephemeral: bool`, or `resume: <provider session id>` to continue saved history in a new worker. |
@@ -76,17 +76,16 @@ result reports what happened.
 | `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands. `write`: may edit files in the working directory. `full`: no restriction from delega. |
 | `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly. |
 | `permissions.directories` | list of paths | Extra directories the worker may read. |
-| `permissions.on_request` | `deny` (default), `ask` | What happens when the provider asks for something not granted. `deny`: answered no at once, recorded in the result. `ask`: surfaced to the caller as a pending interaction to answer. |
-| `permissions.ask_timeout` | duration | With `ask`, how long a request waits before it is answered no. |
+| `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
 
 Each mode maps to concrete provider settings (Claude tool lists, hooks and
 permission mode; Codex sandbox and approval policy). The mapping is documented
 per provider, and where a provider cannot enforce part of it the result says so
 in `provider_notes`.
 
-**Open:** whether `ask` is in the first version. It needs a long-lived provider
-session, which is due's resident engine and the subject of issue 1. `deny` works
-with one process per run.
+The first version only denies. Asking needs a long-lived provider session,
+which is due's resident engine and the subject of issue 1; `deny` works with
+one process per run.
 
 ## The result
 
@@ -103,11 +102,11 @@ One JSON object, versioned, the same from every surface.
 | `structured` | The structured answer when `answer_schema` was given, with `structured_valid: bool`. |
 | `error` | `kind`, `message`, `provider_exit_code`. Present unless `completed`. |
 | `cleanup` | `confirmed: bool`, and when false, what could not be confirmed stopped (pids, process groups) and why. |
-| `permissions` | `mode` applied, `denied`: requests answered no, `asked`: requests the caller answered. |
+| `permissions` | `mode` applied, and `denied`: requests answered no. **Later:** `asked`, requests the caller answered. |
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
 | `usage` | Tokens in and out, cached, reasoning; `cost_usd` when the provider reports it. |
-| `timing` | Queued, started and finished times, and duration. |
+| `timing` | Queued, started and finished times, duration, and the time limit applied. |
 | `provenance` | delega version and build, provider executable path and version. |
 
 A caller that only needs to know what happened reads `outcome`, `text`, `error`
@@ -151,14 +150,15 @@ Behavior:
   executable, arguments, working directory and applied permissions without
   starting anything.
 - **Progress.** `--progress` writes one line per provider event to stderr.
-  **Open:** due has a fuller trace (files, heartbeats, summaries); proposal is
-  to start with stderr progress only.
-- **Permissions.** The CLI is unattended, so `on_request` is always `deny`.
+  **Later:** due's trace files, heartbeats and summaries.
+- **Scope.** The CLI runs in the foreground only. It does not list or stop runs
+  started by another process; supervising several workers is done over MCP.
 
 ## MCP
 
 The MCP server is for a caller that supervises several workers at once: start
-them, keep working, collect results. Eight tools.
+them, keep working, collect results. Seven tools in the first version, and an
+eighth, `respond`, when live asking is added.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
@@ -168,15 +168,16 @@ them, keep working, collect results. Eight tools.
 | `read` | `run` or `worker`, `detail`, `after` (cursor) | The result if finished; otherwise state, partial text and recent activity. |
 | `list` | none | Workers on this connection, their state, queue length and session ids. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
-| `respond` | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
+| `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
 | `close` | `worker` | Stops the worker, discards queued assignments, frees its slot. Results already produced stay readable for a bounded time. |
 
 Rules that hold for every tool:
 
 - **Starting returns at once.** Only `wait` and `interrupt` wait for anything,
   and both are bounded.
-- **States** a worker can be in: `queued`, `running`, `waiting_for_answer`,
-  `idle`, `closed`. A run is `queued`, `running`, or finished with an outcome.
+- **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
+  **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
+  an outcome.
 - **Detail.** Every response is compact by default. `detail: "full"` adds
   process diagnostics, activity history and every field of the result.
 - **Limits** are admission limits on live workers and running runs, reported by
@@ -188,12 +189,11 @@ Rules that hold for every tool:
 - **History is data.** Text a worker returns is never an instruction to the
   caller.
 
-**Open:** counterpart has two ways to add work to a worker, `send_message`
-(queue input for a running worker) and `followup_task` (another assignment in
-the same conversation). Proposal: one tool, `follow_up`, which queues.
-
-**Open:** due separates releasing a run from releasing a session. Proposal: one
-`close`, with finished runs kept for a bounded time and count.
+Two simplifications against the earlier projects. counterpart has two ways to
+add work to a worker, `send_message` and `followup_task`; here there is one,
+`follow_up`, which queues. due separates releasing a run from releasing a
+session; here there is one `close`, and finished runs are kept for a bounded
+time and count.
 
 ## Library
 
@@ -205,7 +205,7 @@ surfaces compute lives in the library.
 ## Not in this surface
 
 - **Review.** An enforced independent review of a worker's change (counterpart's
-  pair) is a later layer with its own tools, built on these eight. What it needs
+  pair) is a later layer with its own tools, built on the tools above. What it needs
   from this layer: a role and an owner on a worker, an event stream for an
   owner, and a barrier that stops new assignments to a worker. Those should be
   possible to add without changing the tools above.
@@ -222,27 +222,39 @@ surfaces compute lives in the library.
 | Outcome set | `succeeded`, `failed`, `timed_out`, `cancelled`, `planned` | `completed`, `failed`, `interrupted`, `closed`, plus timeouts as errors | The five above; `planned` becomes dry-run output, not an outcome. |
 | Cleanup report | Settlement reporting; limits documented | `cleanup` field, descendant identity tracking, repeated signalling | Take counterpart's, pending issue 1. |
 | Permissions, stated up front | Provider options passed through, allowlisted | Tool lists, exact Bash guard hook, sandbox mode, deny rules | Provider-neutral modes over counterpart's enforcement. |
-| Permissions, asked live | `respond`, interaction references, `Reject` mode | none | Take due's, behind `on_request: ask`. |
+| Permissions, asked live | `respond`, interaction references, `Reject` mode | none | Later: take due's, behind `on_request: ask`. |
 | Long-lived provider session | Resident engine | One process per run, resumed by session id | Decided by issue 1. |
 | Queue and limits | Admission limits, 16 sessions | Queue, pool of 4 running, lifetime cap of 64 | Queue with admission limits; no lifetime cap. |
-| MCP tools | `spawn`, `follow_up`, `inspect`, `wait`, `interrupt`, `respond`, `release_run`, `release_session`, `read_items` | `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `read_agent`, `list_agents`, `interrupt_agent`, `close_agent` | The eight above. |
+| MCP tools | `spawn`, `follow_up`, `inspect`, `wait`, `interrupt`, `respond`, `release_run`, `release_session`, `read_items` | `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `read_agent`, `list_agents`, `interrupt_agent`, `close_agent` | The seven above, then `respond`. |
 | Compact and full responses | none | `detail: summary\|full` with a field audit | Take counterpart's idea, simpler. |
 | Trace files and summaries | `--trace`, `--trace-file`, `due trace summarize` | Activity history in `read_agent` | Start with stderr progress and `read`. |
 | Install into hosts | `due init` | `counterpart init` | One `init`, through the hosts' commands. |
 | Usage and cost | In the result | In the result, with scope notes | Take both. |
 | Provider executable identity | `--binary`, provenance in the result | Identity resource | Provenance in the result and `doctor`. |
 
-## Open questions, collected
+## Decisions
 
-1. Is live asking (`on_request: ask`) in the first version, or only `deny`?
-2. A default `timeout`, and its value.
-3. `completed` with a denial listed, or `refused`, when a run was denied a
-   permission but still finished.
-4. The names: `worker` and `run`, and the tool names `start`, `follow_up`,
-   `wait`, `read`, `list`, `interrupt`, `respond`, `close`.
-5. Whether the three permission modes are the right provider-neutral set, and
-   whether `full` should exist.
-6. Whether the CLI needs anything beyond foreground `run`, such as listing or
-   stopping runs started by another process.
-7. How much of due's tracing to carry in the first version.
-8. Exit status values.
+Settled by Josh on 2026-11-18.
+
+| Question | Decision |
+| --- | --- |
+| Live permission asking in the first version | No. The first version only denies; asking comes later. |
+| Default `timeout` | 10 minutes, stated in the result. |
+| A run denied a permission that still finished | `completed`, with the denial listed. `refused` only when the run stopped because of it. |
+| Names | `worker` and `run`; tools `start`, `follow_up`, `wait`, `read`, `list`, `interrupt`, `close`, and later `respond`. |
+| Permission modes | `read`, `write`, `full`. |
+| CLI scope | Foreground `run` only. |
+| Tracing | Stderr progress only in the first version. |
+| Exit status | 0 `completed`, 1 `failed`, 2 `refused`, 124 `timed_out`, 130 `interrupted`. |
+
+## Deferred
+
+Not in the first version, to be taken up once the core meets the six points in
+the README:
+
+- Live asking: `on_request: ask`, `ask_timeout`, the `respond` tool, the
+  `waiting_for_answer` state and `permissions.asked`. Depends on a long-lived
+  provider session (issue 1).
+- Trace files, heartbeats and trace summaries.
+- Listing or stopping, from the CLI, runs started by another process.
+- The review layer (issue 5).
