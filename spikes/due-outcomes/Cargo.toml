@@ -1,0 +1,16 @@
+[package]
+name = "due-outcomes-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Measures whether due-core meets delega acceptance criteria 1 and 2"
+
+# Not part of any workspace.
+[workspace]
+
+[dependencies]
+due-core = { path = "../../../due/crates/due-core", default-features = false, features = ["oneshot", "resident"] }
+libc = "0.2"
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "io-util", "io-std"] }
