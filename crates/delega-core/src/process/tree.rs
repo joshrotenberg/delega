@@ -157,8 +157,20 @@ pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
     list_processes_from(&system_programs()).await
 }
 
+/// Test-only seam for `acceptance/`: when this variable is set in the
+/// environment of the process, its value (a `PATH`-style list, possibly empty)
+/// replaces the places `ps` is looked for, so a harness can make process
+/// inspection unavailable without root and check that cleanup is then reported
+/// as not confirmed. Nothing sets it outside that harness.
+const PS_PROGRAMS_ENV: &str = "DELEGA_TEST_PS_PROGRAMS";
+
 fn system_programs() -> Vec<PathBuf> {
-    PS_PROGRAMS.iter().map(PathBuf::from).collect()
+    match std::env::var_os(PS_PROGRAMS_ENV) {
+        Some(list) => std::env::split_paths(&list)
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect(),
+        None => PS_PROGRAMS.iter().map(PathBuf::from).collect(),
+    }
 }
 
 /// Source of process rows; injectable for deterministic tests.
