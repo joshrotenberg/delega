@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_gone, is_running, run_guarded, sh,
+    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_gone, is_running,
+    is_running_async, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::Ending;
@@ -378,7 +379,10 @@ async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
     // followed. With the budget the old tests used (150 ms) this run is
     // `Unconfirmed`. The only thing load can change is the real `ps`: when the
     // longest listing was itself near the budget the premise is gone and the run
-    // is repeated; a listing under 2 s with any other verdict fails.
+    // is repeated, and only when the verdict is exactly the late listing's
+    // (`is_late_listing_only`). A listing under 2 s with any verdict but
+    // `Confirmed`, or a slow listing with any other `Unconfirmed` (a failed stop,
+    // a pid left over), fails.
     for attempt in 1..=5 {
         let s = Scratch::new();
         let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
@@ -397,8 +401,9 @@ async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
             return;
         }
         assert!(
-            slowest > 2000,
-            "every listing took at most {slowest} ms, inside the exit budget, yet {report:#?}"
+            slowest > 2000 && crate::process::is_late_listing_only(&report.cleanup),
+            "the slowest listing took {slowest} ms; a run that is not Confirmed must have a \
+             listing over 2000 ms and the late listing's verdict alone: {report:#?}"
         );
         eprintln!("attempt {attempt}: a listing took {slowest} ms under load; repeating");
     }
@@ -407,14 +412,23 @@ async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
     );
 }
 
+/// The exit budget of the concurrent runs below, far under the real one.
+const FAST_EXIT_BUDGET: Duration = Duration::from_millis(250);
+/// How long a held run keeps its listings after the first, a second past the budget.
+const HELD_LISTING: Duration = Duration::from_millis(1250);
+
 /// Many runs at once, so listings are slow. A run may take long, but none may
 /// end `Confirmed` with its descendant alive. The runs are tasks of one
-/// single-thread runtime; their listings are separate `ps` processes. They use
-/// the real exit budget. Every fifth run has its listings after the first held
-/// for 4 s, more than that budget, so the late-listing branch is reached every
-/// time whatever the load: those must end `Unconfirmed` for the late listing
-/// while their descendant is alive. The others may meet the late listing only
-/// when the machine makes them.
+/// single-thread runtime; their listings are separate `ps` processes, and the
+/// checks the test makes on the runtime thread are not blocking ones, so a run
+/// is never held past its deadline by another run's `ps`. The exit budget is
+/// [`FAST_EXIT_BUDGET`], not the real one (the real value is pinned in
+/// `budgets.rs`), so the whole test idles for about 1.5 s where the real
+/// budget made it about 4.5 s. Every fifth run has its listings after the first
+/// held for [`HELD_LISTING`], a full second more than that budget, so the
+/// late-listing branch is reached every time whatever the load: those must end
+/// `Unconfirmed` for the late listing while their descendant is alive. The
+/// others may meet the late listing only when the machine makes them.
 #[tokio::test]
 async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
     require_perl!();
@@ -424,11 +438,11 @@ async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
         tasks.push(tokio::spawn(async move {
             let s = Scratch::new();
             let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
-            spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
+            spec.timings.exit_listing = FAST_EXIT_BUDGET;
             if delayed {
                 spec = spec.with_lister(delayed_lister(
                     s.path("scanned"),
-                    Duration::from_secs(4),
+                    HELD_LISTING,
                     Arc::default(),
                 ));
             }
@@ -436,7 +450,7 @@ async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
             // A descendant still alive after the report is checked once the
             // process has had a moment to receive its signal.
             tokio::time::sleep(Duration::from_millis(300)).await;
-            let alive = is_running(pids[0]);
+            let alive = is_running_async(pids[0]).await;
             drop(reaper);
             (report.cleanup, alive, delayed)
         }));
@@ -450,7 +464,7 @@ async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
         if delayed {
             assert!(
                 crate::process::is_late_listing_only(&cleanup),
-                "a run whose exit listing took 4 s must report the late listing: {cleanup:?}"
+                "a run whose exit listing was held past the budget must report the late listing: {cleanup:?}"
             );
         }
     }

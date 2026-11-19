@@ -274,16 +274,25 @@ impl Shared {
 /// The reason of an `Unconfirmed` verdict whose only cause is that the listing
 /// taken before the first signal did not complete in time. Exported so that
 /// tests of the binary can recognise exactly this verdict.
+///
+/// Public only so that the tests of the binary and of the acceptance harness
+/// can name the verdict; it is not part of the supported API.
+#[doc(hidden)]
 pub const LATE_LISTING_REASON: &str = "the process listing taken before the first signal did not \
      complete, so a descendant that left the session when its parent was stopped could not be \
      ruled out; the group and session sweeps afterwards found nothing";
 
 /// Whether a verdict is `Unconfirmed` for the late listing and for nothing
 /// else: no pids and no process groups, and a reason that is
-/// [`LATE_LISTING_REASON`] alone, or that text twice joined by `"; "` (the
-/// version probe and the run each missed their listing, which
-/// `merge_cleanup` joins that way). Any other text, such as a failed stop, or
-/// any pid, is not this verdict.
+/// [`LATE_LISTING_REASON`] once, or that text repeated any number of times
+/// joined by `"; "` (each report of a provider run that missed its listing,
+/// which `merge_cleanup` joins that way: the version probe, MCP discovery and
+/// the run itself). Any other text, such as a failed stop, or any pid, is not
+/// this verdict.
+///
+/// Public only so that the tests of the binary and of the acceptance harness
+/// can recognise the verdict; it is not part of the supported API.
+#[doc(hidden)]
 pub fn is_late_listing_only(cleanup: &Cleanup) -> bool {
     let Cleanup::Unconfirmed {
         pids,
@@ -293,10 +302,25 @@ pub fn is_late_listing_only(cleanup: &Cleanup) -> bool {
     else {
         return false;
     };
-    let twice = format!("{LATE_LISTING_REASON}; {LATE_LISTING_REASON}");
-    pids.is_empty()
-        && process_groups.is_empty()
-        && (reason == LATE_LISTING_REASON || *reason == twice)
+    pids.is_empty() && process_groups.is_empty() && only_late_listing_reasons(reason)
+}
+
+/// Whether `reason` is [`LATE_LISTING_REASON`] one or more times, joined by
+/// `"; "`. The reason itself contains `"; "`, so it is matched by prefix.
+fn only_late_listing_reasons(reason: &str) -> bool {
+    let mut rest = reason;
+    loop {
+        let Some(after) = rest.strip_prefix(LATE_LISTING_REASON) else {
+            return false;
+        };
+        if after.is_empty() {
+            return true;
+        }
+        match after.strip_prefix("; ") {
+            Some(next) => rest = next,
+            None => return false,
+        }
+    }
 }
 
 /// What cleanup concluded.
