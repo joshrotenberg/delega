@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::{Rig, finished, read_compact, result_of};
+use super::{Rig, assert_state, finished, read_compact, result_of};
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::request::Provider;
 use delega_core::supervisor::{Error, Limits, RunState, Supervisor, Target, WorkerState};
@@ -31,6 +31,14 @@ async fn defaults_are_the_named_constants() {
         limits.wait_ceiling,
         delega_core::supervisor::limits::WAIT_CEILING
     );
+    assert_eq!(
+        limits.retained_bytes,
+        delega_core::supervisor::limits::RETAINED_BYTES
+    );
+    assert_eq!(
+        delega_core::supervisor::limits::DEFAULT_WAIT,
+        Duration::from_secs(30)
+    );
 
     let rig = Rig::new();
     let supervisor = rig.supervisor(Provider::Claude);
@@ -40,6 +48,8 @@ async fn defaults_are_the_named_constants() {
     assert_eq!(view.max_queued_per_worker, limits.max_queued_per_worker);
     assert_eq!(view.retention_secs, limits.retention.as_secs());
     assert_eq!(view.wait_ceiling_secs, limits.wait_ceiling.as_secs());
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -128,7 +138,8 @@ async fn a_run_beyond_the_running_limit_waits_queued_and_starts_when_a_slot_free
     assert_eq!(list.limits.running_runs, 2);
     assert_eq!(list.workers[2].brief.state, WorkerState::Queued);
     assert_eq!(list.workers[0].brief.state, WorkerState::Running);
-    gates[2].assert_not_started().await;
+    assert_state(&supervisor, &started[2].run, RunState::Queued).await;
+    gates[2].assert_not_started();
     assert!(!gates[3].has_started());
 
     // The run that became eligible first starts first.
@@ -196,13 +207,9 @@ async fn the_queue_limit_refuses_a_follow_up_and_a_finish_makes_room() {
 }
 
 #[tokio::test]
-async fn results_stay_readable_after_close_until_the_retention_time_passes() {
+async fn results_stay_readable_after_close() {
     let rig = Rig::new();
-    let limits = Limits {
-        retention: Duration::from_millis(1500),
-        ..Limits::default()
-    };
-    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let supervisor = rig.supervisor(Provider::Claude);
     let started = supervisor
         .start(rig.request(Provider::Claude, "echo:kept"))
         .await
@@ -220,23 +227,163 @@ async fn results_stay_readable_after_close_until_the_retention_time_passes() {
         before.text,
         "answered echo:kept sid=".to_string() + rig.session()
     );
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
 
-    tokio::time::sleep(Duration::from_millis(1700)).await;
-    let gone = supervisor
-        .read(Target::Run(started.run.clone()), Default::default(), None)
+#[tokio::test]
+async fn results_are_gone_after_the_retention_time_and_a_closed_worker_goes_with_them() {
+    let rig = Rig::new();
+    let limits = Limits {
+        retention: Duration::from_millis(100),
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "echo:aged"))
         .await
-        .expect_err("the result has aged out");
-    assert_eq!(gone, Error::UnknownRun(started.run.clone()));
+        .expect("start");
+    let worker = started.worker.clone().expect("worker");
+    // Only the wait: by the time it answers the result may already be gone.
+    finished(&supervisor, &[&started.run]).await;
+
+    // Sleeping past the retention time can only make the result older.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        supervisor
+            .read(Target::Run(started.run.clone()), Default::default(), None)
+            .await
+            .expect_err("the result has aged out"),
+        Error::UnknownRun(started.run.clone())
+    );
+    // A live worker is never dropped for age, even with no result kept.
+    let list = supervisor.list().await.expect("list");
+    assert_eq!(list.workers.len(), 1, "{list:#?}");
+    assert_eq!(list.workers[0].brief.state, WorkerState::Idle);
+    assert_eq!(list.limits.retained_now, 0);
+
+    // Closing it then leaves nothing to keep it listed.
+    supervisor.close(&worker).await.expect("close");
+    let list = supervisor.list().await.expect("list");
+    assert!(list.workers.is_empty(), "{list:#?}");
     assert_eq!(
         supervisor
             .read(Target::Worker(worker.clone()), Default::default(), None)
             .await
-            .expect_err("the closed worker has gone with its results"),
+            .expect_err("the closed worker has gone"),
         Error::UnknownWorker(worker)
     );
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn the_byte_bound_drops_the_oldest_results_and_always_keeps_the_newest() {
+    let rig = Rig::new();
+    // Each result weighs a little over 2 KiB, so 5 KB keeps two.
+    let limits = Limits {
+        retained_bytes: 5_000,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let mut runs = Vec::new();
+    for n in 0..5 {
+        let started = supervisor
+            .start(rig.request(Provider::Claude, &format!("echo:{n}")))
+            .await
+            .expect("start");
+        finished(&supervisor, &[&started.run]).await;
+        runs.push(started.run);
+    }
     let list = supervisor.list().await.expect("list");
-    assert!(list.workers.is_empty(), "{list:#?}");
-    assert_eq!(list.limits.retained_now, 0);
+    assert_eq!(list.limits.retained_bytes, 5_000);
+    assert!(list.limits.retained_bytes_now <= 5_000, "{:?}", list.limits);
+    assert!(list.limits.retained_now >= 1 && list.limits.retained_now < 5);
+    assert_eq!(
+        read_compact(&supervisor, &runs[4]).await.outcome,
+        Some(Outcome::Completed),
+        "the newest is kept"
+    );
+    assert!(matches!(
+        supervisor
+            .read(Target::Run(runs[0].clone()), Default::default(), None)
+            .await,
+        Err(Error::UnknownRun(_))
+    ));
+    supervisor.shutdown().await;
+
+    // A bound smaller than one result still keeps the newest.
+    let limits = Limits {
+        retained_bytes: 1,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    for n in 0..3 {
+        let started = supervisor
+            .start(rig.request(Provider::Claude, &format!("echo:b{n}")))
+            .await
+            .expect("start");
+        finished(&supervisor, &[&started.run]).await;
+    }
+    assert_eq!(
+        supervisor.list().await.expect("list").limits.retained_now,
+        1
+    );
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_compact_read_cuts_a_long_answer_and_says_how_long_it_was_while_full_returns_all() {
+    use delega_core::supervisor::limits::COMPACT_RESULT_TEXT_CHARS;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "large"))
+        .await
+        .expect("start");
+    let full = result_of(&supervisor, &started.run).await;
+    let total = full.text.chars().count();
+    assert!(total > COMPACT_RESULT_TEXT_CHARS, "{total}");
+
+    let compact = read_compact(&supervisor, &started.run).await;
+    let Some(ResultView::Compact(result)) = &compact.result else {
+        panic!("{compact:#?}");
+    };
+    assert!(result.text_truncated);
+    assert_eq!(result.text_chars, Some(total));
+    assert_eq!(result.text.chars().count(), COMPACT_RESULT_TEXT_CHARS);
+    assert!(
+        full.text.starts_with(&result.text),
+        "a prefix, not a summary"
+    );
+
+    // The same cut shows through interrupt and close, which are compact too.
+    let closed = supervisor
+        .close(started.worker.as_deref().expect("worker"))
+        .await
+        .expect("close");
+    assert!(closed.result.is_none(), "nothing was running to stop");
+
+    let read = supervisor
+        .read(Target::Run(started.run.clone()), Detail::Full, None)
+        .await
+        .expect("read");
+    let Some(ResultView::Full(whole)) = read.result else {
+        panic!("full read");
+    };
+    assert_eq!(whole.text.chars().count(), total);
+
+    // A short answer is not marked.
+    let short = supervisor
+        .start(rig.request(Provider::Claude, "echo:short"))
+        .await
+        .expect("start");
+    result_of(&supervisor, &short.run).await;
+    let json = serde_json::to_value(read_compact(&supervisor, &short.run).await).expect("json");
+    assert!(json["result"].get("text_truncated").is_none(), "{json}");
+    assert!(json["result"].get("text_chars").is_none(), "{json}");
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
@@ -275,6 +422,47 @@ async fn only_the_newest_results_up_to_the_count_are_kept() {
             Some(Outcome::Completed)
         );
     }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_queue_limit_of_zero_means_no_waiting_behind_a_running_run_not_no_follow_ups() {
+    let rig = Rig::new();
+    let limits = Limits {
+        max_queued_per_worker: 0,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let gate = rig.gate("zero");
+    let first = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    let worker = first.worker.clone().expect("worker");
+    gate.started().await;
+
+    // Behind a running run there is no room to wait.
+    let refused = supervisor
+        .follow_up(&worker, "echo:waits", None)
+        .await
+        .expect("follow_up answers");
+    assert_eq!(refused.outcome, Some(Outcome::Refused));
+    assert_eq!(refused.error.expect("reason").kind, "queue_full");
+
+    // An idle worker takes one, which starts at once and is not queued.
+    gate.open();
+    result_of(&supervisor, &first.run).await;
+    let accepted = supervisor
+        .follow_up(&worker, "echo:now", None)
+        .await
+        .expect("follow_up");
+    assert_eq!(accepted.outcome, None, "{accepted:?}");
+    assert_eq!(accepted.state, RunState::Running);
+    assert_eq!(
+        result_of(&supervisor, &accepted.run).await.outcome,
+        Outcome::Completed
+    );
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }

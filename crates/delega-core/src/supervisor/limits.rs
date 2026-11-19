@@ -14,18 +14,25 @@ pub const MAX_RUNNING_RUNS: usize = 4;
 pub const MAX_QUEUED_PER_WORKER: usize = 16;
 /// Most finished results kept readable, across the whole supervisor.
 pub const RETAINED_RESULTS: usize = 256;
+/// Most bytes of finished results kept readable, estimated from their text,
+/// structured answer, notes and partial text. The oldest are dropped first; the
+/// newest result is always kept.
+pub const RETAINED_BYTES: usize = 64 * 1024 * 1024;
 /// How long a finished result stays readable: one hour.
 pub const RETENTION: Duration = Duration::from_secs(60 * 60);
 /// The longest a single `wait` blocks, whatever timeout the caller asks for.
 pub const WAIT_CEILING: Duration = Duration::from_secs(300);
 /// The timeout `wait` uses when the caller gives none.
-pub const DEFAULT_WAIT: Duration = Duration::from_secs(60);
+pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 
 /// The longest `shutdown` waits for runs to settle after asking them to stop.
 /// The process layer bounds each stop on its own, by its cleanup deadline.
 pub const SHUTDOWN_BOUND: Duration = Duration::from_secs(30);
 /// The longest `interrupt` or `close` waits for a running run to settle.
 pub const INTERRUPT_BOUND: Duration = Duration::from_secs(30);
+/// The longest `start` spends checking the request's paths, executable and
+/// schema before it is admitted.
+pub const PREFLIGHT_BOUND: Duration = Duration::from_secs(10);
 /// Slack added to [`SHUTDOWN_BOUND`] for the blocking wait in `Drop`.
 pub const DROP_SLACK: Duration = Duration::from_secs(2);
 
@@ -37,6 +44,10 @@ pub const MAX_PARTIAL_TEXT_CHARS: usize = 16 * 1024;
 pub const COMPACT_ACTIVITY: usize = 10;
 /// Characters of partial text a compact read returns, taken from the end.
 pub const COMPACT_PARTIAL_TEXT_CHARS: usize = 2_000;
+
+/// Characters of the answer a compact read returns. A longer answer is cut and
+/// the response says so and gives the full length; `detail: full` returns all.
+pub const COMPACT_RESULT_TEXT_CHARS: usize = 20_000;
 
 /// Most run or worker ids one `wait` may name.
 pub const MAX_WAIT_TARGETS: usize = 256;

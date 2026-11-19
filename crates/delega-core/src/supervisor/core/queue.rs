@@ -7,8 +7,6 @@
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use tokio_util::sync::CancellationToken;
-
 use crate::contract::result::RunResult;
 use crate::process::rfc3339_utc;
 use crate::provider::ProgressSink;
@@ -106,7 +104,7 @@ impl Core {
         }
         let wref = worker.worker_ref();
 
-        let stop = CancellationToken::new();
+        let stop = self.root.child_token();
         let mut options = self.config.provider.clone();
         options.run_id = Some(id.to_string());
         options.worker = Some(wref);
@@ -250,6 +248,8 @@ impl Core {
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
         let session = result.session_id.clone();
+        run.bytes = super::retention::weigh(&result, &run.activity);
+        self.retained_bytes += run.bytes;
         run.result = Some(result);
         for waiter in run.settle.drain(..) {
             let _ = waiter.send(());

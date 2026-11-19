@@ -17,7 +17,7 @@ pub(super) struct Done {
 }
 
 impl Done {
-    fn set(&self) {
+    pub fn set(&self) {
         *self.ended.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.changed.notify_all();
     }

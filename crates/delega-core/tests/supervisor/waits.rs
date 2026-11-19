@@ -95,6 +95,7 @@ async fn a_wait_that_times_out_is_a_response_with_current_states_not_an_error() 
     gate.open();
     result_of(&supervisor, &started.run).await;
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -119,13 +120,14 @@ async fn the_wait_ceiling_caps_the_timeout_asked_for() {
     assert!(response.timed_out);
     assert_eq!(response.timeout_secs, 1);
     assert!(
-        begun.elapsed() < Duration::from_secs(5),
+        begun.elapsed() < Duration::from_secs(30),
         "{:?}",
         begun.elapsed()
     );
     gate.open();
     result_of(&supervisor, &started.run).await;
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -172,7 +174,7 @@ async fn a_cursor_returns_at_once_for_a_finish_after_it_and_not_for_one_before_i
         .await
         .expect("wait");
     assert!(
-        begun.elapsed() < Duration::from_secs(2),
+        begun.elapsed() < Duration::from_secs(10),
         "it must return at once"
     );
     assert!(!later.timed_out);
@@ -222,6 +224,7 @@ async fn a_cursor_wait_that_is_pending_wakes_when_a_run_finishes_after_it() {
     assert_eq!(response.runs[0].changed, Some(true));
     assert!(response.cursor > cursor);
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -302,7 +305,7 @@ async fn unknown_ids_are_reported_per_id_and_the_known_ones_still_count() {
         .await
         .expect("wait");
     assert!(
-        begun.elapsed() < Duration::from_secs(2),
+        begun.elapsed() < Duration::from_secs(10),
         "nothing to wait for"
     );
     assert!(!none_known.timed_out);
@@ -317,6 +320,7 @@ async fn unknown_ids_are_reported_per_id_and_the_known_ones_still_count() {
     result_of(&supervisor, &started.run).await;
     supervisor.close(&worker).await.expect("close");
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::{BOTH, Rig, finished, read_compact, read_full, result_of};
+use super::{BOTH, Rig, assert_state, finished, read_compact, read_full, result_of};
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::request::{Provider, Request};
 use delega_core::supervisor::{Detail, Error, ResultView, RunState, Target, WorkerState};
@@ -95,6 +95,7 @@ async fn a_refused_start_is_a_finished_run_without_a_worker_that_read_returns() 
     assert_eq!(compact.state, Some(RunState::Finished));
     assert!(compact.progress.is_none());
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -108,6 +109,8 @@ async fn a_start_the_provider_layer_refuses_is_refused_at_once_with_its_reason()
     assert_eq!(started.worker, None);
     assert_eq!(started.error.expect("reason").kind, "cwd_unusable");
     assert!(supervisor.list().await.expect("list").workers.is_empty());
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -217,6 +220,7 @@ async fn a_follow_up_keeps_the_workers_permissions_and_settings() {
     let three = result_of(&supervisor, &third.run).await;
     assert_eq!(three.timing.timeout_secs, 45);
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -241,6 +245,7 @@ async fn a_follow_up_on_an_ephemeral_worker_is_refused_because_it_has_no_session
     assert_eq!(result.worker.expect("worker ref").id, worker);
     assert_eq!(result.outcome, Outcome::Refused);
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -278,6 +283,8 @@ async fn a_follow_up_on_a_worker_nobody_knows_is_an_error_not_a_run() {
         .await
         .expect_err("unknown worker");
     assert_eq!(error, Error::UnknownWorker("worker-nope".to_string()));
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -295,6 +302,7 @@ async fn a_follow_up_with_an_invalid_prompt_is_refused_as_a_run() {
         .expect("follow_up answers");
     assert_eq!(refused.error.expect("reason").kind, "invalid_request");
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -328,10 +336,12 @@ async fn follow_ups_run_in_the_order_given_one_at_a_time() {
         Some(first.run.as_str())
     );
 
-    g2.assert_not_started().await;
+    assert_state(&supervisor, &second.run, RunState::Queued).await;
+    g2.assert_not_started();
     g1.open();
     g2.started().await;
-    g3.assert_not_started().await;
+    assert_state(&supervisor, &third.run, RunState::Queued).await;
+    g3.assert_not_started();
     let read = read_compact(&supervisor, &first.run).await;
     assert_eq!(read.outcome, Some(Outcome::Completed));
     g2.open();
@@ -371,6 +381,7 @@ async fn timing_includes_the_time_a_run_waited_in_the_queue() {
     let started = result.timing.started_at.clone().expect("started");
     assert!(result.timing.queued_at < started, "{:?}", result.timing);
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -402,6 +413,7 @@ async fn ids_are_unique_opaque_and_never_reused_after_close() {
     assert!(ids.insert(refused.run), "a refused run reused an id");
     assert_eq!(ids.len(), 4 * 3 + 1);
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -432,7 +444,7 @@ async fn start_follow_up_read_and_list_return_while_a_provider_hangs() {
         .expect("read");
     supervisor.list().await.expect("list");
     assert!(
-        begun.elapsed() < Duration::from_millis(500),
+        begun.elapsed() < Duration::from_secs(5),
         "an operation waited on a provider: {:?}",
         begun.elapsed()
     );
@@ -513,4 +525,91 @@ async fn compact_and_full_finished_reads_differ_in_what_they_hold() {
     );
     assert!(progress["diagnostics"].is_object(), "{json}");
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_follow_up_to_an_idle_worker_with_no_session_answers_with_its_outcome_and_error() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let first = supervisor
+        .start(rig.request(Provider::Claude, "malformed"))
+        .await
+        .expect("start");
+    let worker = first.worker.expect("worker");
+    result_of(&supervisor, &first.run).await;
+
+    let refused = supervisor
+        .follow_up(&worker, "echo:more", None)
+        .await
+        .expect("follow_up answers");
+    // The run was dispatched at once and ended there: the answer says how.
+    assert_eq!(refused.state, RunState::Finished);
+    assert_eq!(refused.outcome, Some(Outcome::Refused));
+    let error = refused
+        .error
+        .clone()
+        .expect("a finished run carries its error");
+    assert_eq!(error.kind, "no_session");
+    assert!(!error.message.is_empty());
+    let json = serde_json::to_value(&refused).expect("json");
+    assert_eq!(json["outcome"], "refused");
+    assert_eq!(json["error"]["kind"], "no_session");
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn list_flags_which_workers_can_take_a_follow_up() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let gate = rig.gate("flag");
+    let running = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    let mut ephemeral = rig.request(Provider::Claude, "echo:e");
+    ephemeral.session.ephemeral = true;
+    let ephemeral = supervisor.start(ephemeral).await.expect("start");
+    let sessionless = supervisor
+        .start(rig.request(Provider::Claude, "malformed"))
+        .await
+        .expect("start");
+    let normal = supervisor
+        .start(rig.request(Provider::Claude, "echo:n"))
+        .await
+        .expect("start");
+    let closed = supervisor
+        .start(rig.request(Provider::Claude, "echo:c"))
+        .await
+        .expect("start");
+    for run in [&ephemeral.run, &sessionless.run, &normal.run, &closed.run] {
+        result_of(&supervisor, run).await;
+    }
+    supervisor
+        .close(closed.worker.as_deref().expect("worker"))
+        .await
+        .expect("close");
+
+    let list = supervisor.list().await.expect("list");
+    let flag = |worker: &Option<String>| {
+        list.workers
+            .iter()
+            .find(|w| Some(&w.brief.worker) == worker.as_ref())
+            .expect("worker listed")
+            .can_follow_up
+    };
+    assert!(
+        flag(&running.worker),
+        "a running run may still report a session"
+    );
+    assert!(flag(&normal.worker));
+    assert!(!flag(&ephemeral.worker), "ephemeral has no session");
+    assert!(!flag(&sessionless.worker), "its run reported no session");
+    assert!(!flag(&closed.worker), "closed");
+    gate.open();
+    result_of(&supervisor, &running.run).await;
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }

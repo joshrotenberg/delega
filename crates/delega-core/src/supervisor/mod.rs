@@ -44,15 +44,17 @@
 
 #![cfg(unix)]
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::contract::request::Request;
+use crate::provider;
 
 mod activity;
 mod actor;
@@ -89,19 +91,61 @@ struct Shared {
     tx: UnboundedSender<Command>,
     done: Arc<actor::Done>,
     config: SupervisorConfig,
-    /// Whether `Drop` may block this thread until the supervisor has stopped:
-    /// only when another thread of a multi-threaded runtime can run its task.
+    /// Cancelled to stop every run at once. Each run's stop token is a child
+    /// of it, so `Drop` can signal every provider without the supervisor's
+    /// task having to run.
+    root: CancellationToken,
+    /// Set if the supervisor's own task panicked.
+    failed: Arc<Mutex<Option<String>>>,
+    /// Whether this thread may block waiting for the supervisor when it is
+    /// dropped outside any runtime context: only if the runtime that runs its
+    /// task is multi-threaded.
     can_block: bool,
 }
 
+impl Shared {
+    fn failure(&self) -> Option<String> {
+        self.failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 impl Drop for Shared {
+    /// Signals every child to stop at once, then asks the supervisor's task to
+    /// close every worker. Whether it also waits for the processes to be gone
+    /// depends on where it is called:
+    ///
+    /// - on a thread of a multi-threaded runtime (inside a spawned task) it
+    ///   waits through `block_in_place`, which hands the thread's other work
+    ///   to another thread, up to `shutdown_bound` plus a short slack;
+    /// - on the thread that called `block_on` of a multi-threaded runtime, or
+    ///   outside any runtime when the supervisor's runtime is multi-threaded,
+    ///   it waits the same way;
+    /// - on a current-thread runtime it cannot wait, because nothing else can
+    ///   run the stop. Every child has been signalled, and the processes are
+    ///   gone as soon as that runtime is polled again. If the runtime is
+    ///   dropped first, the process layer kills each child's group when its
+    ///   owner task is dropped.
     fn drop(&mut self) {
+        self.root.cancel();
         if self.tx.send(Command::Quit).is_err() {
             return;
         }
-        if self.can_block {
-            self.done
-                .wait(self.config.shutdown_bound + limits::DROP_SLACK);
+        let limit = self.config.shutdown_bound + limits::DROP_SLACK;
+        let wait = || self.done.wait(limit);
+        match Handle::try_current() {
+            Ok(handle) => {
+                if handle.runtime_flavor() == RuntimeFlavor::MultiThread {
+                    tokio::task::block_in_place(wait);
+                }
+            }
+            Err(_) => {
+                if self.can_block {
+                    wait();
+                }
+            }
         }
     }
 }
@@ -110,9 +154,10 @@ impl Drop for Shared {
 /// the same supervisor.
 ///
 /// Must be created inside a Tokio runtime. Call [`shutdown`](Self::shutdown)
-/// before dropping it when the runtime is current-thread: dropping stops every
-/// worker too, but can only wait for the processes to be gone when the runtime
-/// has another thread to run them (see [`Drop`](#impl-Drop-for-Supervisor)).
+/// before dropping the last clone: dropping signals every child at once and asks
+/// the supervisor to close every worker, but it can wait for the processes to
+/// be gone only on a multi-threaded runtime. On a current-thread runtime the
+/// processes are gone once that runtime runs again.
 #[derive(Clone)]
 pub struct Supervisor {
     shared: Arc<Shared>,
@@ -134,22 +179,52 @@ impl Supervisor {
         let (tx, rx) = unbounded_channel();
         let done = Arc::new(actor::Done::default());
         let cursor = Arc::new(AtomicU64::new(0));
-        let core = core::Core::new(config.clone(), tx.clone(), launch, cursor);
-        tokio::spawn(actor::run(core, rx, done.clone(), config.shutdown_bound));
+        let root = CancellationToken::new();
+        let failed = Arc::new(Mutex::new(None));
+        let core = core::Core::new(config.clone(), tx.clone(), launch, cursor, root.clone());
+        let task = tokio::spawn(actor::run(core, rx, done.clone(), config.shutdown_bound));
+        // If the task panics, `Core`'s drop has already stopped every run;
+        // this records that it happened so no call can mistake it for a clean
+        // stop.
+        let (watch_done, watch_failed) = (done.clone(), failed.clone());
+        tokio::spawn(async move {
+            if let Err(error) = task.await {
+                let how = if error.is_panic() {
+                    "panicked"
+                } else {
+                    "was cancelled"
+                };
+                *watch_failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!(
+                    "the supervisor's task {how}; every provider was sent a stop, and nothing \
+                     confirmed that any of them ended"
+                ));
+                watch_done.set();
+            }
+        });
         Self {
             shared: Arc::new(Shared {
                 tx,
                 done,
                 config,
+                root,
+                failed,
                 can_block,
             }),
         }
     }
 
+    /// The error for a call the supervisor's task cannot answer.
+    fn gone(&self) -> Error {
+        match self.shared.failure() {
+            Some(why) => Error::Failed(why),
+            None => Error::Stopped,
+        }
+    }
+
     async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<T>) -> Command) -> Result<T, Error> {
         let (tx, rx) = oneshot::channel();
-        self.shared.tx.send(make(tx)).map_err(|_| Error::Stopped)?;
-        rx.await.map_err(|_| Error::Stopped)
+        self.shared.tx.send(make(tx)).map_err(|_| self.gone())?;
+        rx.await.map_err(|_| self.gone())
     }
 
     /// Admit `request` as a new worker with its first run and return at once.
@@ -160,11 +235,46 @@ impl Supervisor {
     /// response is `finished` with outcome `refused`, no worker is created, and
     /// [`read`](Self::read) returns the result.
     pub async fn start(&self, request: Request) -> Result<StartResponse, Error> {
+        let preflight = self.preflight(&request).await;
         self.call(|reply| Command::Start {
             request: Box::new(request),
+            preflight,
             reply,
         })
         .await?
+    }
+
+    /// The filesystem and schema work of admitting a request, done off the
+    /// supervisor's task on the blocking pool and bounded, so a hung filesystem
+    /// can delay only this `start`, never `wait` or `interrupt`. Returns the
+    /// refusal, if any. A request that fails validation is left for the
+    /// supervisor to refuse. If the bound passes, the blocking thread cannot be
+    /// cancelled and is left to finish, and the start is refused.
+    async fn preflight(&self, request: &Request) -> Option<(String, String)> {
+        if request.validate().is_err() {
+            return None;
+        }
+        let (request, options) = (request.clone(), self.shared.config.provider.clone());
+        let job = tokio::task::spawn_blocking(move || {
+            provider::dry_run(&request, &options)
+                .err()
+                .map(|refusal| (refusal.kind, refusal.message))
+        });
+        match tokio::time::timeout(limits::PREFLIGHT_BOUND, job).await {
+            Ok(Ok(refusal)) => refusal,
+            Ok(Err(_)) => Some((
+                "internal_error".to_string(),
+                "checking the request failed unexpectedly".to_string(),
+            )),
+            Err(_) => Some((
+                "preflight_timeout".to_string(),
+                format!(
+                    "checking the request did not finish within {} s; the filesystem or the \
+                     provider executable may be unreachable",
+                    limits::PREFLIGHT_BOUND.as_secs()
+                ),
+            )),
+        }
     }
 
     /// Queue another assignment on `worker`, to continue its provider session
@@ -319,7 +429,9 @@ impl Supervisor {
 
     /// Stop every worker and refuse new work. Returns when every run has
     /// stopped, or when the shutdown bound passes, naming the runs that had
-    /// not. Reads and `list` keep working afterwards.
+    /// not. Reads and `list` keep working afterwards. If the supervisor's own
+    /// task had panicked, the report says so in `failed` instead of looking
+    /// clean.
     pub async fn shutdown(&self) -> ShutdownReport {
         let started = self.call(|reply| Command::Shutdown { reply }).await;
         let Ok(started) = started else {
@@ -328,6 +440,7 @@ impl Supervisor {
                 runs_stopped: 0,
                 runs_discarded: 0,
                 unsettled: Vec::new(),
+                failed: self.shared.failure(),
             };
         };
         if let Some(rx) = started.rx {
@@ -342,6 +455,13 @@ impl Supervisor {
             runs_stopped: started.runs_stopped,
             runs_discarded: started.runs_discarded,
             unsettled,
+            failed: self.shared.failure(),
         }
+    }
+
+    /// Make the supervisor's task panic. Test only.
+    #[cfg(test)]
+    pub(crate) fn inject_panic(&self) {
+        let _ = self.shared.tx.send(Command::PanicForTest);
     }
 }

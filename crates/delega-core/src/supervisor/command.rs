@@ -61,6 +61,9 @@ pub(super) struct ShutdownStart {
 pub(super) enum Command {
     Start {
         request: Box<Request>,
+        /// The refusal found by the filesystem checks done off this task, as
+        /// error kind and message.
+        preflight: Option<(String, String)>,
         reply: Reply<StartResponse>,
     },
     FollowUp {
@@ -124,4 +127,7 @@ pub(super) enum Command {
     },
     /// Stop everything and end the task.
     Quit,
+    /// Make the task panic.
+    #[cfg(test)]
+    PanicForTest,
 }

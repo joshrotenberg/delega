@@ -2,10 +2,11 @@
 //! reach: the bounded activity buffer, and a run's task that panics, which
 //! needs a launcher that fails.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -18,7 +19,8 @@ use crate::provider::{self, ProgressEvent, ProviderOptions};
 use super::activity::Activity;
 use super::limits::{COMPACT_ACTIVITY, MAX_ACTIVITY, MAX_PARTIAL_TEXT_CHARS};
 use super::{
-    Detail, ResultView, RunState, Supervisor, SupervisorConfig, Target, WaitTargets, WorkerState,
+    Detail, Error, ResultView, RunState, Supervisor, SupervisorConfig, Target, WaitTargets,
+    WorkerState,
 };
 
 /// A directory with a copy of the Claude fake, so the path is in the command
@@ -250,4 +252,100 @@ fn the_activity_ring_drops_the_oldest_and_counts_them() {
     assert_eq!(snapshot.entries[0].summary, format!("n={COMPACT_ACTIVITY}"));
     let cursors: Vec<u64> = snapshot.entries.iter().map(|e| e.cursor).collect();
     assert!(cursors.windows(2).all(|w| w[0] < w[1]), "cursors increase");
+}
+
+#[test]
+fn no_activity_entry_appears_at_or_below_a_cursor_already_returned() {
+    let cursor = Arc::new(AtomicU64::new(0));
+    let watched = Arc::new(Activity::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    // Several threads number entries from the one shared counter, as the runs
+    // of a supervisor do, and one of them writes the buffer that is read.
+    let writers: Vec<_> = (0..4)
+        .map(|n| {
+            let (cursor, stop) = (cursor.clone(), stop.clone());
+            let own = if n == 0 {
+                watched.clone()
+            } else {
+                Arc::new(Activity::default())
+            };
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    own.record(
+                        ProgressEvent::Provider {
+                            kind: "assistant".to_string(),
+                            summary: String::new(),
+                        },
+                        &cursor,
+                    );
+                }
+            })
+        })
+        .collect();
+
+    let mut previous: Option<(u64, HashSet<u64>)> = None;
+    for _ in 0..20_000 {
+        // What `read` does: take the cursor, then copy the buffer.
+        let returned = cursor.load(Ordering::SeqCst);
+        let seen: HashSet<u64> = watched
+            .snapshot()
+            .entries
+            .iter()
+            .map(|e| e.cursor)
+            .collect();
+        if let Some((before, earlier)) = &previous {
+            for entry in &seen {
+                assert!(
+                    entry > before || earlier.contains(entry),
+                    "entry {entry} appeared after a read that returned cursor {before}"
+                );
+            }
+        }
+        previous = Some((returned, seen));
+    }
+    stop.store(true, Ordering::Relaxed);
+    for writer in writers {
+        writer.join().expect("writer thread");
+    }
+}
+
+#[tokio::test]
+async fn a_panic_in_the_supervisors_own_task_stops_every_child_and_shutdown_says_it_failed() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+
+    supervisor.inject_panic();
+    // The child is stopped on the way out of the panicking task, with nobody
+    // asking for it.
+    dir.assert_nothing_left().await;
+
+    let mut failure = None;
+    for _ in 0..1000 {
+        match supervisor.list().await {
+            Err(error @ Error::Failed(_)) => {
+                failure = Some(error);
+                break;
+            }
+            Err(Error::Stopped) | Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(other) => panic!("unexpected {other:?}"),
+        }
+    }
+    let failure = failure.expect("calls report that the supervisor's task failed");
+    assert!(failure.to_string().contains("panicked"), "{failure}");
+    assert!(matches!(
+        supervisor
+            .follow_up("worker-x", "more", None)
+            .await
+            .expect_err("failed"),
+        Error::Failed(_)
+    ));
+
+    let report = supervisor.shutdown().await;
+    let why = report.failed.expect("not a clean report");
+    assert!(why.contains("nothing confirmed"), "{why}");
 }

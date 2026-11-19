@@ -168,6 +168,8 @@ impl Core {
                 max_queued_per_worker: limits.max_queued_per_worker,
                 retained_results: limits.retained_results,
                 retained_now: self.finished.len(),
+                retained_bytes: limits.retained_bytes,
+                retained_bytes_now: self.retained_bytes,
                 retention_secs: limits.retention.as_secs(),
                 wait_ceiling_secs: limits.wait_ceiling.as_secs(),
             },
@@ -178,6 +180,9 @@ impl Core {
                     name: w.name.clone(),
                     provider: w.provider,
                     session_id: w.session_id.clone(),
+                    can_follow_up: !w.closed
+                        && !w.template.session.ephemeral
+                        && (w.session_id.is_some() || w.current.is_some() || !w.queue.is_empty()),
                     runs: w.runs.len(),
                 })
                 .collect(),

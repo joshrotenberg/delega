@@ -30,8 +30,8 @@ use delega_core::contract::result::RunResult;
 use delega_core::provider::ProviderOptions;
 
 use delega_core::supervisor::{
-    Detail, Limits, ReadResponse, ResultView, Supervisor, SupervisorConfig, Target, WaitResponse,
-    WaitTargets,
+    Detail, Limits, ReadResponse, ResultView, RunState, Supervisor, SupervisorConfig, Target,
+    WaitResponse, WaitTargets,
 };
 
 mod lifecycle;
@@ -130,10 +130,10 @@ impl Gate {
         panic!("the run held on {} never started", self.0.display());
     }
 
-    /// Assert that the fake has not begun the run held on this gate, after
-    /// giving it time it would have needed.
-    pub async fn assert_not_started(&self) {
-        tokio::time::sleep(Duration::from_millis(400)).await;
+    /// Assert that the fake has not begun the run held on this gate. This is
+    /// only a snapshot; what proves the run waited is its state, see
+    /// [`assert_state`].
+    pub fn assert_not_started(&self) {
         assert!(
             !self.has_started(),
             "the run held on {} started too early",
@@ -177,6 +177,11 @@ impl Rig {
             session,
             _tmp: tmp,
         }
+    }
+
+    /// The test's private directory.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// The session id the fakes report when they are not resuming one.
@@ -275,6 +280,13 @@ impl Rig {
         }
         panic!("processes are still running: {left:#?}");
     }
+}
+
+/// Assert the state the supervisor reports for a run. A run that has to wait is
+/// proved to wait by this, not by waiting out a clock.
+pub(crate) async fn assert_state(supervisor: &Supervisor, run: &str, state: RunState) {
+    let read = read_compact(supervisor, run).await;
+    assert_eq!(read.state, Some(state), "{read:#?}");
 }
 
 /// Wait for the runs to finish; the wait must not time out.

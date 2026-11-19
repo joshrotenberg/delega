@@ -16,18 +16,25 @@ async fn fifty_runs_across_ten_workers_all_complete_in_order_and_resume_their_se
         ..Limits::default()
     };
     let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    // Each run writes how many runs of the batch are alive when it starts, so
+    // the concurrency is measured from outside the supervisor.
+    let trace = rig.root().join("trace");
+    std::fs::create_dir(&trace).expect("create the trace directory");
 
     // Each worker gets its first run and four follow-ups, queued at once.
     let mut by_worker: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for w in 0..10 {
         let first = supervisor
-            .start(rig.request(Provider::Claude, &format!("echo:w{w}-r0")))
+            .start(rig.request(
+                Provider::Claude,
+                &format!("trace:{}#w{w}-r0", trace.display()),
+            ))
             .await
             .expect("start");
         let worker = first.worker.clone().expect("worker");
-        let mut runs = vec![(first.run, format!("echo:w{w}-r0"))];
+        let mut runs = vec![(first.run, format!("trace:{}#w{w}-r0", trace.display()))];
         for r in 1..5 {
-            let prompt = format!("echo:w{w}-r{r}");
+            let prompt = format!("trace:{}#w{w}-r{r}", trace.display());
             let queued = supervisor
                 .follow_up(&worker, &prompt, None)
                 .await
@@ -55,7 +62,6 @@ async fn fifty_runs_across_ten_workers_all_complete_in_order_and_resume_their_se
     // Collect every finish through the cursor; no finish is missed or doubled.
     let mut seen = HashSet::new();
     let mut cursor = None;
-    let mut peak_running = 0;
     while seen.len() < all.len() {
         let response = supervisor
             .wait(
@@ -79,9 +85,27 @@ async fn fifty_runs_across_ten_workers_all_complete_in_order_and_resume_their_se
             }
         }
         cursor = Some(response.cursor);
-        peak_running = peak_running.max(supervisor.list().await.expect("list").limits.running_runs);
-        assert!(peak_running <= 4);
     }
+
+    // The most runs ever alive together, from the fakes' own records.
+    let peak = std::fs::read_dir(&trace)
+        .expect("read the trace directory")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("peak."))
+        .filter_map(|e| {
+            std::fs::read_to_string(e.path())
+                .ok()?
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+        .max()
+        .expect("every run recorded a peak");
+    assert!(peak <= 4, "{peak} runs were alive together; the limit is 4");
+    assert!(
+        peak >= 2,
+        "the runs never overlapped, so the limit was not exercised"
+    );
 
     for (worker, runs) in &by_worker {
         let mut finished_at = Vec::new();

@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::command::Command;
 use super::config::SupervisorConfig;
@@ -55,6 +56,20 @@ pub(super) struct Core {
     shutdown_waiters: Vec<oneshot::Sender<()>>,
     tx: UnboundedSender<Command>,
     launch: Launch,
+    /// Parent of every run's stop token.
+    root: CancellationToken,
+    /// Estimated bytes of the finished results kept.
+    retained_bytes: usize,
+}
+
+/// Stops every run still going when the task ends, whether it returns or
+/// panics: the unwinding drop of the `Core` is what makes a panic in the
+/// supervisor's own task stop every provider.
+impl Drop for Core {
+    fn drop(&mut self) {
+        self.root.cancel();
+        self.abort_all();
+    }
 }
 
 impl Core {
@@ -63,6 +78,7 @@ impl Core {
         tx: UnboundedSender<Command>,
         launch: Launch,
         cursor: Arc<AtomicU64>,
+        root: CancellationToken,
     ) -> Self {
         config.limits = config.limits.normalized();
         Self {
@@ -81,6 +97,8 @@ impl Core {
             shutdown_waiters: Vec::new(),
             tx,
             launch,
+            root,
+            retained_bytes: 0,
         }
     }
 
@@ -91,8 +109,12 @@ impl Core {
     pub fn handle(&mut self, command: Command) {
         self.prune(Instant::now());
         match command {
-            Command::Start { request, reply } => {
-                let _ = reply.send(self.start(*request));
+            Command::Start {
+                request,
+                preflight,
+                reply,
+            } => {
+                let _ = reply.send(self.start(*request, preflight));
             }
             Command::FollowUp {
                 worker,
@@ -156,6 +178,8 @@ impl Core {
             Command::Quit => {
                 let _ = self.shutdown();
             }
+            #[cfg(test)]
+            Command::PanicForTest => panic!("the supervisor's task was told to panic"),
         }
         self.settle_changes();
     }

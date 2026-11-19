@@ -189,6 +189,7 @@ async fn interrupting_a_finished_run_returns_its_result_unchanged() {
         Error::UnknownRun("run-nope".into())
     );
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -417,7 +418,7 @@ async fn dropping_the_supervisor_with_ten_workers_running_leaves_nothing_behind(
     let begun = Instant::now();
     drop(supervisor);
     assert!(
-        begun.elapsed() < Duration::from_secs(20),
+        begun.elapsed() < Duration::from_secs(10),
         "{:?}",
         begun.elapsed()
     );
@@ -435,9 +436,15 @@ async fn dropping_the_supervisor_on_a_current_thread_runtime_stops_everything_on
     let rig = Rig::new();
     let supervisor = Supervisor::new(rig.config_with(Provider::Claude, ten_workers_limits()));
     start_ten(&rig, &supervisor).await;
+    let begun = Instant::now();
     drop(supervisor);
-    // Nothing blocks, because nothing else could run the stop; the runtime
-    // does it as soon as it is given the chance.
+    // Nothing blocks, because nothing else could run the stop; every child has
+    // been signalled and the runtime stops them as soon as it is polled.
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        begun.elapsed()
+    );
     rig.assert_nothing_left().await;
 }
 
@@ -544,5 +551,44 @@ async fn a_shutdown_that_does_not_settle_within_its_bound_names_the_runs_left() 
         result_of(&supervisor, &started.run).await.outcome,
         Outcome::Interrupted
     );
+    rig.assert_nothing_left().await;
+}
+
+/// Drop the last clone inside a spawned task, which runs on a runtime worker
+/// thread, with ten workers running. The drop must not hold that thread for
+/// the whole shutdown bound, and must leave nothing running.
+async fn drop_inside_a_spawned_task(rig: &Rig) {
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, ten_workers_limits()));
+    start_ten(rig, &supervisor).await;
+    assert!(!rig.survivors().is_empty());
+    let took = tokio::spawn(async move {
+        let begun = Instant::now();
+        drop(supervisor);
+        begun.elapsed()
+    })
+    .await
+    .expect("the task that drops the supervisor");
+    assert!(
+        took < Duration::from_secs(10),
+        "the drop held a worker thread for {took:?}"
+    );
+    let left = rig.survivors();
+    assert!(
+        left.is_empty(),
+        "drop returned with processes alive: {left:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_the_last_clone_inside_a_task_with_several_runtime_threads_leaves_nothing() {
+    let rig = Rig::new();
+    drop_inside_a_spawned_task(&rig).await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn dropping_the_last_clone_inside_a_task_with_one_runtime_thread_leaves_nothing() {
+    let rig = Rig::new();
+    drop_inside_a_spawned_task(&rig).await;
     rig.assert_nothing_left().await;
 }

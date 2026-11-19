@@ -22,6 +22,9 @@ pub enum Error {
     ShutDown,
     /// The supervisor's task has ended, so nothing can answer.
     Stopped,
+    /// The supervisor's own task failed. The text says what happened to the
+    /// providers it was running.
+    Failed(String),
 }
 
 /// A stable label for an [`Error`], for a surface that returns it as data.
@@ -38,6 +41,8 @@ pub enum ErrorKind {
     ShutDown,
     /// See [`Error::Stopped`].
     Stopped,
+    /// See [`Error::Failed`].
+    Failed,
 }
 
 impl Error {
@@ -49,6 +54,7 @@ impl Error {
             Error::InvalidArguments(_) => ErrorKind::InvalidArguments,
             Error::ShutDown => ErrorKind::ShutDown,
             Error::Stopped => ErrorKind::Stopped,
+            Error::Failed(_) => ErrorKind::Failed,
         }
     }
 }
@@ -69,6 +75,7 @@ impl fmt::Display for Error {
             Error::InvalidArguments(why) => f.write_str(why),
             Error::ShutDown => f.write_str("the supervisor was shut down and takes no new work"),
             Error::Stopped => f.write_str("the supervisor has stopped"),
+            Error::Failed(why) => f.write_str(why),
         }
     }
 }

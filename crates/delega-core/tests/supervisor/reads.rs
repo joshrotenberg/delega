@@ -116,6 +116,7 @@ async fn a_cursor_returns_only_activity_after_it() {
     assert!(kinds.contains(&"finished".to_string()), "{kinds:?}");
     assert!(!kinds.contains(&"started".to_string()), "{kinds:?}");
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -146,6 +147,7 @@ async fn full_detail_adds_diagnostics_and_the_whole_history_to_an_unfinished_rea
     gate.open();
     result_of(&supervisor, &started.run).await;
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -248,6 +250,7 @@ async fn a_queued_run_reads_as_queued_without_activity() {
     gate.open();
     result_of(&supervisor, &queued.run).await;
     supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -264,4 +267,6 @@ async fn reading_an_unknown_run_or_worker_is_an_error_naming_the_id() {
         .await
         .expect_err("unknown");
     assert!(error.to_string().contains("worker-x"));
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }

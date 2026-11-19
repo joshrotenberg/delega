@@ -14,6 +14,7 @@ use crate::contract::result::{Cleanup, DeniedRequest, ErrorDetail, RunResult, Ti
 
 use super::activity::ActivityEntry;
 use super::error::Error;
+use super::limits::COMPACT_RESULT_TEXT_CHARS;
 use super::state::{RunState, WorkerState};
 
 /// How much a read returns.
@@ -180,8 +181,16 @@ pub struct CompactResult {
     pub provider: Option<Provider>,
     /// How the run ended.
     pub outcome: Outcome,
-    /// The final answer, or whatever partial answer exists.
+    /// The final answer, or whatever partial answer exists, cut to
+    /// [`COMPACT_RESULT_TEXT_CHARS`] characters. See `text_truncated`.
     pub text: String,
+    /// True when `text` is only the start of the answer. `detail: full` returns
+    /// all of it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub text_truncated: bool,
+    /// The full length of the answer in characters. Present when truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_chars: Option<usize>,
     /// The structured answer, when one was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured: Option<serde_json::Value>,
@@ -211,21 +220,36 @@ impl ResultView {
     pub fn of(result: &RunResult, detail: Detail) -> Self {
         match detail {
             Detail::Full => ResultView::Full(Box::new(result.clone())),
-            Detail::Compact => ResultView::Compact(Box::new(CompactResult {
-                run: result.run.clone(),
-                worker: result.worker.clone(),
-                provider: result.provider,
-                outcome: result.outcome,
-                text: result.text.clone(),
-                structured: result.structured.clone(),
-                structured_valid: result.structured_valid,
-                error: result.error.clone(),
-                cleanup: result.cleanup.clone(),
-                denied: result.permissions.denied.clone(),
-                provider_notes: result.provider_notes.clone(),
-                session_id: result.session_id.clone(),
-                timing: result.timing.clone(),
-            })),
+            Detail::Compact => {
+                let chars = result.text.chars().count();
+                let truncated = chars > COMPACT_RESULT_TEXT_CHARS;
+                let text: String = if truncated {
+                    result
+                        .text
+                        .chars()
+                        .take(COMPACT_RESULT_TEXT_CHARS)
+                        .collect()
+                } else {
+                    result.text.clone()
+                };
+                ResultView::Compact(Box::new(CompactResult {
+                    run: result.run.clone(),
+                    worker: result.worker.clone(),
+                    provider: result.provider,
+                    outcome: result.outcome,
+                    text,
+                    text_truncated: truncated,
+                    text_chars: truncated.then_some(chars),
+                    structured: result.structured.clone(),
+                    structured_valid: result.structured_valid,
+                    error: result.error.clone(),
+                    cleanup: result.cleanup.clone(),
+                    denied: result.permissions.denied.clone(),
+                    provider_notes: result.provider_notes.clone(),
+                    session_id: result.session_id.clone(),
+                    timing: result.timing.clone(),
+                }))
+            }
         }
     }
 }
@@ -327,6 +351,10 @@ pub struct LimitsView {
     pub retained_results: usize,
     /// Finished results kept now.
     pub retained_now: usize,
+    /// Most bytes of finished results kept, estimated.
+    pub retained_bytes: usize,
+    /// Estimated bytes of the results kept now.
+    pub retained_bytes_now: usize,
     /// How long a finished result stays readable, in seconds.
     pub retention_secs: u64,
     /// The longest one wait blocks, in seconds.
@@ -347,6 +375,11 @@ pub struct WorkerView {
     /// The provider's session id, once a run has reported one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Whether `follow_up` can continue this worker: it is not closed, was not
+    /// started `ephemeral`, and has a session or a run that may still report
+    /// one. A worker whose runs ended without reporting a session cannot, and a
+    /// follow-up to it is refused.
+    pub can_follow_up: bool,
     /// Runs of this worker whose results are kept, plus unfinished ones.
     pub runs: usize,
 }
@@ -420,4 +453,8 @@ pub struct ShutdownReport {
     /// Runs that had not settled when the bound passed. Empty when everything
     /// stopped.
     pub unsettled: Vec<String>,
+    /// Present when the supervisor's own task had failed: what happened to the
+    /// providers it was running. A report with this set is not a clean stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<String>,
 }

@@ -85,13 +85,16 @@ impl Activity {
                 return;
             }
         };
+        // The sequence number is taken and the entry pushed under one lock. A
+        // reader that has seen a cursor and then takes this lock therefore finds
+        // every entry numbered at or below it: none can still be on its way in.
+        let mut inner = self.lock();
         let entry = ActivityEntry {
             cursor: cursor.fetch_add(1, Ordering::SeqCst) + 1,
             at: rfc3339_utc(SystemTime::now()),
             kind,
             summary,
         };
-        let mut inner = self.lock();
         inner.total += 1;
         if inner.entries.len() >= MAX_ACTIVITY {
             inner.entries.pop_front();

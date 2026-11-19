@@ -16,10 +16,14 @@ pub struct Limits {
     /// Most runs running at once. A run beyond it stays queued. At least 1.
     pub max_running_runs: usize,
     /// Most runs waiting behind a worker's running run. A follow-up beyond it
-    /// is refused. 0 means a worker takes a follow-up only when it is idle.
+    /// is refused. 0 means no waiting behind a running run: a worker takes a
+    /// follow-up only when nothing of its own is running or queued.
     pub max_queued_per_worker: usize,
     /// Most finished results kept readable, across the supervisor. At least 1.
     pub retained_results: usize,
+    /// Most bytes of finished results kept, estimated. The oldest go first and
+    /// the newest is always kept.
+    pub retained_bytes: usize,
     /// How long a finished result stays readable.
     pub retention: Duration,
     /// The longest one `wait` blocks.
@@ -33,6 +37,7 @@ impl Default for Limits {
             max_running_runs: limits::MAX_RUNNING_RUNS,
             max_queued_per_worker: limits::MAX_QUEUED_PER_WORKER,
             retained_results: limits::RETAINED_RESULTS,
+            retained_bytes: limits::RETAINED_BYTES,
             retention: limits::RETENTION,
             wait_ceiling: limits::WAIT_CEILING,
         }

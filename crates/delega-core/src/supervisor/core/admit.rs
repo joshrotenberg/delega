@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use crate::contract::request::Request;
 use crate::contract::result::RunResult;
-use crate::provider::dry_run;
 
 use super::super::error::Error;
 use super::super::record::{Kind, Run, Worker};
@@ -21,7 +20,11 @@ use super::{Core, Mode};
 impl Core {
     /// Validate a request, then admit it as a new worker with its first run,
     /// or refuse it.
-    pub(super) fn start(&mut self, request: Request) -> Result<StartResponse, Error> {
+    pub(super) fn start(
+        &mut self,
+        request: Request,
+        preflight: Option<(String, String)>,
+    ) -> Result<StartResponse, Error> {
         if self.mode != Mode::Active {
             return Err(Error::ShutDown);
         }
@@ -48,8 +51,9 @@ impl Core {
             let result = results::refused(&run, None, "limit_reached", &message);
             return Ok(self.admit_refused(run, result));
         }
-        if let Err(refusal) = dry_run(&request, &self.config.provider) {
-            let result = results::refused(&run, None, &refusal.kind, &refusal.message);
+        // The paths, executable and schema were checked off this task.
+        if let Some((kind, message)) = preflight {
+            let result = results::refused(&run, None, &kind, &message);
             return Ok(self.admit_refused(run, result));
         }
 
@@ -121,7 +125,9 @@ impl Core {
                  new worker"
                     .to_string(),
             ))
-        } else if worker.queue.len() >= max {
+        } else if worker.queue.len() >= max
+            && (worker.current.is_some() || !worker.queue.is_empty())
+        {
             Some((
                 "queue_full",
                 format!(
@@ -171,6 +177,8 @@ impl Core {
         let seq = self.next_cursor();
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
+        run.bytes = super::retention::weigh(&result, &run.activity);
+        self.retained_bytes += run.bytes;
         run.result = Some(result);
         self.finished.push_back(id.clone());
         if let Some(worker) = worker.as_ref().and_then(|w| self.workers.get_mut(w)) {
@@ -188,20 +196,23 @@ impl Core {
         }
     }
 
-    /// The response for a run that was queued or started.
+    /// The response for a run that was queued or started. A run that was
+    /// dispatched at once and ended there, such as a follow-up with no session
+    /// to continue, says how it ended.
     fn accepted(&self, run_id: &str) -> StartResponse {
         let run = &self.runs[run_id];
         let worker = run.worker.as_ref().and_then(|w| self.workers.get(w));
         let ahead = (run.state == RunState::Queued)
             .then(|| worker.map(|w| self.ahead_of(w, run_id)))
             .flatten();
+        let finished = run.result.as_ref();
         StartResponse {
             worker: run.worker.clone(),
             run: run_id.to_string(),
             state: run.state,
             ahead,
-            outcome: None,
-            error: None,
+            outcome: finished.map(|r| r.outcome),
+            error: finished.and_then(|r| r.error.clone()),
         }
     }
 

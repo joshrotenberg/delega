@@ -70,6 +70,33 @@ fn context(run: &Run, worker: Option<WorkerRef>, cleanup: Cleanup) -> RunContext
     }
 }
 
+/// Check a result the supervisor built itself. One that fails
+/// `RunResult::validate` is a bug here: it fails a debug build loudly, and in a
+/// release build it is replaced by a `failed` result that says so, so a run
+/// still ends in exactly one valid result.
+fn seal(run: &Run, worker: Option<WorkerRef>, result: RunResult) -> RunResult {
+    match result.validate() {
+        Ok(()) => result,
+        Err(problems) => {
+            let message = problems
+                .iter()
+                .map(Problem::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            debug_assert!(false, "the supervisor built an invalid result: {message}");
+            RunResult::failed(
+                context(run, worker, result.cleanup.clone()),
+                ErrorDetail {
+                    kind: "internal_error".to_string(),
+                    message: format!("the supervisor built an inconsistent result: {message}"),
+                    provider_exit_code: None,
+                },
+                result.text,
+            )
+        }
+    }
+}
+
 /// The run did not go ahead, for a stated reason.
 pub(super) fn refused(
     run: &Run,
@@ -77,7 +104,9 @@ pub(super) fn refused(
     kind: &str,
     message: &str,
 ) -> RunResult {
-    RunResult::refused_before_start(refusal_context(run, worker), kind, message)
+    let result =
+        RunResult::refused_before_start(refusal_context(run, worker.clone()), kind, message);
+    seal(run, worker, result)
 }
 
 /// The request failed validation. `problems` is never empty here.
@@ -92,7 +121,8 @@ pub(super) fn refused_invalid(
 
 /// The run was stopped before its provider started.
 pub(super) fn interrupted_unstarted(run: &Run, worker: Option<WorkerRef>, why: &str) -> RunResult {
-    RunResult::interrupted(context(run, worker, Cleanup::Confirmed), why, "")
+    let result = RunResult::interrupted(context(run, worker.clone(), Cleanup::Confirmed), why, "");
+    seal(run, worker, result)
 }
 
 /// The task that followed the run ended without a result. Whatever it started
@@ -111,15 +141,16 @@ pub(super) fn crashed(
              confirmed it stopped"
         ),
     };
-    RunResult::failed(
-        context(run, worker, cleanup),
+    let result = RunResult::failed(
+        context(run, worker.clone(), cleanup),
         ErrorDetail {
             kind: "internal_error".to_string(),
             message: why.to_string(),
             provider_exit_code: None,
         },
         partial_text,
-    )
+    );
+    seal(run, worker, result)
 }
 
 /// A result that failed `RunResult::validate`, replaced by one that does not.

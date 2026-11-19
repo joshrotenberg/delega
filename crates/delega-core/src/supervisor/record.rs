@@ -70,6 +70,8 @@ pub(super) struct Run {
     /// Told when the run finishes.
     pub settle: Vec<oneshot::Sender<()>>,
     pub result: Option<RunResult>,
+    /// Estimated bytes this run's kept result takes.
+    pub bytes: usize,
     pub finished_seq: Option<u64>,
     pub finished_at: Option<Instant>,
 }
@@ -96,6 +98,7 @@ impl Run {
             in_ready: false,
             settle: Vec::new(),
             result: None,
+            bytes: 0,
             finished_seq: None,
             finished_at: None,
         }
