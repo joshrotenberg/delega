@@ -121,10 +121,7 @@ async fn fifty_runs_across_ten_workers_all_complete_in_order_and_resume_their_se
                 result.text,
                 format!("answered {prompt} sid={}", rig.session())
             );
-            assert_eq!(
-                result.cleanup,
-                delega_core::contract::result::Cleanup::Confirmed
-            );
+            crate::assert_exit_cleanup(&result.cleanup);
             finished_at.push(result.timing.finished_at.clone());
         }
         let mut sorted = finished_at.clone();
