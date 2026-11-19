@@ -139,7 +139,7 @@ pub(crate) async fn list_processes_from(
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
     let result = match tokio::time::timeout(PS_TIMEOUT, read).await {
-        Ok(result) => result.map(|s| parse_rows(&s)),
+        Ok(result) => result.and_then(|s| validate_listing(&s, std::process::id())),
         Err(_) => Err(InspectError::TimedOut),
     };
     if result.is_err() {
@@ -158,19 +158,49 @@ pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
 }
 
 /// Test-only seam for `acceptance/`: when this variable is set in the
-/// environment of the process, its value (a `PATH`-style list, possibly empty)
-/// replaces the places `ps` is looked for, so a harness can make process
-/// inspection unavailable without root and check that cleanup is then reported
-/// as not confirmed. Nothing sets it outside that harness.
-const PS_PROGRAMS_ENV: &str = "DELEGA_TEST_PS_PROGRAMS";
+/// environment of the process, whatever its value, no program is used to list
+/// processes, so inspection is unavailable and cleanup is reported as not
+/// confirmed. It cannot substitute a program, so it can only make the verdict
+/// weaker. Nothing sets it outside that harness.
+const NO_LISTING_ENV: &str = "DELEGA_TEST_NO_PROCESS_LISTING";
 
 fn system_programs() -> Vec<PathBuf> {
-    match std::env::var_os(PS_PROGRAMS_ENV) {
-        Some(list) => std::env::split_paths(&list)
-            .filter(|path| !path.as_os_str().is_empty())
-            .collect(),
-        None => PS_PROGRAMS.iter().map(PathBuf::from).collect(),
+    if std::env::var_os(NO_LISTING_ENV).is_some() {
+        return Vec::new();
     }
+    PS_PROGRAMS.iter().map(PathBuf::from).collect()
+}
+
+/// Parse a process listing and refuse one that cannot be right. A valid
+/// listing is never empty, holds this process (`own_pid`), and has no line
+/// that does not parse. Anything else is a failed inspection, never "nothing
+/// found": a listing that shows no descendants must not confirm cleanup.
+pub(crate) fn validate_listing(
+    stdout: &str,
+    own_pid: u32,
+) -> Result<Vec<ProcessRow>, InspectError> {
+    let lines = stdout.lines().filter(|l| !l.trim().is_empty()).count();
+    let rows = parse_rows(stdout);
+    if rows.is_empty() {
+        return Err(InspectError::Failed(
+            "the process listing held no rows".into(),
+        ));
+    }
+    if rows.len() < lines {
+        return Err(InspectError::Failed(format!(
+            "the process listing had {} lines that could not be parsed",
+            lines - rows.len()
+        )));
+    }
+    if !rows
+        .iter()
+        .any(|row| u32::try_from(row.pid).is_ok_and(|pid| pid == own_pid))
+    {
+        return Err(InspectError::Failed(
+            "the process listing does not contain this process".into(),
+        ));
+    }
+    Ok(rows)
 }
 
 /// Source of process rows; injectable for deterministic tests.
@@ -555,6 +585,50 @@ mod tests {
             let error = error.clone();
             Box::pin(async move { Err(error) })
         })
+    }
+
+    const ROW: &str = "{pid} 1 {pid} S Mon Nov 18 10:00:00 2026\n";
+
+    fn row(pid: u32) -> String {
+        ROW.replace("{pid}", &pid.to_string())
+    }
+
+    #[test]
+    fn an_empty_listing_is_a_failed_inspection_not_nothing_found() {
+        for text in ["", "\n  \n"] {
+            assert!(matches!(
+                validate_listing(text, 10),
+                Err(InspectError::Failed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_listing_without_our_own_process_is_a_failed_inspection() {
+        let text = format!("{}{}", row(1), row(2));
+        match validate_listing(&text, 10) {
+            Err(InspectError::Failed(message)) => assert!(message.contains("this process")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_that_cannot_be_parsed_is_a_failed_inspection() {
+        assert!(matches!(
+            validate_listing("not a process table\n", 10),
+            Err(InspectError::Failed(_))
+        ));
+        let mixed = format!("{}garbage line\n", row(10));
+        match validate_listing(&mixed, 10) {
+            Err(InspectError::Failed(message)) => assert!(message.contains("could not be parsed")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_with_our_process_and_every_line_parsed_is_accepted() {
+        let text = format!("{}{}", row(1), row(10));
+        assert_eq!(validate_listing(&text, 10).map(|r| r.len()), Ok(2));
     }
 
     #[tokio::test]

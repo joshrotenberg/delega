@@ -265,6 +265,7 @@ Behavior:
   it. `--allow-command` for Claude Code is enforced by this executable's own
   hidden `command-guard` subcommand, which Claude Code starts before a `Bash`
   call; it is not part of the public surface.
+- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface.
 - **Scope.** The CLI runs in the foreground only. It does not list or stop runs
   started by another process; supervising several workers is done over MCP.
 
