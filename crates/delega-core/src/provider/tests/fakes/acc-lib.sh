@@ -33,6 +33,10 @@
 #   orphan       a child that starts a setsid grandchild and exits at once
 #   orphan-late  as orphan, but the child lives 1.3 s first
 #   relay        a fork relay (see acc-child.sh)
+#   bare         a `sleep 300` in a session of its own whose command line does
+#                not carry the case directory; only the ledger (and its
+#                command name) identifies it, so a harness that looks for the
+#                directory name in the process table does not find it
 
 ACC_DIR=$(dirname "$0")
 
@@ -54,6 +58,10 @@ acc_start_variant() {
     orphan) acc_spawn sh "$ACC_DIR/acc-child.sh" orphan </dev/null >/dev/null 2>&1 ;;
     orphan-late) acc_spawn sh "$ACC_DIR/acc-child.sh" orphan-late </dev/null >/dev/null 2>&1 ;;
     relay) acc_spawn sh "$ACC_DIR/acc-child.sh" relay </dev/null >/dev/null 2>&1 ;;
+    bare)
+      perl -MPOSIX -e 'POSIX::setsid(); $SIG{INT}="DEFAULT"; exec @ARGV' sleep 300 </dev/null >/dev/null 2>&1 &
+      acc_record bare $!
+      ;;
   esac
 }
 
@@ -68,6 +76,7 @@ acc_wait_ready() {
       ignore) grep -q '^child-ignore ' "$ACC_DIR/pids" 2>/dev/null && return ;;
       setsid | orphan | orphan-late) grep -q '^leaf-setsid ' "$ACC_DIR/pids" 2>/dev/null && return ;;
       relay) [ -e "$ACC_DIR/beat" ] && return ;;
+      bare) sleep 0.2; return ;;
       *) return ;;
     esac
     sleep 0.05
