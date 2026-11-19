@@ -79,12 +79,7 @@ fn version_json_has_name_version_and_schema_version() {
 
 #[test]
 fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
-    for args in [
-        &["run", "--provider", "codex", "-p", "hi"][..],
-        &["mcp"],
-        &["init", "--dry-run"],
-        &["doctor"],
-    ] {
+    for args in [&["mcp"][..], &["init", "--dry-run"], &["doctor"]] {
         let out = delega(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(
@@ -242,7 +237,6 @@ fn conflicting_permission_flags_are_a_usage_error_with_exit_two() {
     assert_eq!(out.status.code(), Some(2));
     let err = text(&out.stderr);
     assert!(err.contains("cannot be used with"), "{err}");
-    assert!(!err.contains("not implemented"), "{err}");
 }
 
 #[test]
@@ -258,14 +252,17 @@ fn malformed_timeout_is_a_usage_error_naming_the_accepted_forms() {
     assert_eq!(out.status.code(), Some(2));
     let err = text(&out.stderr);
     assert!(err.contains("invalid duration"), "{err}");
-    assert!(!err.contains("not implemented"), "{err}");
 }
 
 #[test]
-fn timeout_forms_are_accepted_before_the_command_reports_not_implemented() {
+fn timeout_forms_are_accepted_and_the_request_is_then_refused_for_its_missing_fields() {
     for t in ["90s", "20m", "2h", "45"] {
         let out = delega(&["run", "--timeout", t]);
-        assert!(text(&out.stderr).contains("not implemented yet"), "{t}");
+        assert_eq!(out.status.code(), Some(2), "{t}");
+        let err = text(&out.stderr);
+        assert!(!err.contains("invalid duration"), "{t}: {err}");
+        assert!(err.contains("refused: provider: is required"), "{t}: {err}");
+        assert!(!err.contains("timeout_secs"), "{t}: {err}");
     }
 }
 

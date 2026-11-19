@@ -86,3 +86,10 @@ pub const CLEAN_SWEEPS_PLAIN: u32 = 1;
 /// signalled. A sweep that follows a kill confirms it only if the next one
 /// agrees.
 pub const CLEAN_SWEEPS_AFTER_ACTIVITY: u32 = 2;
+
+/// Most output chunks queued for a stdout tap. A full queue drops chunks, so a
+/// slow tap cannot hold the owner loop.
+pub const TAP_QUEUE_CHUNKS: usize = 256;
+/// How long, after cleanup, the owner waits for a stdout tap to finish what is
+/// queued before it reports and leaves the tap behind.
+pub const TAP_DRAIN_WAIT: Duration = Duration::from_millis(250);

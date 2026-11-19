@@ -1,11 +1,24 @@
-//! `delega run`: run one assignment in the foreground. Not built yet.
+//! `delega run`: run one assignment in the foreground.
+//!
+//! This module holds the command line definition and the order of work. Each
+//! step is a module of its own: [`request`] builds the request from the profile
+//! and the flags, [`execute`] runs it (with [`signals`]), [`output`] prints what
+//! came out and [`log`] is the one writer of standard error. Every failure before a run exists is still
+//! printed as a result, so a caller reads one shape whatever happened.
+
+mod execute;
+mod log;
+mod output;
+mod request;
+mod signals;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgGroup, Parser, ValueEnum};
+use delega_core::provider::{HookCommand, ProviderOptions, dry_run};
 
-use super::OutputFormat;
+use super::{OutputFormat, hook};
 use crate::duration::parse_duration_secs;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -21,11 +34,9 @@ pub enum Effort {
     High,
 }
 
-/// Options from `docs/api.md`. They are parsed and checked now so that the
-/// help text shows the planned surface; nothing uses them yet.
+/// Options from `docs/api.md`.
 #[derive(Debug, Parser)]
 #[command(group(ArgGroup::new("mode").args(["read", "write", "full"])))]
-#[allow(dead_code)]
 pub struct Args {
     /// A request or profile file; explicit options override it
     #[arg(long, value_name = "FILE")]
@@ -33,7 +44,7 @@ pub struct Args {
     /// The provider to run
     #[arg(long, value_enum)]
     provider: Option<Provider>,
-    /// The assignment
+    /// The assignment. Written `--prompt=-text` when it starts with a hyphen
     #[arg(short, long)]
     prompt: Option<String>,
     /// Read the assignment from stdin
@@ -92,6 +103,51 @@ pub struct Args {
     native_args: Vec<String>,
 }
 
-pub fn run(_args: Args) -> ExitCode {
-    super::not_implemented("run")
+pub fn run(args: Args) -> ExitCode {
+    let log = log::Log::start();
+    let code = go(&args, &log);
+    // Bounded: a blocked standard error cannot hold the exit.
+    log.finish();
+    code
+}
+
+fn go(args: &Args, log: &log::Log) -> ExitCode {
+    let format = args.output.unwrap_or(OutputFormat::Text);
+    let request = match request::build(args) {
+        Ok(request) => request,
+        Err(failure) => {
+            if args.progress {
+                log.line("progress: finished: refused");
+            }
+            return output::refuse(format, &failure, log);
+        }
+    };
+    let facts = request::Facts::of(&request);
+    let mut options = ProviderOptions {
+        hook: guard_command(),
+        ..ProviderOptions::default()
+    };
+    if args.dry_run {
+        return match dry_run(&request, &options) {
+            Ok(plan) => output::dry_run(format, &plan, log),
+            Err(refusal) => output::refuse_dry_run(format, &facts, &refusal, log),
+        };
+    }
+    if args.progress {
+        options.progress = Some(log.progress_sink());
+    }
+    let writer_log = log.clone();
+    execute::run(request, options, &facts, log, move |result| {
+        output::print_result(format, &result, &writer_log)
+    })
+}
+
+/// The hook command that runs this executable's command guard, so
+/// `--allow-command` can be enforced for Claude Code. Without a usable path to
+/// this executable no guard is configured, and the result says that exact
+/// command grants were not applied.
+fn guard_command() -> Option<HookCommand> {
+    let exe = std::env::current_exe().ok()?;
+    exe.is_absolute()
+        .then(|| HookCommand::new(exe, [hook::NAME]))
 }

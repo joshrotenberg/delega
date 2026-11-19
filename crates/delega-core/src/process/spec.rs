@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use super::limits::{
@@ -108,6 +110,13 @@ pub struct CaptureSpec {
     pub keep: Keep,
 }
 
+/// A function called with chunks read from the child's standard output, in
+/// order, while the child runs. It runs on a thread of its own and is fed
+/// through a bounded queue: a tap that is slow loses chunks (the report's
+/// warnings count them) and a tap that panics receives nothing more, but
+/// neither delays the run, its time limit or the capture.
+pub type OutputTap = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// A child process to run.
 #[derive(Clone)]
 pub struct ProcessSpec {
@@ -130,6 +139,13 @@ pub struct ProcessSpec {
     pub stdout: CaptureSpec,
     /// Standard error capture.
     pub stderr: CaptureSpec,
+    /// Called with every chunk of standard output as it is read, in addition
+    /// to the capture. Chunks have no line framing.
+    pub stdout_tap: Option<OutputTap>,
+    /// Incremented by one for each chunk the tap was not given because it was
+    /// too slow. Lets the caller report drops, which the report's warnings
+    /// carry only as text.
+    pub stdout_tap_dropped: Option<Arc<AtomicU64>>,
     /// Grace between SIGTERM and SIGKILL.
     pub stop_grace: Duration,
     /// How long output pipes may stay open after the kill.
@@ -172,6 +188,8 @@ impl ProcessSpec {
                 limit: DEFAULT_STDERR_CAPTURE_BYTES,
                 keep: Keep::Tail,
             },
+            stdout_tap: None,
+            stdout_tap_dropped: None,
             stop_grace: DEFAULT_STOP_GRACE,
             drain_bound: DEFAULT_DRAIN_BOUND,
             cleanup_deadline: DEFAULT_CLEANUP_DEADLINE,
@@ -242,6 +260,7 @@ impl std::fmt::Debug for ProcessSpec {
             .field("time_limit", &self.time_limit)
             .field("stdout", &self.stdout)
             .field("stderr", &self.stderr)
+            .field("stdout_tap", &self.stdout_tap.is_some())
             .field("stop_grace", &self.stop_grace)
             .field("drain_bound", &self.drain_bound)
             .field("cleanup_deadline", &self.cleanup_deadline)

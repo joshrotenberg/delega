@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::contract::result::WorkerRef;
 
 use super::hook::HookCommand;
+use super::progress::ProgressSink;
 
 /// Settings for one provider run that are not part of the request.
 ///
@@ -41,6 +42,9 @@ pub struct ProviderOptions {
     pub max_output_bytes: Option<usize>,
     /// Grace between SIGTERM and SIGKILL. Defaults to the process layer's.
     pub stop_grace: Option<Duration>,
+    /// Receives [`ProgressEvent`](super::ProgressEvent)s while the run goes
+    /// on. Without it nothing is reported live.
+    pub progress: Option<ProgressSink>,
 }
 
 impl ProviderOptions {
@@ -71,6 +75,7 @@ impl fmt::Debug for ProviderOptions {
             .field("worker", &self.worker)
             .field("max_output_bytes", &self.max_output_bytes)
             .field("stop_grace", &self.stop_grace)
+            .field("progress", &self.progress.is_some())
             .finish()
     }
 }

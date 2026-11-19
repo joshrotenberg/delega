@@ -15,6 +15,10 @@
 for arg in "$@"; do
   case "$arg" in
     --version)
+      if [ -n "$FAKE_VERSION_SLEEP" ]; then
+        [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/probe-started"
+        sleep "$FAKE_VERSION_SLEEP"
+      fi
       printf '%s\n' "${FAKE_VERSION:-codex-cli 0.99.0}"
       exit 0
       ;;
@@ -216,6 +220,27 @@ case "$mode" in
     init
     printf 'boom token=%s and sk-ant-abcdefghijklmnopqrstuvwx and Bearer abcdefghijklmnop123\n' "$MY_SERVICE_API_TOKEN" >&2
     exit 3
+    ;;
+  chatty)
+    init
+    i=0
+    while [ $i -lt 20000 ]; do
+      emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"i\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"x\"}}"
+      i=$((i+1))
+    done
+    final '"fake final answer"'
+    done_ok
+    ;;
+  chatty-hang)
+    init
+    i=0
+    while [ $i -lt 10000 ]; do
+      emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"i\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"x\"}}"
+      i=$((i+1))
+    done
+    trap '' TERM
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
+    while :; do sleep 1; done
     ;;
   hang)
     init

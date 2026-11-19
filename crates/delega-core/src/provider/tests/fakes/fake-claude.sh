@@ -17,6 +17,12 @@
 #   FAKE_VERSION     the text printed for --version
 
 if [ "$1" = "--version" ]; then
+  # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
+  # caller while the probe runs.
+  if [ -n "$FAKE_VERSION_SLEEP" ]; then
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/probe-started"
+    sleep "$FAKE_VERSION_SLEEP"
+  fi
   printf '%s\n' "${FAKE_VERSION:-2.1.400 (Claude Code)}"
   exit 0
 fi
@@ -230,6 +236,26 @@ case "$mode" in
     init
     printf 'boom token=%s and sk-ant-abcdefghijklmnopqrstuvwx and Bearer abcdefghijklmnop123\n' "$MY_SERVICE_API_TOKEN" >&2
     exit 3
+    ;;
+  chatty)
+    init
+    i=0
+    while [ $i -lt 20000 ]; do
+      emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}"
+      i=$((i+1))
+    done
+    success '"fake final answer"' '[]'
+    ;;
+  chatty-hang)
+    init
+    i=0
+    while [ $i -lt 10000 ]; do
+      emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}"
+      i=$((i+1))
+    done
+    trap '' TERM
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
+    while :; do sleep 1; done
     ;;
   hang)
     init
