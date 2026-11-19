@@ -225,15 +225,27 @@ async fn message_text_has_credentials_removed_and_is_bounded(provider: Provider)
         .env_set
         .push(("MY_SERVICE_API_TOKEN".into(), "tok-value-123456".into()));
     let events = recording(&mut options);
-    run_checked(rig.request(provider, "chatty"), options).await;
+    run_checked(rig.request(provider, "secret-message"), options).await;
     let events = events.lock().expect("lock").clone();
-    let text: String = messages(&events).concat();
-    assert!(!text.contains("tok-value-123456"));
-    assert!(
-        messages(&events)
-            .iter()
-            .all(|t| t.chars().count() <= crate::provider::limits::PROGRESS_TEXT_CHARS + 3)
+    let texts = messages(&events);
+    // The first message held the token value and a key; both are gone and the
+    // text around them is not.
+    let secret = texts
+        .iter()
+        .find(|t| t.starts_with("token="))
+        .expect("the message that held the secret");
+    assert!(!secret.contains("tok-value-123456"));
+    assert!(!secret.contains("sk-ant-"));
+    // Another was 5000 characters and is cut.
+    let long = texts
+        .iter()
+        .find(|t| t.starts_with("xxxx"))
+        .expect("the long message");
+    assert_eq!(
+        long.chars().count(),
+        crate::provider::limits::PROGRESS_TEXT_CHARS + 3
     );
+    rig.assert_nothing_left().await;
 }
 both!(
     message_text_is_redacted_and_bounded,

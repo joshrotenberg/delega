@@ -72,15 +72,18 @@ impl RunHandle {
     }
 
     /// Wait for the result. Cancelling this future drops the handle, which
-    /// interrupts the run.
+    /// interrupts the run: the join handle stays in the handle until the task
+    /// has ended, so a dropped future still leaves `Drop` something to act on.
     pub async fn wait(mut self) -> RunResult {
         if let Some(result) = self.ready.take() {
             return *result;
         }
-        let Some(join) = self.join.take() else {
+        let Some(join) = self.join.as_mut() else {
             return self.abnormal("the result was already taken");
         };
-        match join.await {
+        let joined = join.await;
+        self.join = None;
+        match joined {
             Ok(result) => result,
             Err(error) => {
                 let why = if error.is_panic() {

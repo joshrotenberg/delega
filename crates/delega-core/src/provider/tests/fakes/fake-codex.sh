@@ -111,6 +111,25 @@ case "$mode" in
     final "\"answered $mode sid=$sid\""
     done_ok
     ;;
+  trace:*)
+    init
+    trace_rest=${mode#trace:}
+    trace_dir=${trace_rest%%#*}
+    : > "$trace_dir/run.$$"
+    printf '%s\n' "$(ls "$trace_dir" | grep -c '^run\.')" > "$trace_dir/peak.$$"
+    sleep 0.3
+    rm -f "$trace_dir/run.$$"
+    final "\"answered $mode sid=$sid\""
+    done_ok
+    ;;
+  secret-message)
+    init
+    big=$(head -c 5000 /dev/zero | tr '\0' 'x')
+    emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"s1\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"token=$MY_SERVICE_API_TOKEN key sk-ant-abcdefghijklmnopqrstuvwx\"}}"
+    emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"s2\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"$big\"}}"
+    final '"done"'
+    done_ok
+    ;;
   gate:*)
     init
     gate=${mode#gate:}

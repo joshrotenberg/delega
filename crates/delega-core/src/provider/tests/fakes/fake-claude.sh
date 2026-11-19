@@ -151,6 +151,26 @@ case "$mode" in
     init
     success "\"answered $mode sid=$sid\"" '[]'
     ;;
+  trace:*)
+    # Records how many `trace:` runs with the same directory are alive when it
+    # starts, in `DIR/peak.PID`, so a test can measure concurrency from outside
+    # the code under test. The directory is the text up to the first `#`.
+    init
+    trace_rest=${mode#trace:}
+    trace_dir=${trace_rest%%#*}
+    : > "$trace_dir/run.$$"
+    printf '%s\n' "$(ls "$trace_dir" | grep -c '^run\.')" > "$trace_dir/peak.$$"
+    sleep 0.3
+    rm -f "$trace_dir/run.$$"
+    success "\"answered $mode sid=$sid\"" '[]'
+    ;;
+  secret-message)
+    # Agent messages that hold a secret and an oversize text.
+    init
+    big=$(head -c 5000 /dev/zero | tr '\0' 'x')
+    emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"token=$MY_SERVICE_API_TOKEN key sk-ant-abcdefghijklmnopqrstuvwx\"},{\"type\":\"text\",\"text\":\"$big\"}]}}"
+    success '"done"' '[]'
+    ;;
   gate:*)
     # Runs until the file named after `gate:` exists, then answers as `echo:`.
     # Writes `<file>.started` when it begins, so a test can tell it is running.
