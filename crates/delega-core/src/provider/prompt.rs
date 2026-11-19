@@ -29,6 +29,9 @@ pub(super) struct Assembled {
 
 /// The shape asked of the final answer when `answer_schema` is set.
 fn schema_block(schema: &serde_json::Value) -> String {
+    // Keys in alphabetical order, so the worker is given the same text whichever
+    // way `serde_json` is built (see `canonical`).
+    let schema = crate::canonical::sorted(schema.clone());
     format!(
         "\n\nAnswer format: reply with one JSON value that satisfies this JSON Schema, and \
          nothing else. Do not wrap it in a code fence and do not add commentary.\nJSON Schema: {schema}\n"
@@ -70,5 +73,28 @@ pub(super) fn assemble(request: &Request) -> Assembled {
         system,
         stdin: stdin.into_bytes(),
         notes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::request::{Provider, Request};
+
+    #[test]
+    fn the_answer_schema_in_the_prompt_has_sorted_keys_whatever_order_it_was_given() {
+        let schema: serde_json::Value = serde_json::from_str(
+            r#"{"type":"object","required":["b","a"],"properties":{"z":{"type":"string"},"a":{"type":"integer","minimum":1}}}"#,
+        )
+        .expect("schema");
+        let mut request = Request::new(Provider::Codex, "do it");
+        request.answer_schema = Some(schema);
+        let text = String::from_utf8(assemble(&request).stdin).expect("UTF-8");
+        assert!(
+            text.contains(
+                r#"JSON Schema: {"properties":{"a":{"minimum":1,"type":"integer"},"z":{"type":"string"}},"required":["b","a"],"type":"object"}"#
+            ),
+            "{text}"
+        );
     }
 }

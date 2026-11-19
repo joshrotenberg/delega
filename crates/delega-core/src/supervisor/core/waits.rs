@@ -69,6 +69,15 @@ impl Core {
         if runs.is_empty() && workers.is_empty() {
             return Ok(WaitStart::Ready);
         }
+        // Once shutdown has begun, a wait with a cursor answers at once, with the
+        // states at that moment and a changed flag for each. A call that arrives
+        // as shutdown begins is then released like one that was already waiting,
+        // whatever its cursor. A wait without a cursor still waits for the runs
+        // to settle, which is how a caller follows a shutdown that ran out of its
+        // bound.
+        if after.is_some() && self.mode != super::Mode::Active {
+            return Ok(WaitStart::Ready);
+        }
         let (wake, rx) = oneshot::channel();
         let waiter = Waiter {
             runs,
@@ -125,6 +134,14 @@ impl Core {
             if let Some(waiter) = self.waiters.remove(&id) {
                 let _ = waiter.wake.send(());
             }
+        }
+    }
+
+    /// Fire every registered wait, ready or not. Shutdown does this, so a call
+    /// that waits on a cursor that no run will pass is released with the rest.
+    pub(super) fn wake_all_waiters(&mut self) {
+        for (_, waiter) in self.waiters.drain() {
+            let _ = waiter.wake.send(());
         }
     }
 

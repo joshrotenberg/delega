@@ -31,7 +31,12 @@
 //! - Table cells in a column headed `Request field` start with a request field.
 //!   Spans after "request fields ...:" are request fields.
 //! - In the `delegate` skill, the first column of a table headed `Tool` holds
-//!   MCP tool names.
+//!   MCP tool names, and the second, headed `Arguments`, names only arguments of
+//!   that row's tool. The tools and their arguments are read from the tool
+//!   schemas the server generates (`delega_mcp::tool_schemas`), not from a list
+//!   kept here, and the names in what a tool returns are read from its output
+//!   schema, so a bare word naming a tool, an argument or a field of a result
+//!   must exist there.
 //!
 //! What is not checked: prose without backticks, whether a described behavior
 //! is true, spans that mix several of these shapes (such as `detail: "full"`),
@@ -47,17 +52,12 @@ use delega_core::contract::outcome::Outcome;
 use delega_core::contract::schema::{REQUEST_SCHEMA, RESULT_SCHEMA};
 use serde_json::Value;
 
-/// The MCP tools and the arguments docs/api.md gives them. This moves to the
-/// MCP crate, and is read from there, when the server exists.
-const MCP_TOOLS: [(&str, &[&str]); 7] = [
-    ("start", &["profile"]),
-    ("follow_up", &["worker", "prompt", "timeout_secs"]),
-    ("wait", &["runs", "workers", "timeout_secs", "after"]),
-    ("read", &["run", "worker", "detail", "after"]),
-    ("list", &[]),
-    ("interrupt", &["run", "worker"]),
-    ("close", &["worker"]),
-];
+/// One MCP tool as the server lists it, read from the generated tool schemas
+/// (`delega_mcp::tool_schemas`), not from a list kept here.
+struct ToolInfo {
+    /// The arguments: the properties of the input schema.
+    args: BTreeSet<String>,
+}
 
 /// Bare words a skill may put in code that are not schema properties, enum
 /// values, tools, arguments or command names.
@@ -92,6 +92,8 @@ struct Known {
     request: Value,
     result: Value,
     skills: BTreeSet<String>,
+    /// The MCP tools by name.
+    tools: BTreeMap<String, ToolInfo>,
     /// Every flag on any command, merged: values are the union.
     longs: BTreeMap<String, Flag>,
     shorts: BTreeMap<char, Flag>,
@@ -194,9 +196,17 @@ fn known() -> Known {
     let mut words: BTreeSet<String> = outcomes.clone();
     schema_words(&request, &mut words);
     schema_words(&result, &mut words);
-    for (tool, args) in MCP_TOOLS {
-        words.insert(tool.to_string());
-        words.extend(args.iter().map(|a| a.to_string()));
+    let mut tools = BTreeMap::new();
+    for schema in delega_mcp::tool_schemas() {
+        let args: BTreeSet<String> = schema.input["properties"]
+            .as_object()
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default();
+        words.insert(schema.name.clone());
+        words.extend(args.iter().cloned());
+        // What a tool returns: the names in its result a skill may describe.
+        schema_words(&schema.output, &mut words);
+        tools.insert(schema.name, ToolInfo { args });
     }
     words.extend(OTHER_WORDS.iter().map(|w| w.to_string()));
     for info in cmds.values() {
@@ -224,6 +234,7 @@ fn known() -> Known {
         request,
         result,
         skills,
+        tools,
         longs,
         shorts,
         words,
@@ -337,6 +348,28 @@ fn table_column(text: &str, header: &str, column: usize) -> Vec<String> {
             if let Some(cell) = cells(row).get(column) {
                 out.push(cell.clone());
             }
+            lines.next();
+        }
+    }
+    out
+}
+
+/// The cells of every row of every table whose first two headers are `first`
+/// and `second`.
+fn table_rows(text: &str, first: &str, second: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let header = cells(line);
+        if !line.starts_with('|')
+            || header.first().map(String::as_str) != Some(first)
+            || header.get(1).map(String::as_str) != Some(second)
+        {
+            continue;
+        }
+        lines.next(); // the separator row
+        while let Some(row) = lines.peek().filter(|l| l.starts_with('|')) {
+            out.push(cells(row));
             lines.next();
         }
     }
@@ -683,8 +716,24 @@ fn problems(text: &str, skill: &str, known: &Known) -> Vec<String> {
     if skill == "delegate" {
         for cell in table_column(text, "Tool", 0) {
             for tool in spans_of(&cell) {
-                if !MCP_TOOLS.iter().any(|(name, _)| *name == tool) {
-                    out.push(format!("MCP tool `{tool}` is not one of the seven tools"));
+                if !known.tools.contains_key(&tool) {
+                    out.push(format!("MCP tool `{tool}` is not a tool of this build"));
+                }
+            }
+        }
+        // Each argument named in a tool's row is an argument of that tool.
+        for row in table_rows(text, "Tool", "Arguments") {
+            let Some(tool) = row.first().and_then(|c| spans_of(c).into_iter().next()) else {
+                continue;
+            };
+            let Some(info) = known.tools.get(&tool) else {
+                continue; // reported above
+            };
+            for arg in row.get(1).map(|c| spans_of(c)).unwrap_or_default() {
+                if is_snake(&arg) && !info.args.contains(&arg) {
+                    out.push(format!(
+                        "`{arg}` is not an argument of the MCP tool `{tool}`"
+                    ));
                 }
             }
         }
@@ -721,7 +770,9 @@ fn the_scan_finds_the_things_it_claims_to_check_in_the_real_skills() {
     let delegate = delega_core::skills::find("delegate")
         .expect("delegate")
         .content();
-    assert_eq!(table_column(delegate, "Tool", 0).len(), 7);
+    assert_eq!(table_column(delegate, "Tool", 0).len(), known.tools.len());
+    assert_eq!(known.tools.len(), 7);
+    assert!(table_rows(delegate, "Tool", "Arguments").len() == 7);
     assert!(request_field_lists(delegate).len() >= 10);
 }
 
@@ -884,4 +935,73 @@ fn paths_below_a_free_form_property_are_not_checked() {
         "Read `permissions.nothing.deeper`.",
         "permissions.nothing.deeper",
     );
+}
+
+#[test]
+fn an_argument_the_tool_does_not_have_is_reported() {
+    let table = "| Tool | Arguments | Returns |\n| --- | --- | --- |\n\
+        | `wait` | `runs`, `workers`, `timeout_secs`, `after` | x |\n\
+        | `close` | `worker` | x |\n";
+    assert!(found(table).is_empty(), "{:#?}", found(table));
+    // `wait` has no `worker`, and `close` has no `runs`.
+    let wrong = "| Tool | Arguments | Returns |\n| --- | --- | --- |\n\
+        | `wait` | `worker` | x |\n| `close` | `runs` | x |\n";
+    let all = found(wrong);
+    assert_eq!(all.len(), 2, "{all:#?}");
+    assert!(
+        all.iter()
+            .any(|p| p.contains("`worker`") && p.contains("`wait`"))
+    );
+    assert!(
+        all.iter()
+            .any(|p| p.contains("`runs`") && p.contains("`close`"))
+    );
+    // An argument that exists nowhere is reported twice over: as an unknown
+    // word and as no argument of the tool.
+    let invented = "| Tool | Arguments | Returns |\n| --- | --- | --- |\n\
+        | `read` | `page_size` | x |\n";
+    let all = found(invented);
+    assert!(
+        all.iter().any(|p| p.contains("not an argument")),
+        "{all:#?}"
+    );
+}
+
+#[test]
+fn a_tool_the_server_does_not_offer_is_reported_as_a_bare_word_too() {
+    // `respond` is a later tool: not built, so a skill may not name it.
+    let all = found("Call `respond` to answer.");
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert!(all[0].contains("respond"), "{all:#?}");
+}
+
+#[test]
+fn the_delegate_skill_describes_every_tool_the_server_offers() {
+    let known = known();
+    let delegate = delega_core::skills::find("delegate")
+        .expect("delegate")
+        .content();
+    let described: BTreeSet<String> = table_column(delegate, "Tool", 0)
+        .iter()
+        .flat_map(|cell| spans_of(cell))
+        .collect();
+    let offered: BTreeSet<String> = known.tools.keys().cloned().collect();
+    assert_eq!(described, offered);
+    // Every argument of every tool is named in that tool's row.
+    for row in table_rows(delegate, "Tool", "Arguments") {
+        let tool = spans_of(&row[0]).remove(0);
+        let named: BTreeSet<String> = spans_of(&row[1]).into_iter().collect();
+        let args = &known.tools[&tool].args;
+        // `start` has the request fields, which the row names as a group.
+        let expected: BTreeSet<String> = if tool == "start" {
+            ["profile".to_string()].into()
+        } else {
+            args.clone()
+        };
+        assert!(
+            expected.is_subset(&named),
+            "the row for `{tool}` does not name {:?}",
+            expected.difference(&named).collect::<Vec<_>>()
+        );
+    }
 }

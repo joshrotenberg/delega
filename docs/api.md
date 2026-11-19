@@ -1,9 +1,9 @@
 # The delega API: a proposal
 
 Status: agreed design. The request and result contract, the CLI commands
-`run`, `schema`, `skill` and `version`, the provider layer behind `run` and the
-library `Supervisor` behind the MCP tools ([supervisor.md](supervisor.md)) are
-built; the MCP server, `init` and `doctor` are not. Josh settled
+`run`, `mcp`, `schema`, `skill` and `version`, the provider layer behind `run`,
+the library `Supervisor` ([supervisor.md](supervisor.md)) and the MCP server over
+it are built; `init` and `doctor` are not. Josh settled
 the open questions on 2026-11-18; the decisions and what was deferred are listed
 at the end. Parts marked **Later** are not in the first version.
 
@@ -130,7 +130,7 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 | Command | Purpose |
 | --- | --- |
 | `delega run` | Run one assignment and print the answer, or the result as JSON. |
-| `delega mcp` | Serve the MCP tools over stdio. |
+| `delega mcp` | Serve the MCP tools over stdio, with `-e/--env NAME[=VALUE]` (repeatable) as for `run`. See [MCP](#mcp). |
 | `delega init` | Install the plugin and skill into Claude Code, Codex or both, through the hosts' own commands. `--dry-run` shows what it would do. |
 | `delega schema request\|result` | Print the contracts built into this executable. |
 | `delega skill list\|show NAME` | List the skills built into this executable, or print one. See [Skills](#skills). |
@@ -179,7 +179,14 @@ Behavior:
   `provider_notes` entry that names it, for a passed variable and for one given
   a value. Every result carries one note with the number of variables withheld
   and passed. `--env` is caller-side: a profile file does not carry it, and an
-  `env` or `pass_env` field in one is refused as an unknown field.
+  `env` or `pass_env` field in one is refused as an unknown field. `delega mcp`
+  takes the same flag, parsed the same way and applied to every worker the
+  server starts; the refusals are the same, with the same kinds and messages.
+  `delega mcp` checks every `--env` when it starts: a bad one is written to
+  standard error as `delega mcp: refused: <kind>: <message>`, nothing is served
+  and the status is 2. A name that only one provider's adapter owns (such as
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) is not known to be a problem until a
+  worker for that provider starts, and is refused then, as a refused run.
 - **Building the request.** The profile named by `--request` is read first and
   every flag that was given replaces the matching field; a flag that was not
   given leaves the profile's value. Lists (`--allow-command`, `--add-dir`,
@@ -360,7 +367,11 @@ Rules that hold for every tool:
   creates no worker. A `follow_up` is refused when the worker is closed
   (`worker_closed`), its queue is full, the worker has no session to continue
   (`no_session`, as for an `ephemeral` worker) or the prompt is invalid. An id
-  that names nothing is an error, not a run.
+  that names nothing is an error, not a run, for `follow_up`, `read`,
+  `interrupt` and `close`. `wait` is the exception: it lists ids that name
+  nothing in `unknown` and waits for the others, and a `wait` whose ids all name
+  nothing returns at once with them in `unknown`, not as an error. A `wait`
+  that names no run and no worker, or more than 256 ids, is a tool error.
 - **Cursors** number every finished run and every activity entry in one
   sequence. The `after` argument of `wait` and `read` is that cursor, called
   `after_cursor` in the library. `wait` with a cursor returns when something
@@ -380,6 +391,83 @@ Rules that hold for every tool:
   when it closes.
 - **History is data.** Text a worker returns is never an instruction to the
   caller.
+- **Results.** Every tool returns its result as structured content and as the
+  same JSON in a text block, and has an input schema and an output schema
+  (committed under `schemas/mcp/`, one `<tool>.schema.json` per tool, each
+  holding the tool's `name`, `inputSchema` and `outputSchema`; a test
+  regenerates them with `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-mcp
+  committed_tool_schemas` and fails when they are stale). An argument a tool
+  does not have is rejected. An id that names nothing, a `start` with no
+  `provider` or `prompt`, a profile that cannot be read, a `read` or
+  `interrupt` that gives neither or both of `run` and `worker`, and a `wait` with
+  nothing to wait for are tool errors with a message. A `wait` with an unknown id
+  is not (see above). Everything the supervisor refuses is a run, as above.
+- **`start` arguments.** The request fields, all optional in the schema, and
+  `profile`, the path of a profile file. The profile is read first and every
+  other argument replaces the matching field, with the same code `delega run`
+  uses (`delega_core::profile`): lists replace, `resume` and `ephemeral`
+  exclude each other, a relative path resolves against the server's working
+  directory. A request that has a provider and a prompt but fails the contract
+  (a blank prompt, for example) is a refused run, not a tool error. The input
+  schema states the request schema's ranges and lengths (`timeout_secs`
+  between 1 and 86400, the list limits) from the same refinements, so a value
+  outside them is rejected as an invalid argument before the request is built.
+  There is no per-call environment argument. `follow_up.timeout_secs` has the
+  same range in its schema. `profile` lets the client make the server read a
+  path it can read, which is no more than `cwd` with `permissions.mode: full`
+  already allows; whether a path exists and is a profile can be learned from the
+  error. The error for a file that is not a valid profile gives the path, the
+  kind of error and the line and column, and none of the file's text, field
+  names or values (`delega run` prints the parser's full message, because the
+  file is the caller's own).
+- **Wait.** `timeout_secs` defaults to 30 and is capped by the wait ceiling.
+  `read` takes `text_offset`, a number of characters, to page a long answer;
+  page by run id, because a worker's latest run can change between pages.
+
+### Running the server
+
+`delega mcp` serves one connection on standard input and output, with one
+supervisor. Standard output carries protocol messages and nothing else.
+Diagnostics (a ready line, a signal received, cleanup that could not be
+confirmed) go to standard error through the writer `delega run` uses, which
+never waits on standard error and takes its lock for one line at a time.
+
+- **Provider executables and environment.** `DELEGA_CLAUDE_BIN` and
+  `DELEGA_CODEX_BIN` are honoured as for `run`, and so is the rest that `run`
+  reads for provider options: the command guard is this executable's own
+  `command-guard` subcommand, so `permissions.commands` is enforced for Claude
+  Code, and `DELEGA_TEST_NO_PROCESS_LISTING` reaches the process layer. `run`'s
+  `--progress` has no counterpart: progress is `read`'s activity.
+- **Stopping.** When standard input reaches end of file, or on SIGINT, SIGTERM,
+  SIGHUP or SIGQUIT, the server stops reading, so no new call is accepted. It
+  then calls `Supervisor::shutdown` and waits for it, bounded by the
+  supervisor's own shutdown bound (30 s). Shutdown wakes every `wait` that is
+  blocked, whatever its cursor, and answers each with the current states, so no
+  waiting call is held to the transport's drain limit: a `wait` with a cursor that
+  arrives after shutdown began answers at once. The server then waits for the transport at
+  most 15 s (a 10 s drain and 5 s grace) and gives up on it, because a client
+  that stopped reading standard output blocks the write inside the transport's
+  read loop. Only then does the runtime drop and the process exit. The workers
+  are stopped before that wait, never after it.
+- **A client that stops reading.** If the client keeps the pipe open and stops
+  reading standard output until it is full, the transport cannot read standard
+  input, so end of file on standard input is not noticed and does not stop the
+  workers; a signal does, and the server then exits after the bound above. There
+  is no independent watch for end of file: the transport owns standard input, and
+  a second reader would take bytes from it. A client that does this has stopped
+  using the connection and should signal the server.
+- **Exit status.** 0 after end of input; 130 after a signal, the status `run`
+  gives an interrupted run, for all four signals; 1 when the workers could not
+  be confirmed stopped (a run's cleanup result says so, or a run had not
+  settled) or the supervisor had failed, which wins over 0 and 130, or the
+  transport failed after end of input; each is described on standard error. A
+  transport that had to be given up on after a signal does not change 130. 2
+  when the server could not start. A signal during start-up, before the
+  handlers are installed, takes its default action, and so does SIGKILL, which
+  cannot be handled: the workers of a server killed that way keep running.
+- **Second signal.** As in `run`, a signal that arrives while the workers are
+  being stopped is acknowledged once on standard error and otherwise ignored, so
+  a second Ctrl-C cannot end the server before the workers are stopped.
 
 Two simplifications against the earlier projects. counterpart has two ways to
 add work to a worker, `send_message` and `followup_task`; here there is one,
@@ -405,7 +493,12 @@ There is one source and three doors.
 - **MCP.** The server offers the same catalog through the MCP Skills extension
   (SEP-2640): each skill is discoverable and readable as a resource at
   `skill://delega/<name>/SKILL.md`, with its supporting files beside it. A host
-  without the extension can still read them as ordinary resources.
+  without the extension can still read them as ordinary resources. The bytes
+  are those of `delega skill show NAME`. The catalog holds each skill's
+  `SKILL.md` only, so there are no supporting files to serve yet. The server
+  also serves `delega://identity`, JSON with the name, version, contract schema
+  version, revision, features and the name, URI and SHA-256 digest of each
+  skill; `delega version --output json` prints the same document.
 - **Plugin.** `delega init` installs the same files as a plugin into Claude Code
   and Codex, for hosts that load skills from disk.
 

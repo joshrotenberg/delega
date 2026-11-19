@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -17,8 +18,9 @@ use super::request::{Effort, Provider, Request, Session};
 use super::validate::Problem;
 
 /// The permissions part of a [`PartialRequest`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_permissions)]
 pub struct PartialPermissions {
     /// See [`Permissions::mode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,8 +37,9 @@ pub struct PartialPermissions {
 }
 
 /// The session part of a [`PartialRequest`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_session)]
 pub struct PartialSession {
     /// See [`Session::ephemeral`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,8 +55,9 @@ pub struct PartialSession {
 /// Deserializing accepts a missing `schema_version`, because explicit values
 /// built in code carry none. Use [`PartialRequest::from_profile_json`] for a
 /// file, which requires it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_partial_request)]
 pub struct PartialRequest {
     /// See [`Request::schema_version`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,6 +170,40 @@ impl PartialRequest {
     /// Fill defaults and validate. Returns every problem found, including
     /// a missing `provider` or `prompt`, or the finished [`Request`].
     pub fn into_request(self) -> Result<Request, Vec<Problem>> {
+        let prompt_missing = self.prompt.is_none();
+        let (request, mut problems) = self.assemble();
+        if let Err(found) = request.validate() {
+            // A missing prompt is already reported as "is required".
+            problems.extend(
+                found
+                    .into_iter()
+                    .filter(|p| !(prompt_missing && p.field == "prompt")),
+            );
+        }
+        if problems.is_empty() {
+            Ok(request)
+        } else {
+            Err(problems)
+        }
+    }
+
+    /// Fill defaults without validating the values. Fails only when `provider`
+    /// or `prompt` is missing, because without them there is no request to
+    /// hand on. A caller that passes the result to the supervisor gets a
+    /// `refused` run for any other problem, readable with `read`, instead of an
+    /// error.
+    pub fn into_request_unvalidated(self) -> Result<Request, Vec<Problem>> {
+        let (request, problems) = self.assemble();
+        if problems.is_empty() {
+            Ok(request)
+        } else {
+            Err(problems)
+        }
+    }
+
+    /// The request with every default applied, and a problem for each of
+    /// `provider` and `prompt` that is missing.
+    fn assemble(self) -> (Request, Vec<Problem>) {
         let mut problems = Vec::new();
         if self.provider.is_none() {
             problems.push(Problem::new("provider", "is required"));
@@ -176,7 +214,7 @@ impl PartialRequest {
 
         let mut request = Request::new(
             self.provider.unwrap_or(Provider::Claude),
-            self.prompt.clone().unwrap_or_default(),
+            self.prompt.unwrap_or_default(),
         );
         request.schema_version = self.schema_version.unwrap_or(SCHEMA_VERSION);
         request.cwd = self.cwd;
@@ -206,19 +244,6 @@ impl PartialRequest {
         if let Some(a) = self.native_args {
             request.native_args = a;
         }
-
-        if let Err(found) = request.validate() {
-            // A missing prompt is already reported as "is required".
-            problems.extend(
-                found
-                    .into_iter()
-                    .filter(|p| !(self.prompt.is_none() && p.field == "prompt")),
-            );
-        }
-        if problems.is_empty() {
-            Ok(request)
-        } else {
-            Err(problems)
-        }
+        (request, problems)
     }
 }

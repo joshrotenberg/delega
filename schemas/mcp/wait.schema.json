@@ -1,0 +1,278 @@
+{
+  "name": "wait",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "WaitArgs",
+    "description": "Arguments of `wait`.",
+    "type": "object",
+    "properties": {
+      "runs": {
+        "description": "Run ids. The wait ends when any of them finishes.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "workers": {
+        "description": "Worker ids. The wait ends when the worker's current run finishes.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "timeout_secs": {
+        "description": "How long to wait, in seconds. Default 30, capped by the server's wait\nceiling. A timeout is not an error.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint64",
+        "minimum": 0,
+        "default": null
+      },
+      "after": {
+        "description": "The `cursor` of an earlier `wait` or `read`. With it, the call returns\nat once when something named finished after that cursor.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint64",
+        "minimum": 0,
+        "default": null
+      }
+    },
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "WaitResponse",
+    "description": "The answer to `wait`. A timeout is not an error: `timed_out` is true and\nthe states are current.",
+    "type": "object",
+    "properties": {
+      "cursor": {
+        "description": "Pass this as `after_cursor` on the next call to see only what finishes\nafter this response.",
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "timed_out": {
+        "description": "True when the time passed and nothing named had finished.",
+        "type": "boolean"
+      },
+      "timeout_secs": {
+        "description": "The wait that applied, in seconds, after the ceiling.",
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "runs": {
+        "description": "The runs named, in the order given, minus the unknown ones.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/RunBrief"
+        }
+      },
+      "workers": {
+        "description": "The workers named, in the order given, minus the unknown ones.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/WorkerBrief"
+        }
+      },
+      "unknown": {
+        "description": "Ids that name nothing: wrong, or their results have gone.",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "cursor",
+      "timed_out",
+      "timeout_secs",
+      "runs",
+      "workers",
+      "unknown"
+    ],
+    "$defs": {
+      "RunBrief": {
+        "description": "One run in a `wait` response.",
+        "type": "object",
+        "properties": {
+          "run": {
+            "description": "The run.",
+            "type": "string"
+          },
+          "worker": {
+            "description": "Its worker, if it has one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "Where it is.",
+            "$ref": "#/$defs/RunState"
+          },
+          "outcome": {
+            "description": "How it ended, once finished.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Outcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "changed": {
+            "description": "With `after_cursor`: whether it finished after that cursor.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run",
+          "state"
+        ]
+      },
+      "RunState": {
+        "description": "Where a run is.",
+        "oneOf": [
+          {
+            "description": "Waiting behind another run on its worker, or for a running slot.",
+            "type": "string",
+            "const": "queued"
+          },
+          {
+            "description": "The provider is running.",
+            "type": "string",
+            "const": "running"
+          },
+          {
+            "description": "Ended, with exactly one result.",
+            "type": "string",
+            "const": "finished"
+          }
+        ]
+      },
+      "Outcome": {
+        "description": "How a run ended. Every run ends in exactly one of these.",
+        "oneOf": [
+          {
+            "description": "The provider finished the assignment and returned a final answer.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "The provider or delega hit an error; `error.kind` says which.",
+            "type": "string",
+            "const": "failed"
+          },
+          {
+            "description": "The run's time limit passed.",
+            "type": "string",
+            "const": "timed_out"
+          },
+          {
+            "description": "The caller stopped the run, or went away.",
+            "type": "string",
+            "const": "interrupted"
+          },
+          {
+            "description": "The run did not go ahead: invalid request, a limit, or a denied\npermission that stopped it.",
+            "type": "string",
+            "const": "refused"
+          }
+        ]
+      },
+      "WorkerBrief": {
+        "description": "One worker in a `wait` or `list` response.",
+        "type": "object",
+        "properties": {
+          "worker": {
+            "description": "The worker.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Where it is.",
+            "$ref": "#/$defs/WorkerState"
+          },
+          "current_run": {
+            "description": "Its running run, or the next queued one when nothing is running.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queue_length": {
+            "description": "How many runs wait behind the running one.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "last_run": {
+            "description": "Its latest finished run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_outcome": {
+            "description": "How that run ended.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Outcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "changed": {
+            "description": "With `after_cursor`: whether a run of this worker finished after it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "worker",
+          "state",
+          "queue_length"
+        ]
+      },
+      "WorkerState": {
+        "description": "Where a worker is. Derived from its runs: see the module documentation.",
+        "oneOf": [
+          {
+            "description": "No run is running and at least one waits for a running slot.",
+            "type": "string",
+            "const": "queued"
+          },
+          {
+            "description": "A run is running. More may be queued behind it.",
+            "type": "string",
+            "const": "running"
+          },
+          {
+            "description": "Nothing is running or queued. A follow-up can be given.",
+            "type": "string",
+            "const": "idle"
+          },
+          {
+            "description": "Closed. Final. Its results stay readable for the retention time.",
+            "type": "string",
+            "const": "closed"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,285 @@
+{
+  "name": "list",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ListArgs",
+    "description": "`list` takes no arguments.",
+    "type": "object",
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ListResponse",
+    "description": "The answer to `list`.",
+    "type": "object",
+    "properties": {
+      "cursor": {
+        "description": "The latest cursor.",
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "limits": {
+        "description": "Limits and use.",
+        "$ref": "#/$defs/LimitsView"
+      },
+      "workers": {
+        "description": "Live workers, then closed ones whose results are still kept, oldest\nfirst.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/WorkerView"
+        }
+      }
+    },
+    "required": [
+      "cursor",
+      "limits",
+      "workers"
+    ],
+    "$defs": {
+      "LimitsView": {
+        "description": "The limits in force and what is in use.",
+        "type": "object",
+        "properties": {
+          "max_live_workers": {
+            "description": "Most live workers.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "live_workers": {
+            "description": "Live workers now.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "max_running_runs": {
+            "description": "Most running runs.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "running_runs": {
+            "description": "Running runs now.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "max_queued_per_worker": {
+            "description": "Most queued runs behind one worker.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "retained_results": {
+            "description": "Most finished results kept.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "retained_now": {
+            "description": "Finished results kept now.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "retained_bytes": {
+            "description": "Most bytes of finished results kept, estimated.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "retained_bytes_now": {
+            "description": "Estimated bytes of the results kept now.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "retention_secs": {
+            "description": "How long a finished result stays readable, in seconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "wait_ceiling_secs": {
+            "description": "The longest one wait blocks, in seconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "max_live_workers",
+          "live_workers",
+          "max_running_runs",
+          "running_runs",
+          "max_queued_per_worker",
+          "retained_results",
+          "retained_now",
+          "retained_bytes",
+          "retained_bytes_now",
+          "retention_secs",
+          "wait_ceiling_secs"
+        ]
+      },
+      "WorkerView": {
+        "description": "One worker in `list`.",
+        "type": "object",
+        "properties": {
+          "worker": {
+            "description": "The worker.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Where it is.",
+            "$ref": "#/$defs/WorkerState"
+          },
+          "current_run": {
+            "description": "Its running run, or the next queued one when nothing is running.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queue_length": {
+            "description": "How many runs wait behind the running one.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "last_run": {
+            "description": "Its latest finished run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_outcome": {
+            "description": "How that run ended.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Outcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "changed": {
+            "description": "With `after_cursor`: whether a run of this worker finished after it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The worker's name, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "description": "The provider.",
+            "$ref": "#/$defs/Provider"
+          },
+          "session_id": {
+            "description": "The provider's session id, once a run has reported one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "can_follow_up": {
+            "description": "Whether `follow_up` can continue this worker: it is not closed, was not\nstarted `ephemeral`, and has a session or a run that may still report\none. A worker whose runs ended without reporting a session cannot, and a\nfollow-up to it is refused.",
+            "type": "boolean"
+          },
+          "runs": {
+            "description": "Runs of this worker whose results are kept, plus unfinished ones.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "worker",
+          "state",
+          "queue_length",
+          "provider",
+          "can_follow_up",
+          "runs"
+        ]
+      },
+      "WorkerState": {
+        "description": "Where a worker is. Derived from its runs: see the module documentation.",
+        "oneOf": [
+          {
+            "description": "No run is running and at least one waits for a running slot.",
+            "type": "string",
+            "const": "queued"
+          },
+          {
+            "description": "A run is running. More may be queued behind it.",
+            "type": "string",
+            "const": "running"
+          },
+          {
+            "description": "Nothing is running or queued. A follow-up can be given.",
+            "type": "string",
+            "const": "idle"
+          },
+          {
+            "description": "Closed. Final. Its results stay readable for the retention time.",
+            "type": "string",
+            "const": "closed"
+          }
+        ]
+      },
+      "Outcome": {
+        "description": "How a run ended. Every run ends in exactly one of these.",
+        "oneOf": [
+          {
+            "description": "The provider finished the assignment and returned a final answer.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "The provider or delega hit an error; `error.kind` says which.",
+            "type": "string",
+            "const": "failed"
+          },
+          {
+            "description": "The run's time limit passed.",
+            "type": "string",
+            "const": "timed_out"
+          },
+          {
+            "description": "The caller stopped the run, or went away.",
+            "type": "string",
+            "const": "interrupted"
+          },
+          {
+            "description": "The run did not go ahead: invalid request, a limit, or a denied\npermission that stopped it.",
+            "type": "string",
+            "const": "refused"
+          }
+        ]
+      },
+      "Provider": {
+        "description": "The provider CLI that runs the assignment.",
+        "oneOf": [
+          {
+            "description": "Claude Code.",
+            "type": "string",
+            "const": "claude"
+          },
+          {
+            "description": "Codex CLI.",
+            "type": "string",
+            "const": "codex"
+          }
+        ]
+      }
+    }
+  }
+}

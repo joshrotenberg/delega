@@ -1352,3 +1352,36 @@ fn env_refuses_a_name_delega_sets_itself_instead_of_dropping_it() {
     }
     assert!(!rig.record.join("argv").exists());
 }
+
+/// Whether every object in the value, at any depth, has its keys in
+/// alphabetical order. `serde_json` is built here with `preserve_order` (the
+/// MCP server's `tower-mcp` turns it on), so the order of the parsed value is
+/// the order of the text.
+fn keys_sorted(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<&String> = map.keys().collect();
+            keys.windows(2).all(|w| w[0] < w[1]) && map.values().all(keys_sorted)
+        }
+        serde_json::Value::Array(items) => items.iter().all(keys_sorted),
+        _ => true,
+    }
+}
+
+#[test]
+fn the_dry_run_json_document_has_alphabetical_keys_in_every_build_configuration() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = rig.run(provider, "success", &["--dry-run", "--output", "json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let document: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        assert!(keys_sorted(&document), "{provider}: {document}");
+        // The document is a value built with `json!`, which is where the order
+        // would otherwise depend on the build.
+        let first = text(&out.stdout);
+        assert!(
+            first.find("\"dry_run\"") < first.find("\"schema_version\""),
+            "{first}"
+        );
+    }
+}

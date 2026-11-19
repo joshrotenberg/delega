@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 delega-core = { path = "crates/delega-core" }
+delega-mcp = { path = "crates/delega-mcp" }
 clap = { version = "4.6", features = ["derive"] }
 jsonschema = { version = "0.61", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -23,6 +24,7 @@ sha2 = "0.10"
 tempfile = "3.27"
 tokio = { version = "1.54", features = ["rt", "macros", "process", "io-util", "sync", "time"] }
 tokio-util = "0.7"
+tower-mcp = { version = "=0.27.0", default-features = false, features = ["skills", "schema-validation"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -299,7 +299,7 @@ fn completed(
                 ));
             }
             let mut result = RunResult::completed(ctx, text);
-            result.structured = Some(value);
+            result.structured = Some(crate::canonical::sorted(value));
             result.structured_valid = Some(problem.is_none());
             result
         }
