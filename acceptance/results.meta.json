@@ -1,0 +1,15 @@
+{
+  "delega_version": {
+    "features": [],
+    "name": "delega",
+    "revision": "dfcf10e0b181",
+    "schema_version": 1,
+    "version": "0.1.0-dev"
+  },
+  "harness_commit": "dfcf10e",
+  "jobs": 8,
+  "os": "Darwin 27.2.0 arm64",
+  "repeat": 1,
+  "rows": 152,
+  "wall_secs": 74
+}
