@@ -236,14 +236,8 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
     for dir in &scope.directories {
         allowed.push(format!("Read({})", rule_path(dir, "directory_unusable")?));
     }
-    allowed.push("Glob".to_string());
-    allowed.push("Grep".to_string());
-    notes.push(
-        "Glob and Grep are granted without a path scope; whether Claude Code confines them to the \
-         working directory and permissions.directories is up to the provider and is not enforced \
-         by delega"
-            .to_string(),
-    );
+    // Glob and Grep stay in --tools but are not allow rules: Claude Code then
+    // applies the scoped Read rules above to them.
     if scope.mode == Mode::Write {
         tools.extend(["Edit", "Write"]);
         allowed.push(format!("Edit({})", rule_path(&scope.cwd, "cwd_unusable")?));

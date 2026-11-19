@@ -1,14 +1,16 @@
 //! The environment a provider process receives.
 //!
-//! The policy starts from the parent's environment and removes three groups of
+//! The policy starts from the parent's environment and removes four groups of
 //! variables:
 //!
 //! 1. Variables that belong to the other provider, so a Claude Code worker does
-//!    not see Codex credentials and the reverse. The session markers a Claude
-//!    Code host sets for its own children are removed from a Claude worker too.
-//! 2. Variables named like secrets (see [`is_secret_name`]), except those that
+//!    not see Codex credentials and the reverse.
+//! 2. Variables that describe the calling session (see [`is_calling_session`]),
+//!    for both providers, so a worker does not believe it is the session that
+//!    started it.
+//! 3. Variables named like secrets (see [`is_secret_name`]), except those that
 //!    belong to the provider being run, which it needs to authenticate.
-//! 3. Variables that configure delega itself (`DELEGA_*`).
+//! 4. Variables that configure delega itself (`DELEGA_*`).
 //!
 //! The caller can pass a stripped variable through by name
 //! (`ProviderOptions::env_pass`) and can set variables outright
@@ -103,7 +105,8 @@ fn inherited(provider: Provider, name: &str, pass: &[String]) -> bool {
     if pass.iter().any(|p| p == name) {
         return true;
     }
-    if is_other_providers(provider, name) || name.starts_with("DELEGA_") {
+    if is_other_providers(provider, name) || is_calling_session(name) || name.starts_with("DELEGA_")
+    {
         return false;
     }
     owned_by(provider, name) || !is_secret_name(name)
@@ -119,24 +122,45 @@ pub fn owned_by(provider: Provider, name: &str) -> bool {
     }
 }
 
-/// Whether a variable belongs to the provider that is not being run, or is a
-/// session marker of the host that must not reach a child.
+/// Whether a variable belongs to the provider that is not being run.
 pub fn is_other_providers(provider: Provider, name: &str) -> bool {
     match provider {
         Provider::Codex => {
             name == "CLAUDECODE" || name.starts_with("CLAUDE_") || name.starts_with("ANTHROPIC_")
         }
-        Provider::Claude => {
-            name.starts_with("CODEX_")
-                || name.starts_with("OPENAI_")
-                || matches!(
-                    name,
-                    "CLAUDE_CODE_MESSAGING_SOCKET"
-                        | "CLAUDE_CODE_MESSAGING_TOKEN"
-                        | "CLAUDE_CODE_BRIDGE_SESSION_ID"
-                )
-        }
+        Provider::Claude => name.starts_with("CODEX_") || name.starts_with("OPENAI_"),
     }
+}
+
+/// Names that describe the session that called delega, not how to reach a
+/// provider account. They are withheld from both providers.
+const SESSION_NAMES: [&str; 10] = [
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+];
+
+/// Whether a variable describes the calling session.
+///
+/// A name matches when it is in [`SESSION_NAMES`], or starts with
+/// `CLAUDE_CODE_` and contains `SESSION`, `MESSAGING` or `BRIDGE` (this covers
+/// `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_BRIDGE_SESSION_ID`). Other
+/// `CLAUDE_*` names are configuration (`CLAUDE_CONFIG_DIR`,
+/// `CLAUDE_CODE_OAUTH_TOKEN`) and are not matched. No variable a calling Codex
+/// session sets is known, so none is listed for Codex.
+pub fn is_calling_session(name: &str) -> bool {
+    SESSION_NAMES.contains(&name)
+        || (name.starts_with("CLAUDE_CODE_")
+            && ["SESSION", "MESSAGING", "BRIDGE"]
+                .iter()
+                .any(|part| name.contains(part)))
 }
 
 /// Whether a name looks like it holds a secret or grants access to one.

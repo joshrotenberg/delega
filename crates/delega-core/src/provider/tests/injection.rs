@@ -317,7 +317,6 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
         };
         let mut expected = vec![rule("Read", &cwd)];
         expected.extend(dirs.iter().map(|d| rule("Read", &d.to_string_lossy())));
-        expected.extend(["Glob".to_string(), "Grep".to_string()]);
         if mode == Mode::Write {
             expected.push(rule("Edit", &cwd));
             expected.push(rule("Write", &cwd));

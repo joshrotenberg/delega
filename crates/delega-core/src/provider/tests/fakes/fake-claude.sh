@@ -84,6 +84,16 @@ path_allowed() {
   return $hit
 }
 
+# search_allowed TOOL PATH: Glob or Grep exists and is allowed on PATH, either
+# because the tool is listed as an allow rule (bare, or scoped to a directory
+# covering PATH) or because a scoped Read rule covers PATH. Claude Code applies
+# the Read rules to its read-only search tools, so Grep and Glob need no allow
+# rule of their own.
+search_allowed() {
+  has_tool "$1" || return 1
+  path_allowed "$1" "$2" || path_allowed Read "$2"
+}
+
 # bash_allowed COMMAND: the Bash tool exists, an exact rule (or bare Bash)
 # allows it, and the hook, when settings install one, exits 0.
 bash_allowed() {
@@ -210,6 +220,18 @@ case "$mode" in
       success '"read it"' '[]'
     else
       success '"could not read it"' "[{\"tool_name\":\"Read\",\"tool_use_id\":\"t1\",\"tool_input\":{\"file_path\":\"$target\"}}]"
+    fi
+    ;;
+  tool-grep:*|tool-glob:*)
+    init
+    case "$mode" in
+      tool-grep:*) search_tool=Grep; target=${mode#tool-grep:}; ;;
+      *) search_tool=Glob; target=${mode#tool-glob:} ;;
+    esac
+    if search_allowed "$search_tool" "$target"; then
+      success '"searched it"' '[]'
+    else
+      success '"could not search it"' "[{\"tool_name\":\"$search_tool\",\"tool_use_id\":\"t1\",\"tool_input\":{\"path\":\"$target\"}}]"
     fi
     ;;
   denial-then-work)
