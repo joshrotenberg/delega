@@ -45,22 +45,22 @@ Time to the result in milliseconds, start to exit. `c` is a 2 s time limit, `d` 
 
 | Row | delega | counterpart | due one-shot | due resident |
 | --- | --- | --- | --- | --- |
-| claude-a-plain | 646 | 64 | 27 | 29 |
-| claude-c-plain | 2252 | 2074 | 4004 | 2005 |
-| claude-c-ignore | 3721 | 3593 | 4004 | 2005 |
-| claude-c-stubborn | 3760 | 3572 | 4006 | 8006 |
-| claude-d-plain | 1252 | 1057 | 3004 | 1009 |
-| claude-d-stubborn | 2739 | 2557 | 3004 | 4004 |
-| claude-e-plain | 966 | 787 | 535 | 2547 |
-| claude-e-pipe | 1034 | 568 | 30002 | 30002 |
-| codex-a-plain | 581 | 130 | 28 | 29 |
-| codex-c-plain | 2220 | 2060 | 4004 | 2005 |
-| codex-c-ignore | 3706 | 3581 | 4004 | 2010 |
-| codex-c-stubborn | 3780 | 3560 | 4005 | 8006 |
-| codex-d-plain | 1253 | 1052 | 3004 | 1009 |
-| codex-d-stubborn | 2828 | 2554 | 3004 | 4004 |
-| codex-e-plain | 1165 | 612 | 533 | 534 |
-| codex-e-pipe | 1260 | 631 | 30002 | 30001 |
+| claude-a-plain | 932 | 64 | 27 | 29 |
+| claude-c-plain | 2279 | 2074 | 4004 | 2005 |
+| claude-c-ignore | 3802 | 3593 | 4004 | 2005 |
+| claude-c-stubborn | 3944 | 3572 | 4006 | 8006 |
+| claude-d-plain | 1395 | 1057 | 3004 | 1009 |
+| claude-d-stubborn | 2817 | 2557 | 3004 | 4004 |
+| claude-e-plain | 960 | 787 | 535 | 2547 |
+| claude-e-pipe | 1340 | 568 | 30002 | 30002 |
+| codex-a-plain | 534 | 130 | 28 | 29 |
+| codex-c-plain | 2175 | 2060 | 4004 | 2005 |
+| codex-c-ignore | 3683 | 3581 | 4004 | 2010 |
+| codex-c-stubborn | 3752 | 3560 | 4005 | 8006 |
+| codex-d-plain | 1173 | 1052 | 3004 | 1009 |
+| codex-d-stubborn | 2773 | 2554 | 3004 | 4004 |
+| codex-e-plain | 1067 | 612 | 533 | 534 |
+| codex-e-pipe | 1188 | 631 | 30002 | 30001 |
 
 ## Row by row
 
@@ -68,78 +68,78 @@ Each cell is the outcome (or status), the milliseconds to the result, and what w
 
 | Row | delega | counterpart | due one-shot | due resident |
 | --- | --- | --- | --- | --- |
-| claude-a-plain | completed 646 ms; left none | completed 64 ms; left none | Succeeded 27 ms; left none | Succeeded 29 ms; left none* |
-| claude-b-plain | failed 490 ms; left none | failed 64 ms; left none | Failed 33 ms; left none | Failed 2033 ms; left none |
-| claude-c-plain | timed_out 2252 ms; left none | failed (timeout) 2074 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left none* |
-| claude-c-child | timed_out 2253 ms; left none | failed (timeout) 2053 ms; left none | TimedOut 4004 ms; left none | TimedOut 2006 ms; left none* |
-| claude-c-setsid | timed_out 2179 ms; left none | failed (timeout) 2120 ms; left none | TimedOut 4003 ms; left leaf-setsid | TimedOut 2007 ms; left leaf-setsid |
-| claude-c-ignore | timed_out 3721 ms; left none | failed (timeout) 3593 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left none* |
-| claude-c-stubborn | timed_out 3760 ms; left none | failed (timeout) 3572 ms; left none | TimedOut 4006 ms; left none | Failed 8006 ms; left none* |
-| claude-c-pipe | timed_out 2257 ms; left none | failed (timeout) 2072 ms; left none | TimedOut 4005 ms; left none | TimedOut 2005 ms; left none* |
-| claude-c-orphan | timed_out 2301 ms; left leaf-setsid | failed (timeout) 2056 ms; left leaf-setsid | - | - |
-| claude-c-orphan-late | timed_out 2255 ms; left none | failed (timeout) 2123 ms; left none | - | - |
-| claude-d-plain | interrupted 1252 ms; left none | interrupted 1057 ms; left none | Cancelled 3004 ms; left none | Cancelled 1009 ms; left none* |
-| claude-d-child | interrupted 1302 ms; left none | interrupted 1057 ms; left none | Cancelled 3004 ms; left none | Cancelled 1005 ms; left none* |
-| claude-d-setsid | interrupted 1280 ms; left none | interrupted 1118 ms; left none | Cancelled 3004 ms; left leaf-setsid | Cancelled 1005 ms; left leaf-setsid |
-| claude-d-ignore | interrupted 2664 ms; left none | interrupted 2571 ms; left none | Cancelled 3004 ms; left none | Cancelled 1007 ms; left none* |
-| claude-d-stubborn | interrupted 2739 ms; left none | interrupted 2557 ms; left none | Cancelled 3004 ms; left none | NO RESULT interrupt-error 4004 ms; left none* |
-| claude-d-pipe | interrupted 1227 ms; left none | interrupted 1063 ms; left none | Cancelled 3004 ms; left none | Cancelled 1010 ms; left none* |
-| claude-d-orphan | interrupted 1234 ms; left leaf-setsid | interrupted 1065 ms; left leaf-setsid | - | - |
-| claude-d-orphan-late | interrupted 1253 ms; left none | interrupted 1125 ms; left none | - | - |
-| claude-e-plain | failed 966 ms; left none | failed 787 ms; left none | Failed 535 ms; left none | Failed 2547 ms; left none |
-| claude-e-child | failed 1044 ms; left none | failed 680 ms; left none | Failed 526 ms; left child | Failed 2536 ms; left none |
-| claude-e-setsid | failed 1121 ms; left none | failed 915 ms; left none | Failed 567 ms; left leaf-setsid,mid | Failed 2540 ms; left leaf-setsid |
-| claude-e-ignore | failed 2477 ms; left none | failed 2100 ms; left none | Failed 536 ms; left child-ignore | Failed 2539 ms; left none |
-| claude-e-pipe | failed 1034 ms; left none | failed 568 ms; left none | NO RESULT HANG 30002 ms; left none | NO RESULT HANG 30002 ms; left none* |
-| claude-e-orphan | failed 1161 ms; left leaf-setsid | failed 586 ms; left leaf-setsid | - | - |
-| claude-e-orphan-late | failed 1095 ms; left none | failed 630 ms; left none | - | - |
-| claude-ed-plain | failed 980 ms; left none | failed 588 ms; left none | Failed 521 ms; left none | Failed 2530 ms; left none |
-| claude-ed-pipe | failed 1092 ms; left none | failed 588 ms; left none | TimedOut 5003 ms; left none | Failed 5003 ms; left none |
-| claude-fd-plain | timed_out 3255 ms; left none | failed (timeout) 3054 ms; left none | TimedOut 5005 ms; left none | Failed 9007 ms; left none* |
-| claude-fd-child | timed_out 3177 ms; left none | failed (timeout) 3064 ms; left none | TimedOut 5004 ms; left none | Failed 9007 ms; left none* |
-| claude-fd-setsid | timed_out 3190 ms; left none | failed (timeout) 3122 ms; left none | TimedOut 5004 ms; left leaf-setsid | Failed 9006 ms; left leaf-setsid |
-| claude-fd-ignore | timed_out 4682 ms; left none | failed (timeout) 4566 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
-| claude-fd-stubborn | timed_out 4818 ms; left none | failed (timeout) 4573 ms; left none | TimedOut 5005 ms; left none | Failed 9005 ms; left none* |
-| claude-fd-pipe | timed_out 3220 ms; left none | failed (timeout) 3060 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
-| claude-hd-plain | timed_out 3195 ms; left none | failed (timeout) 3063 ms; left none | TimedOut 5003 ms; left none | Failed 6004 ms; left none |
-| claude-i-plain | failed 547 ms; left none | failed 65 ms; left none | Failed 318 ms; left none | NO RESULT HANG 12002 ms; left none* |
-| claude-id-plain | failed 439 ms; left none | failed 86 ms; left none | Failed 182 ms; left none | TimedOut 3005 ms; left none* |
-| codex-a-plain | completed 581 ms; left none | completed 130 ms; left none | Succeeded 28 ms; left none | Succeeded 29 ms; left none* |
-| codex-b-plain | failed 689 ms; left none | failed 130 ms; left none | Failed 27 ms; left none | Failed 24 ms; left none |
-| codex-c-plain | timed_out 2220 ms; left none | failed (timeout) 2060 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left none* |
-| codex-c-child | timed_out 2216 ms; left none | failed (timeout) 2053 ms; left none | TimedOut 4004 ms; left none | TimedOut 2006 ms; left child |
-| codex-c-setsid | timed_out 2206 ms; left none | failed (timeout) 2137 ms; left none | TimedOut 4004 ms; left leaf-setsid | TimedOut 2005 ms; left leaf-setsid,mid |
-| codex-c-ignore | timed_out 3706 ms; left none | failed (timeout) 3581 ms; left none | TimedOut 4004 ms; left none | TimedOut 2010 ms; left child-ignore |
-| codex-c-stubborn | timed_out 3780 ms; left none | failed (timeout) 3560 ms; left none | TimedOut 4005 ms; left none | Failed 8006 ms; left none* |
-| codex-c-pipe | timed_out 2207 ms; left none | failed (timeout) 2073 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left child |
-| codex-c-orphan | timed_out 2260 ms; left leaf-setsid | failed (timeout) 2056 ms; left leaf-setsid | - | - |
-| codex-c-orphan-late | timed_out 2244 ms; left none | failed (timeout) 2119 ms; left none | - | - |
-| codex-d-plain | interrupted 1253 ms; left none | interrupted 1052 ms; left none | Cancelled 3004 ms; left none | Cancelled 1009 ms; left none* |
-| codex-d-child | interrupted 1264 ms; left none | interrupted 1051 ms; left none | Cancelled 3005 ms; left none | Cancelled 1005 ms; left child |
-| codex-d-setsid | interrupted 1233 ms; left none | interrupted 1112 ms; left none | Cancelled 3004 ms; left leaf-setsid | Cancelled 1005 ms; left leaf-setsid,mid |
-| codex-d-ignore | interrupted 2751 ms; left none | interrupted 2550 ms; left none | Cancelled 3003 ms; left none | Cancelled 1009 ms; left child-ignore |
-| codex-d-stubborn | interrupted 2828 ms; left none | interrupted 2554 ms; left none | Cancelled 3004 ms; left none | NO RESULT interrupt-error 4004 ms; left none* |
-| codex-d-pipe | interrupted 1203 ms; left none | interrupted 1053 ms; left none | Cancelled 3003 ms; left none | Cancelled 1006 ms; left child |
-| codex-d-orphan | interrupted 1190 ms; left leaf-setsid | interrupted 1058 ms; left leaf-setsid | - | - |
-| codex-d-orphan-late | interrupted 1243 ms; left none | interrupted 1106 ms; left none | - | - |
-| codex-e-plain | failed 1165 ms; left none | failed 612 ms; left none | Failed 533 ms; left none | Failed 534 ms; left none |
-| codex-e-child | failed 1288 ms; left none | failed 627 ms; left none | Failed 541 ms; left child | Failed 528 ms; left child |
-| codex-e-setsid | failed 1347 ms; left none | failed 698 ms; left none | Failed 566 ms; left leaf-setsid,mid | Failed 533 ms; left leaf-setsid,mid |
-| codex-e-ignore | failed 2723 ms; left none | failed 2119 ms; left none | Failed 536 ms; left child-ignore | Failed 620 ms; left child-ignore |
-| codex-e-pipe | failed 1260 ms; left none | failed 631 ms; left none | NO RESULT HANG 30002 ms; left none | NO RESULT HANG 30001 ms; left child |
-| codex-e-orphan | failed 1229 ms; left leaf-setsid | failed 654 ms; left leaf-setsid | - | - |
-| codex-e-orphan-late | failed 1437 ms; left none | failed 650 ms; left leaf-setsid | - | - |
-| codex-ed-plain | failed 1217 ms; left none | failed 653 ms; left none | Failed 537 ms; left none | Failed 665 ms; left none |
-| codex-ed-pipe | failed 1233 ms; left none | failed 631 ms; left none | TimedOut 5004 ms; left none | Failed 6504 ms; left child |
-| codex-fd-plain | timed_out 3199 ms; left none | failed (timeout) 3066 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
-| codex-fd-child | timed_out 3212 ms; left none | failed (timeout) 3062 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
-| codex-fd-setsid | timed_out 3224 ms; left none | failed (timeout) 3127 ms; left none | TimedOut 5003 ms; left leaf-setsid | Failed 9006 ms; left leaf-setsid |
-| codex-fd-ignore | timed_out 4711 ms; left none | failed (timeout) 4568 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
-| codex-fd-stubborn | timed_out 4804 ms; left none | failed (timeout) 4565 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
-| codex-fd-pipe | timed_out 3205 ms; left none | failed (timeout) 3077 ms; left none | TimedOut 5003 ms; left none | Failed 9006 ms; left none* |
-| codex-hd-plain | timed_out 3229 ms; left none | failed (timeout) 3069 ms; left none | TimedOut 5004 ms; left none | Failed 9007 ms; left none |
-| codex-i-plain | failed 634 ms; left none | failed 151 ms; left none | Failed 39 ms; left none | NO RESULT HANG 12001 ms; left none* |
-| codex-id-plain | failed 698 ms; left none | failed 220 ms; left none | Failed 86 ms; left none | TimedOut 3009 ms; left none* |
+| claude-a-plain | completed 932 ms; left none | completed 64 ms; left none | Succeeded 27 ms; left none | Succeeded 29 ms; left none* |
+| claude-b-plain | failed 564 ms; left none | failed 64 ms; left none | Failed 33 ms; left none | Failed 2033 ms; left none |
+| claude-c-plain | timed_out 2279 ms; left none | failed (timeout) 2074 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left none* |
+| claude-c-child | timed_out 2384 ms; left none | failed (timeout) 2053 ms; left none | TimedOut 4004 ms; left none | TimedOut 2006 ms; left none* |
+| claude-c-setsid | timed_out 2410 ms; left none | failed (timeout) 2120 ms; left none | TimedOut 4003 ms; left leaf-setsid | TimedOut 2007 ms; left leaf-setsid |
+| claude-c-ignore | timed_out 3802 ms; left none | failed (timeout) 3593 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left none* |
+| claude-c-stubborn | timed_out 3944 ms; left none | failed (timeout) 3572 ms; left none | TimedOut 4006 ms; left none | Failed 8006 ms; left none* |
+| claude-c-pipe | timed_out 2358 ms; left none | failed (timeout) 2072 ms; left none | TimedOut 4005 ms; left none | TimedOut 2005 ms; left none* |
+| claude-c-orphan | timed_out 2343 ms; left leaf-setsid | failed (timeout) 2056 ms; left leaf-setsid | - | - |
+| claude-c-orphan-late | timed_out 2344 ms; left none | failed (timeout) 2123 ms; left none | - | - |
+| claude-d-plain | interrupted 1395 ms; left none | interrupted 1057 ms; left none | Cancelled 3004 ms; left none | Cancelled 1009 ms; left none* |
+| claude-d-child | interrupted 1291 ms; left none | interrupted 1057 ms; left none | Cancelled 3004 ms; left none | Cancelled 1005 ms; left none* |
+| claude-d-setsid | interrupted 1449 ms; left none | interrupted 1118 ms; left none | Cancelled 3004 ms; left leaf-setsid | Cancelled 1005 ms; left leaf-setsid |
+| claude-d-ignore | interrupted 2836 ms; left none | interrupted 2571 ms; left none | Cancelled 3004 ms; left none | Cancelled 1007 ms; left none* |
+| claude-d-stubborn | interrupted 2817 ms; left none | interrupted 2557 ms; left none | Cancelled 3004 ms; left none | NO RESULT interrupt-error 4004 ms; left none* |
+| claude-d-pipe | interrupted 1288 ms; left none | interrupted 1063 ms; left none | Cancelled 3004 ms; left none | Cancelled 1010 ms; left none* |
+| claude-d-orphan | interrupted 1315 ms; left leaf-setsid | interrupted 1065 ms; left leaf-setsid | - | - |
+| claude-d-orphan-late | interrupted 1337 ms; left none | interrupted 1125 ms; left none | - | - |
+| claude-e-plain | failed 960 ms; left none | failed 787 ms; left none | Failed 535 ms; left none | Failed 2547 ms; left none |
+| claude-e-child | failed 1366 ms; left none | failed 680 ms; left none | Failed 526 ms; left child | Failed 2536 ms; left none |
+| claude-e-setsid | failed 1327 ms; left none | failed 915 ms; left none | Failed 567 ms; left leaf-setsid,mid | Failed 2540 ms; left leaf-setsid |
+| claude-e-ignore | failed 2739 ms; left none | failed 2100 ms; left none | Failed 536 ms; left child-ignore | Failed 2539 ms; left none |
+| claude-e-pipe | failed 1340 ms; left none | failed 568 ms; left none | NO RESULT HANG 30002 ms; left none | NO RESULT HANG 30002 ms; left none* |
+| claude-e-orphan | failed 1515 ms; left leaf-setsid | failed 586 ms; left leaf-setsid | - | - |
+| claude-e-orphan-late | failed 1530 ms; left none | failed 630 ms; left none | - | - |
+| claude-ed-plain | failed 1296 ms; left none | failed 588 ms; left none | Failed 521 ms; left none | Failed 2530 ms; left none |
+| claude-ed-pipe | failed 1300 ms; left none | failed 588 ms; left none | TimedOut 5003 ms; left none | Failed 5003 ms; left none |
+| claude-fd-plain | timed_out 3330 ms; left none | failed (timeout) 3054 ms; left none | TimedOut 5005 ms; left none | Failed 9007 ms; left none* |
+| claude-fd-child | timed_out 3317 ms; left none | failed (timeout) 3064 ms; left none | TimedOut 5004 ms; left none | Failed 9007 ms; left none* |
+| claude-fd-setsid | timed_out 3330 ms; left none | failed (timeout) 3122 ms; left none | TimedOut 5004 ms; left leaf-setsid | Failed 9006 ms; left leaf-setsid |
+| claude-fd-ignore | timed_out 4818 ms; left none | failed (timeout) 4566 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
+| claude-fd-stubborn | timed_out 4888 ms; left none | failed (timeout) 4573 ms; left none | TimedOut 5005 ms; left none | Failed 9005 ms; left none* |
+| claude-fd-pipe | timed_out 3293 ms; left none | failed (timeout) 3060 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
+| claude-hd-plain | timed_out 3196 ms; left none | failed (timeout) 3063 ms; left none | TimedOut 5003 ms; left none | Failed 6004 ms; left none |
+| claude-i-plain | failed 489 ms; left none | failed 65 ms; left none | Failed 318 ms; left none | NO RESULT HANG 12002 ms; left none* |
+| claude-id-plain | failed 423 ms; left none | failed 86 ms; left none | Failed 182 ms; left none | TimedOut 3005 ms; left none* |
+| codex-a-plain | completed 534 ms; left none | completed 130 ms; left none | Succeeded 28 ms; left none | Succeeded 29 ms; left none* |
+| codex-b-plain | failed 519 ms; left none | failed 130 ms; left none | Failed 27 ms; left none | Failed 24 ms; left none |
+| codex-c-plain | timed_out 2175 ms; left none | failed (timeout) 2060 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left none* |
+| codex-c-child | timed_out 2160 ms; left none | failed (timeout) 2053 ms; left none | TimedOut 4004 ms; left none | TimedOut 2006 ms; left child |
+| codex-c-setsid | timed_out 2173 ms; left none | failed (timeout) 2137 ms; left none | TimedOut 4004 ms; left leaf-setsid | TimedOut 2005 ms; left leaf-setsid,mid |
+| codex-c-ignore | timed_out 3683 ms; left none | failed (timeout) 3581 ms; left none | TimedOut 4004 ms; left none | TimedOut 2010 ms; left child-ignore |
+| codex-c-stubborn | timed_out 3752 ms; left none | failed (timeout) 3560 ms; left none | TimedOut 4005 ms; left none | Failed 8006 ms; left none* |
+| codex-c-pipe | timed_out 2194 ms; left none | failed (timeout) 2073 ms; left none | TimedOut 4004 ms; left none | TimedOut 2005 ms; left child |
+| codex-c-orphan | timed_out 2180 ms; left leaf-setsid | failed (timeout) 2056 ms; left leaf-setsid | - | - |
+| codex-c-orphan-late | timed_out 2206 ms; left none | failed (timeout) 2119 ms; left none | - | - |
+| codex-d-plain | interrupted 1173 ms; left none | interrupted 1052 ms; left none | Cancelled 3004 ms; left none | Cancelled 1009 ms; left none* |
+| codex-d-child | interrupted 1181 ms; left none | interrupted 1051 ms; left none | Cancelled 3005 ms; left none | Cancelled 1005 ms; left child |
+| codex-d-setsid | interrupted 1148 ms; left none | interrupted 1112 ms; left none | Cancelled 3004 ms; left leaf-setsid | Cancelled 1005 ms; left leaf-setsid,mid |
+| codex-d-ignore | interrupted 2681 ms; left none | interrupted 2550 ms; left none | Cancelled 3003 ms; left none | Cancelled 1009 ms; left child-ignore |
+| codex-d-stubborn | interrupted 2773 ms; left none | interrupted 2554 ms; left none | Cancelled 3004 ms; left none | NO RESULT interrupt-error 4004 ms; left none* |
+| codex-d-pipe | interrupted 1178 ms; left none | interrupted 1053 ms; left none | Cancelled 3003 ms; left none | Cancelled 1006 ms; left child |
+| codex-d-orphan | interrupted 1182 ms; left leaf-setsid | interrupted 1058 ms; left leaf-setsid | - | - |
+| codex-d-orphan-late | interrupted 1218 ms; left none | interrupted 1106 ms; left none | - | - |
+| codex-e-plain | failed 1067 ms; left none | failed 612 ms; left none | Failed 533 ms; left none | Failed 534 ms; left none |
+| codex-e-child | failed 1109 ms; left none | failed 627 ms; left none | Failed 541 ms; left child | Failed 528 ms; left child |
+| codex-e-setsid | failed 1122 ms; left none | failed 698 ms; left none | Failed 566 ms; left leaf-setsid,mid | Failed 533 ms; left leaf-setsid,mid |
+| codex-e-ignore | failed 2670 ms; left none | failed 2119 ms; left none | Failed 536 ms; left child-ignore | Failed 620 ms; left child-ignore |
+| codex-e-pipe | failed 1188 ms; left none | failed 631 ms; left none | NO RESULT HANG 30002 ms; left none | NO RESULT HANG 30001 ms; left child |
+| codex-e-orphan | failed 1314 ms; left leaf-setsid | failed 654 ms; left leaf-setsid | - | - |
+| codex-e-orphan-late | failed 1297 ms; left none | failed 650 ms; left leaf-setsid | - | - |
+| codex-ed-plain | failed 1074 ms; left none | failed 653 ms; left none | Failed 537 ms; left none | Failed 665 ms; left none |
+| codex-ed-pipe | failed 1179 ms; left none | failed 631 ms; left none | TimedOut 5004 ms; left none | Failed 6504 ms; left child |
+| codex-fd-plain | timed_out 3207 ms; left none | failed (timeout) 3066 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
+| codex-fd-child | timed_out 3184 ms; left none | failed (timeout) 3062 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
+| codex-fd-setsid | timed_out 3181 ms; left none | failed (timeout) 3127 ms; left none | TimedOut 5003 ms; left leaf-setsid | Failed 9006 ms; left leaf-setsid |
+| codex-fd-ignore | timed_out 4736 ms; left none | failed (timeout) 4568 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
+| codex-fd-stubborn | timed_out 4777 ms; left none | failed (timeout) 4565 ms; left none | TimedOut 5004 ms; left none | Failed 9006 ms; left none* |
+| codex-fd-pipe | timed_out 3173 ms; left none | failed (timeout) 3077 ms; left none | TimedOut 5003 ms; left none | Failed 9006 ms; left none* |
+| codex-hd-plain | timed_out 3180 ms; left none | failed (timeout) 3069 ms; left none | TimedOut 5004 ms; left none | Failed 9007 ms; left none |
+| codex-i-plain | failed 508 ms; left none | failed 151 ms; left none | Failed 39 ms; left none | NO RESULT HANG 12001 ms; left none* |
+| codex-id-plain | failed 496 ms; left none | failed 220 ms; left none | Failed 86 ms; left none | TimedOut 3009 ms; left none* |
 
 72 rows.
 
