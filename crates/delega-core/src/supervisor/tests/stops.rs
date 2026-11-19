@@ -552,3 +552,55 @@ async fn a_run_stopped_while_stopping_is_asked_again_changes_nothing() {
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
+
+#[tokio::test]
+async fn an_interrupt_that_does_not_settle_within_its_bound_says_so_and_the_run_still_ends() {
+    let rig = Rig::new();
+    let mut config = rig.config(Provider::Claude);
+    config.interrupt_bound = Duration::from_millis(1);
+    let supervisor = Supervisor::new(config);
+    let gate = rig.gate("bounded");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+
+    let response = supervisor
+        .interrupt(Target::Run(started.run.clone()))
+        .await
+        .expect("interrupt");
+    assert!(
+        !response.settled,
+        "stopping a process takes longer than 1 ms"
+    );
+    assert!(response.result.is_none());
+    let result = result_of(&supervisor, &started.run).await;
+    assert_eq!(result.outcome, Outcome::Interrupted);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_shutdown_that_does_not_settle_within_its_bound_names_the_runs_left() {
+    let rig = Rig::new();
+    let mut config = rig.config(Provider::Claude);
+    config.shutdown_bound = Duration::from_millis(1);
+    let supervisor = Supervisor::new(config);
+    let gate = rig.gate("bounded");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+
+    let report = supervisor.shutdown().await;
+    assert_eq!(report.runs_stopped, 1);
+    assert_eq!(report.unsettled, std::slice::from_ref(&started.run));
+    // The stop was asked for and goes on; the run still ends interrupted.
+    assert_eq!(
+        result_of(&supervisor, &started.run).await.outcome,
+        Outcome::Interrupted
+    );
+    rig.assert_nothing_left().await;
+}
