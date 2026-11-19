@@ -371,16 +371,24 @@ pub fn assert_stop_cleanup(result: &RunResult, what: &str) {
 /// listing and for nothing else: the result document on standard output when
 /// there is one, otherwise the exact line text mode prints on standard error.
 fn listing_was_late(out: &Output) -> bool {
-    use delega_core::process::{LATE_LISTING_REASON, is_late_listing_only};
+    use delega_core::contract::result::Cleanup;
+    use delega_core::process::is_late_listing_only;
     if let Ok(result) = serde_json::from_slice::<RunResult>(&out.stdout) {
         return is_late_listing_only(&result.cleanup);
     }
-    let line = |reason: &str| {
-        format!("delega run: cleanup not confirmed: {reason} (pids [], process groups [])")
-    };
-    let once = line(LATE_LISTING_REASON);
-    let twice = line(&format!("{LATE_LISTING_REASON}; {LATE_LISTING_REASON}"));
-    text(&out.stderr).lines().any(|l| l == once || l == twice)
+    // Text mode prints the reason with no pids and no process groups; the
+    // reason may be the late listing any number of times, as in the document.
+    text(&out.stderr).lines().any(|l| {
+        l.strip_prefix("delega run: cleanup not confirmed: ")
+            .and_then(|rest| rest.strip_suffix(" (pids [], process groups [])"))
+            .is_some_and(|reason| {
+                is_late_listing_only(&Cleanup::Unconfirmed {
+                    pids: Vec::new(),
+                    process_groups: Vec::new(),
+                    reason: reason.to_owned(),
+                })
+            })
+    })
 }
 
 pub fn text(bytes: &[u8]) -> String {
