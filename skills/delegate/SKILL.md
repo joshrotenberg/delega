@@ -62,8 +62,12 @@ stated (Codex `read` and `write` cannot confine reads or commands); the run is
 `refused` with `permissions_not_enforceable`, naming each part. Without it, the
 run goes ahead and `provider_notes` says what is wider than requested.
 
-The environment a worker receives is fixed by whoever started the server. There
-is no argument for it.
+The environment a worker receives is fixed by whoever started the server, with
+`--env` and the user's configuration file. There is no argument for it. The same
+file can give the server lower limits and give `start` a provider, a model, an
+effort, a time limit and a permission mode to use when the call names none; a
+profile and the arguments of the call replace them. The server reads the file
+once, when it starts, and refuses to start on a file it cannot use.
 
 Do not point several `write` workers at the same `cwd`; their edits can collide.
 Give each its own working directory.
@@ -138,7 +142,8 @@ A call that cannot go ahead is not always an error.
   others are still waited for. If every id is unknown, it returns at once with
   them all in `unknown`. Check `unknown` before you trust a quiet `wait`.
 
-`list` reports the limits on live workers and running runs. Check it before
+`list` reports the limits on live workers and running runs, as the server runs
+with them, which the user's configuration file may have lowered. Check it before
 starting many workers. A run beyond the running limit is not refused: it stays
 `queued` until a slot frees.
 
