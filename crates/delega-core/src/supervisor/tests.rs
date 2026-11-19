@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -258,19 +258,20 @@ fn the_activity_ring_drops_the_oldest_and_counts_them() {
 fn no_activity_entry_appears_at_or_below_a_cursor_already_returned() {
     let cursor = Arc::new(AtomicU64::new(0));
     let watched = Arc::new(Activity::default());
-    let stop = Arc::new(AtomicBool::new(false));
+    let live = Arc::new(AtomicUsize::new(4));
     // Several threads number entries from the one shared counter, as the runs
-    // of a supervisor do, and one of them writes the buffer that is read.
+    // of a supervisor do, and one of them writes the buffer that is read. Each
+    // writes a fixed number and stops, so the test's CPU use is bounded.
     let writers: Vec<_> = (0..4)
         .map(|n| {
-            let (cursor, stop) = (cursor.clone(), stop.clone());
+            let (cursor, live) = (cursor.clone(), live.clone());
             let own = if n == 0 {
                 watched.clone()
             } else {
                 Arc::new(Activity::default())
             };
             std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                for _ in 0..30_000 {
                     own.record(
                         ProgressEvent::Provider {
                             kind: "assistant".to_string(),
@@ -279,12 +280,13 @@ fn no_activity_entry_appears_at_or_below_a_cursor_already_returned() {
                         &cursor,
                     );
                 }
+                live.fetch_sub(1, Ordering::SeqCst);
             })
         })
         .collect();
 
     let mut previous: Option<(u64, HashSet<u64>)> = None;
-    for _ in 0..20_000 {
+    while live.load(Ordering::SeqCst) > 0 {
         // What `read` does: take the cursor, then copy the buffer.
         let returned = cursor.load(Ordering::SeqCst);
         let seen: HashSet<u64> = watched
@@ -303,7 +305,6 @@ fn no_activity_entry_appears_at_or_below_a_cursor_already_returned() {
         }
         previous = Some((returned, seen));
     }
-    stop.store(true, Ordering::Relaxed);
     for writer in writers {
         writer.join().expect("writer thread");
     }
