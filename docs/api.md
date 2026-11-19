@@ -140,13 +140,33 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 `delega run` options: `--request FILE`, `--provider`, `-p/--prompt`, `--stdin`,
 `-C/--cwd`, `--name`, `--model`, `--effort`, `--timeout`, `--read`, `--write`,
 `--full`, `--allow-command CMD` (repeatable), `--add-dir DIR` (repeatable),
-`--schema FILE`, `--resume ID`, `--ephemeral`, `--output text|json`,
-`--dry-run`, and provider options after `--`.
+`-e/--env NAME[=VALUE]` (repeatable), `--schema FILE`, `--resume ID`, `--ephemeral`,
+`--output text|json`, `--dry-run`, and provider options after `--`.
 
 Behavior:
 
 - **Timeout.** `--timeout` accepts `90s`, `20m`, `2h` or a plain number of
   seconds, and the CLI converts it to the request's `timeout_secs`.
+- **Environment.** A worker does not inherit the caller's environment. It
+  receives a fixed base (the user, shell, locale, temporary and base directory
+  variables), proxy and certificate variables, and the provider's own
+  variables, and nothing else; the lists are in
+  [providers.md](providers.md#environment-policy). `--env NAME` (short `-e`)
+  passes the caller's value of one more variable; `--env NAME=VALUE` sets it to
+  VALUE, which may be empty and may contain `=`. Repeat the flag for more.
+  Prefer the `NAME` form for secrets, because a value on the command line is
+  visible in the process table and in shell history. A `NAME` that is not set
+  in the caller's environment is ignored. A name that is not valid (letters,
+  digits and underscore, not starting with a digit), a calling-session variable,
+  any `DELEGA_*` variable and a name delega itself sets for the provider (such
+  as `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) are refused before the run starts, in either form,
+  with error kind `invalid_env_name` or `forbidden_env_name`; the message gives
+  the position of an invalid name and never repeats it, so a value is not
+  echoed. A variable whose name looks like a secret is allowed and adds a
+  `provider_notes` entry that names it, for a passed variable and for one given
+  a value. Every result carries one note with the number of variables withheld
+  and passed. `--env` is caller-side: a profile file does not carry it, and an
+  `env` or `pass_env` field in one is refused as an unknown field.
 - **Building the request.** The profile named by `--request` is read first and
   every flag that was given replaces the matching field; a flag that was not
   given leaves the profile's value. Lists (`--allow-command`, `--add-dir`,
@@ -238,10 +258,14 @@ Behavior:
   executable, arguments, working directory and applied permissions without
   starting anything, not even a version probe. Text output is a readable list.
   JSON output is `{"schema_version": 1, "dry_run": {...}}` where the object is
-  the provider layer's `DryRun`: provider, program, args, `env_names`, cwd,
-  `time_limit_secs`, `stdin_bytes`, the permission `mapping`, `notes` and
-  `before_start`. It lists environment variable names, never values, and not
-  the assignment, instructions or settings text, which are replaced by their
+  the provider layer's `DryRun`: provider, program, args, `env_names`, `env`,
+  cwd, `time_limit_secs`, `stdin_bytes`, the permission `mapping`, `notes` and
+  `before_start`. `env` groups the names that would be passed by reason
+  (`base`, `network`, `provider`, `named`, `set_by_caller`, `set_by_delega`),
+  lists names given as `--env NAME` that are not set (`named_not_set`) and gives only the count of
+  the caller's variables that are withheld (`withheld_count`); text output
+  prints the same groups. It lists environment variable names, never values,
+  never the names of withheld variables, and not the assignment, instructions or settings text, which are replaced by their
   size. A request that would be refused prints the refusal as for a run (a
   `refused` result in JSON, a line on standard error in text) and exits 2.
   A dry run exits 0 otherwise.

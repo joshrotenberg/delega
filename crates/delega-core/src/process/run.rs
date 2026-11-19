@@ -10,12 +10,15 @@ use std::time::{Duration, SystemTime};
 use futures_util::FutureExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use crate::contract::result::Cleanup;
 
 use super::capture::{Bounded, Captured};
-use super::limits::{FAR_FUTURE, FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
+use super::handle::Stop;
+use super::limits::{
+    EXIT_LISTING_BUDGET, FAR_FUTURE, FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_READ_CHUNK,
+    STOP_LISTING_BUDGET,
+};
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
@@ -61,7 +64,7 @@ struct Driven {
 /// child's group and to the descendants seen at the latest scan.
 pub(super) async fn run_owned(
     spec: ProcessSpec,
-    stop: CancellationToken,
+    stop: Stop,
     registry: Arc<Registry>,
 ) -> ProcessReport {
     let started_wall = SystemTime::now();
@@ -139,7 +142,7 @@ pub(super) async fn run_owned(
 async fn drive(
     owner: &mut OwnedProcess,
     spec: &ProcessSpec,
-    stop: &CancellationToken,
+    stop: &Stop,
     shared: &Arc<Shared>,
     started: Instant,
     cleanup_deadline: Duration,
@@ -198,19 +201,26 @@ async fn drive(
     let mut term_at: Option<Instant> = None;
     let mut drain_deadline: Option<Instant> = None;
     let mut watch_failed = false;
+    // The listing that must precede the first signal after a natural exit. It
+    // runs beside the reads so a wait for it never stalls the output.
+    let mut exit_listing: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        None;
 
     loop {
         if exited && stdout.is_none() && stderr.is_none() {
             break;
         }
         tokio::select! {
-            _ = stop.cancelled(), if !stop_seen => {
+            _ = stop.stop.cancelled(), if !stop_seen => {
                 stop_seen = true;
                 if !exited && term_at.is_none() && !shared.leader_has_exited() {
-                    shared.before_stop().await;
+                    let listed = shared.before_stop(STOP_LISTING_BUDGET, &stop.hurry).await;
                     // The child may have exited while the scan ran. Then it
                     // ended on its own and is reported as it exited.
                     if !shared.leader_has_exited() {
+                        if !listed {
+                            shared.note_listing_missed();
+                        }
                         ending = Some(Ending::Interrupted);
                         term_at = Some(Instant::now());
                         shared.terminate().await;
@@ -220,8 +230,11 @@ async fn drive(
             _ = tokio::time::sleep_until(limit_at), if !limit_seen && !exited => {
                 limit_seen = true;
                 if term_at.is_none() && !shared.leader_has_exited() {
-                    shared.before_stop().await;
+                    let listed = shared.before_stop(STOP_LISTING_BUDGET, &stop.hurry).await;
                     if !shared.leader_has_exited() {
+                        if !listed {
+                            shared.note_listing_missed();
+                        }
                         ending = Some(Ending::TimedOut { limit: spec.time_limit });
                         term_at = Some(Instant::now());
                         shared.terminate().await;
@@ -241,11 +254,25 @@ async fn drive(
                     shared.warn("Leader exit observation failed".into());
                 }
                 // A natural exit begins cleanup of the rest of the group
-                // without changing how the run is reported.
+                // without changing how the run is reported. One listing comes
+                // first: the TERM that follows can end a member that has a
+                // descendant in a session of its own, and that descendant is
+                // then orphaned and cannot be told from any other process.
                 if term_at.is_none() {
-                    term_at = Some(Instant::now());
-                    shared.terminate().await;
+                    let listing = shared.clone();
+                    let hurry = stop.hurry.clone();
+                    exit_listing = Some(Box::pin(async move {
+                        if !listing.before_stop(EXIT_LISTING_BUDGET, &hurry).await {
+                            listing.note_listing_missed();
+                        }
+                    }));
                 }
+            },
+            _ = async { exit_listing.as_mut().expect("guarded").await },
+                if exit_listing.is_some() => {
+                exit_listing = None;
+                term_at = Some(Instant::now());
+                shared.terminate().await;
             },
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
                 if stdout.is_some() => match n {
@@ -277,6 +304,12 @@ async fn drive(
                 break;
             },
         }
+    }
+    if let Some(listing) = exit_listing.take() {
+        // The pipes closed before the listing finished; the signals still wait.
+        listing.await;
+        term_at = Some(Instant::now());
+        shared.terminate().await;
     }
     if !exited {
         owner.exit_rx = Some(exit_rx);

@@ -195,9 +195,26 @@ fn dry_run_text(plan: &DryRun) -> String {
     line(format!("working directory: {}", plan.cwd));
     line(format!("time limit: {} s", plan.time_limit_secs));
     line(format!("standard input: {} bytes", plan.stdin_bytes));
+    line("environment variable names:".to_string());
+    for (reason, names) in [
+        ("base", &plan.env.base),
+        ("network", &plan.env.network),
+        ("provider", &plan.env.provider),
+        ("named by the caller", &plan.env.named),
+        ("set by the caller", &plan.env.set_by_caller),
+        ("set by delega", &plan.env.set_by_delega),
+    ] {
+        line(format!("  {reason}: {}", names.join(", ")));
+    }
+    if !plan.env.named_not_set.is_empty() {
+        line(format!(
+            "  named but not set: {}",
+            plan.env.named_not_set.join(", ")
+        ));
+    }
     line(format!(
-        "environment variable names: {}",
-        plan.env_names.join(", ")
+        "  withheld from the caller's environment: {} (names not shown)",
+        plan.env.withheld_count
     ));
     line(format!(
         "permissions: mode {}",

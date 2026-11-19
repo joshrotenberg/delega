@@ -23,11 +23,23 @@ pub const DEFAULT_STDERR_CAPTURE_BYTES: usize = 256 * 1024;
 
 /// Interval between descendant scans while the child runs.
 pub const CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
-/// How long a stop waits for one fresh descendant scan before signalling.
-/// One `ps` run took 18 to 54 ms when measured on macOS, so 25 ms missed on
-/// almost every stop; 150 ms covers that with margin and delays a stop by at
-/// most this much.
-pub const PRE_STOP_CAPTURE_BUDGET: Duration = Duration::from_millis(150);
+/// How long the first signal after a natural exit of the child waits for one
+/// descendant listing taken after the exit. The leader is gone, so nothing is
+/// delayed for anyone. The listing is the only one that can see a member of the
+/// session alive together with a descendant that left it, so a signal sent
+/// without it can orphan that descendant, and the verdict then cannot be
+/// `Confirmed`. The scan in progress at the exit began before it and cannot
+/// stand in, so up to two runs of `ps`, each bounded by `PS_TIMEOUT`, may follow
+/// one another. One run took 18 to 54 ms when measured on macOS and several
+/// hundred ms with fifty runs at once.
+pub const EXIT_LISTING_BUDGET: Duration =
+    Duration::from_millis(2 * PS_TIMEOUT.as_millis() as u64 + 100);
+/// How long a requested stop (an interrupt or the time limit) waits for that
+/// listing before it signals anyway. A caller waits for the stop, so the wait
+/// is short; a listing that is not done by then is a missed one and the verdict
+/// is `Unconfirmed`. A second interrupt ends the wait at once, and dropping the
+/// handle does not wait at all.
+pub const STOP_LISTING_BUDGET: Duration = Duration::from_millis(500);
 /// Poll interval while a stop waits for that scan.
 pub const PRE_STOP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
