@@ -226,9 +226,14 @@ impl Supervisor {
         // A shutdown that began while this start was being checked released it.
         // Answer here: a `Start` sent now could reach the supervisor's task
         // before the `Shutdown` that `shutdown` sends after closing the checks,
-        // and the run would be started only to be stopped.
+        // and the run would be started only to be stopped. A start that read
+        // "not closed" just before the close may still be admitted; it finished
+        // its check before the shutdown began, and the shutdown stops it.
         if self.shared.preflight.is_closed() {
-            return Err(Error::ShutDown);
+            return Err(match self.shared.failure() {
+                Some(why) => Error::Failed(why),
+                None => Error::ShutDown,
+            });
         }
         self.call(|reply| Command::Start {
             request: Box::new(request),

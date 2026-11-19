@@ -119,7 +119,7 @@ and its late result is discarded when the filesystem answers. Because a hung
 check keeps its thread, the number of outstanding checks is capped (16, see
 [Limits and defaults](#limits-and-defaults)); a `start` beyond the cap
 waits for a slot within the same preflight bound and is refused `preflight_timeout`
-if none frees; `shutdown` or a drop releases a waiting start with `Error::ShutDown`.
+if none frees; `shutdown` releases a waiting start with `Error::ShutDown` (`Error::Failed` if the supervisor's task had failed).
 If any step fails the
 request is still a run: the response is `finished`, the outcome is `refused`, the
 error says why, and `read` returns the result. **A refused start creates no
