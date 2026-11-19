@@ -25,6 +25,13 @@ use crate::procs;
 /// Prefix of every case marker. `--sweep` looks for it.
 pub const MARKER_PREFIX: &str = "accmk-";
 
+/// The marker of case `n` of run `run_id`. It ends in `/`, the separator that
+/// follows it in every path it appears in, so no marker is contained in
+/// another (`accmk-7-1/` is not in `accmk-7-10/`).
+pub fn case_marker(run_id: &str, n: u64) -> String {
+    format!("{MARKER_PREFIX}{run_id}-{n}/")
+}
+
 /// A case that has not ended this long after it started is a hang.
 const HARD_LIMIT: Duration = Duration::from_secs(30);
 /// How long after `delega` exits the harness waits before it measures what is
@@ -42,6 +49,11 @@ pub struct Context {
 }
 
 impl Context {
+    /// What every case marker of this run starts with.
+    pub fn run_marker(&self) -> String {
+        format!("{MARKER_PREFIX}{}-", self.run_id)
+    }
+
     pub fn new(delega: PathBuf, base: PathBuf) -> Self {
         let run_id = format!(
             "{}{}",
@@ -80,6 +92,9 @@ pub struct Measured {
     pub error_kind: Option<String>,
     pub cleanup_confirmed: Option<bool>,
     pub cleanup_reason: Option<String>,
+    pub cleanup_pids: Vec<u32>,
+    pub cleanup_groups: Vec<u32>,
+    pub provider_pid: Option<i32>,
     pub survivors_at_exit: Vec<String>,
     pub survivors: Vec<String>,
     pub honest: Option<bool>,
@@ -91,6 +106,8 @@ pub struct Measured {
     pub elapsed_ms: Option<u64>,
     pub expected_outcome: String,
     pub expected_exit: Exit,
+    pub expected_confirmed: Option<bool>,
+    pub expected_survivors: Vec<String>,
     pub expected_leak: LeakClass,
     pub expected_reason: Option<String>,
     pub verdict: String,
@@ -128,8 +145,8 @@ impl Fixture {
             .prefix("dacc-")
             .tempdir_in(&ctx.base)?;
         let top = std::fs::canonicalize(root.path())?;
-        let marker = format!("{MARKER_PREFIX}{}-{n}", ctx.run_id);
-        let dir = top.join(&marker);
+        let marker = case_marker(&ctx.run_id, n);
+        let dir = top.join(marker.trim_end_matches('/'));
         let work = top.join("work");
         let home = top.join("home");
         let record = top.join("record");
@@ -190,6 +207,10 @@ impl Fixture {
             // Its own process group: a signal the harness's terminal sends
             // never reaches it, and the harness never signals its own group.
             .process_group(0);
+        if case.case.ps_unavailable {
+            // Test-only seam: no place to look for `ps`.
+            command.env("DELEGA_TEST_PS_PROGRAMS", "");
+        }
         command
     }
 }
@@ -255,6 +276,9 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         error_kind: None,
         cleanup_confirmed: None,
         cleanup_reason: None,
+        cleanup_pids: Vec::new(),
+        cleanup_groups: Vec::new(),
+        provider_pid: None,
         survivors_at_exit: Vec::new(),
         survivors: Vec::new(),
         honest: None,
@@ -263,6 +287,13 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         elapsed_ms: None,
         expected_outcome: case.expect.outcome.to_string(),
         expected_exit: case.expect.exit,
+        expected_confirmed: case.expect.confirmed,
+        expected_survivors: case
+            .expect
+            .survivors
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
         expected_leak: case.expect.leak,
         expected_reason: case.expect.reason.map(str::to_string),
         verdict: String::new(),
@@ -373,6 +404,10 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
 
     read_stdout(&mut m, &stdout_bytes, case.expect.docs);
 
+    m.provider_pid = procs::ledger(&fixture.dir)
+        .into_iter()
+        .find(|(role, _)| role == "provider")
+        .map(|(_, pid)| pid);
     // Survivors, measured by marker and heartbeat, whatever delega said.
     let except = [delega_pid];
     let at_exit = procs::survivors_sampled(&fixture.marker, &fixture.dir, &except, 3);
@@ -453,8 +488,14 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
             m.error_kind = result.error.as_ref().map(|e| e.kind.clone());
             match &result.cleanup {
                 Cleanup::Confirmed => m.cleanup_confirmed = Some(true),
-                Cleanup::Unconfirmed { reason, .. } => {
+                Cleanup::Unconfirmed {
+                    reason,
+                    pids,
+                    process_groups,
+                } => {
                     m.cleanup_confirmed = Some(false);
+                    m.cleanup_pids.clone_from(pids);
+                    m.cleanup_groups.clone_from(process_groups);
                     m.cleanup_reason = Some(reason.chars().take(300).collect());
                 }
             }
@@ -464,6 +505,14 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
 }
 
 /// Compare the measurement with the expectation and set the verdict.
+///
+/// Anything but criterion 2 that differs from the expectation is a `fail`: the
+/// outcome, the exit status, the document on standard output, the cleanup
+/// verdict (`confirmed`, and the reason when it is not) and a hang. Criterion 2
+/// is judged on the survivors: they must be exactly the roles the row lists
+/// (none, unless it is an expected failure or the report says cleanup was not
+/// confirmed). A row whose expected survivors are absent has closed its gap
+/// (`unexpected_pass`); one with any other survivor fails.
 fn judge(m: &mut Measured, case: &Case) {
     let expect = &case.expect;
     let mut problems = std::mem::take(&mut m.problems);
@@ -492,12 +541,23 @@ fn judge(m: &mut Measured, case: &Case) {
                 ));
             } else if m.result_valid != Some(true) {
                 problems.push("the document is not a valid RunResult".to_string());
-            } else if m.outcome.as_deref() != Some(expect.outcome) {
-                problems.push(format!(
-                    "outcome {} where {} was expected",
-                    m.outcome.as_deref().unwrap_or("none"),
-                    expect.outcome
-                ));
+            } else {
+                if m.outcome.as_deref() != Some(expect.outcome) {
+                    problems.push(format!(
+                        "outcome {} where {} was expected",
+                        m.outcome.as_deref().unwrap_or("none"),
+                        expect.outcome
+                    ));
+                }
+                if m.cleanup_confirmed != expect.confirmed {
+                    problems.push(format!(
+                        "cleanup.confirmed is {:?} where {:?} was expected",
+                        m.cleanup_confirmed, expect.confirmed
+                    ));
+                }
+                if expect.confirmed == Some(false) {
+                    check_unconfirmed(m, expect.reason, &mut problems);
+                }
             }
         }
         Docs::None => {
@@ -507,42 +567,90 @@ fn judge(m: &mut Measured, case: &Case) {
         }
         Docs::Unread => {}
     }
-    // Criterion 2: nothing left, and an honest report.
-    let mut criterion2 = Vec::new();
-    if !m.survivors.is_empty() {
-        criterion2.push(format!("survivors: {}", m.survivors.join(",")));
-    }
-    if m.honest == Some(false) {
-        criterion2.push("cleanup reported confirmed while processes ran".to_string());
-    }
+
+    let mut actual: Vec<&str> = m.survivors.iter().map(String::as_str).collect();
+    actual.sort_unstable();
+    let wanted: Vec<&str> = m.expected_survivors.iter().map(String::as_str).collect();
+    let mut wanted_sorted = wanted.clone();
+    wanted_sorted.sort_unstable();
+    // Survivors alongside a report of confirmed cleanup, or no report at all.
+    let unreported = !actual.is_empty() && m.cleanup_confirmed != Some(false);
 
     if !problems.is_empty() {
         m.verdict = "fail".to_string();
-        problems.extend(criterion2);
+        if actual != wanted_sorted {
+            problems.push(format!(
+                "survivors {} where {} was expected",
+                list(&actual),
+                list(&wanted_sorted)
+            ));
+        }
         m.problems = problems;
         return;
     }
-    match expect.leak {
-        LeakClass::None => {
-            if criterion2.is_empty() {
-                m.verdict = "pass".to_string();
-            } else {
+    let gap = m.expected_leak != LeakClass::None;
+    if actual == wanted_sorted {
+        if !gap {
+            if unreported {
                 m.verdict = "fail".to_string();
-                m.problems = criterion2;
-            }
-        }
-        LeakClass::Documented | LeakClass::Defect => {
-            if !criterion2.is_empty() {
-                m.verdict = "expected_failure".to_string();
-                m.problems = criterion2;
-            } else if expect.flaky {
-                m.verdict = "pass".to_string();
+                m.problems.push(format!(
+                    "survivors {} with cleanup reported confirmed",
+                    list(&actual)
+                ));
             } else {
-                m.verdict = "unexpected_pass".to_string();
-                m.problems.push(
-                    "a row expected to fail criterion 2 passed; correct the table".to_string(),
-                );
+                m.verdict = "pass".to_string();
             }
+        } else if unreported {
+            m.verdict = "expected_failure".to_string();
+            m.problems.push(format!(
+                "survivors {}; cleanup not reported as unconfirmed",
+                list(&actual)
+            ));
+        } else {
+            m.verdict = "unexpected_pass".to_string();
+            m.problems
+                .push("a row expected to fail criterion 2 passed; correct the table".to_string());
         }
+    } else if gap && actual.is_empty() {
+        m.verdict = "unexpected_pass".to_string();
+        m.problems.push(format!(
+            "no survivor where {} was expected: the gap is closed; correct the table",
+            list(&wanted_sorted)
+        ));
+    } else {
+        m.verdict = "fail".to_string();
+        m.problems.push(format!(
+            "survivors {} where {} was expected",
+            list(&actual),
+            list(&wanted_sorted)
+        ));
+    }
+}
+
+fn list(roles: &[&str]) -> String {
+    if roles.is_empty() {
+        "none".to_string()
+    } else {
+        roles.join(",")
+    }
+}
+
+/// An unconfirmed cleanup must say why, and say what could not be checked.
+/// With no process listing it cannot name the processes that remain, so
+/// `pids` and `process_groups` list only what is known to be alive (nothing,
+/// when the worker's group is gone); the reason carries the caveat.
+fn check_unconfirmed(m: &Measured, reason: Option<&str>, problems: &mut Vec<String>) {
+    let text = m.cleanup_reason.as_deref().unwrap_or("");
+    if let Some(wanted) = reason
+        && !text.contains(wanted)
+    {
+        problems.push(format!(
+            "cleanup.reason does not contain {wanted:?}: {text:?}"
+        ));
+    }
+    if !text.contains("could not be checked") {
+        problems.push(format!(
+            "cleanup.reason does not say what could not be checked: {text:?}"
+        ));
     }
 }

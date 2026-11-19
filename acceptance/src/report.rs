@@ -109,6 +109,7 @@ fn outcome_exit_ok(m: &Measured) -> bool {
 struct Counts {
     rows: usize,
     outcome_exit: usize,
+    cleanup_ok: usize,
     stated: (usize, usize),
     clean: usize,
     honest: (usize, usize),
@@ -123,6 +124,7 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
     for m in rows {
         c.rows += 1;
         c.outcome_exit += usize::from(outcome_exit_ok(m));
+        c.cleanup_ok += usize::from(m.cleanup_confirmed == m.expected_confirmed);
         if let Some(s) = stated(m) {
             c.stated.1 += 1;
             c.stated.0 += usize::from(s);
@@ -144,9 +146,10 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
 
 fn counts_row(name: &str, c: &Counts) -> String {
     format!(
-        "| {name} | {} | {} | {} of {} | {} | {} of {} | {} | {} | {} | {} |\n",
+        "| {name} | {} | {} | {} | {} of {} | {} | {} of {} | {} | {} | {} | {} |\n",
         c.rows,
         c.outcome_exit,
+        c.cleanup_ok,
         c.stated.0,
         c.stated.1,
         c.clean,
@@ -159,7 +162,7 @@ fn counts_row(name: &str, c: &Counts) -> String {
     )
 }
 
-const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | One stated outcome | Nothing left | Honest report | Pass | Expected failure | Unexpected pass | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
+const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Honest report | Pass | Expected failure | Unexpected pass | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
 
 fn ms_label(v: Option<u64>) -> String {
     v.map_or("-".to_string(), |x| format!("{x} ms"))
@@ -263,6 +266,9 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     out.push_str("## Summary\n\n");
     out.push_str(
         "- **Expected outcome and exit**: the outcome and the exit status the expectations table gives.\n\
+         - **Cleanup verdict as expected**: `cleanup.confirmed` is what the expectations table gives (true on\n\
+           every row except the rows that make process listing unavailable, where it must be false; for rows\n\
+           with no result, there is none).\n\
          - **One stated outcome**: standard output held exactly one JSON document that parses and validates\n\
            as a `RunResult`, and `delega` exited without the harness having to kill it. Rows where the harness\n\
            closed standard output or killed `delega` have no document to read and are not counted.\n\
@@ -353,10 +359,23 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     out.push_str("## Expected failures\n\n");
     out.push_str(
         "Rows in the expectations table (`acceptance/src/matrix.rs`) that are expected to fail criterion 2.\n\
-         A *documented gap* is one the process module lists as known; a *defect* is a failure this harness\n\
-         found that is not documented. A row in this list that passes fails the run, so the table is\n\
-         corrected when a gap closes.\n\n",
+         Each pins exactly which roles may survive, and fails the run if anything else survives or the\n\
+         outcome, exit status or cleanup verdict differs. A row in this list that passes fails the run, so\n\
+         the table is corrected when a gap closes. There are three classes, listed separately:\n\
+         \n\
+         - **documented gap**: the process module's docs list it as known.\n\
+         - **undocumented gap**: a failure this harness found that the docs do not describe.\n\
+         - **defect**: a failure that is neither.\n\n",
     );
+    for class in [
+        LeakClass::DocumentedGap,
+        LeakClass::UndocumentedGap,
+        LeakClass::Defect,
+    ] {
+        let n = rows.iter().filter(|m| m.expected_leak == class).count();
+        let _ = writeln!(out, "- {}: {n} rows.", class.label());
+    }
+    out.push('\n');
     let mut groups: BTreeMap<(String, String), Vec<&Measured>> = BTreeMap::new();
     for m in rows.iter().filter(|m| m.expected_leak != LeakClass::None) {
         groups
@@ -366,9 +385,6 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
             ))
             .or_default()
             .push(m);
-    }
-    if groups.is_empty() {
-        out.push_str("None.\n\n");
     }
     for ((class, reason), list) in &groups {
         let seen = list
@@ -396,6 +412,38 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
         out.push('\n');
     }
 
+    out.push_str("## Rows that force an unconfirmed cleanup\n\n");
+    out.push_str(
+        "Process listing is made unavailable (`DELEGA_TEST_PS_PROGRAMS` set empty, a test-only seam in\n\
+         `delega-core`). Each row must report `cleanup.confirmed` false with a reason that contains\n\
+         \"process inspection was unavailable\" and says what could not be checked. With no listing it cannot\n\
+         name a descendant in a session of its own, so `pids` and `process_groups` hold only what is known\n\
+         to be alive (nothing, once the worker's group is gone). Such a descendant survives and the report\n\
+         says cleanup was not confirmed, which meets criterion 2 by its second clause but names nothing.\n\n",
+    );
+    out.push_str("| Row | Outcome | Confirmed | Process groups | Pids | Left running | Reason |\n| --- | --- | --- | --- | --- | --- | --- |\n");
+    for m in rows.iter().filter(|m| m.expected_confirmed == Some(false)) {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {:?} | {:?} | {} | {} |",
+            m.id,
+            m.outcome.as_deref().unwrap_or("none"),
+            yes(m.cleanup_confirmed),
+            m.cleanup_groups,
+            m.cleanup_pids,
+            label(&m.survivors),
+            m.cleanup_reason
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(70)
+                .collect::<String>(),
+        );
+    }
+    out.push('\n');
+
+    out.push_str(TIME_BREAKDOWN);
+
     if !repeats.is_empty() {
         out.push_str(&variation(repeats));
     }
@@ -420,6 +468,14 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     }
     out
 }
+
+/// Written by the reviewer of the harness, not measured by it.
+const TIME_BREAKDOWN: &str = "## Where the time goes in a run\n\n\
+    Measured by the reviewer on a release build, not by this harness. On an idle machine a plain Claude\n\
+    run takes about 250 to 310 ms and a plain Codex run about 385 to 440 ms. Roughly 80 percent of that\n\
+    is process listings: 8 for Claude and 12 for Codex, 24 to 33 ms each, four per child process run\n\
+    (the version probe counts as one, and Codex runs a second probe). Under 8 parallel jobs the listings\n\
+    slow down, which accounts for the 264 to 680 ms seen for a normal completion here.\n\n";
 
 fn variation(repeats: &[Measured]) -> String {
     let mut out = String::from("## Variation across repeated runs\n\n");
@@ -587,7 +643,7 @@ fn comparison_md(rows: &[Measured], spike: &[SpikeRow]) -> String {
            harness drives the `delega` executable: a caller action is an operating system signal or a closed pipe,\n\
            and the result is the JSON on standard output and the exit status.\n\
          - Times are from start to exit in milliseconds, as the spike's `elapsed_ms` is from the start of the call.\n\
-           A `delega` run also pays process start and two provider probes.\n\
+           A `delega` run also pays process start and one provider probe for Claude and two for Codex.\n\
          - Survivors: the spike measured 5 s after the result (after close and shutdown for resident workers and\n\
            counterpart; `*` marks a process that was alive 5 s after the result and removed only by close). This\n\
            harness measures 1 s after `delega` exits, because `delega` waits for cleanup before it exits.\n\

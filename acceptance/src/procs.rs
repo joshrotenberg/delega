@@ -1,11 +1,14 @@
 //! Process inspection through `ps`, signals, and the survivor check.
 //!
-//! Survivors are found by the case marker in the process table, independently
-//! of anything `delega` reported. A process counts when its command line
-//! carries the marker (every process the fakes start runs a script from the
-//! case directory, and the relay passes paths in it to `perl`). The ledger the
-//! fakes write maps a pid to a role for the report; a process the ledger does
-//! not know is reported as `unrecorded`.
+//! Survivors are found independently of anything `delega` reported, in two
+//! ways. A process counts when its command line, as `ps -axww` shows it,
+//! carries the case marker (every process the fakes start runs a script from
+//! the case directory, and the relay passes paths in it to `perl`). A process
+//! of a role in `BARE_ROLES` has no marker in its command line, so the ledger
+//! the fakes write is read instead: it counts when its recorded pid is alive
+//! and its command is still `sleep` (which rules out a reused pid). The
+//! ledger also maps a pid to a role; a marked process it does not know is
+//! reported as `unrecorded`.
 
 use std::path::Path;
 use std::process::Command;
@@ -57,13 +60,24 @@ pub struct Survivor {
     pub pid: i32,
 }
 
-/// Live processes (zombies excluded) whose command line carries `marker`,
-/// other than the pids in `except`.
+/// Roles whose processes carry no marker in their command line.
+const BARE_ROLES: [&str; 1] = ["bare"];
+
+/// Whether a command line carries `marker`. The marker ends in `/`, so the
+/// marker of case 1 is not found in the command line of case 10.
+pub fn carries(command: &str, marker: &str) -> bool {
+    command.contains(marker)
+}
+
+/// Live processes (zombies excluded) that belong to the case: whose command
+/// line carries `marker`, or that the ledger names with a role in
+/// `BARE_ROLES`; other than the pids in `except`.
 pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
     let ledger = ledger(dir);
-    let mut found: Vec<Survivor> = ps()
-        .into_iter()
-        .filter(|p| !p.stat.starts_with('Z') && p.command.contains(marker))
+    let table = ps();
+    let mut found: Vec<Survivor> = table
+        .iter()
+        .filter(|p| !p.stat.starts_with('Z') && carries(&p.command, marker))
         .filter(|p| !except.contains(&p.pid))
         .map(|p| Survivor {
             role: ledger
@@ -73,6 +87,18 @@ pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
             pid: p.pid,
         })
         .collect();
+    for (role, pid) in &ledger {
+        let alive_bare = BARE_ROLES.contains(&role.as_str())
+            && table.iter().any(|p| {
+                p.pid == *pid && !p.stat.starts_with('Z') && p.command.starts_with("sleep ")
+            });
+        if alive_bare && !except.contains(pid) && !found.iter().any(|f| f.pid == *pid) {
+            found.push(Survivor {
+                role: role.clone(),
+                pid: *pid,
+            });
+        }
+    }
     found.sort_by_key(|s| s.pid);
     found
 }
@@ -135,5 +161,22 @@ pub fn sweep(marker: &str, dir: &Path, except: &[i32], limit: Duration) -> Vec<S
             return survivors(marker, dir, except);
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::carries;
+
+    #[test]
+    fn a_marker_is_not_found_in_the_command_line_of_a_case_whose_number_starts_with_it() {
+        let one = "accmk-777-1/";
+        let ten = "sh /tmp/dacc-x/accmk-777-10/fake-claude.sh";
+        let one_cmd = "sh /tmp/dacc-x/accmk-777-1/acc-child.sh child";
+        assert!(!carries(ten, one));
+        assert!(carries(one_cmd, one));
+        assert!(carries(ten, "accmk-777-10/"));
+        assert!(!carries(one_cmd, "accmk-77-1/"));
+        assert!(!carries("sh /tmp/accmk-1777-1/x", one));
     }
 }

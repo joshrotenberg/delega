@@ -43,10 +43,13 @@ expected failure passes (the expectations table is then out of date), or when a
 process of the run is alive at the end. After a run the harness kills what is
 left and prints how many processes carried its marker; `ps` shows none.
 
-`cargo test --workspace` runs `tests/smoke.rs`, which runs nine rows (both
-providers; a normal run, an error, a timeout with a child, a signal, a crash,
-output with no final answer, a closed stdout, and a SIGKILL of `delega` whose
-worker the harness must clean up) in a few seconds. It never runs the matrix.
+`cargo test --workspace` runs `tests/smoke.rs`, which runs eleven rows (both
+providers; a normal run, a normal run with a child that ignores TERM, an error, a
+timeout with a child, a signal, a crash, output with no final answer, a closed
+stdout, a run with process listing unavailable that must report cleanup as not
+confirmed, and a SIGKILL of `delega` whose worker the harness must clean up) in
+about ten seconds. It never runs the matrix. A skipped row fails the run unless
+`--allow-skips` is given.
 
 After a new full run, regenerate the documents:
 
@@ -99,6 +102,9 @@ kept where a row carries over.
 | `dc` | as `c` | reader closes stdout at 1 s | exit 124, nothing to read |
 | `dca` | finishes after 1.5 s | reader closes stdout at 0.3 s | exit 0, nothing to read |
 | `k` | hangs, no output | SIGKILL of `delega` at 1 s | killed by signal 9, no output |
+| `u` | finishes normally | wait, process listing unavailable | `completed`, exit 0, cleanup **not** confirmed |
+| `ud` | hangs, no output | `--timeout 3s`, process listing unavailable | `timed_out`, exit 124, cleanup not confirmed |
+| `ui` | as `c`, no timeout | SIGINT at 1 s, process listing unavailable | `interrupted`, exit 130, cleanup not confirmed |
 
 Variants: `plain` (nothing), `child` (one child in the provider's group),
 `setsid` (a child in the group that starts a grandchild in a session of its
@@ -107,8 +113,9 @@ ignores TERM and INT itself), `pipe` (a child that keeps the provider's stdio),
 `orphan` (a child that starts a `setsid` grandchild and exits at once),
 `orphan-late` (as `orphan`, after 1.3 s), `relay` (a fork relay: each process
 ignores TERM, leads a group of its own, lives a few milliseconds and forks its
-successor). Each case runs the variants listed for it in `src/matrix.rs`; the
-whole matrix is 152 rows.
+successor), `bare` (a `sleep 300` in a session of its own whose command line
+does not carry the marker, found through the fake's pid ledger instead). Each case runs the variants listed for it in `src/matrix.rs`; the
+whole matrix is 188 rows.
 
 Actions that start at 1 s wait until the fake has recorded every process the
 variant starts, so the action lands with the descendants running.
@@ -146,32 +153,73 @@ The harness copies the fakes and their helper scripts into a directory whose
 name is unique to the case, `accmk-<run>-<n>`. Every process the fakes start
 runs a script from that directory, so the name is in its command line. After
 `delega` exits the harness looks in the process table (`ps -axww`) for the
-marker, whatever `delega` reported; the relay is also detected by a heartbeat
-file it touches, because a relay process lives too briefly to be listed
-reliably. It samples at exit and again 1 s later, records the second set as the
-survivors, then kills everything, stops the relay through a file it checks, and
-checks the table until it is empty.
+marker, whatever `delega` reported. The marker it matches ends in `/`, so case 1
+is not found in the command line of case 10 (a unit test covers it). It samples
+at exit and again 1 s later, records the second set as the survivors, then kills
+everything, stops the relay through a file it checks, and checks the table until
+it is empty.
+
+**What this can miss.** Detection reads the marker from a process's arguments as
+`ps` shows them. A process that rewrites its own arguments, runs a program whose
+path is outside the case directory with no marker in its arguments, or is started
+by another user is not found by that. Two other means are used. The relay is also
+detected by a heartbeat file it touches, because a relay process lives too briefly
+to be listed reliably. The `bare` variant is a `sleep` in a session of its own with
+no marker in its command line; the fake records its pid in a ledger, and the
+harness counts it when that pid is alive and still runs `sleep`. A session-id
+sweep of the worker's session is not used, because the point of these rows is
+descendants that left the session. A process that is neither marked, recorded nor
+touching a heartbeat is invisible to the harness.
 
 Per row the results file records the provider, behaviour, action, exit status,
 the number of JSON documents on standard output and whether the one validates
-as a `RunResult`, the outcome, `cleanup.confirmed`, the survivors, whether the
-report was honest (survivors exist only when cleanup is not confirmed), the
-latency from the action to the exit, and the expectation and verdict.
+as a `RunResult`, the outcome, `cleanup.confirmed` with its reason, pids and
+groups, the survivors, whether the report was honest (survivors exist only when
+cleanup is not confirmed), the latency from the action to the exit, and the
+expectation and verdict.
+
+## Forcing an unconfirmed cleanup
+
+Criterion 2 allows survivors when the result says cleanup could not be
+confirmed. Rows `u`, `ud` and `ui` make that happen: they set
+`DELEGA_TEST_PS_PROGRAMS` (empty) in the environment of `delega`. This is a
+test-only seam in `crates/delega-core/src/process/tree.rs`: when the variable is
+set, its value replaces the list of places `ps` is looked for. `delega` hard-codes
+`/bin/ps` and `/usr/bin/ps`, and neither can be hidden without root, so no
+arrangement from outside was found; nothing outside this harness sets the
+variable. With no listing, the run must still end in its outcome, must report
+`cleanup.confirmed` false, with a reason that contains "process inspection was
+unavailable" and says what could not be checked. A descendant in a session of its
+own then survives, as the report says.
+
+A second way to an unconfirmed cleanup, a descendant that is seen and cannot be
+killed within the cleanup deadline, was not built: without root there is no
+process that survives SIGKILL on demand (an uninterruptible wait cannot be
+arranged from a script, and a respawning process would need to outrun the
+kill, which risks the machine). No row covers it.
+
+Every row that has a result also carries an expectation on `cleanup.confirmed`
+(true unless listed above), so a `delega` that reported confirmed unconditionally
+fails the run.
 
 ## Expectations
 
-`src/matrix.rs` holds them: per case the expected outcome, exit status and
-standard output, and a list of expected failures (`GAPS`), each with a class and
-a reason:
+`src/matrix.rs` holds them: per case the expected outcome, exit status, standard
+output and `cleanup.confirmed`, and a list of expected failures (`GAPS`), each
+with a class, a reason and exactly which roles may survive:
 
 - **documented gap**: the process module's docs list it as known (a descendant
-  that calls `setsid` unseen, a fast fork relay, SIGKILL of `delega`).
-- **defect**: a failure this harness found that is not documented.
+  that calls `setsid` and is orphaned unseen, a fast fork relay, SIGKILL of
+  `delega`).
+- **undocumented gap**: a failure this harness found that the docs do not
+  describe.
+- **defect**: a failure that is neither. None is listed now.
 
 A row's verdict is `pass`, `expected_failure` (it failed criterion 2 as the
-table says), `unexpected_pass` (an expected failure passed, so the table is
-out of date) or `fail`. A wrong outcome, a wrong exit status, a missing or
-duplicate document, or a hang is always `fail`; only criterion 2 can be an
-expected failure.
+table says), `unexpected_pass` (an expected failure passed, so the table is out
+of date) or `fail`. A wrong outcome, exit status, `cleanup.confirmed`, document
+or hang is always `fail`. Survivors must be exactly the roles the row lists
+(none, for most rows): a different or extra survivor fails the row, so an
+expected failure cannot hide a second leak.
 
 `delega`'s behaviour is never changed to make a row pass.

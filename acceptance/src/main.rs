@@ -52,6 +52,10 @@ struct Args {
     /// For use after a harness run was killed.
     #[arg(long)]
     sweep: bool,
+    /// Do not fail the run when a row is skipped (for example when `perl` is
+    /// missing). A skipped row fails the run by default.
+    #[arg(long)]
+    allow_skips: bool,
     /// Do not print a line per finished case.
     #[arg(long)]
     quiet: bool,
@@ -148,7 +152,7 @@ fn main() -> ExitCode {
     }
 
     // Whatever the cases did, nothing from this run may be left.
-    let marker = format!("{MARKER_PREFIX}{}", ctx.run_id);
+    let marker = ctx.run_marker();
     let left: Vec<_> = procs::ps()
         .into_iter()
         .filter(|p| !p.stat.starts_with('Z') && p.command.contains(&marker))
@@ -159,7 +163,7 @@ fn main() -> ExitCode {
         }
     }
 
-    summarize(&measured, wall, left.len())
+    summarize(&measured, wall, left.len(), args.allow_skips)
 }
 
 fn write_results(path: &PathBuf, rows: &[Measured]) -> std::io::Result<()> {
@@ -209,7 +213,12 @@ fn meta(
     })
 }
 
-fn summarize(measured: &[Measured], wall: std::time::Duration, left: usize) -> ExitCode {
+fn summarize(
+    measured: &[Measured],
+    wall: std::time::Duration,
+    left: usize,
+    allow_skips: bool,
+) -> ExitCode {
     let count = |v: &str| measured.iter().filter(|m| m.verdict == v).count();
     println!(
         "{} cases in {:.0} s: {} pass, {} expected failures, {} unexpected passes, {} fail, {} skipped",
@@ -240,7 +249,8 @@ fn summarize(measured: &[Measured], wall: std::time::Duration, left: usize) -> E
     } else {
         println!("no process carrying this run's marker was alive at the end");
     }
-    if count("fail") + count("unexpected_pass") > 0 || left > 0 {
+    let skipped = if allow_skips { 0 } else { count("skipped") };
+    if count("fail") + count("unexpected_pass") + skipped > 0 || left > 0 {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

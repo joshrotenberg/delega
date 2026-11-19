@@ -79,6 +79,9 @@ pub struct Case {
     pub action: Action,
     pub variants: &'static [&'static str],
     pub desc: &'static str,
+    /// Run `delega` with its process listing made unavailable (the test-only
+    /// `DELEGA_TEST_PS_PROGRAMS` variable, see `acceptance/README.md`).
+    pub ps_unavailable: bool,
     pub expect: ExpectBase,
 }
 
@@ -87,6 +90,10 @@ pub struct ExpectBase {
     pub outcome: &'static str,
     pub exit: Exit,
     pub docs: Docs,
+    /// The expected `cleanup.confirmed`; `None` when there is no result.
+    pub confirmed: Option<bool>,
+    /// Text the `cleanup.reason` must contain when cleanup is not confirmed.
+    pub reason: Option<&'static str>,
 }
 
 /// How `delega` is expected to end.
@@ -115,6 +122,7 @@ const ALL: &[&str] = &[
     "orphan",
     "orphan-late",
     "relay",
+    "bare",
 ];
 const SOME: &[&str] = &["plain", "child", "setsid"];
 const FEW: &[&str] = &["plain", "child", "setsid", "stubborn"];
@@ -127,6 +135,7 @@ const NO_STUBBORN: &[&str] = &[
     "orphan",
     "orphan-late",
     "relay",
+    "bare",
 ];
 
 const fn ok(outcome: &'static str, code: i32) -> ExpectBase {
@@ -134,8 +143,24 @@ const fn ok(outcome: &'static str, code: i32) -> ExpectBase {
         outcome,
         exit: Exit::Code(code),
         docs: Docs::One,
+        confirmed: Some(true),
+        reason: None,
     }
 }
+
+/// As `ok`, for a run whose process listing is unavailable: cleanup must be
+/// reported as not confirmed, and say why.
+const fn unconfirmed(outcome: &'static str, code: i32) -> ExpectBase {
+    ExpectBase {
+        outcome,
+        exit: Exit::Code(code),
+        docs: Docs::One,
+        confirmed: Some(false),
+        reason: Some(NO_LISTING),
+    }
+}
+
+const NO_LISTING: &str = "process inspection was unavailable";
 
 const SIGINT_1S: Action = Action::Signal(Sig::Int, 1000);
 
@@ -147,6 +172,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: ALL,
         desc: "normal completion",
+        ps_unavailable: false,
         expect: ok("completed", 0),
     },
     Case {
@@ -156,6 +182,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: SOME,
         desc: "provider exits 3 with an error",
+        ps_unavailable: false,
         expect: ok("failed", 1),
     },
     Case {
@@ -165,6 +192,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: ALL,
         desc: "timeout 2 s, provider keeps producing output",
+        ps_unavailable: false,
         expect: ok("timed_out", 124),
     },
     Case {
@@ -174,6 +202,7 @@ pub const CASES: &[Case] = &[
         action: SIGINT_1S,
         variants: ALL,
         desc: "SIGINT to delega at 1 s",
+        ps_unavailable: false,
         expect: ok("interrupted", 130),
     },
     Case {
@@ -183,6 +212,7 @@ pub const CASES: &[Case] = &[
         action: Action::Signal(Sig::Term, 1000),
         variants: FEW,
         desc: "SIGTERM to delega at 1 s",
+        ps_unavailable: false,
         expect: ok("interrupted", 130),
     },
     Case {
@@ -192,6 +222,7 @@ pub const CASES: &[Case] = &[
         action: Action::Signal(Sig::Hup, 1000),
         variants: FEW,
         desc: "SIGHUP to delega at 1 s",
+        ps_unavailable: false,
         expect: ok("interrupted", 130),
     },
     Case {
@@ -201,6 +232,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: NO_STUBBORN,
         desc: "provider SIGKILLs itself 0.5 s in",
+        ps_unavailable: false,
         expect: ok("failed", 1),
     },
     Case {
@@ -210,6 +242,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: &["plain", "pipe"],
         desc: "provider SIGKILLs itself 0.5 s in, timeout 3 s",
+        ps_unavailable: false,
         expect: ok("failed", 1),
     },
     Case {
@@ -219,6 +252,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: ALL,
         desc: "provider hangs with no output, timeout 3 s",
+        ps_unavailable: false,
         expect: ok("timed_out", 124),
     },
     Case {
@@ -228,6 +262,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: &["plain", "child"],
         desc: "provider closes stdout and stays alive, timeout 3 s",
+        ps_unavailable: false,
         expect: ok("timed_out", 124),
     },
     Case {
@@ -237,6 +272,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: SOME,
         desc: "output ends without a final answer, provider exits 0",
+        ps_unavailable: false,
         expect: ok("failed", 1),
     },
     Case {
@@ -246,6 +282,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: &["plain"],
         desc: "as i, timeout 3 s",
+        ps_unavailable: false,
         expect: ok("failed", 1),
     },
     Case {
@@ -255,6 +292,7 @@ pub const CASES: &[Case] = &[
         action: Action::Wait,
         variants: &["plain", "child", "ignore"],
         desc: "provider writes output at full speed, timeout 3 s",
+        ps_unavailable: false,
         expect: ok("timed_out", 124),
     },
     Case {
@@ -264,6 +302,7 @@ pub const CASES: &[Case] = &[
         action: SIGINT_1S,
         variants: &["plain", "child"],
         desc: "provider writes output at full speed, SIGINT at 1 s",
+        ps_unavailable: false,
         expect: ok("interrupted", 130),
     },
     Case {
@@ -273,10 +312,13 @@ pub const CASES: &[Case] = &[
         action: Action::CloseStdout(1000),
         variants: SOME,
         desc: "reader closes delega's stdout at 1 s, timeout 3 s",
+        ps_unavailable: false,
         expect: ExpectBase {
             outcome: "timed_out",
             exit: Exit::Code(124),
             docs: Docs::Unread,
+            confirmed: None,
+            reason: None,
         },
     },
     Case {
@@ -286,10 +328,13 @@ pub const CASES: &[Case] = &[
         action: Action::CloseStdout(300),
         variants: &["plain"],
         desc: "reader closes delega's stdout at 0.3 s, provider finishes at 1.5 s",
+        ps_unavailable: false,
         expect: ExpectBase {
             outcome: "completed",
             exit: Exit::Code(0),
             docs: Docs::Unread,
+            confirmed: None,
+            reason: None,
         },
     },
     Case {
@@ -299,17 +344,50 @@ pub const CASES: &[Case] = &[
         action: Action::Signal(Sig::Kill, 1000),
         variants: FEW,
         desc: "SIGKILL to delega at 1 s",
+        ps_unavailable: false,
         expect: ExpectBase {
             outcome: "none",
             exit: Exit::Signal(9),
             docs: Docs::None,
+            confirmed: None,
+            reason: None,
         },
+    },
+    Case {
+        id: "u",
+        behaviour: "success",
+        timeout_secs: None,
+        action: Action::Wait,
+        variants: &["plain", "child", "setsid", "orphan", "bare"],
+        desc: "normal completion, process listing unavailable",
+        ps_unavailable: true,
+        expect: unconfirmed("completed", 0),
+    },
+    Case {
+        id: "ud",
+        behaviour: "hang",
+        timeout_secs: Some(3),
+        action: Action::Wait,
+        variants: &["plain", "child", "setsid", "stubborn"],
+        desc: "provider hangs, timeout 3 s, process listing unavailable",
+        ps_unavailable: true,
+        expect: unconfirmed("timed_out", 124),
+    },
+    Case {
+        id: "ui",
+        behaviour: "busy",
+        timeout_secs: None,
+        action: SIGINT_1S,
+        variants: &["plain", "child", "setsid", "ignore"],
+        desc: "SIGINT to delega at 1 s, process listing unavailable",
+        ps_unavailable: true,
+        expect: unconfirmed("interrupted", 130),
     },
 ];
 
 /// Rows that are spike rows, listed so the report can say which carried over.
 /// A case id that is in the spike keeps its meaning; these are new here.
-pub const NEW_CASES: &[&str] = &["dt", "dh", "fl", "fli", "dc", "dca", "k"];
+pub const NEW_CASES: &[&str] = &["dt", "dh", "fl", "fli", "dc", "dca", "k", "u", "ud", "ui"];
 
 /// Cases of the spike that are not run, and why.
 pub const DROPPED: &[(&str, &str)] = &[
@@ -338,10 +416,13 @@ pub const DROPPED: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeakClass {
-    /// No survivor and an honest report are required.
+    /// Nothing may survive unless the report says so, and the survivors are
+    /// exactly the listed roles.
     None,
     /// A gap the process module documents.
-    Documented,
+    DocumentedGap,
+    /// A gap the process module does not document, found by this harness.
+    UndocumentedGap,
     /// A defect found by this harness.
     Defect,
 }
@@ -350,7 +431,8 @@ impl LeakClass {
     pub fn label(self) -> &'static str {
         match self {
             LeakClass::None => "none",
-            LeakClass::Documented => "documented gap",
+            LeakClass::DocumentedGap => "documented gap",
+            LeakClass::UndocumentedGap => "undocumented gap",
             LeakClass::Defect => "defect",
         }
     }
@@ -362,75 +444,116 @@ pub struct Expect {
     pub outcome: &'static str,
     pub exit: Exit,
     pub docs: Docs,
+    pub confirmed: Option<bool>,
+    pub confirmed_reason: Option<&'static str>,
     pub leak: LeakClass,
-    /// A gap that sometimes passes by timing; a pass is then tolerated.
-    pub flaky: bool,
+    /// Exactly the roles that may be alive after delega exits, sorted. A row
+    /// with any other survivor, or without these, does not meet it.
+    pub survivors: Vec<&'static str>,
     pub reason: Option<&'static str>,
 }
 
-/// An override of the leak expectation for rows that match. An empty list
-/// matches anything.
+/// An expected failure of criterion 2 for the rows that match. An empty list
+/// matches anything. The first match wins.
 struct Gap {
     cases: &'static [&'static str],
     variants: &'static [&'static str],
     class: LeakClass,
-    flaky: bool,
+    survivors: &'static [&'static str],
     reason: &'static str,
 }
 
 const SIGKILL_REASON: &str = "SIGKILL of delega cannot be handled, so the worker keeps running with nothing enforcing its time limit (docs/api.md, process module docs). Documented gap.";
 const ORPHAN_REASON: &str = "A descendant that called setsid and was orphaned before any scan saw its parent is in no group or session of the worker and has no known ancestry, so cleanup reports confirmed while it runs (process module gap 1, delega issue 1).";
 const RELAY_REASON: &str = "A fast fork relay is never in a process listing for long enough to be a member, so cleanup reports confirmed while it runs (process module gap 2, delega issue 1).";
-const ENDS_FIRST_REASON: &str = "The provider ended on its own (completed, failed, or output without a final answer) before any 500 ms scan saw its setsid descendant. No stop starts, so there is no scan before the final sweep, and the descendant is in no group or session of the worker. Same mechanism as process module gap 1, reached by a normal end, which the module docs list only for an orphaned parent and a crash.";
+const ENDS_FIRST_REASON: &str = "The provider ended by itself within one scan interval of a descendant calling setsid; the descendant is never seen and cleanup is reported confirmed.";
 
-/// Expected failures. The first match wins. Every entry is a row that is
-/// expected to fail criterion 2 (survivors or a dishonest report).
+const PROVIDER_ONLY: &[&str] = &["provider"];
+
 const GAPS: &[Gap] = &[
     Gap {
         cases: &["k"],
+        variants: &["child"],
+        class: LeakClass::DocumentedGap,
+        survivors: &["child", "provider"],
+        reason: SIGKILL_REASON,
+    },
+    Gap {
+        cases: &["k"],
+        variants: &["setsid"],
+        class: LeakClass::DocumentedGap,
+        survivors: &["leaf-setsid", "mid", "provider"],
+        reason: SIGKILL_REASON,
+    },
+    Gap {
+        cases: &["k"],
         variants: &[],
-        class: LeakClass::Documented,
-        flaky: false,
+        class: LeakClass::DocumentedGap,
+        survivors: PROVIDER_ONLY,
         reason: SIGKILL_REASON,
     },
     Gap {
         cases: &[],
         variants: &["relay"],
-        class: LeakClass::Documented,
-        flaky: false,
+        class: LeakClass::DocumentedGap,
+        survivors: &["relay-heartbeat"],
         reason: RELAY_REASON,
     },
     Gap {
         cases: &[],
         variants: &["orphan"],
-        class: LeakClass::Documented,
-        flaky: false,
+        class: LeakClass::DocumentedGap,
+        survivors: &["leaf-setsid"],
         reason: ORPHAN_REASON,
     },
     Gap {
         cases: &["a", "b", "i"],
         variants: &["setsid", "orphan-late"],
-        class: LeakClass::Documented,
-        flaky: false,
+        class: LeakClass::UndocumentedGap,
+        survivors: &["leaf-setsid"],
+        reason: ENDS_FIRST_REASON,
+    },
+    Gap {
+        cases: &["a", "b", "i"],
+        variants: &["bare"],
+        class: LeakClass::UndocumentedGap,
+        survivors: &["bare"],
         reason: ENDS_FIRST_REASON,
     },
 ];
+
+/// Roles that survive when the process listing is unavailable: the worker's
+/// group is killed, but a descendant in a session of its own is not found.
+/// The report says so (cleanup not confirmed), so this is not a failure.
+fn unlisted_survivors(variant: &str) -> Vec<&'static str> {
+    match variant {
+        "setsid" | "orphan" => vec!["leaf-setsid"],
+        "bare" => vec!["bare"],
+        _ => Vec::new(),
+    }
+}
 
 pub fn expect_for(case: &Case, variant: &str) -> Expect {
     let mut expect = Expect {
         outcome: case.expect.outcome,
         exit: case.expect.exit,
         docs: case.expect.docs,
+        confirmed: case.expect.confirmed,
+        confirmed_reason: case.expect.reason,
         leak: LeakClass::None,
-        flaky: false,
+        survivors: Vec::new(),
         reason: None,
     };
+    if case.ps_unavailable {
+        expect.survivors = unlisted_survivors(variant);
+        return expect;
+    }
     for gap in GAPS {
         let hit = (gap.cases.is_empty() || gap.cases.contains(&case.id))
             && (gap.variants.is_empty() || gap.variants.contains(&variant));
         if hit {
             expect.leak = gap.class;
-            expect.flaky = gap.flaky;
+            expect.survivors = gap.survivors.to_vec();
             expect.reason = Some(gap.reason);
             break;
         }
@@ -479,6 +602,8 @@ pub const SMOKE: &[&str] = &[
     "claude-i-plain",
     "codex-dc-plain",
     "claude-k-plain",
+    "claude-a-ignore",
+    "codex-u-plain",
 ];
 
 pub fn smoke() -> Vec<Row> {
@@ -497,6 +622,7 @@ pub fn roles_of(variant: &str) -> &'static [&'static str] {
         "setsid" => &["mid", "leaf-setsid"],
         "orphan" | "orphan-late" => &["mid", "leaf-setsid"],
         "relay" => &["relay"],
+        "bare" => &["bare"],
         _ => &[],
     }
 }

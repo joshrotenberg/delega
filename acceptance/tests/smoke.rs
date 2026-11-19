@@ -5,7 +5,7 @@
 use delega_acceptance::delega_bin;
 use delega_acceptance::matrix;
 use delega_acceptance::run_all::run_all;
-use delega_acceptance::runner::{Context, MARKER_PREFIX};
+use delega_acceptance::runner::Context;
 
 #[test]
 fn the_smoke_rows_meet_their_expectations_and_leave_nothing_running() {
@@ -29,7 +29,7 @@ fn the_smoke_rows_meet_their_expectations_and_leave_nothing_running() {
     );
 
     // Nothing the cases started may be left, whatever delega reported.
-    let marker = format!("{MARKER_PREFIX}{}", ctx.run_id);
+    let marker = ctx.run_marker();
     let left: Vec<_> = delega_acceptance::procs::ps()
         .into_iter()
         .filter(|p| !p.stat.starts_with('Z') && p.command.contains(&marker))
