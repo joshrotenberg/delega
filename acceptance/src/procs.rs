@@ -19,13 +19,14 @@ use rustix::process::{Pid, Signal, kill_process};
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub pid: i32,
+    pub ppid: i32,
     pub stat: String,
     pub command: String,
 }
 
 pub fn ps() -> Vec<Proc> {
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-axww", "-o", "pid=,stat=,command="])
+        .args(["-axww", "-o", "pid=,ppid=,stat=,command="])
         .output()
     else {
         return Vec::new();
@@ -35,9 +36,15 @@ pub fn ps() -> Vec<Proc> {
         .filter_map(|line| {
             let mut it = line.split_whitespace();
             let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
             let stat = it.next()?.to_owned();
             let command = it.collect::<Vec<_>>().join(" ");
-            Some(Proc { pid, stat, command })
+            Some(Proc {
+                pid,
+                ppid,
+                stat,
+                command,
+            })
         })
         .collect()
 }
@@ -98,6 +105,7 @@ pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
         .iter()
         .filter(|p| !p.stat.starts_with('Z') && carries(&p.command, marker))
         .filter(|p| !except.contains(&p.pid))
+        .filter(|p| !is_forked_copy_of_a_provider(p, &table, &ledger))
         .map(|p| Survivor {
             role: ledger
                 .iter()
@@ -120,6 +128,27 @@ pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
     }
     found.sort_by_key(|s| s.pid);
     found
+}
+
+/// Whether `p` is a copy of a provider script that the script forked and that
+/// has not yet become the program it runs. A shell forks to run each command,
+/// and until the new process calls `exec` it has the script's command line, so
+/// it carries the case marker and the ledger does not know it. It is a
+/// transient of the provider that stays only as long as the machine takes to
+/// schedule it, which on a loaded machine is long enough to be sampled; a real
+/// survivor is a process of a role the ledger records, or one that is not a
+/// copy of the provider's own command line. The provider itself, which the
+/// ledger records, is never excluded.
+fn is_forked_copy_of_a_provider(p: &Proc, table: &[Proc], ledger: &[(String, i32)]) -> bool {
+    let recorded = |pid: i32| ledger.iter().any(|(_, recorded)| *recorded == pid);
+    !recorded(p.pid)
+        && ledger.iter().any(|(role, pid)| {
+            role == "provider"
+                && *pid == p.ppid
+                && table
+                    .iter()
+                    .any(|q| q.pid == *pid && q.command == p.command && !q.stat.starts_with('Z'))
+        })
 }
 
 /// Several samples a short time apart, merged by pid. A relay process lives a
