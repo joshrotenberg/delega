@@ -199,6 +199,7 @@ impl Core {
             start.runs_discarded += discarded.len();
             start.runs_stopped += usize::from(running.is_some());
         }
+        self.wake_all_waiters();
         if self.running > 0 {
             let (tx, rx) = oneshot::channel();
             self.shutdown_waiters.push(tx);

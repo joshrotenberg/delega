@@ -371,3 +371,42 @@ async fn a_worker_wait_ends_when_the_current_run_finishes_even_if_more_are_queue
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
+
+#[tokio::test]
+async fn shutdown_releases_a_wait_whose_cursor_no_run_will_pass() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let gate = rig.gate("shutdown-wait");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    let waiting = {
+        let supervisor = supervisor.clone();
+        let targets = runs(&[&started.run]);
+        tokio::spawn(async move {
+            supervisor
+                .wait(targets, Some(300), Some(u64::MAX / 2))
+                .await
+        })
+    };
+    // Whether the wait has registered yet or not, it must be released.
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    let report = supervisor.shutdown().await;
+    assert_eq!(report.runs_stopped, 1);
+    let released = tokio::time::timeout(Duration::from_secs(120), waiting)
+        .await
+        .expect("shutdown released the wait")
+        .expect("task")
+        .expect("wait answers");
+    assert!(!released.timed_out, "{released:#?}");
+    // A wait with a cursor that arrives after shutdown began answers at once.
+    let late = supervisor
+        .wait(runs(&[&started.run]), Some(300), Some(u64::MAX / 2))
+        .await
+        .expect("wait answers");
+    assert!(!late.timed_out, "{late:#?}");
+    rig.assert_nothing_left().await;
+}

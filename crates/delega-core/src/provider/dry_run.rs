@@ -154,7 +154,7 @@ fn take_deny_rules(args: &mut [String]) -> Vec<String> {
         settings["permissions"] = serde_json::json!({
             "deny": [format!("<{} deny rules, listed under deny_rules>", rules.len())]
         });
-        *arg = settings.to_string();
+        *arg = crate::canonical::sorted(settings).to_string();
     }
     rules
 }

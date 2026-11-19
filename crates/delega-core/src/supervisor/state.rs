@@ -32,10 +32,11 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Where a run is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
     /// Waiting behind another run on its worker, or for a running slot.
@@ -47,7 +48,7 @@ pub enum RunState {
 }
 
 /// Where a worker is. Derived from its runs: see the module documentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerState {
     /// No run is running and at least one waits for a running slot.

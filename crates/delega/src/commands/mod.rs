@@ -65,6 +65,31 @@ impl Command {
     }
 }
 
+/// The hook command that runs this executable's command guard, so
+/// `--allow-command` can be enforced for Claude Code. Without a usable path to
+/// this executable no guard is configured, and the result says that exact
+/// command grants were not applied.
+pub(crate) fn guard_command() -> Option<delega_core::provider::HookCommand> {
+    let exe = std::env::current_exe().ok()?;
+    exe.is_absolute()
+        .then(|| delega_core::provider::HookCommand::new(exe, [hook::NAME]))
+}
+
+/// Add the `--env NAME` and `--env NAME=VALUE` arguments to the provider
+/// options, for `delega run` and `delega mcp` alike. Nothing is checked here: a
+/// name that is not valid, that describes the calling session or that delega
+/// owns is refused by the provider layer when a worker starts, with error kind
+/// `invalid_env_name` or `forbidden_env_name`, and the message never repeats a
+/// value.
+pub(crate) fn apply_env(options: &mut delega_core::provider::ProviderOptions, given: &[String]) {
+    for given in given {
+        match given.split_once('=') {
+            Some((name, value)) => options.env_set.push((name.to_string(), value.to_string())),
+            None => options.env_pass.push(given.clone()),
+        }
+    }
+}
+
 /// Report that a planned subcommand is not built yet.
 pub(super) fn not_implemented(name: &str) -> ExitCode {
     eprintln!("delega {name}: not implemented yet");

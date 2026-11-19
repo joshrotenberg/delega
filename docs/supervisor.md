@@ -3,8 +3,10 @@
 `delega_core::supervisor` runs several workers at once. It is the library
 behind the MCP tools of [api.md](api.md#mcp): each tool is one operation of
 [`Supervisor`](../crates/delega-core/src/supervisor/mod.rs), with the same
-arguments and a serializable response. The MCP server is a later change; it maps
-tool arguments to these calls and returns the responses as they are.
+arguments and a serializable response. The MCP server (`delega-mcp`, served by
+`delega mcp`) maps tool arguments to these calls and returns the responses as
+they are; every response type also derives `JsonSchema`, which is where the
+tools' output schemas come from.
 
 A worker is one provider conversation. A run is one assignment given to it.
 `start` makes a worker and its first run; `follow_up` adds a run to the same
@@ -242,8 +244,12 @@ verdict.
   not go ahead on its own terms.
 - **shutdown** closes every live worker the same way, with the message
   `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits for
-  runs to settle within the bound, naming any that did not. Reads and `list`
-  keep working.
+  runs to settle within the bound, naming any that did not. It wakes every
+  `wait` that is registered, whatever its cursor, and each answers with the
+  states at that moment (a run may still be stopping). A `wait` with a cursor
+  made after it began answers at once too, so a call that arrives as shutdown
+  begins is released like the others; a `wait` without a cursor still waits for
+  the runs to settle. Reads and `list` keep working.
 - **Drop** of the last clone of a `Supervisor` signals everything and returns.
   It cancels one token that is the parent of every run's stop token, so every
   provider is signalled at once without the supervisor's task having to run,
@@ -326,7 +332,6 @@ across ten workers.
 
 ## Not built
 
-- The MCP server and `delega mcp`.
 - Persisting workers across a restart.
 - `waiting_for_answer`, `respond` and `permissions.asked`, which depend on a
   long-lived provider session.
