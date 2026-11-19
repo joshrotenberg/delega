@@ -695,12 +695,45 @@ fn resume_replaces_an_ephemeral_session_from_the_profile() {
 }
 
 #[test]
-fn a_prompt_may_start_with_a_hyphen() {
+fn a_prompt_that_starts_with_a_hyphen_is_given_in_the_equals_form() {
+    for form in [
+        "--prompt=-text that starts with a hyphen",
+        "-p=-text that starts with a hyphen",
+    ] {
+        let rig = Rig::new();
+        let out = rig
+            .command()
+            .args(["run", "--provider", "claude", form, "-C"])
+            .arg(&rig.work)
+            .output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(0), "{form}: {}", text(&out.stderr));
+        assert!(
+            rig.recorded("stdin").starts_with("-text that starts"),
+            "{form}"
+        );
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn a_prompt_flag_does_not_swallow_the_flag_after_it() {
     let rig = Rig::new();
-    let out = rig.run("claude", "-text that starts with a hyphen", &[]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(rig.recorded("stdin").starts_with("-text that starts"));
-    rig.assert_nothing_left();
+    let out = rig
+        .command()
+        .args(["run", "--provider", "claude", "-p", "--dry-run", "-C"])
+        .arg(&rig.work)
+        .output()
+        .expect("run delega");
+    // A usage error, not a run whose assignment is "--dry-run".
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("a value is required"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "");
+    assert!(!rig.record.join("argv").exists());
 }
 
 #[test]

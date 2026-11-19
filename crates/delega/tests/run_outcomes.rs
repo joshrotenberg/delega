@@ -357,9 +357,12 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
             Some(0) => assert_eq!(result_of(&out).outcome, Outcome::Completed, "{delay_ms}"),
             Some(130) => assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}"),
             // The signal came before delega could handle it: nothing had started.
+            // The signal came before delega had installed its handlers, which
+            // happens before any worker is started. A worker that exists here
+            // would be a worker nothing could have stopped.
             None => assert!(
-                !rig.record.join("argv").exists() || delay_ms > 0,
-                "{delay_ms}"
+                !rig.record.join("argv").exists() && !rig.record.join("pid").exists(),
+                "{delay_ms}: delega was killed after a worker started"
             ),
             other => panic!(
                 "{delay_ms}: unexpected status {other:?}: {}",
@@ -463,5 +466,86 @@ fn an_unwritable_standard_output_is_a_write_failure_not_a_silent_success() {
             );
             rig.assert_nothing_left();
         }
+    }
+}
+
+#[test]
+fn a_signal_ends_delega_that_is_only_waiting_for_a_reader_of_a_large_result() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        // The fake answers with 3 MB; nobody reads standard output, so delega
+        // blocks writing the result after the worker is gone.
+        let mut child = rig.spawn_run(provider, "large", &["--output", "json"]);
+        let began = std::time::Instant::now();
+        while !rig.record.join("pid").exists() {
+            assert!(
+                began.elapsed() < Duration::from_secs(30),
+                "the fake never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        rig.assert_nothing_left();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            child.try_wait().expect("poll").is_none(),
+            "{provider}: delega should still be waiting to write"
+        );
+        signal(child.id(), "TERM");
+        let status = wait_exit_only(&mut child, Duration::from_secs(10));
+        assert_eq!(status.code(), Some(130), "{provider}");
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn every_terminal_signal_ends_a_delega_blocked_writing_its_result() {
+    for name in ["INT", "HUP", "QUIT"] {
+        let rig = Rig::new();
+        let mut child = rig.spawn_run("claude", "large", &["--output", "json"]);
+        let began = std::time::Instant::now();
+        while !rig.record.join("pid").exists() {
+            assert!(
+                began.elapsed() < Duration::from_secs(30),
+                "the fake never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        signal(child.id(), name);
+        let status = wait_exit_only(&mut child, Duration::from_secs(10));
+        assert_eq!(status.code(), Some(130), "{name}");
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn dropped_progress_is_counted_in_a_final_line_and_in_the_result_notes() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = rig.run(provider, "chatty", &["--progress", "--output", "json"]);
+        assert_eq!(out.status.code(), Some(0), "{provider}");
+        let result = result_of(&out);
+        let err = text(&out.stderr);
+        let shown = err
+            .lines()
+            .filter(|l| l.contains(": message: 1 chars"))
+            .count();
+        let notice = err.lines().find(|l| l.contains("were dropped"));
+        let noted = result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("chunks of provider output were not reported"));
+        // 20000 events plus one the fake's own opening line: whatever did not
+        // arrive as a line is announced, by the last line on stderr, and when
+        // the loss was at the output tap also in the result.
+        if shown < 20_000 {
+            let notice = notice.unwrap_or_else(|| panic!("{provider}: {shown} lines, no notice"));
+            assert!(notice.starts_with("progress: "), "{notice}");
+            assert_eq!(err.lines().last(), Some(notice), "the notice comes last");
+        } else {
+            assert!(notice.is_none(), "{provider}: nothing was lost");
+            assert!(!noted);
+        }
+        rig.assert_nothing_left();
     }
 }

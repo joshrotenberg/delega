@@ -298,7 +298,15 @@ pub fn wait_exit_only(child: &mut Child, limit: Duration) -> std::process::ExitS
         if began.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("the child did not exit within {limit:?}");
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut stderr);
+            }
+            let tail = &stderr[stderr.len().saturating_sub(2000)..];
+            panic!(
+                "the child did not exit within {limit:?}; the end of its stderr:\n{}",
+                String::from_utf8_lossy(tail)
+            );
         }
         std::thread::sleep(POLL);
     }

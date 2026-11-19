@@ -44,8 +44,8 @@ pub struct Args {
     /// The provider to run
     #[arg(long, value_enum)]
     provider: Option<Provider>,
-    /// The assignment
-    #[arg(short, long, allow_hyphen_values = true)]
+    /// The assignment. Written `--prompt=-text` when it starts with a hyphen
+    #[arg(short, long)]
     prompt: Option<String>,
     /// Read the assignment from stdin
     #[arg(long)]
@@ -136,8 +136,10 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     if args.progress {
         options.progress = Some(log.progress_sink());
     }
-    let result = execute::run(request, options, &facts, log);
-    output::print_result(format, &result, log)
+    let writer_log = log.clone();
+    execute::run(request, options, &facts, log, move |result| {
+        output::print_result(format, &result, &writer_log)
+    })
 }
 
 /// The hook command that runs this executable's command guard, so

@@ -25,6 +25,7 @@
 //! A [`ProgressEvent::Denied`] carries the request exactly as the result lists
 //! it in `permissions.denied`, which includes the denied command or path.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Map, Value};
@@ -62,6 +63,14 @@ pub enum ProgressEvent {
         /// What the provider asked to do, as in `permissions.denied`.
         request: String,
     },
+    /// Provider output was not reported as events because the sink was too
+    /// slow. Sent once, after the provider has ended and before `Finished`,
+    /// only when the count is not zero.
+    Dropped {
+        /// How many chunks of provider output were not delivered. A chunk
+        /// holds part of a line, one line or several.
+        chunks: u64,
+    },
     /// The run ended. Always the last event.
     Finished {
         /// How it ended.
@@ -75,38 +84,72 @@ pub type ProgressSink = Arc<dyn Fn(ProgressEvent) + Send + Sync>;
 
 /// The sink of one run, if any, and the events built from a run's facts.
 #[derive(Clone, Default)]
-pub(super) struct Progress(Option<ProgressSink>);
+pub(super) struct Progress {
+    sink: Option<ProgressSink>,
+    /// Chunks of output the process layer could not hand to the tap.
+    dropped: Arc<AtomicU64>,
+    /// True once the run's last events were sent. The tap runs on a thread
+    /// that can be left behind by a slow sink, so without this it could
+    /// deliver an event after `Finished`.
+    closed: Arc<Mutex<bool>>,
+}
 
 impl Progress {
     pub fn new(sink: Option<ProgressSink>) -> Self {
-        Self(sink)
+        Self {
+            sink,
+            dropped: Arc::default(),
+            closed: Arc::default(),
+        }
     }
 
+    /// Send an event unless the run's last event has been sent.
     pub fn emit(&self, event: ProgressEvent) {
-        if let Some(sink) = &self.0 {
+        let closed = self.closed.lock().unwrap_or_else(PoisonError::into_inner);
+        if let (false, Some(sink)) = (*closed, &self.sink) {
             sink(event);
         }
     }
 
-    /// Announce the denials and the end of a run.
-    pub fn finished(&self, result: &RunResult) {
-        if self.0.is_none() {
+    /// The counter the process layer adds dropped chunks to.
+    pub fn drop_counter(&self) -> Arc<AtomicU64> {
+        self.dropped.clone()
+    }
+
+    /// Announce the denials, any dropped output and the end of a run, and say
+    /// in the result's notes that output was dropped. Nothing is sent after
+    /// this returns, so `Finished` is always the last event.
+    pub fn finished(&self, result: &mut RunResult) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        let mut closed = self.closed.lock().unwrap_or_else(PoisonError::into_inner);
+        if *closed {
             return;
         }
         for denied in &result.permissions.denied {
-            self.emit(ProgressEvent::Denied {
+            sink(ProgressEvent::Denied {
                 request: denied.request.clone(),
             });
         }
-        self.emit(ProgressEvent::Finished {
+        let chunks = self.dropped.load(Ordering::Relaxed);
+        if chunks > 0 {
+            result.provider_notes.push(format!(
+                "{chunks} chunks of provider output were not reported as progress events because \
+                 the progress consumer was too slow"
+            ));
+            sink(ProgressEvent::Dropped { chunks });
+        }
+        sink(ProgressEvent::Finished {
             outcome: result.outcome,
         });
+        *closed = true;
     }
 
     /// A tap for the provider's standard output that turns each line into
     /// events, or `None` when nobody listens.
     pub fn tap(&self, provider: Provider, redactor: Redactor) -> Option<OutputTap> {
-        self.0.as_ref()?;
+        self.sink.as_ref()?;
         let progress = self.clone();
         let framer = Mutex::new(Framer::default());
         Some(Arc::new(move |chunk: &[u8]| {

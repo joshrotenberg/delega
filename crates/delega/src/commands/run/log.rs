@@ -31,6 +31,9 @@ const IDLE_POLL: Duration = Duration::from_millis(20);
 struct Inner {
     sender: SyncSender<String>,
     dropped: Arc<AtomicU64>,
+    /// Chunks of provider output the provider layer reported as dropped before
+    /// they became events.
+    tap_dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     done: Mutex<Option<Receiver<()>>>,
 }
@@ -45,15 +48,18 @@ impl Log {
         let (sender, receiver) = sync_channel::<String>(QUEUE_LINES);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let dropped = Arc::new(AtomicU64::new(0));
+        let tap_dropped = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let (thread_dropped, thread_stop) = (dropped.clone(), stop.clone());
+        let counts = (dropped.clone(), tap_dropped.clone());
+        let thread_stop = stop.clone();
         std::thread::spawn(move || {
-            writer(&receiver, &thread_dropped, &thread_stop);
+            writer(&receiver, &counts.0, &counts.1, &thread_stop);
             let _ = done_tx.send(());
         });
         Self(Arc::new(Inner {
             sender,
             dropped,
+            tap_dropped,
             stop,
             done: Mutex::new(Some(done_rx)),
         }))
@@ -69,7 +75,12 @@ impl Log {
     /// The sink that turns provider progress events into `progress:` lines.
     pub fn progress_sink(&self) -> ProgressSink {
         let log = self.clone();
-        Arc::new(move |event| log.line(progress_line(&event)))
+        Arc::new(move |event| match event {
+            ProgressEvent::Dropped { chunks } => {
+                log.0.tap_dropped.fetch_add(chunks, Ordering::Relaxed);
+            }
+            other => log.line(progress_line(&other)),
+        })
     }
 
     /// Give the writer a bounded time to write what is queued. Returns
@@ -87,7 +98,12 @@ impl Log {
     }
 }
 
-fn writer(receiver: &Receiver<String>, dropped: &AtomicU64, stop: &AtomicBool) {
+fn writer(
+    receiver: &Receiver<String>,
+    dropped: &AtomicU64,
+    tap_dropped: &AtomicU64,
+    stop: &AtomicBool,
+) {
     let mut err = std::io::stderr().lock();
     loop {
         match receiver.recv_timeout(IDLE_POLL) {
@@ -99,11 +115,13 @@ fn writer(receiver: &Receiver<String>, dropped: &AtomicU64, stop: &AtomicBool) {
             Err(_) => break,
         }
     }
-    let lost = dropped.load(Ordering::Relaxed);
+    // Said last, straight to standard error, so it cannot itself be dropped.
+    let lost = dropped.load(Ordering::Relaxed) + tap_dropped.load(Ordering::Relaxed);
     if lost > 0 {
         let _ = writeln!(
             err,
-            "delega run: {lost} lines were not shown because standard error was not being read"
+            "progress: {lost} events or output chunks were dropped: standard error was not read \
+             fast enough, or the provider wrote faster than progress could be reported"
         );
     }
 }
@@ -120,6 +138,7 @@ fn progress_line(event: &ProgressEvent) -> String {
         }
         ProgressEvent::Provider { kind, summary } => format!("progress: {kind}: {summary}"),
         ProgressEvent::Denied { request } => format!("progress: denied: {request}"),
+        ProgressEvent::Dropped { .. } => String::new(),
         ProgressEvent::Finished { outcome } => {
             format!("progress: finished: {}", outcome_name(*outcome))
         }

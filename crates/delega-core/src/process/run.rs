@@ -84,7 +84,10 @@ pub(super) async fn run_owned(
         ));
     }
 
-    let tap = spec.stdout_tap.clone().map(TapWorker::start);
+    let tap = spec
+        .stdout_tap
+        .clone()
+        .map(|tap| TapWorker::start(tap, spec.stdout_tap_dropped.clone()));
     let driven = AssertUnwindSafe(drive(
         &mut owner,
         &spec,

@@ -237,6 +237,15 @@ case "$mode" in
     printf 'boom token=%s and sk-ant-abcdefghijklmnopqrstuvwx and Bearer abcdefghijklmnop123\n' "$MY_SERVICE_API_TOKEN" >&2
     exit 3
     ;;
+  chatty)
+    init
+    i=0
+    while [ $i -lt 20000 ]; do
+      emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}"
+      i=$((i+1))
+    done
+    success '"fake final answer"' '[]'
+    ;;
   chatty-hang)
     init
     i=0

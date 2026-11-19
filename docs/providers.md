@@ -74,7 +74,10 @@ nothing. The process layer's `ProcessSpec::stdout_tap` delivers the output chunk
 through a bounded queue to a thread of its own: a slow tap loses chunks (counted
 in the report's warnings) and a tap that panics gets no more, and neither delays
 the run, its time limit or its capture. After the run the owner waits at most
-250 ms for the tap to catch up.
+250 ms for the tap to catch up; events a left-behind tap produces after
+`Finished` are discarded, so `Finished` stays last. A `Dropped { chunks }` event,
+sent once before `Finished` when the count is not zero, says how many output
+chunks the tap never received, and the result's `provider_notes` says so too.
 
 ## Outcomes
 

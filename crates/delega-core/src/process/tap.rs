@@ -27,7 +27,7 @@ pub(super) struct TapWorker {
 }
 
 impl TapWorker {
-    pub(super) fn start(tap: OutputTap) -> Self {
+    pub(super) fn start(tap: OutputTap, counter: Option<Arc<AtomicU64>>) -> Self {
         let (sender, receiver) = sync_channel::<Vec<u8>>(TAP_QUEUE_CHUNKS);
         let (done_tx, done) = oneshot::channel();
         let panicked = Arc::new(AtomicU64::new(0));
@@ -44,7 +44,7 @@ impl TapWorker {
         });
         Self {
             sender,
-            dropped: Arc::new(AtomicU64::new(0)),
+            dropped: counter.unwrap_or_default(),
             panicked,
             done,
         }

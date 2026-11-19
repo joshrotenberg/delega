@@ -52,7 +52,7 @@ impl Signals {
     }
 
     /// Wait for any of them. `None` means a handler stopped delivering.
-    async fn next(&mut self) -> Option<()> {
+    pub async fn next(&mut self) -> Option<()> {
         tokio::select! {
             got = self.interrupt.recv() => got,
             got = self.terminate.recv() => got,
@@ -63,7 +63,8 @@ impl Signals {
 }
 
 /// Wait for the run's result, stopping the run on the first signal.
-pub async fn follow(handle: RunHandle, mut signals: Signals, log: &Log) -> RunResult {
+/// Returns the result and whether a signal was received while waiting.
+pub async fn follow(handle: RunHandle, signals: &mut Signals, log: &Log) -> (RunResult, bool) {
     let interrupter = handle.interrupter();
     let wait = handle.wait();
     tokio::pin!(wait);
@@ -71,12 +72,12 @@ pub async fn follow(handle: RunHandle, mut signals: Signals, log: &Log) -> RunRe
     let mut told = false;
     loop {
         tokio::select! {
-            result = &mut wait => return result,
+            result = &mut wait => return (result, stopping),
             got = signals.next() => {
                 if got.is_none() {
                     // The handlers are gone; stop the run and take its result.
                     interrupter.interrupt();
-                    return wait.await;
+                    return (wait.await, true);
                 }
                 if stopping {
                     // Said once; later signals are ignored without a word.
@@ -92,5 +93,16 @@ pub async fn follow(handle: RunHandle, mut signals: Signals, log: &Log) -> RunRe
                 }
             }
         }
+    }
+}
+
+/// What a signal that arrives while the result is being written ends with: the
+/// outcome's status, or 130 when that is 0, because the result was not
+/// delivered.
+pub const fn exit_status_when_cut_short(outcome_status: u8) -> u8 {
+    if outcome_status == 0 {
+        130
+    } else {
+        outcome_status
     }
 }

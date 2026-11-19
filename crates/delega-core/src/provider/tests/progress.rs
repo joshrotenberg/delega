@@ -132,3 +132,39 @@ both!(
     summaries_hold_no_command_and_no_environment_value,
     no_summary_carries_a_command_or_the_environment
 );
+
+async fn a_slow_sink_loses_output_and_the_run_says_so(provider: Provider) {
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink_events = events.clone();
+    let sink: ProgressSink = Arc::new(move |event| {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        sink_events.lock().expect("lock").push(event);
+    });
+    options.progress = Some(sink);
+    let result = run_checked(rig.request(provider, "chatty"), options).await;
+    assert_eq!(result.outcome, Outcome::Completed);
+
+    let events = events.lock().expect("lock").clone();
+    let n = events.len();
+    let chunks = match &events[n - 2] {
+        ProgressEvent::Dropped { chunks } => *chunks,
+        other => panic!("expected Dropped before Finished, got {other:?}"),
+    };
+    assert!(chunks > 0);
+    assert!(matches!(&events[n - 1], ProgressEvent::Finished { .. }));
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|note| note.contains(&format!("{chunks} chunks of provider output"))),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+both!(
+    a_slow_sink_gets_a_dropped_event_and_a_note,
+    a_slow_sink_loses_output_and_the_run_says_so
+);

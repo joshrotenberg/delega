@@ -158,7 +158,7 @@ Behavior:
   The profile and the schema file must be regular files; a device or a pipe is
   refused, and so is a file over the limit (the prompt, instructions and
   headroom for a profile; four times the schema limit for a schema), with the
-  limit named. A value after `-p` may start with a hyphen. Every relative path
+  limit named. A prompt that starts with a hyphen is given as `--prompt=-text` (or `-p=-text`); `-p -text` is a usage error, so `-p` never swallows the flag after it. Every relative path
   resolves against the caller's working directory: `--request`, `--schema`,
   `-C`, `--add-dir`, and `cwd` and `permissions.directories` in a profile. (The
   provider layer would otherwise resolve a relative extra directory against the
@@ -208,11 +208,27 @@ Behavior:
   if `delega` is killed with it, or crashes without running its exit code, the
   worker keeps running and nothing enforces its time limit. Stop `delega` with
   SIGTERM or SIGINT, not SIGKILL.
+- **Writing the result waits on the reader.** After the worker is stopped,
+  `delega` writes the result to standard output on a thread of its own, and that
+  write waits for whoever reads standard output; a large result and a reader that
+  does not read can hold it indefinitely. The signal handlers stay installed
+  during the write, and a SIGINT, SIGTERM, SIGHUP or SIGQUIT ends `delega` at
+  once, with the outcome's exit status, or 130 when the outcome was `completed`
+  because its result was not delivered. The worker is already gone by then.
+  If a signal had already been received during the run (it was used to stop
+  the worker), the write is given 3 seconds and `delega` then exits the same
+  way.
 - **Standard error never holds up the run.** Everything `delega run` writes to
   standard error (progress, summaries, problems, signal acknowledgements) goes
   through one writer thread fed by a bounded queue (1024 lines). A line that
-  finds the queue full is dropped and counted, and the writer says how many were
-  dropped if standard error becomes writable. Stopping the worker, the result on
+  finds the queue full is dropped and counted. The count also includes chunks of provider output that
+  could not be handed to the progress consumer fast enough. If it is not zero,
+  the last line on standard error is `progress: N events or output chunks were
+  dropped: ...`, and with `--output json` a `provider_notes` entry in the result
+  names the chunks lost at the provider output (not those lost on standard
+  error, which the result cannot know). The line is written directly by the
+  writer, so it cannot itself be dropped, and appears if standard error becomes
+  writable before `delega` exits. Stopping the worker, the result on
   standard output and the exit never wait for standard error: at the end
   `delega` waits at most one second for the queue to be written and then
   exits. A caller that does not read standard error can therefore lose lines

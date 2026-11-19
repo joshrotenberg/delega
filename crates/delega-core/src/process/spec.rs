@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use super::limits::{
@@ -141,6 +142,10 @@ pub struct ProcessSpec {
     /// Called with every chunk of standard output as it is read, in addition
     /// to the capture. Chunks have no line framing.
     pub stdout_tap: Option<OutputTap>,
+    /// Incremented by one for each chunk the tap was not given because it was
+    /// too slow. Lets the caller report drops, which the report's warnings
+    /// carry only as text.
+    pub stdout_tap_dropped: Option<Arc<AtomicU64>>,
     /// Grace between SIGTERM and SIGKILL.
     pub stop_grace: Duration,
     /// How long output pipes may stay open after the kill.
@@ -184,6 +189,7 @@ impl ProcessSpec {
                 keep: Keep::Tail,
             },
             stdout_tap: None,
+            stdout_tap_dropped: None,
             stop_grace: DEFAULT_STOP_GRACE,
             drain_bound: DEFAULT_DRAIN_BOUND,
             cleanup_deadline: DEFAULT_CLEANUP_DEADLINE,

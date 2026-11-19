@@ -148,12 +148,12 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
     let cancel = CancellationToken::new();
     match plan::build(&request, &options) {
         Err(refusal) => {
-            let result = RunResult::refused_before_start(
+            let mut result = RunResult::refused_before_start(
                 facts.refusal_context(),
                 &refusal.kind,
                 &refusal.message,
             );
-            progress.finished(&result);
+            progress.finished(&mut result);
             RunHandle {
                 cancel,
                 facts,
@@ -286,8 +286,8 @@ async fn execute(
     ephemeral: bool,
     progress: Progress,
 ) -> RunResult {
-    let result = execute_steps(plan, facts, cancel, ephemeral, &progress).await;
-    progress.finished(&result);
+    let mut result = execute_steps(plan, facts, cancel, ephemeral, &progress).await;
+    progress.finished(&mut result);
     result
 }
 
@@ -400,6 +400,7 @@ async fn execute_steps(
         spec.stop_grace = grace;
     }
     spec.stdout_tap = progress.tap(plan.provider, plan.redactor.clone());
+    spec.stdout_tap_dropped = Some(progress.drop_counter());
     progress.emit(ProgressEvent::Started {
         provider: plan.provider,
         program: plan.program.display().to_string(),
