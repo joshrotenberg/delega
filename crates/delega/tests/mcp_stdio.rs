@@ -163,6 +163,17 @@ impl Rig {
         }
     }
 
+    /// Write the user-level configuration file where this rig's
+    /// `XDG_CONFIG_HOME` points, private to the user.
+    fn write_config(&self, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.root.join("home").join("delega").join("config.toml");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create directory");
+        std::fs::write(&path, body).expect("write config");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        path
+    }
+
     /// Processes whose command line carries this rig's directory.
     fn survivors(&self) -> Vec<String> {
         let out = Command::new("/bin/ps")
@@ -810,4 +821,157 @@ fn the_skills_and_the_identity_over_stdio_are_what_the_cli_prints() {
     assert_stop_status(&session, status, 0);
     rig.assert_nothing_left();
     session.assert_only_json_rpc();
+}
+
+/// Read `run` until it has a result, and return the result.
+fn finished_result(session: &mut Session, run: &Value) -> Value {
+    let began = Instant::now();
+    loop {
+        let read = session.call("read", json!({"run": run}));
+        if read["result"].is_object() {
+            return read["result"].clone();
+        }
+        assert!(
+            began.elapsed() < EVENTUALLY,
+            "the run did not finish: {read}"
+        );
+        std::thread::sleep(POLL);
+    }
+}
+
+#[test]
+fn the_files_limits_defaults_and_environment_apply_to_the_server_and_its_starts() {
+    let rig = Rig::new();
+    // No --env flag: the file alone gives the workers the record directory, a
+    // value of its own and the request defaults; the limits are lowered.
+    rig.write_config(&format!(
+        "schema_version = 1\n\
+         [defaults]\nprovider = \"codex\"\nmodel = \"file-model\"\ntimeout_secs = 777\n\
+         [env]\npass = [\"FAKE_RECORD_DIR\"]\n[env.set]\nFROM_FILE = \"{SECRET_VALUE}\"\n\
+         [mcp]\nmax_live_workers = 2\nmax_queued_per_worker = 3\n\
+         wait_default_secs = 1\nwait_ceiling_secs = 2\n"
+    ));
+    let mut session = rig.start(&[]);
+    session.initialize();
+
+    // The limits in force are the file's.
+    let listed = session.call("list", json!({}));
+    let limits = &listed["limits"];
+    assert_eq!(limits["max_live_workers"], 2, "{limits}");
+    assert_eq!(limits["max_queued_per_worker"], 3, "{limits}");
+    assert_eq!(limits["max_running_runs"], 4, "{limits}");
+    assert_eq!(limits["default_wait_secs"], 1, "{limits}");
+    assert_eq!(limits["wait_ceiling_secs"], 2, "{limits}");
+
+    // A start with no provider and no timeout takes the file's.
+    let first = session.call(
+        "start",
+        json!({"prompt": "success", "cwd": rig.work, "name": "a"}),
+    );
+    assert!(first["worker"].is_string(), "{first}");
+    let result = finished_result(&mut session, &first["run"]);
+    assert_eq!(result["outcome"], "completed", "{result}");
+    assert_eq!(result["provider"], "codex", "{result}");
+    assert_eq!(result["timing"]["timeout_secs"], 777, "{result}");
+    // The model reached the provider's command line, and the file's variables
+    // its environment, by name.
+    let argv = std::fs::read_to_string(rig.record.join("argv")).expect("argv");
+    assert!(argv.split('\0').any(|a| a == "file-model"), "{argv:?}");
+    let env_names = std::fs::read_to_string(rig.record.join("env")).expect("env");
+    assert!(env_names.lines().any(|n| n == "FROM_FILE"), "{env_names}");
+
+    // An argument of the call beats the file.
+    let second = session.call(
+        "start",
+        json!({"prompt": "success", "cwd": rig.work, "name": "b", "timeout_secs": 55, "provider": "codex"}),
+    );
+    let result = finished_result(&mut session, &second["run"]);
+    assert_eq!(result["timing"]["timeout_secs"], 55, "{result}");
+
+    // A profile beats the file, and an argument beats the profile.
+    let profile = rig.root.join("profile.json");
+    std::fs::write(
+        &profile,
+        r#"{"schema_version": 1, "timeout_secs": 66, "model": "profile-model"}"#,
+    )
+    .expect("write profile");
+    session.call("close", json!({"worker": first["worker"]}));
+    let third = session.call(
+        "start",
+        json!({"profile": profile, "prompt": "success", "cwd": rig.work, "name": "c"}),
+    );
+    let result = finished_result(&mut session, &third["run"]);
+    assert_eq!(result["timing"]["timeout_secs"], 66, "{result}");
+    let argv = std::fs::read_to_string(rig.record.join("argv")).expect("argv");
+    assert!(argv.split('\0').any(|a| a == "profile-model"), "{argv:?}");
+
+    // Two workers are live (b and c); a third is refused at the file's limit.
+    let refused = session.call("start", json!({"prompt": "success", "cwd": rig.work}));
+    assert_eq!(refused["outcome"], "refused", "{refused}");
+    assert_eq!(refused["error"]["kind"], "limit_reached", "{refused}");
+
+    // A wait with no timeout uses the file's default, and is capped at its ceiling.
+    session.call("close", json!({"worker": second["worker"]}));
+    let long = session.call(
+        "start",
+        json!({"prompt": LONG_RUNNING, "cwd": rig.work, "name": "d"}),
+    );
+    rig.wait_for_workers(1);
+    let waited = session.call("wait", json!({"runs": [long["run"]]}));
+    assert_eq!(waited["timed_out"], true, "{waited}");
+    assert_eq!(waited["timeout_secs"], 1, "{waited}");
+    let waited = session.call("wait", json!({"runs": [long["run"]], "timeout_secs": 50}));
+    assert_eq!(waited["timeout_secs"], 2, "{waited}");
+
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
+    session.assert_only_json_rpc();
+    assert_no_secret_value(&session);
+}
+
+#[test]
+fn a_file_the_server_cannot_use_refuses_to_start_it_and_a_missing_one_does_not() {
+    // No file: the server starts and serves, as before.
+    let rig = Rig::new();
+    let mut session = rig.start(&[]);
+    session.initialize();
+    let listed = session.call("list", json!({}));
+    assert_eq!(listed["limits"]["max_live_workers"], 16);
+    assert_eq!(listed["limits"]["default_wait_secs"], 30);
+    session.close_stdin();
+    assert_eq!(session.exit().code(), Some(0), "{}", session.stderr());
+    // A rig holds the lock that lets one of these tests run at a time.
+    drop(session);
+    drop(rig);
+
+    // A group-writable file: refused at start, nothing served, status 2, and
+    // the message names the file and holds no value.
+    let rig = Rig::new();
+    let path = rig.write_config(&format!(
+        "schema_version = 1\n[env.set]\nFROM_FILE = \"{SECRET_VALUE}\"\n"
+    ));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+    }
+    let mut session = rig.start(&[]);
+    let status = session.exit();
+    assert_eq!(status.code(), Some(2), "{}", session.stderr());
+    let error = session.stderr();
+    assert!(
+        error.contains("delega mcp: refused: config_unreadable"),
+        "{error}"
+    );
+    assert!(error.contains(&path.display().to_string()), "{error}");
+    assert!(
+        session
+            .lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty(),
+        "nothing is served"
+    );
+    assert_no_secret_value(&session);
 }
