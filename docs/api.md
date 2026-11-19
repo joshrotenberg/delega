@@ -354,13 +354,14 @@ Options, for both commands: `--host claude|codex` (repeatable),
   | `plugin/delega/bin/delega` | A copy of the running executable, mode 0755. |
   | `plugin/delega/skills/<name>/SKILL.md` | One per embedded skill, the bytes of `delega skill show NAME`. |
   | `plugin/delega/IDENTITY.json` | The document `delega version --output json` prints. |
-  | `plugin/delega/.claude-plugin/plugin.json`, `plugin/delega/.mcp.json` | The Claude Code plugin and MCP manifests. The server is `${CLAUDE_PLUGIN_ROOT}/bin/delega` with the argument `mcp`. |
-  | `plugin/delega/plugin.json`, `plugin/delega/mcp.json` | The Codex plugin and MCP manifests. The server is `./bin/delega` with the argument `mcp`. |
+  | `plugin/delega/.claude-plugin/plugin.json`, `plugin/delega/.mcp.json` | The Claude Code plugin and MCP manifests. The server is `${CLAUDE_PLUGIN_ROOT}/bin/delega` with the argument `mcp`, and no `cwd`. |
+  | `plugin/delega/plugin.json`, `plugin/delega/mcp.json` | The Codex plugin and MCP manifests. The server is `./bin/delega` with the argument `mcp`, and no `cwd`. |
   | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | The local marketplace `delega-local`, one file per host. |
   | `.delega-install.json` | The ownership marker. |
 
-- **Plugin version.** The delega version, a dot and the SHA-256 of the copied
-  executable, for example `0.1.0-dev.3f9c...`. A host caches a plugin by version,
+- **Plugin version.** The delega version, a plus sign and the SHA-256 of the copied
+  executable, for example `0.1.0-dev+3f9c...`. The digest is semver build
+  metadata, so the version stays valid semver at a release. A host caches a plugin by version,
   so a changed executable, even another build of the same source revision, gets
   a new version and a refreshed cache. Running `init` again with identical bytes
   gives the same version.
@@ -409,13 +410,33 @@ directory that does not exist is nothing to do and runs no host command.
 nothing. For `uninstall` it does not read the listings, so it does not verify
 ownership.
 
+The manifests set no `cwd`, so each host starts the server in its own default
+directory, normally the project, and not in the plugin directory or a host's
+cached copy of it. A `start` without `cwd` uses the server's working directory,
+so a caller should always pass `cwd` explicitly.
+
+Removing by hand: if the managed directory was deleted by hand, `uninstall`
+reports it absent and runs no host command, because without the marker it cannot
+tell whose registration it would remove. Remove the registrations with the
+hosts' own commands, from a neutral directory: `claude plugin uninstall
+delega@delega-local --scope user` and `claude plugin marketplace remove
+delega-local --scope user`; `codex plugin remove delega@delega-local` and
+`codex plugin marketplace remove delega-local`. `uninstall` also removes the
+managed directory itself when it ends up empty, including an empty directory the
+user chose with `--install-dir`. It deletes only files the marker lists, and a
+marker that names a path `init` of this build cannot write (anything outside the
+marketplaces, the executable, the plugin's manifests, `IDENTITY.json` and
+`skills/<name>/SKILL.md`) is refused as invalid, not deleted. There is no lock:
+running `init` or `uninstall` concurrently, or against the same directory from
+two sessions, is not supported.
+
 After `init`, each host needs a reload to start the new server: in Claude Code,
 start a new session or reconnect `plugin:delega:delega` from `/mcp`
 (`/reload-plugins` re-reads the skills but does not restart the running
 server); in Codex, start a new session. Then read `delega://identity` and check it
 against `plugin/delega/IDENTITY.json`.
 
-`--output json` prints one document and is validated against
+`--output json` prints one document, also for every exit-1 failure, and is validated against
 [`schemas/init.schema.json`](../schemas/init.schema.json) and
 [`schemas/uninstall.schema.json`](../schemas/uninstall.schema.json), which are
 committed. Both have `ok`, `dry_run`, `install_dir`, `hosts` (each with its
@@ -518,7 +539,9 @@ Rules that hold for every tool:
   other argument replaces the matching field, with the same code `delega run`
   uses (`delega_core::profile`): lists replace, `resume` and `ephemeral`
   exclude each other, a relative path resolves against the server's working
-  directory. A request that has a provider and a prompt but fails the contract
+  directory. A `start` without `cwd` runs the worker in the server's working
+  directory, which is whatever directory the host gave the server, so a caller
+  should pass `cwd` explicitly, always for a `write` worker. A request that has a provider and a prompt but fails the contract
   (a blank prompt, for example) is a refused run, not a tool error. The input
   schema states the request schema's ranges and lengths (`timeout_secs`
   between 1 and 86400, the list limits) from the same refinements, so a value
