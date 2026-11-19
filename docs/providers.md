@@ -4,9 +4,8 @@ How delega starts Claude Code and Codex CLI and what each request field turns
 into. The code is `crates/delega-core/src/provider/`. The request and result
 fields are defined in [api.md](api.md).
 
-The design follows counterpart at commit `8fa4645` (its `providers/`,
-`permissions.rs` and `provider_env.rs`). Where this layer differs on purpose, the
-difference is stated below.
+The provider behaviour is ported from an earlier project's runner (source commit `8fa4645`, named in the commit messages). This document
+describes behaviour in its own terms, and states where it differs on purpose.
 
 ## Entry points
 
@@ -61,11 +60,56 @@ probe's cleanup verdict is merged into the result's `cleanup`.
 | Outcome | When |
 | --- | --- |
 | `completed` | The provider reported success, exited with code 0, and gave answer text. With `answer_schema`, the text parsed as JSON. A denial that did not stop the run is listed in `permissions.denied`. |
-| `failed` | Provider error event or result (`provider_error`), non-zero exit (`provider_exit`, with the last 300 characters of standard error), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a failed preparation step, a failure to start. |
+| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a failed preparation step, a failure to start. |
 | `timed_out` | The time limit passed. `text` holds any partial answer. |
 | `interrupted` | `interrupt()` was called, or the handle or future was dropped. |
 | `refused` before start | See steps 1 and 2 above. `timing.started_at` is absent. |
-| `refused` after start | The provider reported failure and at least one request had been denied. Kind `permission_denied`. |
+| `refused` after start | The run stopped because of a denial, by the rule below. Kind `permission_denied`. |
+
+**When a run is `refused` after start.** Only when all of these hold: the
+provider's first terminal event is a failure; that failure is not a limit the
+provider names (`provider_turn_limit`, `provider_budget_limit`); at least one
+request was denied; and nothing reported an error separately and nothing went on
+after the last denial. For Claude Code the denials arrive in the failed result
+event, so the test is that no `error` event or `api_retry` event was seen. For
+Codex the last event before the failure must be a `declined` command: a later
+agent message, a later command that was not declined, or an `error` event ends
+the attribution. Every other failure with a denial is `failed` with the denial
+listed in `permissions.denied`. `provider_exit_code` is in the error of every
+`failed` and refused-after-start result from a process that exited.
+
+The first terminal event decides. A later terminal event is ignored and a note
+says a second one was seen, so a failure followed by a success is not a
+completion. Output bytes that are not valid UTF-8 are decoded with replacement
+characters and a note says how many lines were affected.
+
+### Error kinds
+
+`invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
+`cwd_unusable`, `directory_unusable`, `unsupported_command`,
+`provider_not_found`, `unsupported_provider_version` (all refused before start);
+`provider_error`, `provider_turn_limit`, `provider_budget_limit`,
+`provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
+`provider_preparation_failed`, `spawn_failed`, `process_signaled`,
+`wait_failed`, `internal_error` (failed); `permission_denied` (refused after
+start); `timed_out`; `interrupted`.
+
+### Text from the provider
+
+Provider standard error and provider error messages can echo what the provider
+was given. Before they go into an error message, standard error is cut to its
+last 8 KiB, joined to one line, and cut again to its last 300 characters. Two
+kinds of text are replaced with `[redacted]` first:
+
+- the value of every variable passed to the provider whose name looks like a
+  secret or belongs to the provider, when the value is at least 6 characters;
+- strings shaped like API keys (`sk-`, `sk-ant-`), forge tokens (`ghp_`, `gho_`,
+  `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack tokens, AWS access key ids, JSON
+  web tokens, `Bearer` tokens and private key blocks.
+
+The shapes are a heuristic; a credential in another form is not caught. The
+answer text itself is the provider's output and is not redacted. A denied
+request records the command or path the provider asked for, as written.
 
 A structured answer that parses but does not satisfy the schema is `completed`
 with `structured_valid: false` and a note. The cleanup field comes from the
@@ -110,9 +154,11 @@ claude -p --output-format stream-json --verbose
   [native_args]
 ```
 
-Environment set by the adapter: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`,
-`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, and, when the command guard is
-installed, `DELEGA_EXACT_BASH_GRANTS` (a JSON array of the allowed commands).
+Environment set by the adapter: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and,
+when the command guard is installed, `DELEGA_EXACT_BASH_GRANTS` (a JSON array of
+the allowed commands). `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` is not
+set: a directory listed in `permissions.directories` is for reading and does not
+contribute instruction files.
 
 `--permission-mode dontAsk` with `--permission-prompts none` means anything not
 granted is denied at once. Denials come back in the result event's
@@ -121,8 +167,7 @@ granted is denied at once. Denials come back in the result event's
 
 ### Permission mapping
 
-`CWD` is the resolved working directory. A rule path is written `//abs/path/**`
-with `* ? [ ] { } \` escaped.
+`CWD` is the resolved working directory. A rule path is written `//abs/path/**`.
 
 | Mode | `--tools` | `--allowedTools` | Settings |
 | --- | --- | --- | --- |
@@ -136,9 +181,7 @@ with `* ? [ ] { } \` escaped.
   `Bash(<command>)` rule per command is added to `--allowedTools`, and a blocking
   `PreToolUse` hook is installed in `--settings`. The hook allows a `Bash` call
   only when its command equals a granted command byte for byte, and denies a call
-  that asks to run in the background or to disable the provider's sandbox. A
-  command containing `*`, a carriage return or a line feed is refused
-  (`unsupported_command`), because Claude Code rules read those as syntax. In
+  that asks to run in the background or to disable the provider's sandbox. In
   `full`, commands are not listed: every command is allowed.
 - The hook is a program the caller supplies in `ProviderOptions::hook`
   (`HookCommand { program, args }`). `provider::hook::run` is the entry point it
@@ -148,15 +191,39 @@ with `* ? [ ] { } \` escaped.
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
   It is readable, not editable: no `Edit` or `Write` rule names it.
 
+### Text refused because it could change a rule
+
+Rules are written into one comma-separated `--allowedTools` value, so text that
+could end or split a rule, or be read as a pattern, is refused before start. The
+same text is accepted for Codex, which has no rule text.
+
+- **Commands** (kind `unsupported_command`): any command containing `(`, `)`,
+  `,`, `*`, `\`, or a control character (line breaks, tabs and NUL included).
+  Everything else is allowed.
+- **The working directory and `permissions.directories`** (kinds `cwd_unusable`
+  and `directory_unusable`): the resolved path may contain only letters and
+  digits (any script) and the characters ` / . _ - + @ = : % ~` (the space is
+  included). Any other character refuses the run. No path is escaped. In `full`
+  no path rules are written, so these paths are not checked.
+
 ### What cannot be enforced
 
 - `Glob` and `Grep` are granted without a path scope. Whether Claude Code
   confines them to the working directory and listed directories is the provider's
   behaviour, not delega's. A note says so on every `read` and `write` run.
-- `--setting-sources ""` means the user's and project's own Claude settings,
-  including their deny rules, hooks and instructions, are not loaded. A note says
-  so. Counterpart copies those deny rules and the user's `CLAUDE.md` into the
-  launch; this layer does not (see [Not done](#not-done)).
+- `--setting-sources ""` means Claude Code loads no user, project or local
+  settings file. Not applied to the worker: the user's and project's
+  `permissions.deny` rules, hooks, `env`, `apiKeyHelper`, plugins, skills, MCP
+  servers and settings-defined instructions. Every Claude run carries a note
+  saying the user's and project's settings, including deny rules, were not
+  applied. The earlier project merged those deny rules into the launch; this
+  layer does not (see [Not done](#not-done)).
+- Which instruction files Claude Code still reads is not controlled by delega.
+  Reference directories contribute none (the variable that would load them is
+  not set). Whether the working directory's own `CLAUDE.md` is read with empty
+  settings sources is the provider's behaviour and is listed as unverified.
+- A working directory of `/` or the home directory makes the working-directory
+  rules cover everything below it. The run is not refused; a note warns.
 - `full` is the nine built-in tools. Sub-agents, MCP tools and background tasks
   stay off, and a note says so.
 - `NotebookEdit` is not granted in `write`.
@@ -174,7 +241,8 @@ and both can be passed as `native_args`.
 
 Events are one JSON object per line. `session_id` is taken from any event. The
 `result` event gives the answer (`result`), success (`subtype == "success"` and
-`is_error` not true), errors, `usage` (`input_tokens`, `output_tokens`,
+`is_error` not true), errors, `usage` (`input_tokens` plus
+`cache_creation_input_tokens`, reported as `input_tokens`; `output_tokens`;
 `cache_read_input_tokens` as `cached_tokens`), `total_cost_usd` and
 `permission_denials`. Messages with `parent_tool_use_id` are sub-agent messages
 and are not used as the worker's text. When the result carries no text, the last
@@ -222,18 +290,29 @@ The adapter sets no environment variables.
 `approval_policy="never"` means nothing is ever asked: an action the sandbox
 does not allow fails.
 
-### Commands and directories
+### Wider than requested
 
-Codex has no setting that restricts shell commands to a list, and its sandboxes
-let it read the whole filesystem. So:
+In `read` and `write`, Codex does more than the request asks. The same note,
+starting `wider than requested`, is on every Codex `read` and `write` result and
+in `dry_run`, whether or not the request set `commands` or `directories`:
 
-- `permissions.commands` is not enforced. Any command that the sandbox allows
-  (no writes in `read`, writes only in the working directory in `write`, no
-  network) can run. The result's `permissions` does not list the commands as
-  granted, and a note says they are not enforced.
-- `permissions.directories` is not translated. Reading is already possible
-  everywhere. Directories are deliberately not added as writable (`--add-dir` is
-  not used), and a note says so.
+- Codex can read any file the user can read, including outside the working
+  directory and `permissions.directories`. The request says "read the working
+  directory" and the listed directories.
+- Codex can run any command that works inside the sandbox: in `read`, any command
+  that needs no write access and no network access; in `write`, also commands
+  that write inside the working directory. The request says "no commands except
+  those in `permissions.commands`".
+- `permissions.commands` is not turned into any setting, and
+  `permissions.directories` is not added as a readable (or writable) directory;
+  `--add-dir` is not used.
+- Writes are stricter than `write` strictly needs: temporary directories and the
+  network are excluded.
+- `full` has no sandbox at all.
+
+The mapping is not stricter than the request here because Codex has no setting
+that would make it so. Use Claude Code when `commands` and `directories` must be
+enforced.
 
 ### What cannot be enforced
 
@@ -281,59 +360,67 @@ The provider gets the parent environment minus three groups of variables, then
 1. **The other provider's.** A Claude Code run loses `CODEX_*` and `OPENAI_*`,
    and the host session markers `CLAUDE_CODE_MESSAGING_SOCKET`,
    `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_BRIDGE_SESSION_ID`. A Codex run
-   loses `CLAUDECODE`, `CLAUDE_*` and `ANTHROPIC_*`. This is counterpart's rule.
+   loses `CLAUDECODE`, `CLAUDE_*` and `ANTHROPIC_*`. The earlier project did the
+   same.
 2. **Names that look like secrets**, unless they belong to the provider being
    run (`ANTHROPIC_*`, `CLAUDE_*`, `CLAUDECODE` for Claude Code; `OPENAI_*`,
    `CODEX_*` for Codex). A name matches when, in upper case, it contains
    `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY` or
    `ACCESS_KEY`, ends in `_KEY`, `_PAT` or `APIKEY`, or is `SSH_AUTH_SOCK`.
-   Counterpart does not have this rule: it passes every other variable. It is
-   added here because a worker can print its environment. It is a heuristic; a
-   secret under an ordinary name is passed.
+   The earlier project passed every other variable. This rule is added because a
+   worker can print its environment. It is a heuristic; a secret under an
+   ordinary name is passed.
 3. **delega's own settings**: `DELEGA_*`.
 
 `ProviderOptions::env_pass` names variables to pass although 1 to 3 would remove
 them. `env_set` sets variables after the policy runs. The adapter's variables
-(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`,
-`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`, `DELEGA_EXACT_BASH_GRANTS`)
-cannot be overridden. A variable whose name is not valid UTF-8 is dropped.
+(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, `DELEGA_EXACT_BASH_GRANTS`) cannot be overridden. A variable whose name is not valid UTF-8 is dropped.
 
 Only names are reported: `dry_run().env_names`, `ProviderOptions`'s `Debug` and
 the `ResolvedEnv` type show names. The prompt, the instructions and variable
-values are not in a dry run, a result or an error message.
+values are not in a dry run. In a result, the only text that can carry a value is
+text the provider wrote (an error message or the standard error excerpt), which
+is redacted as described under [Text from the provider](#text-from-the-provider),
+and the answer, which is the provider's own output.
 
 ## Unverified against the real CLI
 
-The fake providers in the tests copy counterpart's stream formats. Nothing here
-was run against the real `claude` or `codex`. The choices below are not
+The fake providers in the tests copy the stream formats of the earlier
+project's fakes. The fake Claude Code also honours its tool, rule and hook
+arguments, and the fake Codex its sandbox flag, so that the tests show
+enforcement through `run`; that proves the plumbing against the behaviour
+assumed here, not the real CLIs. Nothing here was run against the real `claude` or `codex`. The choices below are not
 confirmed and were made conservatively. A live run per provider should settle
 each.
 
 | Assumption | Conservative choice |
 | --- | --- |
-| Claude Code accepts `Read(//abs/dir/**)` as an allow rule and then allows reading only there under `dontAsk` | Counterpart uses this rule form for deny rules. If allow rules do not work, reads fail closed. |
+| Claude Code accepts `Read(//abs/dir/**)` as an allow rule and then allows reading only there under `dontAsk` | The earlier project used this rule form for deny rules. If allow rules do not work, reads fail closed. |
 | Claude Code applies Read scoping to `Glob` and `Grep` | Not relied on: both are granted unscoped and a note says so. |
 | `--add-dir` does not make an extra directory editable in `write` mode | No `Edit` or `Write` rule names it. |
 | `--no-session-persistence` exists with `-p` | Used for `session.ephemeral`. An unknown flag would fail the run. |
 | `claude --version` prints the version first, such as `2.1.400 (Claude Code)` | An unparseable version refuses exact command grants. |
-| The hook settings accept an `args` list next to `command` | Taken from counterpart's settings, which gate on 2.1.325. |
-| `full` for Claude Code needs no `--permission-mode bypassPermissions` | The nine built-in tools are allowed under `dontAsk`, the mechanism counterpart already exercises. |
+| The hook settings accept an `args` list next to `command` | Taken from the earlier project's settings, which gate on 2.1.325. |
+| `full` for Claude Code needs no `--permission-mode bypassPermissions` | The nine built-in tools are allowed under `dontAsk`, the mechanism the earlier project already used. |
 | Codex honours `sandbox_workspace_write.network_access`, `exclude_slash_tmp` and `exclude_tmpdir_env_var` given with `-c` | They only narrow the sandbox. An unknown key would fail the run. |
 | `codex exec --ephemeral` exists | Used for `session.ephemeral`. An unknown flag would fail the run. |
 | A declined command is `item.completed` with `status: "declined"` | Only those are listed in `permissions.denied`, and a note says other blocks are not. |
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
 | Both providers exit 0 after a successful result | A non-zero exit after success is `failed`. |
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
-| `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | Counterpart passes them. Its extra levels `xhigh` and `max` are not in the request. |
+| `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
+| With empty settings sources Claude Code still reads the working directory's own `CLAUDE.md` | Not controlled. A note on every run says what delega does and does not load. |
+| A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
+| Claude Code names `error_max_turns` and `error_max_budget_usd` as result subtypes | They become the `provider_turn_limit` and `provider_budget_limit` error kinds. |
 
 ## Not done
 
-- **User deny rules and instructions for Claude Code.** Counterpart reads the
-  user's and project's `permissions.deny` arrays and the user's `CLAUDE.md` and
-  copies them into the launch, because `--setting-sources ""` otherwise drops
-  them. That reads the user's own files and needs its own review of what may be
-  read. This layer does not read them; the result says the settings are not
-  loaded.
+- **User deny rules and instructions for Claude Code.** The earlier project
+  read the user's and project's `permissions.deny` arrays and the user's
+  `CLAUDE.md` and copied them into the launch, because `--setting-sources ""`
+  otherwise drops them. That reads the user's own files and is a separate
+  decision about what may be read. This layer does not read them; every Claude
+  result says the settings were not applied.
 - **Command shape in the result.** The contract's `provenance` has no field for
   it. `dry_run` reports the shape; a run records the executable and version.
 - **Live asking** (`on_request: ask`), as in [api.md](api.md).

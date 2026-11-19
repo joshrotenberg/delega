@@ -17,12 +17,15 @@ use crate::contract::result::RunResult;
 use crate::provider::{ProviderOptions, run};
 
 mod dry;
+mod enforce;
 mod env;
 mod hook;
+mod injection;
 mod mapping;
 mod native;
 mod outcomes;
 mod prepare;
+mod rules;
 mod streams;
 
 /// A private working area per test: working directory, record directory, home
@@ -137,6 +140,20 @@ impl Rig {
                 assert_gone(name, pid).await;
             }
         }
+    }
+
+    /// A hook command that runs the real guard: this test executable, started
+    /// so that it runs only `hook::hook_process_entry`.
+    pub fn guard_hook() -> crate::provider::HookCommand {
+        let exe = std::env::current_exe().expect("test executable path");
+        crate::provider::HookCommand::new(
+            exe,
+            [
+                "--exact",
+                "provider::tests::hook::hook_process_entry",
+                "--nocapture",
+            ],
+        )
     }
 
     /// Wait until the fake has signalled that it is running.

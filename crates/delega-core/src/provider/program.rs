@@ -1,7 +1,6 @@
 //! Finding the provider executable.
 
 use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::contract::request::Provider;
@@ -34,7 +33,10 @@ fn label(provider: Provider) -> &'static str {
 }
 
 fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    // Ask the operating system whether this user may execute it; a mode bit
+    // alone does not establish that.
+    std::fs::metadata(path).is_ok_and(|m| m.is_file())
+        && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }
 
 fn not_found(provider: Provider, detail: String) -> Refusal {

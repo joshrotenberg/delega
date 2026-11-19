@@ -10,8 +10,8 @@
 
 use crate::contract::request::Provider;
 
-use super::limits::{NATIVE_NAME_CHARS, NATIVE_NUMBER_CHARS};
-use super::refusal::Refusal;
+use super::limits::{NATIVE_FLAG_NAME_CHARS, NATIVE_NAME_CHARS, NATIVE_NUMBER_CHARS};
+use super::refusal::{Refusal, clip};
 
 /// What a value must look like.
 #[derive(Debug, Clone, Copy)]
@@ -170,6 +170,7 @@ fn valid(value: Value, text: &str) -> bool {
 }
 
 fn reject(index: usize, flag: &str, why: &str) -> Refusal {
+    let flag = clip(flag, NATIVE_FLAG_NAME_CHARS);
     Refusal::new(
         "native_arg_rejected",
         format!("native_args[{index}] ({flag}): {why}"),

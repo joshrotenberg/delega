@@ -98,3 +98,21 @@ fn run_denies_an_event_over_the_input_limit() {
 fn the_grants_variable_name_is_stable() {
     assert_eq!(GRANTS_ENV, "DELEGA_EXACT_BASH_GRANTS");
 }
+
+/// Not a test of its own. The enforcement tests use this test executable as the
+/// hook command: the fake provider starts it with the documented hook input,
+/// and it runs the real guard. The variable that carries the grants is only
+/// ever set in that child, so an ordinary test run returns at once.
+#[test]
+fn hook_process_entry() {
+    let Ok(grants) = std::env::var(GRANTS_ENV) else {
+        return;
+    };
+    let code = run(
+        &mut std::io::stdin().lock(),
+        Some(&grants),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    );
+    std::process::exit(code);
+}

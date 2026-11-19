@@ -226,10 +226,7 @@ async fn only_the_policy_environment_is_visible(provider: Provider) {
         "XDG_CONFIG_HOME",
     ];
     if provider == Provider::Claude {
-        expected.extend([
-            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
-        ]);
+        expected.push("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
     }
     expected.sort_unstable();
     assert_eq!(seen, expected);

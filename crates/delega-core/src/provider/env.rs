@@ -41,6 +41,20 @@ impl ResolvedEnv {
             .collect()
     }
 
+    /// The values of the variables whose text must not appear in results: those
+    /// with a secret-looking name or that belong to the provider.
+    pub(super) fn secret_values(&self, provider: Provider) -> Vec<String> {
+        self.vars
+            .iter()
+            .filter_map(|(name, value)| {
+                let name = name.to_str()?;
+                (is_secret_name(name) || owned_by(provider, name))
+                    .then(|| value.to_str().map(str::to_string))
+                    .flatten()
+            })
+            .collect()
+    }
+
     /// The process-layer policy that passes exactly these variables.
     pub(super) fn to_policy(&self) -> EnvPolicy {
         self.vars

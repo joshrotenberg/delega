@@ -51,6 +51,7 @@ mod permissions;
 mod plan;
 pub mod program;
 mod prompt;
+mod redact;
 mod refusal;
 mod run;
 mod settle;

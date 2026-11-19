@@ -7,7 +7,8 @@ use crate::contract::result::{Cleanup, ErrorDetail, RunResult, Timing};
 use crate::process::{Ending, ProcessReport};
 
 use super::facts::Facts;
-use super::limits::{STDERR_EXCERPT_CHARS, VALIDATION_MESSAGE_CHARS};
+use super::limits::{STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS};
+use super::redact::Redactor;
 use super::refusal::clip;
 use super::stream::{Parsed, Terminal};
 use super::structured;
@@ -19,6 +20,7 @@ pub(super) struct Settle<'a> {
     pub ephemeral: bool,
     pub notes: Vec<String>,
     pub max_output_bytes: usize,
+    pub redactor: &'a Redactor,
 }
 
 fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDetail {
@@ -29,9 +31,12 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
     }
 }
 
-/// The last part of the provider's standard error as one line.
-fn stderr_excerpt(report: &ProcessReport) -> Option<String> {
-    let text = report.stderr.text();
+/// The last part of the provider's standard error as one line, with secrets
+/// removed. Only the final [`STDERR_SCAN_BYTES`] are read.
+fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
+    let bytes = &report.stderr.bytes;
+    let tail = &bytes[bytes.len().saturating_sub(STDERR_SCAN_BYTES)..];
+    let text = redactor.apply(&String::from_utf8_lossy(tail));
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.is_empty() {
         return None;
@@ -60,12 +65,12 @@ fn timing(facts: &Facts, report: &ProcessReport) -> Timing {
 
 /// Build the result for a finished provider process.
 pub(super) fn settle(
-    s: Settle<'_>,
+    mut s: Settle<'_>,
     report: &ProcessReport,
     parsed: &Parsed,
     cleanup: Cleanup,
 ) -> RunResult {
-    let mut notes = s.notes;
+    let mut notes = std::mem::take(&mut s.notes);
     if parsed.stats.unparseable > 0 {
         notes.push(format!(
             "{} provider output lines were not JSON objects and were ignored",
@@ -78,6 +83,14 @@ pub(super) fn settle(
             parsed.stats.oversize
         ));
     }
+    if parsed.stats.replaced > 0 {
+        notes.push(format!(
+            "{} provider output lines held invalid UTF-8 and were decoded with replacement \
+             characters",
+            parsed.stats.replaced
+        ));
+    }
+    notes.extend(parsed.notes.iter().cloned());
     if parsed.denied_omitted > 0 {
         notes.push(format!(
             "{} further denied requests were not listed",
@@ -120,7 +133,13 @@ pub(super) fn settle(
                 partial,
             )
         }
-        Ending::Exited { code } => exited(ctx, *code, report, parsed, s.validator, &mut notes),
+        Ending::Exited { code } => {
+            let mut result = exited(ctx, *code, report, parsed, &s, &mut notes);
+            if let Some(error) = result.error.as_mut() {
+                error.provider_exit_code.get_or_insert(*code);
+            }
+            result
+        }
         other => {
             let detail = other
                 .error_detail()
@@ -141,12 +160,12 @@ fn exited(
     code: i32,
     report: &ProcessReport,
     parsed: &Parsed,
-    validator: Option<&Validator>,
+    s: &Settle<'_>,
     notes: &mut Vec<String>,
 ) -> RunResult {
     let partial = parsed.partial_text();
     match &parsed.terminal {
-        Terminal::Success if code == 0 => completed(ctx, parsed, validator, notes),
+        Terminal::Success if code == 0 => completed(ctx, parsed, s.validator, notes),
         Terminal::Success => RunResult::failed(
             ctx,
             error(
@@ -156,38 +175,60 @@ fn exited(
             ),
             partial,
         ),
-        Terminal::Failure(message) if !parsed.denied.is_empty() => RunResult::refused_after_start(
+        // The run stopped because of a denial only when the provider reported
+        // a failure that is not a named limit and nothing else went on or went
+        // wrong after the denial (see `Parsed::stopped_by_denial`).
+        Terminal::Failure {
+            message,
+            code: None,
+        } if parsed.stopped_by_denial => RunResult::refused_after_start(
             ctx,
             "permission_denied",
             format!(
-                "the provider stopped after {} denied request(s) it was not granted: {message}",
-                parsed.denied.len()
+                "the provider stopped after {} denied request(s) it was not granted: {}",
+                parsed.denied.len(),
+                s.redactor.apply(message)
             ),
             partial,
         ),
-        Terminal::Failure(message) => RunResult::failed(
+        Terminal::Failure {
+            message,
+            code: kind,
+        } => RunResult::failed(
             ctx,
-            error("provider_error", message.clone(), Some(code)),
+            error(
+                kind.unwrap_or("provider_error"),
+                s.redactor.apply(message),
+                Some(code),
+            ),
             partial,
         ),
         Terminal::None => {
-            let detail = no_terminal(code, report, parsed);
+            let detail = no_terminal(code, report, parsed, s.redactor);
             RunResult::failed(ctx, detail, partial)
         }
     }
 }
 
-fn no_terminal(code: i32, report: &ProcessReport, parsed: &Parsed) -> ErrorDetail {
+fn no_terminal(
+    code: i32,
+    report: &ProcessReport,
+    parsed: &Parsed,
+    redactor: &Redactor,
+) -> ErrorDetail {
     if let Some(last) = parsed.errors.last() {
         return error(
             "provider_error",
-            format!("{last} (the provider exited with code {code} without a final result)"),
+            format!(
+                "{} (the provider exited with code {code} without a final result)",
+                redactor.apply(last)
+            ),
             Some(code),
         );
     }
     if code != 0 {
         let mut message = format!("the provider exited with code {code} without a final result");
-        if let Some(excerpt) = stderr_excerpt(report) {
+        if let Some(excerpt) = stderr_excerpt(report, redactor) {
             message.push_str(&format!("; its standard error ended with: {excerpt}"));
         }
         return error("provider_exit", message, Some(code));

@@ -60,19 +60,25 @@ fn claude_failure_subtypes_and_errors_become_a_failure_message() {
     ]));
     assert_eq!(
         with_errors.terminal,
-        Terminal::Failure("Turn limit reached; second".into())
+        Terminal::Failure {
+            message: "Turn limit reached; second".into(),
+            code: Some("provider_turn_limit")
+        }
     );
     let without = claude::parse(&lines(&[
         r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true}"#,
     ]));
     assert_eq!(
         without.terminal,
-        Terminal::Failure("Claude Code ended with error_max_budget_usd".into())
+        Terminal::Failure {
+            message: "Claude Code ended with error_max_budget_usd".into(),
+            code: Some("provider_budget_limit")
+        }
     );
     let flagged = claude::parse(&lines(&[
         r#"{"type":"result","subtype":"success","is_error":true,"result":"x"}"#,
     ]));
-    assert!(matches!(flagged.terminal, Terminal::Failure(_)));
+    assert!(matches!(flagged.terminal, Terminal::Failure { .. }));
     assert_eq!(flagged.final_text.as_deref(), Some("x"));
 }
 
@@ -121,14 +127,20 @@ fn codex_failed_turn_keeps_its_message_and_error_events_are_collected() {
         r#"{"type":"turn.failed","error":{"message":"rejected"}}"#,
     ]));
     assert_eq!(parsed.errors, ["Retrying connection"]);
-    assert_eq!(parsed.terminal, Terminal::Failure("rejected".into()));
+    assert_eq!(
+        parsed.terminal,
+        Terminal::Failure {
+            message: "rejected".into(),
+            code: None
+        }
+    );
 }
 
 #[test]
 fn denied_requests_are_bounded() {
     let mut parsed = crate::provider::stream::Parsed::default();
     for i in 0..(crate::provider::limits::MAX_DENIED + 5) {
-        parsed.deny("Bash", Some(&format!("cmd {i}")));
+        parsed.deny("Bash", Some(&format!("cmd {i}")), None);
     }
     assert_eq!(parsed.denied.len(), crate::provider::limits::MAX_DENIED);
     assert_eq!(parsed.denied_omitted, 5);
@@ -136,6 +148,7 @@ fn denied_requests_are_bounded() {
     parsed.deny(
         "Bash",
         Some(&"x".repeat(crate::provider::limits::DENIAL_TARGET_CHARS + 50)),
+        None,
     );
     assert!(parsed.denied[0].request.ends_with("..."));
 }
@@ -159,4 +172,26 @@ fn the_mcp_override_quotes_names_and_disables_each_transport() {
     ] {
         assert!(codex::disabled_servers(bad).is_err(), "{bad}");
     }
+}
+
+#[test]
+fn claude_cache_creation_tokens_count_as_input_and_an_error_flagged_success_has_a_plain_message() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"result","subtype":"success","result":"x","usage":{"input_tokens":3,"cache_creation_input_tokens":10,"cache_read_input_tokens":2,"output_tokens":1}}"#,
+    ]));
+    let usage = parsed.usage.unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.cached_tokens),
+        (Some(13), Some(2))
+    );
+    let flagged = claude::parse(&lines(&[
+        r#"{"type":"result","subtype":"success","is_error":true}"#,
+    ]));
+    assert_eq!(
+        flagged.terminal,
+        Terminal::Failure {
+            message: "Claude Code reported an error".into(),
+            code: None
+        }
+    );
 }

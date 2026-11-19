@@ -17,6 +17,7 @@ use super::launch::{Built, Elide, Inputs};
 use super::limits::{MAX_OUTPUT_BYTES, VALIDATION_MESSAGE_CHARS};
 use super::options::ProviderOptions;
 use super::permissions::{Mapping, Scope};
+use super::redact::Redactor;
 use super::refusal::{Refusal, clip};
 use super::{claude, codex, native_args, permissions, program, prompt};
 
@@ -34,6 +35,7 @@ pub(super) struct Plan {
     pub mcp_index: Option<usize>,
     pub needs_hook_version: bool,
     pub validator: Option<Validator>,
+    pub redactor: Redactor,
     pub time_limit: Duration,
     pub max_output_bytes: usize,
     pub stop_grace: Option<Duration>,
@@ -85,7 +87,9 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         set: &options.env_set,
         adapter: &built.env,
     });
+    let redactor = Redactor::new(env.secret_values(request.provider));
     let mut notes = built.notes;
+    notes.extend(wide_scope_note(&scope, &parent));
     notes.extend(assembled.notes);
     let mapping = Mapping {
         mode: scope.mode,
@@ -111,8 +115,34 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         mcp_index: built.mcp_index,
         needs_hook_version: built.needs_hook_version,
         validator,
+        redactor,
         time_limit: Duration::from_secs(request.timeout_secs),
         max_output_bytes: options.max_output_bytes.unwrap_or(MAX_OUTPUT_BYTES),
         stop_grace: options.stop_grace,
     })
+}
+
+/// A warning when the working directory is the filesystem root or the home
+/// directory, where rules scoped to the working directory cover everything
+/// below it.
+fn wide_scope_note(
+    scope: &Scope,
+    parent: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<String> {
+    let home = parent
+        .iter()
+        .rev()
+        .find(|(n, _)| n.to_str() == Some("HOME"))
+        .and_then(|(_, v)| std::fs::canonicalize(v).ok());
+    let what = if scope.cwd == std::path::Path::new("/") {
+        "the filesystem root"
+    } else if home.as_deref() == Some(scope.cwd.as_path()) {
+        "the home directory"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "the working directory is {what}, so the working-directory scope of this mode covers \
+         everything below it"
+    ))
 }

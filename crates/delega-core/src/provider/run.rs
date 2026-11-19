@@ -390,6 +390,7 @@ async fn execute(
             ephemeral,
             notes,
             max_output_bytes: plan.max_output_bytes,
+            redactor: &plan.redactor,
         },
         &report,
         &parsed,

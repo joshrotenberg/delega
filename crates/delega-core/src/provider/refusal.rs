@@ -8,6 +8,13 @@ use std::fmt;
 /// Kinds used by this layer: `invalid_request`, `invalid_answer_schema`,
 /// `native_arg_rejected`, `cwd_unusable`, `directory_unusable`,
 /// `unsupported_command`, `provider_not_found`, `unsupported_provider_version`.
+///
+/// Error kinds of started runs, besides `timed_out` and `interrupted`:
+/// `provider_error` (the provider reported failure), `provider_turn_limit` and
+/// `provider_budget_limit` (Claude Code reported a turn or budget limit),
+/// `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
+/// `provider_preparation_failed`, `permission_denied` (refused after start),
+/// `spawn_failed`, `process_signaled`, `wait_failed` and `internal_error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     /// A short machine-readable label.

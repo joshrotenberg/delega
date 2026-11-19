@@ -3,6 +3,10 @@
 # --json` and `codex mcp list --json`. The first line of standard input picks
 # the behaviour. It never reads real configuration.
 #
+# It honours the sandbox flags as far as the tests assume Codex does: it reads
+# `-c sandbox_mode=...` and lets a write through only where that sandbox would.
+# This proves delega's plumbing against that assumed behaviour, not the real CLI.
+#
 # Environment (set by the test, never inherited from a real session):
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
@@ -44,9 +48,15 @@ if [ -n "$is_mcp" ]; then
 fi
 
 resume=""
+sandbox=""
 prev=""
 for arg in "$@"; do
   [ "$prev" = "resume" ] && resume="$arg"
+  if [ "$prev" = "-c" ]; then
+    case "$arg" in
+      sandbox_mode=*) sandbox=$(printf '%s' "${arg#sandbox_mode=}" | tr -d '"') ;;
+    esac
+  fi
   prev="$arg"
 done
 sid="${resume:-fake-codex-thread-1}"
@@ -147,6 +157,54 @@ case "$mode" in
     init
     emit '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"make install","status":"declined"}}'
     emit '{"type":"turn.failed","error":{"message":"Cannot continue without the command"}}'
+    ;;
+  tool-write:*)
+    init
+    target=${mode#tool-write:}
+    here=$(pwd)
+    allow=1
+    case "$sandbox" in
+      danger-full-access) allow=0 ;;
+      workspace-write) case "$target" in "$here"/*) allow=0 ;; esac ;;
+    esac
+    if [ $allow -eq 0 ]; then
+      : > "$target"
+      emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"c1\",\"type\":\"command_execution\",\"command\":\"touch $target\",\"status\":\"completed\",\"exit_code\":0}}"
+      final '"wrote it"'
+    else
+      emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"c1\",\"type\":\"command_execution\",\"command\":\"touch $target\",\"status\":\"failed\",\"exit_code\":1}}"
+      final '"could not write it"'
+    fi
+    done_ok
+    ;;
+  tool-command:*)
+    init
+    cmd=${mode#tool-command:}
+    emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"c1\",\"type\":\"command_execution\",\"command\":\"$cmd\",\"status\":\"completed\",\"exit_code\":0}}"
+    final "\"ran: $cmd\""
+    done_ok
+    ;;
+  failed-then-completed)
+    init
+    emit '{"type":"turn.failed","error":{"message":"First failure"}}'
+    final '"a later answer"'
+    done_ok
+    ;;
+  denied-then-error)
+    init
+    emit '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"make","status":"declined"}}'
+    emit '{"type":"error","message":"Connection reset"}'
+    emit '{"type":"turn.failed","error":{"message":"Stream disconnected"}}'
+    ;;
+  invalid-utf8)
+    init
+    printf '{"type":"item.completed","item":{"type":"agent_message","phase":"final_answer","text":"bad \377 byte"}}\n'
+    done_ok
+    ;;
+  stderr-secret)
+    init
+    printf 'boom token=%s and sk-ant-abcdefghijklmnopqrstuvwx and Bearer abcdefghijklmnop123\n' "$MY_SERVICE_API_TOKEN" >&2
+    exit 3
     ;;
   hang)
     init

@@ -3,6 +3,7 @@
 //! Commands run with `-p --output-format stream-json`, the prompt on standard
 //! input. The permission mapping is explained in `docs/providers.md`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -13,7 +14,10 @@ use crate::contract::result::Usage;
 
 use super::hook::{GRANTS_ENV, HookCommand};
 use super::launch::{Built, Elide, Inputs};
-use super::limits::{HOOK_TIMEOUT_SECS, PROVIDER_MESSAGE_CHARS, SETTINGS_ARGUMENT_LIMIT};
+use super::limits::{
+    DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, PROVIDER_MESSAGE_CHARS,
+    SETTINGS_ARGUMENT_LIMIT,
+};
 use super::refusal::{Refusal, clip};
 use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
 
@@ -39,29 +43,43 @@ fn effort(e: Effort) -> &'static str {
     }
 }
 
-/// A rule path for an absolute directory: `//abs/dir/**`, with the characters
-/// that are special in a rule escaped.
-fn rule_path(dir: &Path) -> Result<String, Refusal> {
-    let text = dir.to_str().ok_or_else(|| {
+/// Characters other than letters and digits that may appear in a path written
+/// into a rule. Everything else is refused: a rule is comma-separated text with
+/// parentheses and glob syntax, and a path that could end or split a rule, or
+/// read as a pattern, must never reach it.
+const PATH_PUNCTUATION: &str = " /._-+@=:%~";
+
+/// Whether a path can be written into a rule as it is.
+pub(super) fn path_is_rule_safe(text: &str) -> bool {
+    text.chars()
+        .all(|c| c.is_alphanumeric() || PATH_PUNCTUATION.contains(c))
+}
+
+/// A rule path for an absolute directory: `//abs/dir/**`.
+fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
+    let unusable = |why: &str| {
         Refusal::new(
-            "directory_unusable",
+            kind,
             format!(
-                "{} is not valid UTF-8 and cannot be written as a Claude Code rule",
+                "{} cannot be written as a Claude Code rule: {why}. Letters, digits and \
+                 `{PATH_PUNCTUATION}` are allowed in the path; use a path without other characters",
                 dir.display()
             ),
         )
-    })?;
-    let mut escaped = String::new();
-    for ch in text.trim_matches('/').chars() {
-        if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '\\') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
+    };
+    let text = dir
+        .to_str()
+        .ok_or_else(|| unusable("it is not valid UTF-8"))?;
+    if !path_is_rule_safe(text) {
+        return Err(unusable(
+            "it contains a character that could end or split a rule or read as a pattern",
+        ));
     }
-    Ok(if escaped.is_empty() {
+    let inner = text.trim_matches('/');
+    Ok(if inner.is_empty() {
         "//**".to_string()
     } else {
-        format!("//{escaped}/**")
+        format!("//{inner}/**")
     })
 }
 
@@ -82,14 +100,23 @@ fn settings_json(guard: Option<&HookCommand>) -> Value {
     }
 }
 
+/// Characters refused in a command that becomes a rule: parentheses and commas
+/// end or split a rule, `*` is a wildcard, a backslash escapes, and control
+/// characters (line breaks included) are never part of an exact command.
+const COMMAND_REFUSED: [char; 5] = ['(', ')', ',', '*', '\\'];
+
 /// A command that cannot be written as an exact Claude Code rule.
 fn check_command(index: usize, command: &str) -> Result<(), Refusal> {
-    if command.contains(['*', '\n', '\r']) {
+    if command
+        .chars()
+        .any(|c| c.is_control() || COMMAND_REFUSED.contains(&c))
+    {
         return Err(Refusal::new(
             "unsupported_command",
             format!(
-                "permissions.commands[{index}] contains '*' or a line break, which Claude Code \
-                 rules treat as syntax; an exact command cannot be written for it"
+                "permissions.commands[{index}] contains a parenthesis, comma, asterisk, \
+                 backslash or control character, which Claude Code rules treat as syntax; an \
+                 exact command cannot be written for it"
             ),
         ));
     }
@@ -123,9 +150,9 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
     }
 
     let mut tools = vec!["Read", "Glob", "Grep"];
-    let mut allowed = vec![format!("Read({})", rule_path(&scope.cwd)?)];
+    let mut allowed = vec![format!("Read({})", rule_path(&scope.cwd, "cwd_unusable")?)];
     for dir in &scope.directories {
-        allowed.push(format!("Read({})", rule_path(dir)?));
+        allowed.push(format!("Read({})", rule_path(dir, "directory_unusable")?));
     }
     allowed.push("Glob".to_string());
     allowed.push("Grep".to_string());
@@ -137,8 +164,8 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
     );
     if scope.mode == Mode::Write {
         tools.extend(["Edit", "Write"]);
-        allowed.push(format!("Edit({})", rule_path(&scope.cwd)?));
-        allowed.push(format!("Write({})", rule_path(&scope.cwd)?));
+        allowed.push(format!("Edit({})", rule_path(&scope.cwd, "cwd_unusable")?));
+        allowed.push(format!("Write({})", rule_path(&scope.cwd, "cwd_unusable")?));
         notes.push("NotebookEdit is not granted in write mode".to_string());
     }
 
@@ -234,16 +261,10 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     args.push(inputs.system.to_string());
     args.extend(inputs.native.iter().cloned());
 
-    let mut env = vec![
-        (
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_string(),
-            "1".to_string(),
-        ),
-        (
-            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(),
-            "1".to_string(),
-        ),
-    ];
+    let mut env = vec![(
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_string(),
+        "1".to_string(),
+    )];
     if g.guard.is_some() {
         env.push((
             GRANTS_ENV.to_string(),
@@ -253,8 +274,16 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
 
     let mut notes = g.notes;
     notes.push(
-        "Claude Code settings sources are not loaded (--setting-sources is empty): the user's and \
-         the project's own deny rules, hooks and instructions do not apply to this worker"
+        "the user's and the project's Claude Code settings, including their deny rules, were not \
+         applied: --setting-sources is empty, so those settings files are not loaded (their \
+         hooks, env, apiKeyHelper, plugins, skills, MCP servers and instructions with them)"
+            .to_string(),
+    );
+    notes.push(
+        "reference directories do not contribute CLAUDE.md files (the variable that would load \
+         them is not set); whether Claude Code reads the working directory's own CLAUDE.md when \
+         settings sources are empty is the provider's behaviour and is not controlled or \
+         verified by delega"
             .to_string(),
     );
     let mut mapping = vec![
@@ -314,7 +343,15 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
     let counts = event.get("usage");
     let cost = event.get("total_cost_usd").and_then(Value::as_f64);
     let usage = Usage {
-        input_tokens: counts.and_then(|u| count(u, "input_tokens")),
+        // Input tokens that were sent, including those written to the cache.
+        input_tokens: counts.and_then(|u| {
+            let plain = count(u, "input_tokens");
+            let created = count(u, "cache_creation_input_tokens");
+            match (plain, created) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            }
+        }),
         output_tokens: counts.and_then(|u| count(u, "output_tokens")),
         cached_tokens: counts.and_then(|u| count(u, "cache_read_input_tokens")),
         reasoning_tokens: None,
@@ -335,8 +372,8 @@ fn failure_message(event: &Map<String, Value>) -> String {
         .unwrap_or_default();
     let text = if errors.is_empty() {
         match str_field(event, "subtype") {
+            Some("success") | None => "Claude Code reported an error".to_string(),
             Some(subtype) => format!("Claude Code ended with {subtype}"),
-            None => "Claude Code reported an error".to_string(),
         }
     } else {
         errors.join("; ")
@@ -344,14 +381,40 @@ fn failure_message(event: &Map<String, Value>) -> String {
     clip(&text, PROVIDER_MESSAGE_CHARS)
 }
 
+/// The first sentence of a tool error, as a short reason.
+fn error_reason(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => return None,
+    };
+    let sentence_end = text.find(". ").map_or(text.len(), |i| i + 1);
+    let line_end = text.find('\n').unwrap_or(text.len());
+    let reason = text[..sentence_end.min(line_end)].trim();
+    (!reason.is_empty()).then(|| clip(reason, DENIAL_REASON_CHARS))
+}
+
 /// Reduce the output stream to a [`Parsed`].
 pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut parsed = Parsed::default();
+    let mut reasons: HashMap<String, String> = HashMap::new();
     let stats = for_each_event(bytes, |event| {
+        let kind = str_field(event, "type");
+        // The first terminal event decides; later events are ignored.
+        if parsed.terminal != Terminal::None {
+            if kind == Some("result") {
+                parsed.note_second_terminal();
+            }
+            return;
+        }
         if let Some(id) = str_field(event, "session_id") {
             parsed.session_id = Some(id.to_string());
         }
-        match str_field(event, "type") {
+        match kind {
             Some("assistant") => {
                 // A sub-agent's messages are not the worker's answer.
                 if event
@@ -364,27 +427,72 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     parsed.last_text = Some(text);
                 }
             }
+            Some("user") => {
+                let blocks = event
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(Value::as_array);
+                for block in blocks.into_iter().flatten() {
+                    let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                    let id = block.get("tool_use_id").and_then(Value::as_str);
+                    if let (true, Some(id), Some(reason)) =
+                        (is_error, id, block.get("content").and_then(error_reason))
+                        && reasons.len() < MAX_REASONS
+                    {
+                        reasons.insert(id.to_string(), reason);
+                    }
+                }
+            }
+            Some("error") => {
+                let message =
+                    str_field(event, "message").unwrap_or("Claude Code reported an error");
+                parsed.errors.push(clip(message, PROVIDER_MESSAGE_CHARS));
+            }
+            Some("system") if str_field(event, "subtype") == Some("api_retry") => {
+                parsed
+                    .errors
+                    .push("Claude Code is retrying a failed API request".to_string());
+            }
             Some("result") => {
-                let success = str_field(event, "subtype") == Some("success")
+                let subtype = str_field(event, "subtype");
+                let success = subtype == Some("success")
                     && event.get("is_error").and_then(Value::as_bool) != Some(true);
+                let code = match subtype {
+                    Some("error_max_turns") => Some("provider_turn_limit"),
+                    Some("error_max_budget_usd") => Some("provider_budget_limit"),
+                    _ => None,
+                };
                 parsed.final_text = str_field(event, "result").map(str::to_string);
                 parsed.terminal = if success {
                     Terminal::Success
                 } else {
-                    Terminal::Failure(failure_message(event))
+                    Terminal::Failure {
+                        message: failure_message(event),
+                        code,
+                    }
                 };
                 parsed.usage = usage(event);
-                parsed.denied.clear();
-                parsed.denied_omitted = 0;
                 if let Some(items) = event.get("permission_denials").and_then(Value::as_array) {
                     for item in items {
                         let tool = item
                             .get("tool_name")
                             .and_then(Value::as_str)
                             .unwrap_or("unknown tool");
-                        parsed.deny(tool, denial_target(item).as_deref());
+                        let reason = item
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .and_then(|id| reasons.get(id));
+                        parsed.deny(
+                            tool,
+                            denial_target(item).as_deref(),
+                            reason.map(String::as_str),
+                        );
                     }
                 }
+                parsed.stopped_by_denial = !success
+                    && code.is_none()
+                    && !parsed.denied.is_empty()
+                    && parsed.errors.is_empty();
             }
             _ => {}
         }

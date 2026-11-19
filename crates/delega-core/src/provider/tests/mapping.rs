@@ -102,7 +102,7 @@ fn claude_read_mode_grants_reading_the_working_directory_and_nothing_else() {
     assert!(
         plan.notes
             .iter()
-            .any(|n| n.contains("settings sources are not loaded"))
+            .any(|n| n.contains("including their deny rules, were not applied"))
     );
 }
 
@@ -261,30 +261,6 @@ fn claude_directories_are_added_and_readable_by_rule_but_not_editable() {
 }
 
 #[test]
-fn claude_rule_paths_escape_pattern_characters() {
-    let rig = Rig::new();
-    let odd = rig.work.join("a[1]*{x}");
-    std::fs::create_dir(&odd).unwrap();
-    let mut request = rig.request(Provider::Claude, "p");
-    request.cwd = Some(odd.clone());
-    let plan = dry(&rig, &request);
-    let at = plan
-        .args
-        .iter()
-        .position(|a| a == "--allowedTools")
-        .unwrap();
-    let escaped = format!(
-        "Read(//{}/a\\[1\\]\\*\\{{x\\}}/**)",
-        rig.work.to_string_lossy().trim_matches('/')
-    );
-    assert!(
-        plan.args[at + 1].starts_with(&escaped),
-        "{}",
-        plan.args[at + 1]
-    );
-}
-
-#[test]
 fn claude_model_effort_resume_and_ephemeral_are_placed_before_the_system_prompt() {
     let rig = Rig::new();
     let mut request = rig.request(Provider::Claude, "p");
@@ -384,12 +360,12 @@ fn codex_read_mode_is_the_read_only_sandbox_with_approval_never() {
     assert!(
         plan.notes
             .iter()
-            .any(|n| n.contains("read the whole filesystem"))
+            .any(|n| n.contains("wider than requested: the read-only sandbox"))
     );
     assert!(
         plan.notes
             .iter()
-            .any(|n| n.contains("permissions.commands are not enforced"))
+            .any(|n| n.contains("permissions.commands is not enforced as a list"))
     );
 }
 
@@ -411,7 +387,7 @@ fn codex_write_mode_is_workspace_write_without_network_or_temporary_directories(
     assert!(
         plan.notes
             .iter()
-            .any(|n| n.contains("limits writes to the working directory"))
+            .any(|n| n.contains("wider than requested: the workspace-write sandbox"))
     );
 }
 
@@ -447,7 +423,7 @@ fn codex_directories_and_commands_are_not_translated_into_grants() {
     assert!(
         plan.notes
             .iter()
-            .any(|n| n.contains("permissions.directories and permissions.commands"))
+            .any(|n| n.contains("permissions.directories does not limit reading"))
     );
 }
 

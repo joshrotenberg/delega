@@ -56,3 +56,16 @@ pub const HOOK_TIMEOUT_SECS: u64 = 5;
 pub const NATIVE_NAME_CHARS: usize = 200;
 /// The longest accepted numeric `native_args` value, in characters.
 pub const NATIVE_NUMBER_CHARS: usize = 10;
+
+/// Longest denial reason kept after a denied request, in characters.
+pub const DENIAL_REASON_CHARS: usize = 300;
+/// Most tool error reasons remembered while reading a Claude Code stream.
+pub const MAX_REASONS: usize = 64;
+/// Most bytes of provider standard error read for an error message, from the
+/// end.
+pub const STDERR_SCAN_BYTES: usize = 8 * 1024;
+/// Shortest environment value that is removed from provider text. Shorter
+/// values would also remove ordinary words.
+pub const MIN_REDACTED_VALUE_CHARS: usize = 6;
+/// Longest prefix of a rejected `native_args` option named in a message.
+pub const NATIVE_FLAG_NAME_CHARS: usize = 40;

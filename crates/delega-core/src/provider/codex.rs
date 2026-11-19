@@ -104,26 +104,22 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
             .to_string(),
     ];
     match scope.mode {
-        Mode::Read => {
-            notes.push(
-                "the read-only sandbox lets Codex read the whole filesystem and run any command \
-                 that does not write or use the network; the working directory, \
-                 permissions.directories and permissions.commands are not enforced as limits"
-                    .to_string(),
-            );
-        }
-        Mode::Write => {
-            notes.push(
-                "the workspace-write sandbox limits writes to the working directory and disables \
-                 network access and the temporary directories, but lets Codex read the whole \
-                 filesystem and run any command inside the sandbox; permissions.directories and \
-                 permissions.commands are not enforced as limits"
-                    .to_string(),
-            );
-        }
-        Mode::Full => {
-            notes.push("full runs Codex with no sandbox".to_string());
-        }
+        Mode::Read => notes.push(
+            "wider than requested: the read-only sandbox lets Codex read any file this user can \
+             read, including outside the working directory and permissions.directories, and run \
+             any command that needs no write access and no network access; permissions.commands \
+             is not enforced as a list and permissions.directories does not limit reading"
+                .to_string(),
+        ),
+        Mode::Write => notes.push(
+            "wider than requested: the workspace-write sandbox lets Codex read any file this user \
+             can read, including outside the working directory and permissions.directories, and \
+             run any command that works inside the sandbox (writes only in the working directory, \
+             no network, no temporary directories); permissions.commands is not enforced as a \
+             list and permissions.directories does not limit reading"
+                .to_string(),
+        ),
+        Mode::Full => notes.push("full runs Codex with no sandbox".to_string()),
     }
     let mut mapping = settings.clone();
     mapping.push("developer_instructions=<system prompt>".to_string());
@@ -195,8 +191,16 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut parsed = Parsed::default();
     let stats = for_each_event(bytes, |event| {
         let kind = str_field(event, "type").unwrap_or_default();
+        // The first terminal event decides; later events are ignored.
+        if parsed.terminal != Terminal::None {
+            if matches!(kind, "turn.completed" | "turn.failed") {
+                parsed.note_second_terminal();
+            }
+            return;
+        }
         let item = event.get("item");
         let item_type = item.and_then(|i| i.get("type")).and_then(Value::as_str);
+        let status = item.and_then(|i| i.get("status")).and_then(Value::as_str);
         match kind {
             "thread.started" => {
                 if let Some(id) = str_field(event, "thread_id") {
@@ -211,14 +215,16 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 if let Some(text) = text.filter(|t| !t.is_empty() && !commentary) {
                     parsed.last_text = Some(text.to_string());
                     parsed.final_text = Some(text.to_string());
+                    parsed.stopped_by_denial = false;
                 }
             }
-            "item.started" | "item.completed" if item_type == Some("command_execution") => {
-                let declined =
-                    item.and_then(|i| i.get("status")).and_then(Value::as_str) == Some("declined");
-                if declined && kind == "item.completed" {
+            "item.completed" if item_type == Some("command_execution") => {
+                if status == Some("declined") {
                     let command = item.and_then(|i| i.get("command")).and_then(Value::as_str);
-                    parsed.deny("command", command);
+                    parsed.deny("command", command, None);
+                    parsed.stopped_by_denial = true;
+                } else {
+                    parsed.stopped_by_denial = false;
                 }
             }
             "turn.completed" => {
@@ -231,12 +237,16 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     .and_then(|e| e.get("message"))
                     .and_then(Value::as_str)
                     .unwrap_or("Codex turn failed");
-                parsed.terminal = Terminal::Failure(clip(message, PROVIDER_MESSAGE_CHARS));
+                parsed.terminal = Terminal::Failure {
+                    message: clip(message, PROVIDER_MESSAGE_CHARS),
+                    code: None,
+                };
                 parsed.usage = usage(event);
             }
             "error" => {
                 if let Some(message) = str_field(event, "message") {
                     parsed.errors.push(clip(message, PROVIDER_MESSAGE_CHARS));
+                    parsed.stopped_by_denial = false;
                 }
             }
             _ => {}
