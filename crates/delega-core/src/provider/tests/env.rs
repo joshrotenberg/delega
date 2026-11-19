@@ -43,6 +43,11 @@ fn secret_looking_names_are_recognised_and_ordinary_ones_are_not() {
         "my_token",
         "SOME_APIKEY",
         "DEPLOY_PRIVATE_KEY",
+        "DATABASE_URL",
+        "REDIS_CLOUD_URL",
+        "MONGODB_URI",
+        "SENTRY_DSN",
+        "AZURE_STORAGE_CONNECTION_STRING",
     ] {
         assert!(is_secret_name(name), "{name}");
     }
@@ -55,6 +60,8 @@ fn secret_looking_names_are_recognised_and_ordinary_ones_are_not() {
         "KEYBOARD_LAYOUT",
         "MONKEY",
         "USER",
+        "HTTPS_PROXY",
+        "CURLOPT",
     ] {
         assert!(!is_secret_name(name), "{name}");
     }

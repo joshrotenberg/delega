@@ -441,8 +441,10 @@ The provider gets the parent environment minus four groups of variables, then
 3. **Names that look like secrets**, unless they belong to the provider being
    run (`ANTHROPIC_*`, `CLAUDE_*` for Claude Code; `OPENAI_*`, `CODEX_*` for
    Codex). A name matches when, in upper case, it contains
-   `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY` or
-   `ACCESS_KEY`, ends in `_KEY`, `_PAT` or `APIKEY`, or is `SSH_AUTH_SOCK`.
+   `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY`,
+   `ACCESS_KEY` or `CONNECTION_STRING`, ends in `_KEY`, `_PAT`, `APIKEY`,
+   `_URL`, `_URI` or `_DSN`, or is `SSH_AUTH_SOCK`. Connection addresses count
+   because they often carry a user name and password.
    The earlier project passed every other variable. This rule is added because a
    worker can print its environment. It is a heuristic; a secret under an
    ordinary name is passed.
