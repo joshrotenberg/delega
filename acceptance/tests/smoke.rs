@@ -30,10 +30,12 @@ fn the_smoke_rows_meet_their_expectations_and_leave_nothing_running() {
 
     // Nothing the cases started may be left, whatever delega reported.
     let marker = ctx.run_marker();
-    let left: Vec<_> = delega_acceptance::procs::ps()
+    let mut left: Vec<_> = delega_acceptance::procs::ps()
         .into_iter()
         .filter(|p| !p.stat.starts_with('Z') && p.command.contains(&marker))
         .collect();
+    let bare = ctx.bare.lock().map(|b| b.clone()).unwrap_or_default();
+    left.extend(delega_acceptance::procs::live_bare(&bare));
     assert!(left.is_empty(), "processes left behind: {left:?}");
 }
 

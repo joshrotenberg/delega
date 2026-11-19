@@ -153,10 +153,13 @@ fn main() -> ExitCode {
 
     // Whatever the cases did, nothing from this run may be left.
     let marker = ctx.run_marker();
-    let left: Vec<_> = procs::ps()
+    let mut left: Vec<_> = procs::ps()
         .into_iter()
         .filter(|p| !p.stat.starts_with('Z') && p.command.contains(&marker))
         .collect();
+    // Processes with no marker in their command line: the pids the ledgers named.
+    let bare = ctx.bare.lock().map(|b| b.clone()).unwrap_or_default();
+    left.extend(procs::live_bare(&bare));
     if !left.is_empty() {
         for p in &left {
             procs::signal(p.pid, rustix::process::Signal::KILL);
@@ -257,7 +260,8 @@ fn summarize(
     }
 }
 
-/// Kill every process whose command line carries a harness marker.
+/// Kill every process whose command line carries a harness marker, and every
+/// `bare` process that a ledger left in a case directory names.
 fn sweep_all() -> ExitCode {
     let found: Vec<_> = procs::ps()
         .into_iter()
@@ -271,6 +275,29 @@ fn sweep_all() -> ExitCode {
         procs::signal(p.pid, rustix::process::Signal::KILL);
         killed += 1;
     }
+    let mut bare = Vec::new();
+    let top = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_default();
+    for case_root in read_dirs(&top, "dacc-") {
+        for dir in read_dirs(&case_root, MARKER_PREFIX) {
+            bare.extend(procs::bare_pids_in(&dir));
+        }
+    }
+    for p in procs::live_bare(&bare) {
+        procs::signal(p.pid, rustix::process::Signal::KILL);
+        killed += 1;
+    }
     println!("killed {killed} processes");
     ExitCode::SUCCESS
+}
+
+/// The subdirectories of `dir` whose names start with `prefix`.
+fn read_dirs(dir: &std::path::Path, prefix: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
 }

@@ -6,7 +6,7 @@
 //! the case directory, and the relay passes paths in it to `perl`). A process
 //! of a role in `BARE_ROLES` has no marker in its command line, so the ledger
 //! the fakes write is read instead: it counts when its recorded pid is alive
-//! and its command is still `sleep` (which rules out a reused pid). The
+//! and its command is exactly the one the fake starts, `sleep 300` (which rules out a reused pid). The
 //! ledger also maps a pid to a role; a marked process it does not know is
 //! reported as `unrecorded`.
 
@@ -60,8 +60,27 @@ pub struct Survivor {
     pub pid: i32,
 }
 
+/// The command line of a `bare` process, as the fake starts it.
+const BARE_COMMAND: &str = "sleep 300";
+
 /// Roles whose processes carry no marker in their command line.
 const BARE_ROLES: [&str; 1] = ["bare"];
+
+/// The pids the ledger of a case directory records for `bare` processes.
+pub fn bare_pids_in(dir: &Path) -> Vec<i32> {
+    ledger(dir)
+        .into_iter()
+        .filter(|(role, _)| BARE_ROLES.contains(&role.as_str()))
+        .map(|(_, pid)| pid)
+        .collect()
+}
+
+/// The live processes among `pids` that are still the `bare` command.
+pub fn live_bare(pids: &[i32]) -> Vec<Proc> {
+    ps().into_iter()
+        .filter(|p| pids.contains(&p.pid) && !p.stat.starts_with('Z') && p.command == BARE_COMMAND)
+        .collect()
+}
 
 /// Whether a command line carries `marker`. The marker ends in `/`, so the
 /// marker of case 1 is not found in the command line of case 10.
@@ -89,9 +108,9 @@ pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
         .collect();
     for (role, pid) in &ledger {
         let alive_bare = BARE_ROLES.contains(&role.as_str())
-            && table.iter().any(|p| {
-                p.pid == *pid && !p.stat.starts_with('Z') && p.command.starts_with("sleep ")
-            });
+            && table
+                .iter()
+                .any(|p| p.pid == *pid && !p.stat.starts_with('Z') && p.command == BARE_COMMAND);
         if alive_bare && !except.contains(pid) && !found.iter().any(|f| f.pid == *pid) {
             found.push(Survivor {
                 role: role.clone(),

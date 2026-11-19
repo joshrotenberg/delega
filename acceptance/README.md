@@ -182,9 +182,10 @@ expectation and verdict.
 
 Criterion 2 allows survivors when the result says cleanup could not be
 confirmed. Rows `u`, `ud` and `ui` make that happen: they set
-`DELEGA_TEST_PS_PROGRAMS` (empty) in the environment of `delega`. This is a
+`DELEGA_TEST_NO_PROCESS_LISTING` in the environment of `delega`. This is a
 test-only seam in `crates/delega-core/src/process/tree.rs`: when the variable is
-set, its value replaces the list of places `ps` is looked for. `delega` hard-codes
+set, whatever its value, no program is used to list processes. It cannot
+substitute a program, so it can only make the verdict weaker. `delega` hard-codes
 `/bin/ps` and `/usr/bin/ps`, and neither can be hidden without root, so no
 arrangement from outside was found; nothing outside this harness sets the
 variable. With no listing, the run must still end in its outcome, must report

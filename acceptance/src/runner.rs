@@ -42,6 +42,9 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Settings shared by every case of a run.
 pub struct Context {
+    /// Pids of `bare` processes any case recorded, so the end of the run can
+    /// look for them after the case directories (and their ledgers) are gone.
+    pub bare: std::sync::Mutex<Vec<i32>>,
     pub delega: PathBuf,
     pub fakes: PathBuf,
     pub run_id: String,
@@ -63,6 +66,7 @@ impl Context {
                 .map_or(0, |d| d.as_secs() % 100_000)
         );
         Self {
+            bare: std::sync::Mutex::new(Vec::new()),
             delega,
             fakes: crate::delega_bin::workspace_root()
                 .join("crates/delega-core/src/provider/tests/fakes"),
@@ -209,7 +213,7 @@ impl Fixture {
             .process_group(0);
         if case.case.ps_unavailable {
             // Test-only seam: no place to look for `ps`.
-            command.env("DELEGA_TEST_PS_PROGRAMS", "");
+            command.env("DELEGA_TEST_NO_PROCESS_LISTING", "");
         }
         command
     }
@@ -404,6 +408,9 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
 
     read_stdout(&mut m, &stdout_bytes, case.expect.docs);
 
+    if let Ok(mut all) = ctx.bare.lock() {
+        all.extend(procs::bare_pids_in(&fixture.dir));
+    }
     m.provider_pid = procs::ledger(&fixture.dir)
         .into_iter()
         .find(|(role, _)| role == "provider")

@@ -414,7 +414,7 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
 
     out.push_str("## Rows that force an unconfirmed cleanup\n\n");
     out.push_str(
-        "Process listing is made unavailable (`DELEGA_TEST_PS_PROGRAMS` set empty, a test-only seam in\n\
+        "Process listing is made unavailable (`DELEGA_TEST_NO_PROCESS_LISTING` set, a test-only seam in\n\
          `delega-core`). Each row must report `cleanup.confirmed` false with a reason that contains\n\
          \"process inspection was unavailable\" and says what could not be checked. With no listing it cannot\n\
          name a descendant in a session of its own, so `pids` and `process_groups` hold only what is known\n\

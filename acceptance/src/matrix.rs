@@ -80,7 +80,7 @@ pub struct Case {
     pub variants: &'static [&'static str],
     pub desc: &'static str,
     /// Run `delega` with its process listing made unavailable (the test-only
-    /// `DELEGA_TEST_PS_PROGRAMS` variable, see `acceptance/README.md`).
+    /// `DELEGA_TEST_NO_PROCESS_LISTING` variable, see `acceptance/README.md`).
     pub ps_unavailable: bool,
     pub expect: ExpectBase,
 }
