@@ -132,15 +132,10 @@ fn version_json_carries_a_digest_of_each_skill_that_matches_skill_list_and_show(
 
 #[test]
 fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
-    for args in [&["init", "--dry-run"][..], &["doctor"]] {
-        let out = delega(args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}");
-        assert!(
-            text(&out.stderr).contains("not implemented yet"),
-            "{args:?}"
-        );
-        assert!(out.stdout.is_empty(), "{args:?} wrote to stdout");
-    }
+    let out = delega(&["doctor"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("not implemented yet"));
+    assert!(out.stdout.is_empty(), "doctor wrote to stdout");
 }
 
 #[test]
@@ -324,7 +319,16 @@ fn help_lists_every_planned_subcommand() {
     let out = delega(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
     let help = text(&out.stdout);
-    for name in ["run", "mcp", "init", "schema", "skill", "doctor", "version"] {
+    for name in [
+        "run",
+        "mcp",
+        "init",
+        "uninstall",
+        "schema",
+        "skill",
+        "doctor",
+        "version",
+    ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(name)),
             "help does not list {name}"

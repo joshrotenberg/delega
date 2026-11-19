@@ -30,6 +30,13 @@ The MCP argument `after` is the library's `after_cursor`. `start` takes a
 `PartialRequest`. A target is `Target::Run(id)` or `Target::Worker(id)`; for a
 worker it means the worker's current run, or its latest if nothing is current.
 
+The library `start` defaults a missing `cwd` to the embedder's own working
+directory, as `delega run` does. `start_requiring_cwd(Request)` is `start` for a
+caller whose working directory says nothing about the project: a missing or
+relative `cwd` is refused, kind `cwd_required`, as a finished run with no worker.
+`delega mcp` uses it. `follow_up` takes no `cwd`; it runs in the first
+request's.
+
 Every response is compact by default. `Detail::Full` adds every field of the
 result, the whole activity history and the supervisor's own diagnostics. An
 operation that cannot be answered at all returns an `Error`: an unknown run or

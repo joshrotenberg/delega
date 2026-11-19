@@ -79,16 +79,22 @@ pub fn build_request(mut args: Value) -> Result<Request, String> {
     if !problems.is_empty() {
         return Err(format!("invalid arguments: {}", join(&problems)));
     }
-    // A missing or relative `cwd` is refused by the supervisor, so it is not made
-    // absolute against the server's own working directory, which the host
-    // chooses. An absolute one is left as it is and the other paths are made
-    // absolute as `delega run` does.
-    if merged
-        .cwd
-        .as_deref()
-        .is_some_and(std::path::Path::is_absolute)
+    // A missing or relative `cwd` is refused by the supervisor, so nothing is
+    // made absolute against the server's own working directory, which the host
+    // chooses. With an absolute `cwd`, a relative extra directory is relative to
+    // it, so the worker's directory, not the server's, is what it resolves under
+    // and what a refusal names.
+    if let Some(cwd) = merged.cwd.clone().filter(|cwd| cwd.is_absolute())
+        && let Some(dirs) = merged
+            .permissions
+            .as_mut()
+            .and_then(|p| p.directories.as_mut())
     {
-        profile::resolve_paths(&mut merged);
+        for dir in dirs {
+            if dir.is_relative() {
+                *dir = cwd.join(&dir);
+            }
+        }
     }
     merged
         .into_request_unvalidated()

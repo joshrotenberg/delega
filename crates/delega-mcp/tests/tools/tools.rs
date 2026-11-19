@@ -160,6 +160,54 @@ async fn a_start_without_an_absolute_cwd_is_refused_as_a_run_and_starts_nothing(
 }
 
 #[tokio::test]
+async fn a_relative_cwd_in_a_profile_or_a_dot_cwd_is_refused() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let profile = rig.work.join("relative.json");
+    std::fs::write(
+        &profile,
+        json!({"schema_version": 1, "provider": "codex", "prompt": "success", "cwd": "work"})
+            .to_string(),
+    )
+    .expect("write profile");
+    let refused = rig.call("start", json!({"profile": profile})).await;
+    assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+    let mut dot = rig.start_args(CODEX, "success");
+    dot["cwd"] = json!(".");
+    let refused = rig.call("start", dot).await;
+    assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+    assert!(rig.argv().is_empty(), "no process was started");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_relative_extra_directory_resolves_under_cwd_not_the_servers_directory() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    std::fs::create_dir(rig.work.join("extra")).expect("create extra");
+    let mut args = rig.start_args(CODEX, "success");
+    args["permissions"] = json!({"directories": ["extra"]});
+    let started = rig.call("start", args).await;
+    assert!(started["worker"].is_string(), "{started}");
+    rig.finished(started["run"].as_str().expect("run")).await;
+
+    let mut args = rig.start_args(CODEX, "success");
+    args["permissions"] = json!({"directories": ["absent"]});
+    let refused = rig.call("start", args).await;
+    assert_eq!(refused["error"]["kind"], "directory_unusable", "{refused}");
+    let message = refused["error"]["message"].as_str().expect("message");
+    let under_cwd = rig.work.join("absent");
+    assert!(
+        message.contains(under_cwd.to_str().expect("utf-8")),
+        "{message}"
+    );
+    let server = std::env::current_dir().expect("server directory");
+    assert!(
+        !message.contains(server.to_str().expect("utf-8")),
+        "{message}"
+    );
+    rig.finish().await;
+}
+
+#[tokio::test]
 async fn a_profile_supplying_an_absolute_cwd_satisfies_the_requirement() {
     let mut rig = Rig::new(Provider::Codex).await;
     let profile = rig.work.join("with-cwd.json");

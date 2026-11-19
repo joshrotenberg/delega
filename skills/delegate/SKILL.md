@@ -9,6 +9,9 @@ Use these tools when you want to start several workers, keep working, and
 collect results later. For one assignment in the foreground, use the `run` skill
 instead.
 
+To add these tools and skills to Claude Code or Codex, run `delega init`
+(`delega init --dry-run` first shows the files and host commands).
+
 A worker is one provider conversation and holds the provider's session. A run is
 one assignment given to a worker. A worker takes one assignment at a time. Each
 run ends in exactly one outcome and produces one result.
@@ -38,11 +41,11 @@ pass first, `settled` is false: `read` the run later.
 `start` takes the same request fields as a run: `provider`, `prompt`, `cwd`,
 `name`, `instructions`, `model`, `effort`, `timeout_secs`, `permissions`,
 `answer_schema`, `session` and `native_args`. `provider` and `prompt` are
-required, and so is an absolute `cwd`, given in the call or by the profile. A
-start with no `cwd`, or a relative one, is refused as a run of kind
-`cwd_required`: the server's own working directory is chosen by the host, so it
-is never used as a default. The worker does not see your conversation, so write each `prompt` as a
-standalone assignment.
+required, and so is an absolute `cwd`, the directory the worker should work in,
+given in the call or by the profile. A start with no `cwd`, or a relative one,
+is refused as a run of kind `cwd_required`: the server's own working directory
+is chosen by the host, so it is never used as a default. The worker does not see
+your conversation, so write each `prompt` as a standalone assignment.
 
 `profile` is the path of a profile file, a partial request saved as JSON. Fields
 you give in the same call replace the profile's. A list replaces the profile's
