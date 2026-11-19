@@ -25,8 +25,11 @@ impl std::fmt::Debug for Redactor {
     }
 }
 
+/// Characters that can be inside a credential. Everything else, `=`, `:`, `/`,
+/// `@`, quotes and commas included, separates tokens, so `token=ghp_...`,
+/// `https://user:ghp_...@host` and `"key":"sk-..."` are all found.
 fn token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "_-.~+/=".contains(c)
+    c.is_ascii_alphanumeric() || "_-.~+".contains(c)
 }
 
 fn all_alnum(text: &str, min: usize) -> bool {
@@ -87,33 +90,34 @@ fn credential_shaped(token: &str) -> bool {
     false
 }
 
+/// The longest label looked at after `-----BEGIN `, in bytes.
+const BEGIN_LABEL_WINDOW: usize = 64;
+
 /// Replace private key blocks, up to their end line or the end of the text.
+/// One forward pass: every search starts where the last one stopped, and a
+/// begin marker that is not a key is skipped after a bounded look.
 fn without_private_keys(text: &str) -> String {
-    let mut out = String::new();
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "PRIVATE KEY-----";
+    let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find("-----BEGIN ") {
-        let after = &rest[start..];
-        let header_end = after
-            .find("-----\n")
-            .or_else(|| after[11..].find("-----").map(|i| i + 11));
-        let is_key = header_end.is_some_and(|i| after[..i].ends_with("PRIVATE KEY"));
+    while let Some(start) = rest.find(BEGIN) {
+        let after = &rest[start + BEGIN.len()..];
+        let window = &after.as_bytes()[..after.len().min(BEGIN_LABEL_WINDOW)];
+        let label_end = window.windows(5).position(|w| w == b"-----");
+        let is_key = label_end.is_some_and(|i| after.as_bytes()[..i].ends_with(b"PRIVATE KEY"));
         if !is_key {
-            out.push_str(&rest[..start + 11]);
-            rest = &rest[start + 11..];
+            out.push_str(&rest[..start + BEGIN.len()]);
+            rest = after;
             continue;
         }
         out.push_str(&rest[..start]);
         out.push_str(MASK);
-        match after.find("PRIVATE KEY-----").and_then(|i| {
-            after[i + 16..]
-                .find("PRIVATE KEY-----")
-                .map(|j| i + 16 + j + 16)
-        }) {
-            Some(end) => rest = &after[end..],
-            None => {
-                rest = "";
-            }
-        }
+        let body = &after[label_end.unwrap_or(0) + 5..];
+        rest = match body.find(END) {
+            Some(end) => &body[end + END.len()..],
+            None => "",
+        };
     }
     out.push_str(rest);
     out
@@ -140,29 +144,50 @@ impl Redactor {
         }
         let text = without_private_keys(&text);
         let mut out = String::with_capacity(text.len());
-        let mut token = String::new();
-        let mut previous_was_bearer = false;
-        let flush = |token: &mut String, out: &mut String, bearer: &mut bool| {
-            if token.is_empty() {
-                return;
-            }
-            let hide = credential_shaped(token) || (*bearer && token.len() >= 12);
-            *bearer = token.eq_ignore_ascii_case("bearer");
-            out.push_str(if hide { MASK } else { token });
-            token.clear();
-        };
-        for c in text.chars() {
-            if token_char(c) {
-                token.push(c);
-            } else {
-                flush(&mut token, &mut out, &mut previous_was_bearer);
-                if !c.is_whitespace() {
-                    previous_was_bearer = false;
+        let mut previous_word = String::new();
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            let space_len = rest.len() - rest.trim_start().len();
+            let (space, tail) = rest.split_at(space_len);
+            out.push_str(space);
+            let word_len = tail.find(char::is_whitespace).unwrap_or(tail.len());
+            let (word, next) = tail.split_at(word_len);
+            if !word.is_empty() {
+                let after_bearer = previous_word.eq_ignore_ascii_case("bearer");
+                if after_bearer && word.trim_matches(['"', '\'', ',']).len() >= 12 {
+                    out.push_str(MASK);
+                } else {
+                    redact_word(word, &mut out);
                 }
-                out.push(c);
+                previous_word = word.to_string();
             }
+            rest = next;
         }
-        flush(&mut token, &mut out, &mut previous_was_bearer);
         out
     }
+}
+
+/// Copy `word`, replacing each credential-shaped token inside it.
+fn redact_word(word: &str, out: &mut String) {
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        out.push_str(if credential_shaped(token) {
+            MASK
+        } else {
+            token
+        });
+        token.clear();
+    };
+    for c in word.chars() {
+        if token_char(c) {
+            token.push(c);
+        } else {
+            flush(&mut token, out);
+            out.push(c);
+        }
+    }
+    flush(&mut token, out);
 }

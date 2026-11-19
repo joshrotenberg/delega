@@ -68,15 +68,27 @@ probe's cleanup verdict is merged into the result's `cleanup`.
 
 **When a run is `refused` after start.** Only when all of these hold: the
 provider's first terminal event is a failure; that failure is not a limit the
-provider names (`provider_turn_limit`, `provider_budget_limit`); at least one
-request was denied; and nothing reported an error separately and nothing went on
-after the last denial. For Claude Code the denials arrive in the failed result
-event, so the test is that no `error` event or `api_retry` event was seen. For
-Codex the last event before the failure must be a `declined` command: a later
-agent message, a later command that was not declined, or an `error` event ends
-the attribution. Every other failure with a denial is `failed` with the denial
-listed in `permissions.denied`. `provider_exit_code` is in the error of every
-`failed` and refused-after-start result from a process that exited.
+provider names (`provider_turn_limit`, `provider_budget_limit`,
+`provider_usage_limit`); at least one request was denied; and nothing reported an
+error separately and nothing went on after the last denial.
+
+- Claude Code: the denials arrive in the failed result event. The run counts as
+  stopped by the denial when no `error` event and no `api_retry` event was seen;
+  when no assistant message or tool result came after the result of the last
+  denied call; and when every entry in the result's `errors` names a denied tool
+  or speaks of permission or denial. An entry such as "API connection lost"
+  makes the run `failed`.
+- Codex: the last item before the failure must be the `declined` command. Any
+  later item (an agent message, another command, a `file_change`) or an `error`
+  event ends the attribution. A `turn.failed` whose message speaks of a usage
+  limit, rate limit, quota or context window has kind `provider_usage_limit`,
+  and so is `failed`.
+
+Every other failure with a denial is `failed` with the denial listed in
+`permissions.denied`. `provider_exit_code` is in the error of every `failed` and
+refused-after-start result from a process that exited. These attributions are
+heuristics over events whose exact shape is unverified (see the table at the
+end).
 
 The first terminal event decides. A later terminal event is ignored and a note
 says a second one was seen, so a failure followed by a success is not a
@@ -88,7 +100,7 @@ characters and a note says how many lines were affected.
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
 `provider_not_found`, `unsupported_provider_version` (all refused before start);
-`provider_error`, `provider_turn_limit`, `provider_budget_limit`,
+`provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
 `provider_preparation_failed`, `spawn_failed`, `process_signaled`,
 `wait_failed`, `internal_error` (failed); `permission_denied` (refused after
@@ -107,7 +119,10 @@ kinds of text are replaced with `[redacted]` first:
   `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack tokens, AWS access key ids, JSON
   web tokens, `Bearer` tokens and private key blocks.
 
-The shapes are a heuristic; a credential in another form is not caught. The
+Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
+`https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,
+quotes and commas separate tokens. The text after `Bearer` is removed whole. The
+shapes are a heuristic; a credential in another form is not caught. The
 answer text itself is the provider's output and is not redacted. A denied
 request records the command or path the provider asked for, as written.
 
@@ -198,13 +213,34 @@ could end or split a rule, or be read as a pattern, is refused before start. The
 same text is accepted for Codex, which has no rule text.
 
 - **Commands** (kind `unsupported_command`): any command containing `(`, `)`,
-  `,`, `*`, `\`, or a control character (line breaks, tabs and NUL included).
-  Everything else is allowed.
+  `,`, `*`, `\`, a control character (line breaks, tabs and NUL included), U+2028
+  or U+2029, or any fullwidth or halfwidth form (U+FF00 to U+FFEF, which includes
+  the fullwidth comma, asterisk and parentheses); a command with leading or
+  trailing whitespace; and a command with a tool-name word (below). Everything
+  else is allowed.
 - **The working directory and `permissions.directories`** (kinds `cwd_unusable`
-  and `directory_unusable`): the resolved path may contain only letters and
-  digits (any script) and the characters ` / . _ - + @ = : % ~` (the space is
-  included). Any other character refuses the run. No path is escaped. In `full`
-  no path rules are written, so these paths are not checked.
+  and `directory_unusable`): the resolved path may contain only ASCII letters and
+  digits, the characters ` / . _ - + @ = : % ~` (the space is included), and
+  letters of other scripts (accented Latin, Cyrillic, CJK and so on). Non-ASCII
+  digits are refused, and so are letters in the blocks that fold to punctuation
+  or digits under compatibility normalisation: super and subscripts, letterlike
+  symbols and number forms (Roman numerals), enclosed alphanumerics and their
+  supplement, enclosed and compatibility CJK, small forms, and fullwidth and
+  halfwidth forms. No path is escaped. In `full` no path rules are written, so
+  these paths are not checked.
+- **Tool-name words**, for both: the Claude Code help says `--allowedTools` is
+  "comma or space-separated", so a reader may split on whitespace without
+  tracking parentheses. Text whose words, after the first, include (ignoring
+  case, with every Unicode whitespace character as a delimiter) a built-in tool
+  name (`Read`, `Glob`, `Grep`, `Bash`, `Edit`, `Write`, `NotebookEdit`,
+  `WebFetch`, `WebSearch`, `Task`, `Agent`, `TodoWrite`, `MultiEdit`,
+  `NotebookRead`, `LS`, `BashOutput`, `KillShell`, `SlashCommand`,
+  `ExitPlanMode`), a word starting with a tool name and `(`, or a word starting
+  with `mcp__`, is refused. The first word is attached to the rule's own
+  `Tool(` and cannot stand alone, so `ls` and `make read-docs` are fine and
+  `make read` and `x Edit y` are not. A command or directory name with a space
+  that is accepted is read as split fragments by such a reader, which fails
+  closed (the rule matches less) and never adds a tool.
 
 ### What cannot be enforced
 
@@ -411,6 +447,7 @@ each.
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
 | With empty settings sources Claude Code still reads the working directory's own `CLAUDE.md` | Not controlled. A note on every run says what delega does and does not load. |
 | A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
+| Codex words a usage or rate limit failure with "usage limit", "rate limit", "quota" or "context window", and Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
 | Claude Code names `error_max_turns` and `error_max_budget_usd` as result subtypes | They become the `provider_turn_limit` and `provider_budget_limit` error kinds. |
 
 ## Not done

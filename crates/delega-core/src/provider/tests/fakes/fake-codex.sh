@@ -190,6 +190,17 @@ case "$mode" in
     final '"a later answer"'
     done_ok
     ;;
+  denied-then-file-change)
+    init
+    emit '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"make","status":"declined"}}'
+    emit '{"type":"item.completed","item":{"id":"f1","type":"file_change","status":"completed"}}'
+    emit '{"type":"turn.failed","error":{"message":"Cannot continue"}}'
+    ;;
+  denied-then-usage-limit)
+    init
+    emit '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"make","status":"declined"}}'
+    emit '{"type":"turn.failed","error":{"message":"You have hit your usage limit. Try again later."}}'
+    ;;
   denied-then-error)
     init
     emit '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"make","status":"declined"}}'

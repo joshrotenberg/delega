@@ -324,3 +324,89 @@ fn a_long_rejected_option_is_named_only_in_part() {
     assert!(!error.message.contains(&long));
     assert!(error.message.len() < 200, "{}", error.message);
 }
+
+#[tokio::test]
+async fn claude_denial_with_an_unrelated_error_or_further_work_is_failed_not_refused() {
+    for mode in ["denial-api-error", "denial-then-work"] {
+        let rig = Rig::new();
+        let result = run_checked(
+            rig.request(Provider::Claude, mode),
+            rig.options(Provider::Claude),
+        )
+        .await;
+        assert_eq!(result.outcome, Outcome::Failed, "{mode}: {result:#?}");
+        assert_eq!(
+            result.error.expect("error").kind,
+            "provider_error",
+            "{mode}"
+        );
+        assert_eq!(result.permissions.denied.len(), 1, "{mode}");
+        rig.assert_nothing_left().await;
+    }
+}
+
+#[tokio::test]
+async fn codex_work_after_a_declined_command_or_a_named_limit_is_failed_not_refused() {
+    let rig = Rig::new();
+    let request = rig.request(Provider::Codex, "denied-then-file-change");
+    let result = run_checked(request, rig.options(Provider::Codex)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    assert_eq!(result.error.expect("error").kind, "provider_error");
+    assert_eq!(result.permissions.denied.len(), 1);
+    rig.assert_nothing_left().await;
+
+    let rig = Rig::new();
+    let request = rig.request(Provider::Codex, "denied-then-usage-limit");
+    let result = run_checked(request, rig.options(Provider::Codex)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    assert_eq!(result.error.expect("error").kind, "provider_usage_limit");
+    assert_eq!(result.permissions.denied.len(), 1);
+    rig.assert_nothing_left().await;
+}
+
+#[test]
+fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_json() {
+    let redactor = Redactor::default();
+    let ghp = "ghp_abcdefghijklmnopqrstuvwx";
+    let ant = "sk-ant-abcdefghijklmnopqrstuvwx";
+    for text in [
+        format!("token={ghp}"),
+        format!("key={ant}"),
+        format!("token:{ghp}"),
+        format!("token: \"{ghp}\""),
+        format!("a,{ghp},b"),
+        format!("https://user:{ghp}@example.com/path"),
+        format!("https://example.com/{ghp}"),
+        format!("{{\"token\":\"{ghp}\",\"key\":\"{ant}\"}}"),
+        format!("export KEY='{ant}'"),
+        format!("Authorization: Bearer {ghp}=="),
+        "Bearer abc/def+ghi=jkl".to_string(),
+    ] {
+        let out = redactor.apply(&text);
+        assert!(out.contains("[redacted]"), "{text} -> {out}");
+        assert!(!out.contains(ghp) && !out.contains(ant), "{text} -> {out}");
+        assert!(!out.contains("def+ghi"), "{text} -> {out}");
+    }
+    assert_eq!(
+        redactor.apply("token=short key=value"),
+        "token=short key=value"
+    );
+}
+
+#[test]
+fn private_key_removal_is_linear_in_the_input() {
+    let redactor = Redactor::default();
+    // Many begin markers that are not keys, and many unterminated labels.
+    let noise = "-----BEGIN CERTIFICATE".repeat(200_000);
+    let started = std::time::Instant::now();
+    let out = redactor.apply(&noise);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(out.len(), noise.len());
+    let keys = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".repeat(50_000);
+    let out = redactor.apply(&keys);
+    assert_eq!(out, "[redacted]\n".repeat(50_000));
+}

@@ -49,10 +49,84 @@ fn effort(e: Effort) -> &'static str {
 /// read as a pattern, must never reach it.
 const PATH_PUNCTUATION: &str = " /._-+@=:%~";
 
+/// Code point ranges whose characters fold to punctuation or digits under
+/// compatibility normalisation (enclosed and parenthesised alphanumerics,
+/// number and Roman numeral forms, super and subscripts, letterlike symbols,
+/// fullwidth and halfwidth forms, enclosed and compatibility CJK).
+const FOLDING_BLOCKS: [(u32, u32); 8] = [
+    (0x2070, 0x209F),
+    (0x2100, 0x218F),
+    (0x2460, 0x24FF),
+    (0x3200, 0x33FF),
+    (0xFF00, 0xFFEF),
+    (0x1F100, 0x1F1FF),
+    (0x1F200, 0x1F2FF),
+    (0xFE30, 0xFE6F),
+];
+
+fn in_folding_block(c: char) -> bool {
+    let n = c as u32;
+    FOLDING_BLOCKS
+        .iter()
+        .any(|(lo, hi)| (*lo..=*hi).contains(&n))
+}
+
+/// Whether a character may appear in a path written into a rule: an ASCII
+/// letter or digit, one of [`PATH_PUNCTUATION`], or a letter of any script that
+/// is not in a block that folds to punctuation. Non-ASCII digits are refused.
+fn path_char_ok(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || PATH_PUNCTUATION.contains(c)
+        || (!c.is_ascii() && c.is_alphabetic() && !in_folding_block(c))
+}
+
+/// Tool names, and the prefix of any tool name pattern, that a reader splitting
+/// a rule list on whitespace would take as a rule of its own.
+const TOOL_NAMES: [&str; 20] = [
+    "read",
+    "glob",
+    "grep",
+    "bash",
+    "edit",
+    "write",
+    "notebookedit",
+    "webfetch",
+    "websearch",
+    "task",
+    "agent",
+    "todowrite",
+    "multiedit",
+    "notebookread",
+    "ls",
+    "bashoutput",
+    "killshell",
+    "slashcommand",
+    "exitplanmode",
+    "mcp__",
+];
+
+/// Whether a word, as a whitespace-splitting reader sees it, is a tool name or
+/// the start of a tool rule.
+fn is_tool_word(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    TOOL_NAMES.iter().any(|name| {
+        lower == *name
+            || lower.starts_with(&format!("{name}("))
+            || (name.ends_with("__") && lower.starts_with(name))
+    })
+}
+
+/// Whether text written into a rule has, after its first word, a word that a
+/// reader splitting on whitespace would take for a tool or a tool rule. The
+/// first word is attached to the rule's own `Tool(` prefix and cannot stand
+/// alone. Every Unicode whitespace character counts as a delimiter.
+fn has_tool_word(text: &str) -> bool {
+    text.split(char::is_whitespace).skip(1).any(is_tool_word)
+}
+
 /// Whether a path can be written into a rule as it is.
 pub(super) fn path_is_rule_safe(text: &str) -> bool {
-    text.chars()
-        .all(|c| c.is_alphanumeric() || PATH_PUNCTUATION.contains(c))
+    text.chars().all(path_char_ok) && !has_tool_word(text)
 }
 
 /// A rule path for an absolute directory: `//abs/dir/**`.
@@ -62,7 +136,8 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
             kind,
             format!(
                 "{} cannot be written as a Claude Code rule: {why}. Letters, digits and \
-                 `{PATH_PUNCTUATION}` are allowed in the path; use a path without other characters",
+                 `{PATH_PUNCTUATION}` are allowed in the path, and no word after the first \
+                 may be a tool name; use a path without other characters",
                 dir.display()
             ),
         )
@@ -72,7 +147,8 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
         .ok_or_else(|| unusable("it is not valid UTF-8"))?;
     if !path_is_rule_safe(text) {
         return Err(unusable(
-            "it contains a character that could end or split a rule or read as a pattern",
+            "it contains a character that could end or split a rule or read as a pattern, or a \
+             word that reads as a tool name",
         ));
     }
     let inner = text.trim_matches('/');
@@ -107,16 +183,22 @@ const COMMAND_REFUSED: [char; 5] = ['(', ')', ',', '*', '\\'];
 
 /// A command that cannot be written as an exact Claude Code rule.
 fn check_command(index: usize, command: &str) -> Result<(), Refusal> {
-    if command
-        .chars()
-        .any(|c| c.is_control() || COMMAND_REFUSED.contains(&c))
-    {
+    let bad_char = |c: char| {
+        c.is_control()
+            || COMMAND_REFUSED.contains(&c)
+            || c == '\u{2028}'
+            || c == '\u{2029}'
+            || (0xFF00..=0xFFEF).contains(&(c as u32))
+    };
+    if command.chars().any(bad_char) || command.trim() != command || has_tool_word(command) {
         return Err(Refusal::new(
             "unsupported_command",
             format!(
                 "permissions.commands[{index}] contains a parenthesis, comma, asterisk, \
-                 backslash or control character, which Claude Code rules treat as syntax; an \
-                 exact command cannot be written for it"
+                 backslash, control, line-separator or fullwidth character, has leading or \
+                 trailing whitespace, or has a word after the first that reads as a tool name; \
+                 Claude Code rules treat these as syntax, so an exact command cannot be written \
+                 for it"
             ),
         ));
     }
@@ -381,6 +463,25 @@ fn failure_message(event: &Map<String, Value>) -> String {
     clip(&text, PROVIDER_MESSAGE_CHARS)
 }
 
+/// Whether an error text from the failed result is about a denial: it names a
+/// denied tool or speaks of permission or denial. Anything else, such as a lost
+/// connection, is another cause.
+fn mentions_denial(error: &str, denied_tools: &[String]) -> bool {
+    let lower = error.to_lowercase();
+    [
+        "permission",
+        "denied",
+        "denial",
+        "not allowed",
+        "not granted",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+        || denied_tools
+            .iter()
+            .any(|t| !t.is_empty() && lower.contains(t.as_str()))
+}
+
 /// The first sentence of a tool error, as a short reason.
 fn error_reason(content: &Value) -> Option<String> {
     let text = match content {
@@ -402,7 +503,13 @@ fn error_reason(content: &Value) -> Option<String> {
 pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut parsed = Parsed::default();
     let mut reasons: HashMap<String, String> = HashMap::new();
+    // Event positions: when each tool call's result arrived, and when the last
+    // piece of work (a worker message or a tool result) happened.
+    let mut seq = 0usize;
+    let mut result_at: HashMap<String, usize> = HashMap::new();
+    let mut last_work = 0usize;
     let stats = for_each_event(bytes, |event| {
+        seq += 1;
         let kind = str_field(event, "type");
         // The first terminal event decides; later events are ignored.
         if parsed.terminal != Terminal::None {
@@ -426,8 +533,10 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 if let Some(text) = assistant_text(event) {
                     parsed.last_text = Some(text);
                 }
+                last_work = seq;
             }
             Some("user") => {
+                last_work = seq;
                 let blocks = event
                     .get("message")
                     .and_then(|m| m.get("content"))
@@ -435,6 +544,9 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 for block in blocks.into_iter().flatten() {
                     let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
                     let id = block.get("tool_use_id").and_then(Value::as_str);
+                    if let Some(id) = id {
+                        result_at.insert(id.to_string(), seq);
+                    }
                     if let (true, Some(id), Some(reason)) =
                         (is_error, id, block.get("content").and_then(error_reason))
                         && reasons.len() < MAX_REASONS
@@ -489,10 +601,41 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                         );
                     }
                 }
+                // Work after the last denied call's result means the run went on.
+                let last_denied_at = event
+                    .get("permission_denials")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| d.get("tool_use_id").and_then(Value::as_str))
+                    .filter_map(|id| result_at.get(id))
+                    .max()
+                    .copied();
+                let went_on = last_denied_at.is_some_and(|at| last_work > at);
+                let tools: Vec<String> = parsed
+                    .denied
+                    .iter()
+                    .map(|d| {
+                        d.request
+                            .split([':', ' '])
+                            .next()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                    })
+                    .collect();
+                let errors_are_about_denial = event
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .all(|e| mentions_denial(e, &tools));
                 parsed.stopped_by_denial = !success
                     && code.is_none()
                     && !parsed.denied.is_empty()
-                    && parsed.errors.is_empty();
+                    && parsed.errors.is_empty()
+                    && !went_on
+                    && errors_are_about_denial;
             }
             _ => {}
         }

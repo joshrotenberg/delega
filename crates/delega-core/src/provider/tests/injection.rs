@@ -33,7 +33,30 @@ fn split_rules(text: &str) -> Vec<String> {
     rules
 }
 
-const BAD_COMMANDS: [&str; 12] = [
+const TOOLS: [&str; 20] = [
+    "read",
+    "glob",
+    "grep",
+    "bash",
+    "edit",
+    "write",
+    "notebookedit",
+    "webfetch",
+    "websearch",
+    "task",
+    "agent",
+    "todowrite",
+    "multiedit",
+    "notebookread",
+    "ls",
+    "bashoutput",
+    "killshell",
+    "slashcommand",
+    "exitplanmode",
+    "mcp__",
+];
+
+const BAD_COMMANDS: [&str; 24] = [
     "x),Edit,Bash(y",
     "x)",
     "x(",
@@ -46,6 +69,18 @@ const BAD_COMMANDS: [&str; 12] = [
     "a\u{7f}b",
     "a\u{0}b",
     "git status),Write(//**",
+    "x Edit y",
+    "x edit",
+    "x\u{2003}WRITE\u{2003}y",
+    "x Bash",
+    "x mcp__server__tool y",
+    " leading",
+    "trailing ",
+    "a\u{2028}b",
+    "a\u{2029}b",
+    "a\u{ff0c}b",
+    "\u{ff08}x\u{ff09}",
+    "a\u{ff0a}",
 ];
 
 #[test]
@@ -114,6 +149,54 @@ fn a_working_directory_or_extra_directory_with_rule_syntax_in_its_name_is_refuse
 }
 
 #[test]
+fn paths_with_characters_that_fold_to_punctuation_are_refused_and_ordinary_names_accepted() {
+    let rig = Rig::new();
+    for name in [
+        "\u{2474}",
+        "\u{2488}",
+        "\u{1F101}",
+        "\u{24B6}",
+        "\u{2160}",
+        "\u{ff21}",
+        "x\u{3231}",
+        "\u{0663}",
+    ] {
+        let dir = rig.work.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let mut request = rig.request(Provider::Claude, "p");
+        request.permissions.directories = vec![dir];
+        let error = dry_run(&request, &rig.options(Provider::Claude)).unwrap_err();
+        assert_eq!(error.kind, "directory_unusable", "{name:?}");
+    }
+    for name in [
+        "caf\u{e9}",
+        "\u{65e5}\u{672c}\u{8a9e}",
+        "\u{43a}\u{430}\u{442}\u{430}\u{43b}\u{43e}\u{433}",
+        "my dir",
+        "a-b_c.d+e@f=g:h%i~j",
+    ] {
+        let dir = rig.work.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let mut request = rig.request(Provider::Claude, "p");
+        request.permissions.directories = vec![dir];
+        assert!(
+            dry_run(&request, &rig.options(Provider::Claude)).is_ok(),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn a_word_that_is_not_a_tool_name_after_the_first_is_fine() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.permissions.commands = vec!["ls".into(), "git status".into(), "make read-docs".into()];
+    let mut options = rig.options(Provider::Claude);
+    options.hook = Some(hook());
+    assert!(dry_run(&request, &options).is_ok());
+}
+
+#[test]
 fn full_mode_writes_no_path_rules_so_a_special_name_is_not_refused() {
     let rig = Rig::new();
     let dir = rig.work.join("a),Edit,Read(");
@@ -147,6 +230,27 @@ impl Lcg {
         self.0 >> 33
     }
 
+    /// Text built from tool-like words and separators about half the time, so
+    /// the whitespace cases are reached, and from single characters otherwise.
+    fn mixed(&mut self, alphabet: &[char], max: usize) -> String {
+        if self.next().is_multiple_of(2) {
+            return self.text(alphabet, max);
+        }
+        const WORDS: [&str; 12] = [
+            "Edit", "edit", "Read", "Glob", "bash", "WRITE", "mcp__x", "ok", "a", "b", "ls", "Task",
+        ];
+        const SEPARATORS: [&str; 6] = [" ", "\t", "\u{2003}", "/", "-", "  "];
+        let parts = 1 + (self.next() as usize) % 4;
+        let mut out = String::new();
+        for i in 0..parts {
+            if i > 0 {
+                out.push_str(SEPARATORS[(self.next() as usize) % SEPARATORS.len()]);
+            }
+            out.push_str(WORDS[(self.next() as usize) % WORDS.len()]);
+        }
+        out
+    }
+
     fn text(&mut self, alphabet: &[char], max: usize) -> String {
         let len = 1 + (self.next() as usize) % max;
         (0..len)
@@ -164,14 +268,14 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
     let (mut accepted, mut refused) = (0, 0);
     for _ in 0..30000 {
         let mode = [Mode::Read, Mode::Write][(rng.next() % 2) as usize];
-        let cwd = format!("/{}", rng.text(&alphabet, 12));
+        let cwd = format!("/{}", rng.mixed(&alphabet, 12));
         let dirs: Vec<PathBuf> = (0..(rng.next() % 3))
-            .map(|_| PathBuf::from(format!("/{}", rng.text(&alphabet, 12))))
+            .map(|_| PathBuf::from(format!("/{}", rng.mixed(&alphabet, 12))))
             .collect();
         // `permissions::scope` removes duplicates before `build`; do the same.
         let mut commands: Vec<String> = Vec::new();
         for _ in 0..(rng.next() % 3) {
-            let command = rng.text(&alphabet, 12);
+            let command = rng.mixed(&alphabet, 12);
             if !commands.contains(&command) {
                 commands.push(command);
             }
@@ -223,6 +327,32 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
             rules, expected,
             "cwd={cwd:?} dirs={dirs:?} commands={commands:?}"
         );
+
+        // A reader that splits on commas and every whitespace character, with
+        // no regard for parentheses, must find exactly the expected rules and
+        // no other bare tool name or tool rule.
+        let naive: Vec<String> = built.args[at + 1]
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|f| !f.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        let tool_of = |f: &str| {
+            TOOLS.iter().any(|t| {
+                f == *t
+                    || f.starts_with(&format!("{t}("))
+                    || (t.ends_with("__") && f.starts_with(t))
+            })
+        };
+        let found: Vec<String> = naive
+            .iter()
+            .filter(|f| tool_of(f))
+            .map(|f| f.split('(').next().unwrap_or_default().to_string())
+            .collect();
+        let wanted: Vec<String> = expected
+            .iter()
+            .map(|r| r.split('(').next().unwrap_or_default().to_lowercase())
+            .collect();
+        assert_eq!(found, wanted, "naive reading of {:?}", built.args[at + 1]);
     }
     assert!(accepted > 50, "accepted {accepted}");
     assert!(refused > 50, "refused {refused}");

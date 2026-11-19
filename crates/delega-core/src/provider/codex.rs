@@ -189,6 +189,7 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
 /// Reduce the output stream to a [`Parsed`].
 pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut parsed = Parsed::default();
+    let mut declined_id: Option<String> = None;
     let stats = for_each_event(bytes, |event| {
         let kind = str_field(event, "type").unwrap_or_default();
         // The first terminal event decides; later events are ignored.
@@ -199,6 +200,13 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
             return;
         }
         let item = event.get("item");
+        let item_id = item.and_then(|i| i.get("id")).and_then(Value::as_str);
+        // Any item other than the declined command itself means the run went on.
+        if matches!(kind, "item.started" | "item.completed")
+            && item_id.is_none_or(|id| declined_id.as_deref() != Some(id))
+        {
+            parsed.stopped_by_denial = false;
+        }
         let item_type = item.and_then(|i| i.get("type")).and_then(Value::as_str);
         let status = item.and_then(|i| i.get("status")).and_then(Value::as_str);
         match kind {
@@ -223,8 +231,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     let command = item.and_then(|i| i.get("command")).and_then(Value::as_str);
                     parsed.deny("command", command, None);
                     parsed.stopped_by_denial = true;
-                } else {
-                    parsed.stopped_by_denial = false;
+                    declined_id = item_id.map(str::to_string);
                 }
             }
             "turn.completed" => {
@@ -237,9 +244,13 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     .and_then(|e| e.get("message"))
                     .and_then(Value::as_str)
                     .unwrap_or("Codex turn failed");
+                let lower = message.to_lowercase();
+                let limit = ["usage limit", "rate limit", "quota", "context window"]
+                    .iter()
+                    .any(|w| lower.contains(w));
                 parsed.terminal = Terminal::Failure {
                     message: clip(message, PROVIDER_MESSAGE_CHARS),
-                    code: None,
+                    code: limit.then_some("provider_usage_limit"),
                 };
                 parsed.usage = usage(event);
             }

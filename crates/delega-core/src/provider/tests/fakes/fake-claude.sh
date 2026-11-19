@@ -9,6 +9,9 @@
 # running the hook command from --settings with the documented hook input. This
 # proves delega's plumbing against that assumed behaviour, not the real CLI.
 #
+# FAKE_SPLIT=naive makes it read the rule list the way a CLI that splits on
+# commas and all whitespace, ignoring parentheses, would.
+#
 # Environment (set by the test, never inherited from a real session):
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
@@ -19,6 +22,10 @@ if [ "$1" = "--version" ]; then
 fi
 
 set -f
+nl='
+'
+split_ifs=","
+[ "$FAKE_SPLIT" = "naive" ] && split_ifs=", 	$nl"
 resume=""
 tools=""
 allowed=""
@@ -55,7 +62,7 @@ has_tool() {
 path_allowed() {
   hit=1
   old=$IFS
-  IFS=,
+  IFS=$split_ifs
   for rule in $allowed; do
     case "$rule" in
       "$1") hit=0 ;;
@@ -77,7 +84,7 @@ bash_allowed() {
   has_tool Bash || return 1
   exact=1
   old=$IFS
-  IFS=,
+  IFS=$split_ifs
   for rule in $allowed; do
     [ "$rule" = "Bash" ] && exact=0
     [ "$rule" = "Bash($1)" ] && exact=0
@@ -189,6 +196,17 @@ case "$mode" in
     else
       success '"could not read it"' "[{\"tool_name\":\"Read\",\"tool_use_id\":\"t1\",\"tool_input\":{\"file_path\":\"$target\"}}]"
     fi
+    ;;
+  denial-then-work)
+    init
+    emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\"}]}}"
+    emit "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"is_error\":true,\"content\":\"Permission denied.\"}]}}"
+    emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"I will try something else\"}]}}"
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$sid\",\"errors\":[\"Cannot continue without Bash\"],\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\",\"tool_input\":{\"command\":\"make\"}}]}"
+    ;;
+  denial-api-error)
+    init
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$sid\",\"errors\":[\"API connection lost\"],\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\",\"tool_input\":{\"command\":\"make\"}}]}"
     ;;
   error-max-turns-with-denial)
     init

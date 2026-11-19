@@ -278,3 +278,51 @@ async fn codex_full_mode_has_no_sandbox() {
     .await;
     assert!(outside.exists());
 }
+
+/// A CLI that splits `--allowedTools` on commas and all whitespace, ignoring
+/// parentheses, reads a multi-word command rule as fragments. delega accepts
+/// the input, so the naive reading must never grant more than the real one.
+#[tokio::test]
+async fn a_naive_whitespace_reading_of_the_rules_grants_nothing_extra() {
+    let naive = |rig: &Rig| {
+        let mut options = rig.options(Provider::Claude);
+        options.hook = Some(Rig::guard_hook());
+        options.env_set.push(("FAKE_SPLIT".into(), "naive".into()));
+        options
+    };
+    let rig = Rig::new();
+    let outside = rig.home.join("x.txt");
+    let mut request = rig.request(
+        Provider::Claude,
+        &format!("tool-write:{}", outside.display()),
+    );
+    request.permissions.commands = vec!["cargo test".into(), "git status".into()];
+    let result = run_checked(request, naive(&rig)).await;
+    assert!(!outside.exists());
+    assert_eq!(denied(&result).len(), 1);
+
+    // Writing in read mode is denied under the naive reading as well.
+    let rig = Rig::new();
+    let inside = rig.work.join("in.txt");
+    let mut request = rig.request(
+        Provider::Claude,
+        &format!("tool-write:{}", inside.display()),
+    );
+    request.permissions.commands = vec!["cargo test".into()];
+    let result = run_checked(request, naive(&rig)).await;
+    assert!(!inside.exists());
+    assert_eq!(denied(&result).len(), 1);
+
+    // A working directory with a space is accepted; read under the naive reading
+    // fails closed (the rule is split) and never reads wider.
+    let rig = Rig::new();
+    let spaced = rig.work.join("my dir");
+    std::fs::create_dir(&spaced).unwrap();
+    let mut request = rig.request(
+        Provider::Claude,
+        &format!("tool-read:{}/f.txt", spaced.display()),
+    );
+    request.cwd = Some(spaced.clone());
+    let result = run_checked(request, naive(&rig)).await;
+    assert_eq!(denied(&result).len(), 1);
+}
