@@ -429,6 +429,16 @@ case "$mode" in
     big=$(head -c 3000000 /dev/zero | tr '\0' 'x')
     success "\"$big\"" '[]'
     ;;
+  large-utf8)
+    # 24576 characters of a two-, a three- and a four-byte character in turn,
+    # so a window of 20000 characters ends between characters of different
+    # widths.
+    init
+    big='é€😀'
+    n=0
+    while [ $n -lt 13 ]; do big="$big$big"; n=$((n+1)); done
+    success "\"$big\"" '[]'
+    ;;
   descendant)
     init
     sleep 300 > /dev/null 2>&1 &
