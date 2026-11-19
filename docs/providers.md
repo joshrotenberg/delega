@@ -128,7 +128,7 @@ characters and a note says how many lines were affected.
 
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
-`provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
+`permissions_not_enforceable`, `provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
 `forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit` (all
 refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
@@ -239,7 +239,8 @@ listed directories.
   calls; the `delega` binary exposes it as the hidden subcommand
   `command-guard`, and `delega run` passes its own executable path and that
   subcommand as the hook. Without a hook, `permissions.commands` is not granted
-  at all and a note says so. Claude Code must be 2.1.325 or later for the hook
+  at all and a note says so; with `permissions.strict` the run is refused before
+  start with `permissions_not_enforceable` instead. Claude Code must be 2.1.325 or later for the hook
   interface.
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
   It is readable, not editable: no `Edit` or `Write` rule names it.
@@ -437,6 +438,15 @@ Text output prints the same under "user deny rules".
 **Codex.** Claude deny rules do not apply to Codex. The Codex adapter reads no
 Claude Code settings and its dry run has an empty `deny_rules`.
 
+### Strict
+
+With `permissions.strict`, Claude Code refuses before start only when
+`permissions.commands` is set and no command guard hook is configured, because
+the commands cannot be granted exactly. With a hook, and in `full`, nothing is
+refused. The run's other notes (settings not applied, instruction files) do not
+describe a part of the permissions the provider fails to enforce, so strict
+ignores them.
+
 ### What cannot be enforced
 
 - `--setting-sources ""` means Claude Code loads no user, project or local
@@ -555,6 +565,14 @@ in `dry_run`, whether or not the request set `commands` or `directories`:
 The mapping is not stricter than the request here because Codex has no setting
 that would make it so. Use Claude Code when `commands` and `directories` must be
 enforced.
+
+With `permissions.strict` (`--strict`), a Codex `read` or `write` run is refused
+before start with `permissions_not_enforceable`, because the request cannot be
+enforced as stated. The message names these parts: reads are not confined to the
+working directory and `permissions.directories`; commands that need no write
+access and no network access can run although the request allows only the
+commands it lists; and, when `permissions.commands` is set, that it has no
+effect. A Codex `full` run is not refused: it asks for nothing confined.
 
 ### What cannot be enforced
 
