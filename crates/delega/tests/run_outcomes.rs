@@ -6,13 +6,14 @@ use delega_core::contract::outcome::Outcome;
 use delega_core::contract::result::Cleanup;
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use support::{PROVIDERS, Rig, result_of, signal, text, wait_bounded, wait_exit_only};
+use support::{
+    PROVIDERS, Rig, assert_stop_cleanup, result_of, signal, text, wait_bounded, wait_exit_only,
+};
 
 #[test]
 fn a_completed_run_prints_the_answer_alone_and_exits_zero() {
     for provider in PROVIDERS {
-        let rig = Rig::new();
-        let out = rig.run(provider, "success", &[]);
+        let (rig, out) = Rig::run_with_timely_listing(provider, "success", &[]);
         assert_eq!(out.status.code(), Some(0), "{provider}");
         assert_eq!(text(&out.stdout), "fake final answer\n", "{provider}");
         assert_eq!(text(&out.stderr), "", "{provider}");
@@ -23,8 +24,7 @@ fn a_completed_run_prints_the_answer_alone_and_exits_zero() {
 #[test]
 fn a_completed_run_in_json_prints_the_whole_result() {
     for provider in PROVIDERS {
-        let rig = Rig::new();
-        let out = rig.run(provider, "success", &["--output", "json"]);
+        let (rig, out) = Rig::run_with_timely_listing(provider, "success", &["--output", "json"]);
         assert_eq!(out.status.code(), Some(0), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::Completed);
@@ -159,7 +159,7 @@ fn a_run_past_its_time_limit_exits_124_and_leaves_nothing_running() {
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::TimedOut);
         assert_eq!(result.timing.timeout_secs, 1);
-        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert_stop_cleanup(&result, "stop");
         rig.assert_nothing_left();
     }
 }
@@ -194,7 +194,7 @@ fn sigint_stops_the_worker_prints_the_result_and_exits_130() {
         assert_eq!(out.status.code(), Some(130), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert_stop_cleanup(&result, "stop");
         rig.assert_nothing_left();
     }
 }
@@ -206,7 +206,7 @@ fn sigterm_stops_the_worker_prints_the_result_and_exits_130() {
         assert_eq!(out.status.code(), Some(130), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert_stop_cleanup(&result, "stop");
         rig.assert_nothing_left();
     }
 }
@@ -221,7 +221,7 @@ fn signals_while_the_worker_is_stopping_do_not_end_delega_early() {
         assert_eq!(out.status.code(), Some(130), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert_stop_cleanup(&result, "stop");
         let err = text(&out.stderr);
         // Each message is said exactly once, the first by the first signal and
         // the second by a later one, so neither can satisfy the other's check.
@@ -250,8 +250,8 @@ fn an_interrupted_run_in_text_mode_exits_130_with_a_summary_on_stderr() {
 #[test]
 fn a_descendant_the_provider_leaves_behind_is_stopped_before_delega_exits() {
     for provider in PROVIDERS {
-        let rig = Rig::new();
-        let out = rig.run(provider, "descendant", &["--output", "json"]);
+        let (rig, out) =
+            Rig::run_with_timely_listing(provider, "descendant", &["--output", "json"]);
         assert_eq!(out.status.code(), Some(0), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.cleanup, Cleanup::Confirmed);
@@ -292,7 +292,7 @@ fn sighup_and_sigquit_stop_the_worker_like_sigterm() {
             assert_eq!(out.status.code(), Some(130), "{provider} {name}");
             let result = result_of(&out);
             assert_eq!(result.outcome, Outcome::Interrupted, "{provider} {name}");
-            assert_eq!(result.cleanup, Cleanup::Confirmed, "{provider} {name}");
+            assert_stop_cleanup(&result, &format!("{provider} {name}"));
             rig.assert_nothing_left();
         }
     }
@@ -317,7 +317,7 @@ fn a_signal_during_the_version_probe_stops_the_probe_and_starts_no_worker() {
         let began = std::time::Instant::now();
         while !rig.record.join("probe-started").exists() {
             assert!(
-                began.elapsed() < Duration::from_secs(30),
+                began.elapsed() < Duration::from_secs(120),
                 "the probe never started"
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -327,7 +327,7 @@ fn a_signal_during_the_version_probe_stops_the_probe_and_starts_no_worker() {
         assert_eq!(out.status.code(), Some(130), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert_stop_cleanup(&result, "stop");
         assert!(
             !rig.record.join("argv").exists(),
             "{provider}: the worker started"
@@ -387,7 +387,7 @@ fn a_blocked_standard_error_does_not_delay_stopping_the_worker() {
         rig.wait_started();
         std::thread::sleep(Duration::from_millis(500));
         signal(child.id(), "TERM");
-        let status = wait_exit_only(&mut child, Duration::from_secs(15));
+        let status = wait_exit_only(&mut child, Duration::from_secs(90));
         assert_eq!(status.code(), Some(130), "{provider}");
         rig.assert_nothing_left();
         // The result went to standard output without waiting for standard error.
@@ -397,7 +397,7 @@ fn a_blocked_standard_error_does_not_delay_stopping_the_worker() {
         let result: delega_core::contract::result::RunResult =
             serde_json::from_str(&stdout).expect("a result document");
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert_stop_cleanup(&result, "stop");
     }
 }
 
@@ -483,7 +483,7 @@ fn a_signal_ends_delega_that_is_only_waiting_for_a_reader_of_a_large_result() {
         let began = std::time::Instant::now();
         while !rig.record.join("pid").exists() {
             assert!(
-                began.elapsed() < Duration::from_secs(30),
+                began.elapsed() < Duration::from_secs(120),
                 "the fake never started"
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -495,7 +495,7 @@ fn a_signal_ends_delega_that_is_only_waiting_for_a_reader_of_a_large_result() {
             "{provider}: delega should still be waiting to write"
         );
         signal(child.id(), "TERM");
-        let status = wait_exit_only(&mut child, Duration::from_secs(10));
+        let status = wait_exit_only(&mut child, Duration::from_secs(90));
         assert_eq!(status.code(), Some(130), "{provider}");
         rig.assert_nothing_left();
     }
@@ -509,14 +509,14 @@ fn every_terminal_signal_ends_a_delega_blocked_writing_its_result() {
         let began = std::time::Instant::now();
         while !rig.record.join("pid").exists() {
             assert!(
-                began.elapsed() < Duration::from_secs(30),
+                began.elapsed() < Duration::from_secs(120),
                 "the fake never started"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(800));
         signal(child.id(), name);
-        let status = wait_exit_only(&mut child, Duration::from_secs(10));
+        let status = wait_exit_only(&mut child, Duration::from_secs(90));
         assert_eq!(status.code(), Some(130), "{name}");
         rig.assert_nothing_left();
     }

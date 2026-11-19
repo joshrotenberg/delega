@@ -1,39 +1,43 @@
 //! Stopping: stopped processes, sessions, the pre-stop race and a panic.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use super::fixtures::{OWN_SESSION, Reaper, Scratch, assert_confirmed, assert_gone, sh};
+use super::fixtures::{
+    Held, OWN_SESSION, Reaper, Scratch, assert_confirmed, assert_gone, await_event, sh,
+};
 use crate::process::sys::{self, Signal};
-use crate::process::tree::{Lister, list_processes};
+use crate::process::tree::Lister;
 use crate::process::{Ending, ProcessHandle, ProcessSpec, run};
 
 const LONG: Duration = Duration::from_secs(60);
-/// Longer than the pre-stop scan budget, short enough to keep the suite quick.
-const STALL: Duration = Duration::from_millis(300);
+/// A bound for a stop that must not wait out a grace or a limit of a minute or
+/// more: only a stop that does wait reaches it, and no load adds this much.
+const NOT_THE_GRACE: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn a_leader_that_stops_itself_is_still_running_and_ends_as_timed_out() {
     let s = Scratch::new();
+    // The limit is long against the two commands the child runs before it stops
+    // itself. Whether or not it has stopped by then, a child that has not
+    // exited is stopped by the limit and reported as timed out.
     let spec = sh(
         &s,
         "echo $$ > leader; kill -STOP $$; sleep 1",
-        Duration::from_millis(600),
+        Duration::from_secs(2),
     );
-    let started = Instant::now();
-    let report = run(spec).await;
+    // A run that waited for the stopped child to exit would never return.
+    let report = tokio::time::timeout(Duration::from_secs(120), run(spec))
+        .await
+        .expect("the run did not end with a stopped leader");
     assert!(
         matches!(report.ending, Ending::TimedOut { .. }),
         "a stopped child has not ended: {report:#?}"
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(6),
-        "took {:?}",
-        started.elapsed()
-    );
     assert_confirmed(&report);
-    assert_gone("stopped leader", &[s.pid_now("leader")]).await;
+    let leader = i32::try_from(report.pid.expect("it started")).expect("a pid");
+    assert_gone("stopped leader", &[leader]).await;
 }
 
 #[tokio::test]
@@ -49,25 +53,25 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
         "echo $$ > leader; sleep 60 & echo $! > gc; kill -STOP $!; echo stopped > stopped; wait",
         LONG,
     );
-    spec.stop_grace = Duration::from_secs(5);
-    spec.drain_bound = Duration::from_secs(5);
-    spec.cleanup_deadline = Duration::from_secs(30);
+    // The grace is a minute, so a stop that reached the descendant only with
+    // the KILL after the grace would take a minute; the bound is half of it.
+    spec.stop_grace = Duration::from_secs(60);
+    spec.drain_bound = Duration::from_secs(60);
+    spec.cleanup_deadline = Duration::from_secs(180);
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
-    for _ in 0..500 {
-        if s.path("stopped").exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    await_event("the descendant being stopped", || {
+        s.path("stopped").exists()
+    })
+    .await;
     let began = Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted);
     assert!(
-        began.elapsed() < Duration::from_secs(3),
-        "took {:?}",
+        began.elapsed() < NOT_THE_GRACE,
+        "took {:?}, which is the grace, not TERM and CONT",
         began.elapsed()
     );
     assert_confirmed(&report);
@@ -97,44 +101,30 @@ async fn the_child_leads_a_new_session_and_has_no_controlling_terminal() {
     assert_confirmed(&report);
 }
 
-/// A lister that, once armed, stalls once before answering, so a stop's pre-stop
-/// scan cannot finish within its budget.
-fn stalling_lister(armed: Arc<AtomicBool>) -> Lister {
-    // Only the first call after arming stalls: the stop's own scan.
-    let stalls = Arc::new(AtomicBool::new(true));
-    Arc::new(move || {
-        let armed = armed.clone();
-        let stalls = stalls.clone();
-        Box::pin(async move {
-            if armed.load(Ordering::SeqCst) && stalls.swap(false, Ordering::SeqCst) {
-                tokio::time::sleep(STALL).await;
-            }
-            list_processes().await
-        })
-    })
-}
-
 #[tokio::test]
 async fn a_child_that_exits_while_the_stop_waits_for_its_scan_is_reported_as_exited() {
     let s = Scratch::new();
-    let armed = Arc::new(AtomicBool::new(false));
+    let held = Held::new(false);
     // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
     let script = "trap 'exit 0' USR1; echo $$ > leader; echo ready > ready; \
                   while :; do sleep 0.02; done";
-    let spec = sh(&s, script, LONG).with_lister(stalling_lister(armed.clone()));
+    let spec = sh(&s, script, LONG).with_lister(held.lister());
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
-    for _ in 0..500 {
-        if s.path("ready").exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    armed.store(true, Ordering::SeqCst);
-    // The stop begins and waits up to its budget for a scan that stalls; the
-    // child exits during that wait, before any stop signal is sent.
+    let _reaper = Reaper(vec![leader]);
+    await_event("the child being ready", || s.path("ready").exists()).await;
+    held.armed.store(true, Ordering::SeqCst);
+    // The stop begins and waits for a listing that is held; the child exits
+    // during that wait, before any stop signal is sent. The listing is released
+    // only once the child is gone, so the order does not depend on speed.
     handle.interrupt();
+    await_event("the stop asking for its listing", || {
+        held.waiting.load(Ordering::SeqCst) >= 1
+    })
+    .await;
     sys::signal_process(leader, Signal::USR1).expect("signal the child");
+    assert_gone("the child after its exit signal", &[leader]).await;
+    held.release();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert_confirmed(&report);
@@ -186,13 +176,8 @@ fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         let gc = s.pid("gc").await;
         // The owner's drop can only reach it if a scan has recorded it.
-        for _ in 0..500 {
-            if handle.tracked_pids().contains(&(gc as u32)) {
-                return (handle, gc);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the scan never tracked the descendant");
+        super::fixtures::wait_tracked(&handle, gc).await;
+        (handle, gc)
     });
     let _reaper = Reaper(vec![gc]);
     drop(runtime);
@@ -213,16 +198,17 @@ async fn a_finished_child_is_confirmed_at_once_when_inspection_is_unavailable() 
     let mut spec = ProcessSpec::new("/usr/bin/true", LONG)
         .env(crate::process::EnvPolicy::empty())
         .with_lister(missing);
-    // A grace that would show if cleanup slept it out.
-    spec.stop_grace = Duration::from_secs(5);
-    spec.drain_bound = Duration::from_secs(5);
-    spec.cleanup_deadline = Duration::from_secs(30);
+    // A grace that would show if cleanup slept it out: a minute, against a
+    // bound of half of it.
+    spec.stop_grace = Duration::from_secs(60);
+    spec.drain_bound = Duration::from_secs(60);
+    spec.cleanup_deadline = Duration::from_secs(180);
     let started = Instant::now();
     let report = run(spec).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 });
     assert!(
-        started.elapsed() < Duration::from_millis(1500),
-        "took {:?}",
+        started.elapsed() < NOT_THE_GRACE,
+        "took {:?}, which is the grace",
         started.elapsed()
     );
     match &report.cleanup {

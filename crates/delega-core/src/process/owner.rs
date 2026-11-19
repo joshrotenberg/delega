@@ -21,7 +21,6 @@ use super::limits::{
     CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
     DESCENDANT_SIGNAL_BUDGET, EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL,
     LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
-    STOP_LISTING_BUDGET,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -90,6 +89,8 @@ pub(super) struct Shared {
     tracked_mirror: Arc<Mutex<Vec<i32>>>,
     #[cfg(test)]
     swallow_kills: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    descendant_signal_budget: Duration,
 }
 
 impl Shared {
@@ -214,10 +215,23 @@ impl Shared {
         self.signal_swept(Signal::KILL).await;
     }
 
+    /// The budget for the sweep that follows a signal to the group.
+    #[cfg(test)]
+    fn descendant_signal_budget(&self) -> Duration {
+        // Never shorter than the production budget.
+        self.descendant_signal_budget.max(DESCENDANT_SIGNAL_BUDGET)
+    }
+
+    /// The budget for the sweep that follows a signal to the group.
+    #[cfg(not(test))]
+    fn descendant_signal_budget(&self) -> Duration {
+        DESCENDANT_SIGNAL_BUDGET
+    }
+
     /// Signal what a fresh sweep finds, within a budget so a slow or hung
     /// listing cannot hold the owner. A cleanup pass signals again later.
     async fn signal_swept(&self, signal: Signal) {
-        let _ = tokio::time::timeout(DESCENDANT_SIGNAL_BUDGET, async {
+        let _ = tokio::time::timeout(self.descendant_signal_budget(), async {
             let result = self.tree.lock().await.sweep(Some(signal)).await;
             self.note_sweep(signal, result);
         })
@@ -361,6 +375,8 @@ impl OwnedProcess {
             tracked_mirror: registry.tracked.clone(),
             #[cfg(test)]
             swallow_kills: std::sync::atomic::AtomicU32::new(spec.swallow_group_kills),
+            #[cfg(test)]
+            descendant_signal_budget: spec.timings.descendant_signal,
         });
         let mut owner = OwnedProcess {
             child: Some(child),
@@ -426,13 +442,14 @@ impl OwnedProcess {
         deadline: Instant,
         hard_stop: bool,
         term_at: Option<Instant>,
+        stop_budget: Duration,
     ) -> Settled {
         let shared = self.shared.clone();
         if hard_stop {
             // The deadline is already fixed, so the wait leaves it half.
             let left = deadline.saturating_duration_since(Instant::now());
             if !shared
-                .before_stop(STOP_LISTING_BUDGET.min(left / 2), &CancellationToken::new())
+                .before_stop(stop_budget.min(left / 2), &CancellationToken::new())
                 .await
             {
                 shared.note_listing_missed();

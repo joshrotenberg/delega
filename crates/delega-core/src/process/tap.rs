@@ -14,7 +14,7 @@ use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 use tokio::sync::oneshot;
 
-use super::limits::{TAP_DRAIN_WAIT, TAP_QUEUE_CHUNKS};
+use super::limits::TAP_DRAIN_WAIT;
 use super::owner::Shared;
 use super::spec::OutputTap;
 
@@ -27,8 +27,8 @@ pub(super) struct TapWorker {
 }
 
 impl TapWorker {
-    pub(super) fn start(tap: OutputTap, counter: Option<Arc<AtomicU64>>) -> Self {
-        let (sender, receiver) = sync_channel::<Vec<u8>>(TAP_QUEUE_CHUNKS);
+    pub(super) fn start(tap: OutputTap, counter: Option<Arc<AtomicU64>>, queue: usize) -> Self {
+        let (sender, receiver) = sync_channel::<Vec<u8>>(queue);
         let (done_tx, done) = oneshot::channel();
         let panicked = Arc::new(AtomicU64::new(0));
         let thread_panicked = panicked.clone();

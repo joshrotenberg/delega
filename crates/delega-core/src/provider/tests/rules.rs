@@ -393,19 +393,34 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
     );
 }
 
+/// Proves the scan is linear without a wall-clock bound: the same input at
+/// eight times the size must cost far less than eight times eight (quadratic
+/// growth). Both sizes are measured in this test, so machine load scales both;
+/// the best of several runs per size drops a stall that hit only one run.
+/// Linear growth gives a ratio near 8 and quadratic growth near 64; the limit
+/// of 24 sits between them with margin for cache effects.
 #[test]
 fn private_key_removal_is_linear_in_the_input() {
     let redactor = Redactor::default();
-    // Many begin markers that are not keys, and many unterminated labels.
-    let noise = "-----BEGIN CERTIFICATE".repeat(200_000);
-    let started = std::time::Instant::now();
-    let out = redactor.apply(&noise);
+    let best = |repeats: usize| {
+        // Many begin markers that are not keys, and many unterminated labels.
+        let noise = "-----BEGIN CERTIFICATE".repeat(repeats);
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let out = redactor.apply(&noise);
+            best = best.min(started.elapsed());
+            assert_eq!(out.len(), noise.len());
+        }
+        best
+    };
+    let small = best(12_500).max(std::time::Duration::from_micros(1));
+    let large = best(100_000);
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "{:?}",
-        started.elapsed()
+        ratio < 24.0,
+        "8x the input took {ratio:.1}x as long ({small:?} vs {large:?}); linear is about 8, quadratic about 64"
     );
-    assert_eq!(out.len(), noise.len());
     let keys = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".repeat(50_000);
     let out = redactor.apply(&keys);
     assert_eq!(out, "[redacted]\n".repeat(50_000));

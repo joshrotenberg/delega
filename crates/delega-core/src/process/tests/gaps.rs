@@ -60,7 +60,8 @@ async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
     let script = format!("{WAIT_FOR_SCAN} echo $$ > leader; {OWN_GROUP} & echo $! > gc; exit 0");
-    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let mut spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    spec.capture_interval = Some(Duration::from_secs(3600));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     super::fixtures::assert_gone("grandchild", &pids).await;
@@ -70,13 +71,14 @@ async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
 async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
-    // The crash lands 0.2 s after the descendant starts, before the next
-    // periodic scan (0.5 s after the first).
+    // The crash lands 0.2 s after the descendant starts. No periodic scan runs
+    // after the first, however slow the machine is.
     let script = format!(
         "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_GROUP} & echo $! > gc; \
          sleep 0.2; kill -KILL $$; sleep 5"
     );
-    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let mut spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    spec.capture_interval = Some(Duration::from_secs(3600));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     super::fixtures::assert_gone("descendant", &pids).await;

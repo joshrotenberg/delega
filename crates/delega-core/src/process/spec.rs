@@ -170,6 +170,40 @@ pub struct ProcessSpec {
     /// `limits::CAPTURE_INTERVAL`, so a test can rule a periodic scan out.
     #[cfg(test)]
     pub(crate) capture_interval: Option<Duration>,
+    /// Test seam: the waits that depend on how fast `ps` answers. See
+    /// [`TestTimings`].
+    #[cfg(test)]
+    pub(crate) timings: TestTimings,
+}
+
+/// Test seam. The production waits for a process listing (`limits`) are tuned
+/// for a machine at ordinary load, and a test that expects a listing to finish
+/// in time fails when the machine is busy. In a test build every spec starts
+/// with waits far longer than any listing, so a test about what happens when
+/// a listing is late says so explicitly (a short `stop_listing`, or a lister
+/// that waits for a gate) and every other test is independent of speed.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TestTimings {
+    pub(crate) stop_listing: Duration,
+    pub(crate) exit_listing: Duration,
+    pub(crate) final_cleanup_pass: Duration,
+    pub(crate) descendant_signal: Duration,
+    pub(crate) tap_queue_chunks: usize,
+}
+
+#[cfg(test)]
+impl Default for TestTimings {
+    fn default() -> Self {
+        let long = Duration::from_secs(120);
+        Self {
+            stop_listing: long,
+            exit_listing: long,
+            final_cleanup_pass: long,
+            descendant_signal: long,
+            tap_queue_chunks: super::limits::TAP_QUEUE_CHUNKS,
+        }
+    }
 }
 
 impl ProcessSpec {
@@ -205,7 +239,57 @@ impl ProcessSpec {
             panic_in_loop: false,
             #[cfg(test)]
             capture_interval: None,
+            #[cfg(test)]
+            timings: TestTimings::default(),
         }
+    }
+
+    /// How long a requested stop waits for the listing before its first signal.
+    #[cfg(test)]
+    pub(crate) fn stop_listing_budget(&self) -> Duration {
+        self.timings.stop_listing
+    }
+
+    /// How long a requested stop waits for the listing before its first signal.
+    #[cfg(not(test))]
+    pub(crate) fn stop_listing_budget(&self) -> Duration {
+        super::limits::STOP_LISTING_BUDGET
+    }
+
+    /// How long the first signal after a natural exit waits for its listing.
+    #[cfg(test)]
+    pub(crate) fn exit_listing_budget(&self) -> Duration {
+        self.timings.exit_listing
+    }
+
+    /// How long the first signal after a natural exit waits for its listing.
+    #[cfg(not(test))]
+    pub(crate) fn exit_listing_budget(&self) -> Duration {
+        super::limits::EXIT_LISTING_BUDGET
+    }
+
+    /// Least time the last cleanup pass gets.
+    #[cfg(test)]
+    pub(crate) fn final_cleanup_pass(&self) -> Duration {
+        self.timings.final_cleanup_pass
+    }
+
+    /// Least time the last cleanup pass gets.
+    #[cfg(not(test))]
+    pub(crate) fn final_cleanup_pass(&self) -> Duration {
+        super::limits::FINAL_CLEANUP_PASS
+    }
+
+    /// Chunks queued for the stdout tap.
+    #[cfg(test)]
+    pub(crate) fn tap_queue_chunks(&self) -> usize {
+        self.timings.tap_queue_chunks
+    }
+
+    /// Chunks queued for the stdout tap.
+    #[cfg(not(test))]
+    pub(crate) fn tap_queue_chunks(&self) -> usize {
+        super::limits::TAP_QUEUE_CHUNKS
     }
 
     /// The cleanup deadline in force: `cleanup_deadline`, raised to

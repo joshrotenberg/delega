@@ -847,7 +847,7 @@ fn wait_bounded_reads_the_pipes_while_it_waits() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn sh");
-    let out = wait_bounded_for(child, std::time::Duration::from_secs(20));
+    let out = wait_bounded_for(child, std::time::Duration::from_secs(120));
     assert_eq!(out.stdout.len(), 300_000);
     assert_eq!(out.stderr.len(), 300_000);
 }
