@@ -124,6 +124,7 @@ impl Drop for Shared {
     /// confirmed; call it before the last clone is dropped when that matters.
     fn drop(&mut self) {
         self.root.cancel();
+        self.preflight.close();
         let _ = self.tx.send(Command::Quit);
     }
 }
@@ -407,6 +408,8 @@ impl Supervisor {
     /// task had panicked, the report says so in `failed` instead of looking
     /// clean.
     pub async fn shutdown(&self) -> ShutdownReport {
+        // A start still waiting on a request check is released with `ShutDown`.
+        self.shared.preflight.close();
         let started = self.call(|reply| Command::Shutdown { reply }).await;
         let Ok(started) = started else {
             return ShutdownReport {

@@ -764,3 +764,89 @@ async fn paging_by_worker_follows_the_latest_run_so_a_follow_up_changes_the_run_
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
+
+/// Start `count` requests at once from separate tasks and return the responses.
+async fn start_together(
+    supervisor: &Supervisor,
+    requests: Vec<delega_core::contract::request::Request>,
+) -> Vec<delega_core::supervisor::StartResponse> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for request in requests {
+        let supervisor = supervisor.clone();
+        tasks.spawn(async move { supervisor.start(request).await.expect("start") });
+    }
+    let mut responses = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        responses.push(joined.expect("the start task did not panic"));
+    }
+    responses
+}
+
+fn refusal_kind(response: &delega_core::supervisor::StartResponse) -> Option<&str> {
+    response.error.as_ref().map(|e| e.kind.as_str())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forty_concurrent_starts_are_all_admitted_when_the_filesystem_answers() {
+    let rig = Rig::new();
+    let limits = Limits {
+        max_live_workers: 64,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let requests = (0..40)
+        .map(|n| rig.request(Provider::Claude, &format!("echo:{n}")))
+        .collect();
+    let responses = start_together(&supervisor, requests).await;
+    assert_eq!(responses.len(), 40);
+    for response in &responses {
+        assert_eq!(refusal_kind(response), None, "{response:#?}");
+        assert!(response.worker.is_some(), "{response:#?}");
+    }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thirty_concurrent_starts_on_a_missing_directory_are_all_refused_for_the_directory() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let requests = (0..30)
+        .map(|n| {
+            let mut request = rig.request(Provider::Claude, &format!("echo:{n}"));
+            request.cwd = Some(rig.root().join("no-such-directory"));
+            request
+        })
+        .collect();
+    let responses = start_together(&supervisor, requests).await;
+    assert_eq!(responses.len(), 30);
+    for response in &responses {
+        assert_eq!(
+            refusal_kind(response),
+            Some("cwd_unusable"),
+            "{response:#?}"
+        );
+    }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn twenty_concurrent_starts_with_default_limits_refuse_four_for_the_live_worker_limit() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let requests = (0..20)
+        .map(|n| rig.request(Provider::Claude, &format!("echo:{n}")))
+        .collect();
+    let responses = start_together(&supervisor, requests).await;
+    let refused: Vec<_> = responses.iter().filter(|r| r.error.is_some()).collect();
+    assert_eq!(responses.len() - refused.len(), 16, "{responses:#?}");
+    assert_eq!(refused.len(), 4, "{refused:#?}");
+    for response in refused {
+        assert_eq!(refusal_kind(response), Some("limit_reached"));
+        let message = &response.error.as_ref().expect("error").message;
+        assert!(message.contains("live workers"), "{message}");
+    }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}

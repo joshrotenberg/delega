@@ -349,9 +349,11 @@ Rules that hold for every tool:
   restart. The supervisor applies them so: a `start` beyond the live-worker limit
   is refused (`limit_reached`); a `follow_up` beyond the per-worker queue limit
   is refused (`queue_full`); a run beyond the running-runs limit is not refused,
-  it stays `queued` until a slot frees; a `start` is also refused
-  (`limit_reached`) while 16 request checks are outstanding, which happens only
-  when the filesystem is not answering. Defaults are in
+  it stays `queued` until a slot frees. At most 16 request
+  checks run at once; a `start` that finds them all busy waits for one, within the
+  same 10 s bound that covers its check, and is refused `preflight_timeout` only
+  if none frees in time, which happens when the filesystem is not answering.
+  Defaults are in
   [supervisor.md](supervisor.md#limits-and-defaults).
 - **Refusals are runs.** A `start` or `follow_up` that cannot go ahead returns a
   run id whose result is `refused`, and `read` returns it. A refused `start`

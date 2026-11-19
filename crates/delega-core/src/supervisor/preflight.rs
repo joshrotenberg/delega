@@ -8,10 +8,11 @@
 //! that has timed out still counts, because its thread is still there.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::contract::request::Request;
 use crate::provider::{self, ProviderOptions};
@@ -25,23 +26,18 @@ pub(super) type Refusal = (String, String);
 /// tests replace it to hold checks open.
 type Check = Arc<dyn Fn(&Request, &ProviderOptions) -> Option<Refusal> + Send + Sync>;
 
-/// Releases the slot of one outstanding check when its thread ends, however it
-/// ends.
-struct Slot(Arc<AtomicUsize>);
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 /// Runs request checks, at most [`limits::MAX_PENDING_PREFLIGHTS`] at a time.
-/// Cheap to clone; every clone shares the count.
+/// Cheap to clone; every clone shares the slots.
 #[derive(Clone)]
 pub(super) struct Preflight {
     check: Check,
     bound: Duration,
-    pending: Arc<AtomicUsize>,
+    /// One permit per outstanding check. The permit moves into the check's
+    /// thread and is released when the thread ends, however it ends.
+    slots: Arc<Semaphore>,
+    /// Cancelled when the supervisor shuts down or is dropped, so a `start`
+    /// waiting for a slot or an answer is released at once.
+    closed: CancellationToken,
 }
 
 impl Preflight {
@@ -58,37 +54,35 @@ impl Preflight {
         )
     }
 
-    /// Checks done by `check`, each waited for at most `bound`. Reachable only
+    /// Checks done by `check`, each given at most `bound` from the start of the
+    /// `start` that asked for it, waiting for a slot included. Reachable only
     /// from the crate, so a caller of the library cannot replace the checks.
     pub(super) fn with(check: Check, bound: Duration) -> Self {
         Self {
             check,
             bound,
-            pending: Arc::new(AtomicUsize::new(0)),
+            slots: Arc::new(Semaphore::new(limits::MAX_PENDING_PREFLIGHTS)),
+            closed: CancellationToken::new(),
         }
     }
 
-    /// Take a slot, or `None` when the cap is reached.
-    fn reserve(&self) -> Option<Slot> {
-        let mut n = self.pending.load(Ordering::Acquire);
-        let taken = loop {
-            if n >= limits::MAX_PENDING_PREFLIGHTS {
-                break false;
-            }
-            match self
-                .pending
-                .compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => break true,
-                Err(now) => n = now,
-            }
-        };
-        taken.then(|| Slot(self.pending.clone()))
+    /// Release every `start` that is waiting, and every later one. They are
+    /// answered as if nothing was refused, which the supervisor turns into
+    /// `Error::ShutDown`.
+    pub(super) fn close(&self) {
+        self.closed.cancel();
     }
 
-    /// Check `request` on a thread of its own and wait for it, bounded. Returns
-    /// the refusal, if any. A request that fails validation is left for the
+    /// Check `request` on a thread of its own and wait for it. Returns the
+    /// refusal, if any. A request that fails validation is left for the
     /// supervisor to refuse.
+    ///
+    /// When every slot is taken the call waits for one, asynchronously and
+    /// without a thread, so a burst of concurrent starts is served in turn and
+    /// not refused. Waiting for a slot and for the answer share one bound,
+    /// measured from the start of the call: a start is never held longer than
+    /// the bound, and one that gets no slot or no answer in time is refused
+    /// `preflight_timeout`.
     ///
     /// The thread is detached: nothing waits for it. If the bound passes, or the
     /// runtime or the supervisor goes away first, its late result is discarded
@@ -103,16 +97,17 @@ impl Preflight {
         if request.validate().is_err() {
             return None;
         }
-        let Some(slot) = self.reserve() else {
-            return Some((
-                "limit_reached".to_string(),
-                format!(
-                    "the limit of {} outstanding request checks is reached; earlier checks have \
-                     not finished, so the filesystem or the provider executable may be \
-                     unreachable",
-                    limits::MAX_PENDING_PREFLIGHTS
-                ),
-            ));
+        let deadline = Instant::now() + self.bound;
+        let acquire = self.slots.clone().acquire_owned();
+        let permit = tokio::select! {
+            () = self.closed.cancelled() => return None,
+            got = tokio::time::timeout_at(deadline, acquire) => match got {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => return Some(internal("checking the request failed unexpectedly")),
+                Err(_) => return Some(self.timed_out(
+                    "request checks are not completing, so none was free",
+                )),
+            },
         };
         let (request, options, check) = (request.clone(), options.clone(), self.check.clone());
         let (tx, rx) = oneshot::channel();
@@ -121,30 +116,36 @@ impl Preflight {
             .spawn(move || {
                 let refusal = check(&request, &options);
                 // Free the slot before the answer is sent, so a caller that has
-                // the answer never finds the slot still taken.
-                drop(slot);
+                // the answer never finds the slot still taken. A panic in the
+                // check drops the permit on the way out.
+                drop(permit);
                 let _ = tx.send(refusal);
             });
         if spawned.is_err() {
-            return Some((
-                "internal_error".to_string(),
-                "checking the request could not be started".to_string(),
-            ));
+            return Some(internal("checking the request could not be started"));
         }
-        match tokio::time::timeout(self.bound, rx).await {
-            Ok(Ok(refusal)) => refusal,
-            Ok(Err(_)) => Some((
-                "internal_error".to_string(),
-                "checking the request failed unexpectedly".to_string(),
-            )),
-            Err(_) => Some((
-                "preflight_timeout".to_string(),
-                format!(
-                    "checking the request did not finish within {} s; the filesystem or the \
-                     provider executable may be unreachable",
-                    self.bound.as_secs()
-                ),
-            )),
+        tokio::select! {
+            () = self.closed.cancelled() => None,
+            got = tokio::time::timeout_at(deadline, rx) => match got {
+                Ok(Ok(refusal)) => refusal,
+                Ok(Err(_)) => Some(internal("checking the request failed unexpectedly")),
+                Err(_) => Some(self.timed_out("the check did not finish")),
+            },
         }
     }
+
+    fn timed_out(&self, what: &str) -> Refusal {
+        (
+            "preflight_timeout".to_string(),
+            format!(
+                "{what} within {} s; request checks are not completing, and the filesystem or \
+                 the provider executable may be unreachable",
+                self.bound.as_secs()
+            ),
+        )
+    }
+}
+
+fn internal(message: &str) -> Refusal {
+    ("internal_error".to_string(), message.to_string())
 }
