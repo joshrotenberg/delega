@@ -124,7 +124,8 @@ characters and a note says how many lines were affected.
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
 `provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
-`forbidden_env_name` (all refused before start);
+`forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit` (all
+refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
 `provider_preparation_failed`, `spawn_failed`, `process_signaled`,
@@ -274,15 +275,97 @@ same text is accepted for Codex, which has no rule text.
   that is accepted is read as split fragments by such a reader, which fails
   closed (the rule matches less) and never adds a tool.
 
+### Deny rules
+
+A Claude worker starts with `--setting-sources ""`, so Claude Code loads none of
+the user's or the project's settings. One part of them is carried over: the
+`permissions.deny` rules. A rule the user wrote can only narrow a run, so delega
+reads those rules itself at launch and adds them to the worker. This follows the
+earlier project's merge (its commit `8fa4645`).
+
+**Files, in order.** The directories come from the environment the worker will
+receive (`ProviderOptions::parent_env`, `env_pass`, `env_set` and the base
+variables), not from the calling process.
+
+1. User settings: `settings.json` in `CLAUDE_CONFIG_DIR` when the worker's
+   environment has it, otherwise `.claude/settings.json` under the worker's
+   `HOME`. When the worker has neither, no user file is looked for and a note
+   says so.
+2. `.claude/settings.json` under the working directory.
+3. `.claude/settings.local.json` under the working directory.
+
+Managed (enterprise) settings are not read, and nothing is looked for in the
+parent directories of the working directory. A symbolic link to a regular file is
+followed. A missing file contributes nothing.
+
+**What is taken.** Only `permissions.deny`, a list of strings. Everything else in
+a file is dropped when it is parsed and is in no argument, note, result or dry
+run. That covers hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers,
+instructions and the `allow` and `ask` lists.
+
+**Refused before start.** A file that exists and cannot be used refuses the run,
+with kind `settings_unreadable`, naming the file and the reason and never its
+content: it cannot be inspected or read, it is not a regular file (a directory,
+device or pipe is refused before it is opened), it is larger than
+`SETTINGS_FILE_BYTES` (1 MiB), it is not a JSON object, `permissions` is not an
+object, `permissions.deny` is not a list, an entry is not a string, is empty or
+holds a control character. A rule over a bound refuses with kind
+`deny_rules_over_limit`: more than `MAX_DENY_RULES_PER_FILE` (256) in a file,
+more than `MAX_DENY_RULES` (512) after anchoring and removing duplicates, or a
+rule longer than `MAX_DENY_RULE_CHARS` (512). Nothing is truncated; a rule the
+user set is never dropped to make the run fit. The generated settings argument
+is also held to `SETTINGS_ARGUMENT_LIMIT`.
+
+**Anchoring.** A `Read` or `Edit` rule with a relative path is rewritten to an
+absolute path so it keeps its meaning wherever the worker runs. A rule in the
+user file is anchored to the worker's home directory and a rule in a project file
+to the working directory: `Read(secrets/**)` and `Read(./secrets/**)` become
+`Read(//BASE/**/secrets/**)`, and a rule with one leading slash
+(`Edit(/build/out)`, a path from the root of its settings) becomes
+`Edit(//BASE/build/out)`. Rules for other tools and rules whose path starts with
+`//` or `~/` or contains `:` are passed unchanged. A base containing glob
+characters is escaped, and the original rule is passed as well when escaping or a
+parenthesis was needed. Duplicates are removed, keeping the first.
+
+**How they are passed.** The rules are the `permissions.deny` array of the JSON
+given to `--settings`, in all three modes (deny narrows `full` too):
+
+```json
+{"disableAllHooks":true,"permissions":{"deny":["Read(//base/**/secret.txt)"]}}
+```
+
+A rule is the user's own text, so a comma, bracket, quote or space in it is not
+refused. It cannot become an allow rule or change the allow list because it is
+only ever a string element of that array, which `serde_json` escapes: no text can
+end the string or the array or add a key such as `permissions.allow`, and
+`--allowedTools`, `--tools` and every other argument are built from delega's own
+data and never from a rule. A string in a deny list is a deny pattern whatever
+it holds, so a rule that is not well formed matches less and allows nothing.
+This is held by a generated test and a test of hostile rules, which compare the
+launch with and without rules and find only the added `permissions` key.
+
+**What a user sees.** A note on every Claude run says that settings other than
+deny rules were not applied (hooks, env, apiKeyHelper, plugins, skills, MCP
+servers, instructions), and another gives the number of rules applied with the
+path and count of each file, or says none were found. The mapping lists
+`denyRules=N`. `dry_run` has a `deny_rules` object: the files read with their
+rule counts, `applied`, and `user_deny_rules`, the rules as they would be passed,
+at most `DRY_RUN_DENY_RULES_SHOWN` (100) of them and each at most
+`DRY_RUN_DENY_RULE_CHARS` (200) characters, with `omitted` counting the rest. The
+rules are permission patterns the user wrote, not secrets, and they appear only
+there; the `--settings` argument in a dry run shows their count in their place.
+Text output prints the same under "user deny rules".
+
+**Codex.** Claude deny rules do not apply to Codex. The Codex adapter reads no
+Claude Code settings and its dry run has an empty `deny_rules`.
+
 ### What cannot be enforced
 
 - `--setting-sources ""` means Claude Code loads no user, project or local
-  settings file. Not applied to the worker: the user's and project's
-  `permissions.deny` rules, hooks, `env`, `apiKeyHelper`, plugins, skills, MCP
-  servers and settings-defined instructions. Every Claude run carries a note
-  saying the user's and project's settings, including deny rules, were not
-  applied. The earlier project merged those deny rules into the launch; this
-  layer does not (see [Not done](#not-done)).
+  settings file. Only their `permissions.deny` rules reach the worker (see
+  [Deny rules](#deny-rules)). Not applied: hooks, `env`, `apiKeyHelper`,
+  plugins, skills, MCP servers and settings-defined instructions. Every Claude
+  run carries a note saying so.
 - Which instruction files Claude Code still reads is not controlled by delega.
   Reference directories contribute none (the variable that would load them is
   not set). Whether the working directory's own `CLAUDE.md` is read with empty
@@ -574,6 +657,7 @@ each.
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
+| Claude Code accepts `permissions.deny` in the `--settings` JSON when `--setting-sources` is empty, and a deny rule wins over an allow rule, an allowed tool and any mode, including for `Grep` and `Glob` under a `Read` rule and `Write` under an `Edit` rule | Assumed from the earlier project, which passed deny rules this way. The fake Claude models it. Not run against the real CLI. |
 | With empty settings sources Claude Code still reads the working directory's own `CLAUDE.md` | Not controlled. A note on every run says what delega does and does not load. |
 | A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
 | Codex words a usage or rate limit failure with "usage limit", "rate limit", "quota" or "context window", and Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
@@ -581,12 +665,10 @@ each.
 
 ## Not done
 
-- **User deny rules and instructions for Claude Code.** The earlier project
-  read the user's and project's `permissions.deny` arrays and the user's
-  `CLAUDE.md` and copied them into the launch, because `--setting-sources ""`
-  otherwise drops them. That reads the user's own files and is a separate
-  decision about what may be read. This layer does not read them; every Claude
-  result says the settings were not applied.
+- **User instructions for Claude Code.** The earlier project also copied the
+  user's `CLAUDE.md` into the launch. This layer does not read it. The
+  `permissions.deny` rules are carried over (see [Deny rules](#deny-rules)).
+- **Managed settings.** Enterprise managed deny rules are not read.
 - **Command shape in the result.** The contract's `provenance` has no field for
   it. `dry_run` reports the shape; a run records the executable and version.
 - **Live asking** (`on_request: ask`), as in [api.md](api.md).
