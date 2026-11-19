@@ -7,7 +7,10 @@ use crate::contract::outcome::Outcome;
 use crate::process::{Ending, ProcessHandle, ProcessSpec, run};
 
 const LONG: Duration = Duration::from_secs(60);
-const BOUND: Duration = Duration::from_secs(6);
+/// A bound for a run that must not wait out the minute the child sleeps or the
+/// limit it was given: only a run that does wait reaches it, and no load adds
+/// this much.
+const BOUND: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn a_normal_exit_reports_code_zero_its_output_and_confirmed_cleanup() {
@@ -75,20 +78,28 @@ async fn a_time_limit_ends_the_run_as_timed_out_and_stops_the_child() {
     assert!(report.exit.as_ref().is_some_and(|e| e.signal.is_some()));
     assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
     assert_confirmed(&report);
-    assert_gone("leader", &[s.pid_now("leader")]).await;
+    // The pid comes from the report: the limit can pass before the script has
+    // written its pid file.
+    let leader = i32::try_from(report.pid.expect("it started")).expect("a pid");
+    assert_gone("leader", &[leader]).await;
 }
 
 #[tokio::test]
 async fn a_child_that_ignores_terminate_is_killed_after_the_grace_period() {
     let s = Scratch::new();
-    let spec = sh(
+    // Stopped by an interrupt once the script has set its trap and started its
+    // child (it writes `gc` after the trap). A time limit would race the
+    // script's start on a loaded machine; the stop path is the same.
+    let handle = ProcessHandle::start(sh(
         &s,
         "trap '' TERM; echo $$ > leader; sleep 60 & echo $! > gc; wait",
-        Duration::from_millis(400),
-    );
+        LONG,
+    ));
     let started = Instant::now();
-    let report = run(spec).await;
-    assert_eq!(report.outcome(), Outcome::TimedOut);
+    s.pid("gc").await;
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert_eq!(report.outcome(), Outcome::Interrupted);
     assert_eq!(
         report.exit.as_ref().and_then(|e| e.signal),
         Some(9),

@@ -5,14 +5,17 @@ use std::time::{Duration, Instant};
 
 use super::fixtures::{
     OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
-    run_guarded, sh, wait_own_group, wait_tracked,
+    await_event, is_running, run_guarded, sh, wait_own_group, wait_tracked,
 };
 use crate::contract::result::Cleanup;
 use crate::process::tree::{InspectError, Lister, lister_for};
 use crate::process::{Ending, PIPE_WARNING, ProcessHandle, run};
 
 const LONG: Duration = Duration::from_secs(60);
-const BOUND: Duration = Duration::from_secs(6);
+/// A bound for a run that must not wait for a child that sleeps a minute, or
+/// out a grace of that order: only a run that does wait reaches it, and no
+/// load adds this much.
+const BOUND: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn a_crash_while_a_descendant_holds_the_output_pipe_does_not_hang() {
@@ -83,13 +86,21 @@ async fn a_descendant_in_its_own_session_is_found_by_the_scan_and_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
     // A session of its own is beyond the sweep. Only a scan that saw it while
-    // its parent lived can track it. The leader lives long enough for two.
-    let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; sleep 1.0; exit 0");
-    let (report, pids, _reaper) = run_guarded(&s, sh(&s, &script, LONG), &["gc"]).await;
+    // its parent lived can track it. The leader stays until the test has seen
+    // the scan track the descendant, however long that takes, then exits.
+    let script = format!(
+        "echo $$ > leader; {OWN_SESSION} & echo $! > gc; while [ ! -e go ]; do sleep 0.02; done; exit 0"
+    );
+    let handle = ProcessHandle::start(sh(&s, &script, LONG));
+    let gc = s.pid("gc").await;
+    let _reaper = Reaper(vec![gc]);
+    wait_tracked(&handle, gc).await;
+    std::fs::write(s.path("go"), "go").expect("write the go file");
+    let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert_confirmed(&report);
     assert!(report.diagnostics.inspection.retained_descendant_identities >= 1);
-    assert_gone("descendant in its own session", &pids).await;
+    assert_gone("descendant in its own session", &[gc]).await;
 }
 
 #[tokio::test]
@@ -99,12 +110,12 @@ async fn interrupting_stops_a_tracked_descendant_that_holds_the_pipes_without_wa
     let s = Scratch::new();
     // The descendant is in its own session, inherits the pipes and is tracked.
     // It must get TERM when the group does, not when cleanup starts: with a
-    // long grace and drain it would otherwise hold the report for seconds.
+    // long grace and drain it would otherwise hold the report for a minute.
     let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; wait");
     let mut spec = sh(&s, &script, LONG);
-    spec.stop_grace = Duration::from_secs(3);
-    spec.drain_bound = Duration::from_secs(3);
-    spec.cleanup_deadline = Duration::from_secs(20);
+    spec.stop_grace = Duration::from_secs(60);
+    spec.drain_bound = Duration::from_secs(60);
+    spec.cleanup_deadline = Duration::from_secs(180);
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
@@ -115,8 +126,8 @@ async fn interrupting_stops_a_tracked_descendant_that_holds_the_pipes_without_wa
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert!(
-        stopped.elapsed() < Duration::from_millis(2500),
-        "stopping took {:?}",
+        stopped.elapsed() < BOUND,
+        "stopping took {:?}, which is the grace",
         stopped.elapsed()
     );
     assert_confirmed(&report);
@@ -134,7 +145,10 @@ async fn a_descendant_in_its_own_session_started_just_before_an_interrupt_needs_
         "while [ ! -e scanned ]; do sleep 0.02; done; echo $$ > leader; \
          {OWN_SESSION} & echo $! > gc; wait"
     );
-    let spec = sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
+    let mut spec =
+        sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
+    // No periodic scan after the first, however slow the machine is.
+    spec.capture_interval = Some(Duration::from_secs(3600));
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
@@ -176,8 +190,9 @@ async fn a_leader_that_keeps_forking_own_group_children_leaves_none_behind() {
         open F, q(>>), q(kids); print F qq($p\\n); close F; \
         select(undef, undef, undef, 0.05); }'";
     let handle = ProcessHandle::start(sh(&s, script, LONG));
-    s.exists("kids").await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Wait until it has started several, however slowly it forks.
+    let started = || std::fs::read_to_string(s.path("kids")).map_or(0, |text| text.lines().count());
+    await_event("three children being started", || started() >= 3).await;
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
@@ -196,11 +211,16 @@ async fn a_leader_that_keeps_forking_own_group_children_leaves_none_behind() {
 async fn a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_behind() {
     require_perl!();
     let s = Scratch::new();
+    // The handler starts the child and then ends the leader, so no KILL is
+    // involved: the grace is a minute and the leader is gone as soon as the
+    // handler has run, however slow the machine is.
     let script = format!(
-        "trap \"{OWN_GROUP} & echo \\$! > gc\" TERM; echo $$ > leader; \
+        "trap \"{OWN_GROUP} & echo \\$! > gc; exit 0\" TERM; echo $$ > leader; \
          while :; do sleep 0.05; done"
     );
-    let handle = ProcessHandle::start(sh(&s, &script, LONG));
+    let mut spec = sh(&s, &script, LONG);
+    spec.stop_grace = Duration::from_secs(60);
+    let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
     let _reaper = Reaper(vec![leader]);
     handle.interrupt();
@@ -210,6 +230,41 @@ async fn a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_be
     let _reaper_gc = Reaper(vec![gc]);
     assert_confirmed(&report);
     assert_gone("child started by the handler", &[leader, gc]).await;
+}
+
+#[tokio::test]
+async fn a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind()
+ {
+    require_perl!();
+    let s = Scratch::new();
+    // The scenario of the test above with a leader that keeps running after its
+    // handler, so the handler runs again for every TERM the stop sends and each
+    // run starts another child in a group of its own. The leader ends when the
+    // test says so, once the first child exists (a file the test writes), not
+    // after a grace that load could make too short: the grace is a minute.
+    let script = format!(
+        "trap \"{OWN_GROUP} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
+         while [ ! -e quit ]; do sleep 0.05; done"
+    );
+    let mut spec = sh(&s, &script, LONG);
+    spec.stop_grace = Duration::from_secs(60);
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let _reaper = Reaper(vec![leader]);
+    handle.interrupt();
+    s.exists("gcs").await;
+    std::fs::write(s.path("quit"), "quit").expect("write the quit file");
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    let children: Vec<i32> = std::fs::read_to_string(s.path("gcs"))
+        .expect("the children file")
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    assert!(!children.is_empty());
+    let _reaper_children = Reaper(children.clone());
+    assert_confirmed(&report);
+    assert_gone("children started by the handler", &children).await;
 }
 
 #[tokio::test]
@@ -228,10 +283,20 @@ async fn a_pipe_held_by_a_process_that_left_the_session_does_not_hold_the_report
         "while [ ! -e scanned ]; do sleep 0.02; done; echo $$ > leader; \
          {OWN_SESSION} & echo $! > gc; {WAIT_ESCAPED} exit 0"
     );
-    let spec = sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
+    let mut spec =
+        sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
+    // After the first scan no periodic scan runs, however slow the machine is,
+    // so none can see the descendant with its parent alive.
+    spec.capture_interval = Some(Duration::from_secs(3600));
+    // The descendant holds the pipes for as long as it lives, so the owner
+    // always closes them at the drain bound; the bound does not matter here.
+    spec.drain_bound = Duration::from_secs(1);
     let started = Instant::now();
-    let (report, _pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 });
+    // The report did not wait for the process that holds the pipes: it is
+    // alive now, and it sleeps a minute.
+    assert!(is_running(pids[0]), "{report:#?}");
     assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
     assert!(report.diagnostics.pipes_closed_by_owner, "{report:#?}");
     assert!(
@@ -252,13 +317,14 @@ async fn failing_inspection_finishes_quickly_as_unconfirmed_and_says_what_was_ch
     let broken: Lister =
         Arc::new(|| Box::pin(async { Err(InspectError::Failed("listing unavailable".into())) }));
     let mut spec = sh(&s, "echo $$ > leader; exit 0", LONG).with_lister(broken);
-    spec.cleanup_deadline = Duration::from_secs(30);
+    // A deadline that would show if cleanup waited it out.
+    spec.cleanup_deadline = Duration::from_secs(600);
     let started = Instant::now();
     let report = run(spec).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert!(
-        started.elapsed() < Duration::from_secs(4),
-        "took {:?}",
+        started.elapsed() < Duration::from_secs(60),
+        "took {:?}, which is the deadline",
         started.elapsed()
     );
     match &report.cleanup {
@@ -294,15 +360,16 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
         LONG,
     )
     .with_lister(missing);
-    spec.cleanup_deadline = Duration::from_secs(30);
+    // A deadline that would show if cleanup waited it out.
+    spec.cleanup_deadline = Duration::from_secs(600);
     let started = Instant::now();
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
     let report = handle.wait().await;
     assert!(
-        started.elapsed() < Duration::from_secs(4),
-        "took {:?}",
+        started.elapsed() < Duration::from_secs(60),
+        "took {:?}, which is the deadline",
         started.elapsed()
     );
     match &report.cleanup {
@@ -335,7 +402,7 @@ async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
     let mut spec = sh(
         &s,
         "echo $$ > leader; sh -c 'trap \"\" TERM; echo $$ > gc; while :; do sleep 1; done' & \
-         sleep 0.3; exit 0",
+         while [ ! -e gc ]; do sleep 0.02; done; exit 0",
         LONG,
     )
     .with_lister(lister);
@@ -418,28 +485,45 @@ async fn the_report_does_not_claim_more_than_the_sweep_found() {
 async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_kills_are_lost() {
     let s = Scratch::new();
     // Inspection never returns, so only the timer that repeats the group KILL
-    // can stop the child; the first two KILLs are made to do nothing.
+    // can stop the child; the first two KILLs are made to do nothing. The stop
+    // is an interrupt after the script's files exist (a time limit would race
+    // the script's start on a loaded machine); the stop path is the same.
     let hung: Lister = Arc::new(|| {
         Box::pin(async {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(600)).await;
             Err(InspectError::TimedOut)
         })
     });
     let mut spec = sh(
         &s,
         "trap '' TERM; echo $$ > leader; sleep 60 & echo $! > gc; wait",
-        Duration::from_millis(300),
+        LONG,
     )
     .with_lister(hung);
     spec.swallow_group_kills = 2;
     spec.stop_grace = Duration::from_millis(100);
-    spec.drain_bound = Duration::from_millis(100);
-    // Raised to the least allowed, which keeps the test short.
+    spec.drain_bound = Duration::from_secs(2);
+    // Raised to the least allowed (grace, drain and a margin), 2.6 s.
     spec.cleanup_deadline = Duration::from_millis(1);
-    let (report, pids, _reaper) = run_guarded(&s, spec, &["leader", "gc"]).await;
+    // The listing before the stop never comes either; the stop goes ahead after
+    // this budget.
+    spec.timings.stop_listing = Duration::from_millis(300);
+    // The sweep that follows each signal waits for the hung listing only this
+    // long (the production value), so the owner is not held for minutes.
+    spec.timings.descendant_signal = crate::process::limits::DESCENDANT_SIGNAL_BUDGET;
+    // The final pass is the real one: one second is enough for the repeated KILL
+    // to reach the child, which is what this test is about.
+    spec.timings.final_cleanup_pass = crate::process::limits::FINAL_CLEANUP_PASS;
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let gc = s.pid("gc").await;
+    let pids = vec![leader, gc];
+    let _reaper = Reaper(pids.clone());
+    handle.interrupt();
+    let report = handle.wait().await;
     assert_eq!(
         report.outcome(),
-        crate::contract::outcome::Outcome::TimedOut
+        crate::contract::outcome::Outcome::Interrupted
     );
     // The owner reaped the leader before it gave up, so a KILL reached it.
     assert!(
@@ -475,7 +559,12 @@ async fn churn_of_short_lived_orphans_does_not_keep_a_plain_run_from_being_confi
             })
         })
         .collect();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the churn has started something, or every thread has given up.
+    await_event("the churn starting a process or giving up", || {
+        spawned.load(Ordering::SeqCst) > 0
+            || threads.iter().all(std::thread::JoinHandle::is_finished)
+    })
+    .await;
     if spawned.load(Ordering::SeqCst) == 0 {
         stop.store(true, Ordering::SeqCst);
         for t in threads {
@@ -499,6 +588,6 @@ async fn churn_of_short_lived_orphans_does_not_keep_a_plain_run_from_being_confi
     for (report, took) in results {
         assert_eq!(report.ending, Ending::Exited { code: 0 });
         assert_confirmed(&report);
-        assert!(took < Duration::from_secs(1), "took {took:?}");
+        assert!(took < BOUND, "took {took:?}");
     }
 }

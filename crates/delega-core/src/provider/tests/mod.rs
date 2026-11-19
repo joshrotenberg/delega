@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -157,15 +157,31 @@ impl Rig {
         )
     }
 
-    /// Wait until the fake has signalled that it is running.
+    /// Wait until the fake has signalled that it is running, by creating the
+    /// empty record `started`. The wait ends a test whose event never comes,
+    /// after [`AWAIT`], and costs nothing when the event arrives.
     pub async fn wait_started(&self) {
-        for _ in 0..1000 {
-            if self.record.join("started").exists() {
-                return;
-            }
+        let began = Instant::now();
+        while !self.record.join("started").exists() {
+            assert!(
+                began.elapsed() < AWAIT,
+                "waited {AWAIT:?} and the fake provider never started"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the fake provider never started");
+    }
+
+    /// Wait until the fake has written something to the record `name`. The wait
+    /// ends a test whose event never comes, after [`AWAIT`].
+    pub async fn wait_record(&self, name: &str) {
+        let began = Instant::now();
+        while !std::fs::metadata(self.record.join(name)).is_ok_and(|m| m.len() > 0) {
+            assert!(
+                began.elapsed() < AWAIT,
+                "waited {AWAIT:?} and the fake provider never wrote {name}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
@@ -190,15 +206,20 @@ pub(super) fn is_running(pid: i32) -> bool {
     !stat.is_empty() && !stat.starts_with('Z')
 }
 
-/// Wait up to five seconds for a process to be gone, then assert it.
+/// How long a test waits for an event it does not control. Far longer than any
+/// load makes it take; it only ends a test whose event never comes.
+pub(super) const AWAIT: Duration = Duration::from_secs(90);
+
+/// Wait for a process to be gone (see [`AWAIT`]), then assert it.
 pub(super) async fn assert_gone(what: &str, pid: i32) {
-    for _ in 0..500 {
-        if !is_running(pid) {
-            return;
-        }
+    let began = Instant::now();
+    while is_running(pid) {
+        assert!(
+            began.elapsed() < AWAIT,
+            "{what} (pid {pid}) is still running after {AWAIT:?}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("{what} (pid {pid}) is still running");
 }
 
 /// Run a request against the fake and check the result is self-consistent.
