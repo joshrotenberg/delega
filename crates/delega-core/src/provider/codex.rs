@@ -57,6 +57,9 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let mut settings = vec![
         "approval_policy=\"never\"".to_string(),
         format!("sandbox_mode={}", toml_string(sandbox_mode)),
+        // Commands Codex runs start no login shell, so they do not load the
+        // user's shell profile and see only the environment delega passed.
+        "allow_login_shell=false".to_string(),
     ];
     if scope.mode == Mode::Write {
         settings.extend([

@@ -305,7 +305,11 @@ fn a_signal_during_the_version_probe_stops_the_probe_and_starts_no_worker() {
         let child = rig
             .command()
             .env("FAKE_VERSION_SLEEP", "30")
-            .args(rig.run_args(provider, "success", &["--output", "json"]))
+            .args(rig.run_args(
+                provider,
+                "success",
+                &["--output", "json", "--env", "FAKE_VERSION_SLEEP"],
+            ))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

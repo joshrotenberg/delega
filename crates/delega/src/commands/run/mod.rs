@@ -80,6 +80,13 @@ pub struct Args {
     /// An extra directory the worker may read (repeatable)
     #[arg(long, value_name = "DIR")]
     add_dir: Vec<PathBuf>,
+    /// Give the worker an environment variable (repeatable). NAME passes this
+    /// environment's value; NAME=VALUE sets it. Workers receive a fixed set
+    /// only (user, shell, locale, proxy and certificate variables and the
+    /// provider's own) plus what is given here. Prefer NAME for secrets: a
+    /// value on the command line shows in the process table and shell history
+    #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
+    env: Vec<String>,
     /// A JSON Schema file the answer must satisfy
     #[arg(long, value_name = "FILE")]
     schema: Option<PathBuf>,
@@ -127,6 +134,12 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
         hook: guard_command(),
         ..ProviderOptions::default()
     };
+    for given in &args.env {
+        match given.split_once('=') {
+            Some((name, value)) => options.env_set.push((name.to_string(), value.to_string())),
+            None => options.env_pass.push(given.clone()),
+        }
+    }
     if args.dry_run {
         return match dry_run(&request, &options) {
             Ok(plan) => output::dry_run(format, &plan, log),
