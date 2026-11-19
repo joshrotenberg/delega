@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::VERSION;
+use crate::contract::applied::Applied;
 use crate::contract::permissions::Mode;
 use crate::contract::request::{Provider, Request};
 use crate::contract::result::{
@@ -35,6 +36,9 @@ pub(super) struct Facts {
     pub queued_at: SystemTime,
     pub timeout_secs: u64,
     pub provenance: Provenance,
+    /// What is known about what was applied: what the caller supplied until
+    /// the run is prepared, the whole of it after.
+    pub applied: Applied,
 }
 
 impl Facts {
@@ -52,7 +56,13 @@ impl Facts {
                 provider_executable: None,
                 provider_version: None,
             },
+            applied: options.origin.clone(),
         }
+    }
+
+    /// The `applied` a result built from these facts carries.
+    pub fn result_applied(&self) -> Option<Applied> {
+        self.applied.clone().or_absent()
     }
 
     pub fn applied(&self, denied: Vec<DeniedRequest>) -> AppliedPermissions {

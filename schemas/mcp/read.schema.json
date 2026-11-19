@@ -267,7 +267,7 @@
         ]
       },
       "CompactResult": {
-        "description": "The compact form of a [`RunResult`]: the outcome, the answer, the error, the\ncleanup verdict, the denials, the session and the timing. Usage and\nprovenance are left out.",
+        "description": "The compact form of a [`RunResult`]: the outcome, the answer, the error, the\ncleanup verdict, the denials, `applied`, the session and the timing. Usage\nand provenance are left out.",
         "type": "object",
         "properties": {
           "run": {
@@ -377,6 +377,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "applied": {
+            "description": "What delega applied to the run. Small, so a compact read carries it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Applied"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "description": "The provider's session id.",
@@ -543,6 +554,310 @@
           "request"
         ]
       },
+      "Applied": {
+        "description": "What delega applied to a run.\n\n`config` and `sources` come from the caller that built the request; the\nrest comes from preparing the run. Each part is absent when it is not\nknown or does not apply, which `docs/api.md` spells out part by part.",
+        "type": "object",
+        "properties": {
+          "config": {
+            "description": "The configuration file that was read. Absent when none was.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AppliedConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sources": {
+            "description": "For each request field that ended up set, the layer that set it. The\nkeys are the top-level request fields and `permissions.*` and\n`session.*` as dotted names. Absent when the caller did not say.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Layer"
+            }
+          },
+          "env": {
+            "description": "The environment the worker received. Absent when the run was refused\nbefore the environment was resolved.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AppliedEnv"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deny_rules": {
+            "description": "The deny rules applied (Claude Code only). Absent for Codex and when\nthe run was refused before the settings files were read.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AppliedDenyRules"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context": {
+            "description": "The Claude Code context mode. Absent for Codex and when the run was\nrefused before it was decided.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AppliedContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "AppliedConfig": {
+        "description": "The configuration file that was read.",
+        "type": "object",
+        "properties": {
+          "path": {
+            "description": "The file's absolute path.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The SHA-256 of the bytes that were read, as 64 lowercase hex digits.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256"
+        ]
+      },
+      "Layer": {
+        "description": "The layer that set a request field. From lowest to highest precedence:\nbuilt-in defaults, the user-level configuration file, a profile file, then\nthe explicit values of the caller.",
+        "oneOf": [
+          {
+            "description": "The value is the contract's built-in default.",
+            "type": "string",
+            "const": "default"
+          },
+          {
+            "description": "`[defaults]` in the configuration file.",
+            "type": "string",
+            "const": "config"
+          },
+          {
+            "description": "The profile file.",
+            "type": "string",
+            "const": "profile"
+          },
+          {
+            "description": "A command line flag of `delega run`.",
+            "type": "string",
+            "const": "flag"
+          },
+          {
+            "description": "An argument of the MCP `start` tool (or `follow_up`).",
+            "type": "string",
+            "const": "argument"
+          }
+        ]
+      },
+      "AppliedEnv": {
+        "description": "The environment a worker received.",
+        "type": "object",
+        "properties": {
+          "passed": {
+            "description": "What the worker received.",
+            "$ref": "#/$defs/EnvPassed"
+          },
+          "withheld": {
+            "description": "What it did not.",
+            "$ref": "#/$defs/EnvWithheld"
+          },
+          "named": {
+            "description": "The names the caller gave with `--env` or in the configuration file's\n`[env]`, sorted and without duplicates, whether or not the variable was\nset. Names only, never values.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "passed",
+          "withheld",
+          "named"
+        ]
+      },
+      "EnvPassed": {
+        "description": "How many variables a worker received, by reason.",
+        "type": "object",
+        "properties": {
+          "total": {
+            "description": "All variables the worker received. The counts below add up to it.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "base": {
+            "description": "Passed because they are in the base set (user, shell, locale, temporary\nand base directories).",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "network": {
+            "description": "Passed because they are proxy or certificate settings.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "provider": {
+            "description": "Passed because they belong to the provider being run.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "named_by_caller": {
+            "description": "Passed because the caller named them (`--env NAME`, `[env] pass`) and the\nenvironment holds them.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "set_by_caller": {
+            "description": "Set to a value the caller gave (`--env NAME=VALUE`, `[env] set`).",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "set_by_delega": {
+            "description": "Set by delega for the provider.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "total",
+          "base",
+          "network",
+          "provider",
+          "named_by_caller",
+          "set_by_caller",
+          "set_by_delega"
+        ]
+      },
+      "EnvWithheld": {
+        "description": "How many variables of the caller's environment a worker did not receive, by\nreason. Their names are not reported.",
+        "type": "object",
+        "properties": {
+          "total": {
+            "description": "All variables of the caller's environment that were not passed.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "never_passed": {
+            "description": "Never passed, even when named: variables that describe the calling\nsession, and every `DELEGA_*` variable.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "not_allowlisted": {
+            "description": "Not on the allowlist and not named by the caller.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "total",
+          "never_passed",
+          "not_allowlisted"
+        ]
+      },
+      "AppliedDenyRules": {
+        "description": "The deny rules a Claude Code worker ran under: the files, never the rules.",
+        "type": "object",
+        "properties": {
+          "files": {
+            "description": "The settings files that exist and were read, with their rule counts.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/DenyFile"
+            }
+          },
+          "skipped": {
+            "description": "Existing local settings files that were ignored, with the reason.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/SkippedFile"
+            }
+          },
+          "applied": {
+            "description": "How many rules were passed, after deduplication and adding absolute\nforms.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "files",
+          "skipped",
+          "applied"
+        ]
+      },
+      "DenyFile": {
+        "description": "A settings file that was read, and how many deny rules it held.",
+        "type": "object",
+        "properties": {
+          "path": {
+            "description": "The file's path.",
+            "type": "string"
+          },
+          "rules": {
+            "description": "The rules in the file, before deduplication.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "path",
+          "rules"
+        ]
+      },
+      "SkippedFile": {
+        "description": "A local settings file that was not read, and why.",
+        "type": "object",
+        "properties": {
+          "path": {
+            "description": "The file's path.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why it was ignored.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ]
+      },
+      "AppliedContext": {
+        "description": "What of the user's Claude Code context the worker saw.",
+        "type": "object",
+        "properties": {
+          "settings": {
+            "description": "How the user's and the project's Claude Code settings reached the\nworker. `deny_rules` is the only mode today: the deny rules and nothing\nelse from those files. Free text, so a reader must tolerate values it\ndoes not know.",
+            "type": "string"
+          },
+          "instructions": {
+            "description": "Whether the worker loaded instruction files (such as `CLAUDE.md`).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "settings",
+          "instructions"
+        ]
+      },
       "Timing": {
         "description": "When the run was queued, started and finished.\n\nTimes are RFC 3339 strings in UTC.",
         "type": "object",
@@ -665,6 +980,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "applied": {
+            "description": "What delega applied to the run: the configuration file, which layer set\neach request field, the environment, the deny rules and the context\nmode. Absent when nothing is known. A refusal carries what was known\nwhen it happened. See `docs/api.md`.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Applied"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "description": "The provider's own session id, for the provider's `resume`.",

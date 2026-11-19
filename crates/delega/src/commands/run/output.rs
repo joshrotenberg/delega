@@ -89,7 +89,17 @@ fn context(facts: &Facts) -> RefusalContext {
 
 /// A `refused` result for something that went wrong before a run existed.
 pub fn refused_result(facts: &Facts, kind: &str, message: &str) -> RunResult {
-    RunResult::refused_before_start(context(facts), kind, message)
+    with_applied(
+        RunResult::refused_before_start(context(facts), kind, message),
+        facts,
+    )
+}
+
+/// `result` with the `applied` the facts know: the configuration file and the
+/// layer of each field, once the request was merged.
+fn with_applied(mut result: RunResult, facts: &Facts) -> RunResult {
+    result.applied = (*facts.origin).clone().or_absent();
+    result
 }
 
 /// Write a document or the answer to standard output. A failure is reported
@@ -129,6 +139,7 @@ pub fn refuse(format: OutputFormat, failure: &Failure, log: &Log) -> ExitCode {
     match format {
         OutputFormat::Json => {
             let result = RunResult::refused_invalid(context(&failure.facts), &failure.problems)
+                .map(|result| with_applied(result, &failure.facts))
                 .unwrap_or_else(|_| {
                     refused_result(&failure.facts, "invalid_request", "the request is invalid")
                 });
@@ -258,6 +269,18 @@ fn dry_run_text(plan: &DryRun) -> String {
                 "  ... and {} more not shown",
                 plan.deny_rules.omitted
             ));
+        }
+    }
+    if let Some(config) = &plan.applied.config {
+        line(format!(
+            "configuration file: {} (sha256 {})",
+            config.path, config.sha256
+        ));
+    }
+    if !plan.applied.sources.is_empty() {
+        line("where each field came from:".to_string());
+        for (field, layer) in &plan.applied.sources {
+            line(format!("  {field}: {}", layer.as_str()));
         }
     }
     for step in &plan.before_start {

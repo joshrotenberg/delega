@@ -28,6 +28,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::contract::applied::{AppliedEnv, EnvPassed, EnvWithheld};
 use crate::contract::request::Provider;
 use crate::process::EnvPolicy;
 
@@ -97,6 +98,8 @@ pub struct ResolvedEnv {
     report: EnvReport,
     named_secret_looking: Vec<String>,
     set_secret_looking: Vec<String>,
+    /// How many withheld variables are ones that can never be passed.
+    withheld_never_passed: usize,
 }
 
 /// Which variables a worker would receive and why, as names. It holds no
@@ -144,6 +147,30 @@ impl ResolvedEnv {
     /// The names by reason, and the count of withheld variables.
     pub fn report(&self) -> &EnvReport {
         &self.report
+    }
+
+    /// The environment as the `applied` object of a result reports it: counts by
+    /// reason, and `named`, the names the caller gave. No value and no name of
+    /// a withheld variable.
+    pub fn applied(&self, named: Vec<String>) -> AppliedEnv {
+        let r = &self.report;
+        AppliedEnv {
+            passed: EnvPassed {
+                total: self.vars.len(),
+                base: r.base.len(),
+                network: r.network.len(),
+                provider: r.provider.len(),
+                named_by_caller: r.named.len(),
+                set_by_caller: r.set_by_caller.len(),
+                set_by_delega: r.set_by_delega.len(),
+            },
+            withheld: EnvWithheld {
+                total: r.withheld_count,
+                never_passed: self.withheld_never_passed,
+                not_allowlisted: r.withheld_count.saturating_sub(self.withheld_never_passed),
+            },
+            named,
+        }
     }
 
     /// The `provider_notes` that describe this environment: how many variables
@@ -397,6 +424,10 @@ pub(super) fn resolve(inputs: &EnvInputs<'_>) -> ResolvedEnv {
         .map(ToString::to_string)
         .collect();
     report.withheld_count = parent_names.len() - passed_from_parent.len();
+    let withheld_never_passed = parent_names
+        .iter()
+        .filter(|name| name.to_str().is_some_and(is_never_passed))
+        .count();
     let named_secret_looking = explicit_present
         .iter()
         .filter(|n| is_secret_name(n))
@@ -407,6 +438,7 @@ pub(super) fn resolve(inputs: &EnvInputs<'_>) -> ResolvedEnv {
         report,
         named_secret_looking,
         set_secret_looking,
+        withheld_never_passed,
     }
 }
 

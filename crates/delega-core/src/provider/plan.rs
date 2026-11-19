@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use jsonschema::Validator;
 
+use crate::contract::applied::{Applied, AppliedContext, AppliedDenyRules};
 use crate::contract::request::{Provider, Request};
 
 use super::deny::{self, DenyRules};
@@ -32,6 +33,8 @@ pub(super) struct Plan {
     pub stdin: Vec<u8>,
     pub mapping: Mapping,
     pub notes: Vec<String>,
+    /// What this plan applies, for the result and the dry run.
+    pub applied: Applied,
     pub deny: DenyRules,
     pub elide: Vec<Elide>,
     pub mcp_index: Option<usize>,
@@ -156,6 +159,7 @@ fn build_with(
     notes.extend(wide_scope_note(&scope, &parent));
     notes.extend(assembled.notes);
     notes.extend(env.notes());
+    let applied = applied(request.provider, options, &env, &deny);
     let mapping = Mapping {
         mode: scope.mode,
         commands: built.commands,
@@ -176,6 +180,7 @@ fn build_with(
         stdin: assembled.stdin,
         mapping,
         notes,
+        applied,
         deny,
         elide: built.elide,
         mcp_index: built.mcp_index,
@@ -188,6 +193,42 @@ fn build_with(
         #[cfg(test)]
         tap_queue_chunks: options.tap_queue_chunks,
     })
+}
+
+/// The `applied` object of a prepared run: what the caller knew
+/// (`options.origin`) and what preparing the run decided.
+fn applied(
+    provider: Provider,
+    options: &ProviderOptions,
+    env: &ResolvedEnv,
+    deny: &DenyRules,
+) -> Applied {
+    let mut named: Vec<String> = options
+        .env_pass
+        .iter()
+        .cloned()
+        .chain(options.env_set.iter().map(|(name, _)| name.clone()))
+        .collect();
+    named.sort();
+    named.dedup();
+    let claude = provider == Provider::Claude;
+    Applied {
+        config: options.origin.config.clone(),
+        sources: options.origin.sources.clone(),
+        env: Some(env.applied(named)),
+        deny_rules: claude.then(|| AppliedDenyRules {
+            files: deny.files.clone(),
+            skipped: deny.skipped.clone(),
+            applied: deny.rules.len(),
+        }),
+        // Claude Code runs with settings sources empty, so only the deny rules
+        // reach it and delega loads no instruction files. Codex has no such
+        // switch to report.
+        context: claude.then(|| AppliedContext {
+            settings: "deny_rules".to_string(),
+            instructions: false,
+        }),
+    }
 }
 
 /// The deny rules of the user's and the project's Claude Code settings, found

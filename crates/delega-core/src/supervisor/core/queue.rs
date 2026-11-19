@@ -112,6 +112,7 @@ impl Core {
         let Some(run) = self.runs.get_mut(id) else {
             return;
         };
+        options.origin = run.origin.clone();
         let activity = run.activity.clone();
         let cursor = self.cursor.clone();
         let sink: ProgressSink = Arc::new(move |event| activity.record(event, &cursor));

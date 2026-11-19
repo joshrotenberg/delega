@@ -8,6 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::contract::applied::Applied;
 use crate::contract::outcome::Outcome;
 use crate::contract::permissions::Mode;
 use crate::contract::request::Provider;
@@ -168,8 +169,8 @@ pub enum ResultView {
 }
 
 /// The compact form of a [`RunResult`]: the outcome, the answer, the error, the
-/// cleanup verdict, the denials, the session and the timing. Usage and
-/// provenance are left out.
+/// cleanup verdict, the denials, `applied`, the session and the timing. Usage
+/// and provenance are left out.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CompactResult {
     /// Run id.
@@ -221,6 +222,9 @@ pub struct CompactResult {
     /// Where the provider did not do what was asked.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub provider_notes: Vec<String>,
+    /// What delega applied to the run. Small, so a compact read carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Applied>,
     /// The provider's session id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -328,6 +332,7 @@ impl ResultView {
                     cleanup: result.cleanup.clone(),
                     denied: result.permissions.denied.clone(),
                     provider_notes: result.provider_notes.clone(),
+                    applied: result.applied.clone(),
                     session_id: result.session_id.clone(),
                     timing: result.timing.clone(),
                 }))

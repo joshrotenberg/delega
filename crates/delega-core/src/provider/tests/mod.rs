@@ -16,6 +16,7 @@ use crate::contract::request::{Provider, Request};
 use crate::contract::result::RunResult;
 use crate::provider::{ProviderOptions, run};
 
+mod applied;
 mod deny;
 mod dry;
 mod enforce;

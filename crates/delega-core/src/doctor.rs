@@ -258,6 +258,7 @@ pub async fn diagnose(options: &ProviderOptions) -> Result<Report, Refusal> {
             location: None,
             found: false,
             result: Ok(None),
+            applied: None,
         },
     )
     .await

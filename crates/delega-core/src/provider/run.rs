@@ -107,7 +107,7 @@ impl RunHandle {
         };
         let timing = self.facts.timing_unstarted(SystemTime::now());
         let ctx = self.facts.run_context(cleanup, timing, Vec::new());
-        RunResult::failed(
+        let mut result = RunResult::failed(
             ctx,
             ErrorDetail {
                 kind: "internal_error".to_string(),
@@ -115,7 +115,9 @@ impl RunHandle {
                 provider_exit_code: None,
             },
             "",
-        )
+        );
+        result.applied = self.facts.result_applied();
+        result
     }
 }
 
@@ -156,6 +158,7 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
                 &refusal.kind,
                 &refusal.message,
             );
+            result.applied = facts.result_applied();
             progress.finished(&mut result);
             RunHandle {
                 cancel,
@@ -166,6 +169,7 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
         }
         Ok(plan) => {
             facts.provenance.provider_executable = Some(plan.program.display().to_string());
+            facts.applied = plan.applied.clone();
             let ephemeral = request.session.ephemeral;
             let join = tokio::spawn(execute(
                 plan,
@@ -265,6 +269,7 @@ fn unstarted(facts: &Facts, cleanup: Cleanup, notes: Vec<String>, how: Unstarted
         }
     };
     result.provider_notes = notes;
+    result.applied = facts.result_applied();
     result
 }
 

@@ -112,9 +112,10 @@ impl Core {
             Command::Start {
                 request,
                 preflight,
+                origin,
                 reply,
             } => {
-                let _ = reply.send(self.start(*request, preflight));
+                let _ = reply.send(self.start(*request, preflight, *origin));
             }
             Command::FollowUp {
                 worker,

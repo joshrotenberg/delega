@@ -31,7 +31,31 @@ pub(super) fn weigh(result: &RunResult, activity: &Activity) -> usize {
         .iter()
         .map(|d| d.request.len())
         .sum();
-    FIXED + result.text.len() + structured + error + notes + denied + activity.text().len()
+    let applied = result.applied.as_ref().map_or(0, |a| {
+        let config = a.config.as_ref().map_or(0, |c| c.path.len());
+        let env = a
+            .env
+            .as_ref()
+            .map_or(0, |e| e.named.iter().map(String::len).sum());
+        let deny = a.deny_rules.as_ref().map_or(0, |d| {
+            let read: usize = d.files.iter().map(|f| f.path.len()).sum();
+            let skipped: usize = d
+                .skipped
+                .iter()
+                .map(|f| f.path.len() + f.reason.len())
+                .sum();
+            read + skipped
+        });
+        config + env + deny
+    });
+    FIXED
+        + result.text.len()
+        + structured
+        + error
+        + notes
+        + denied
+        + applied
+        + activity.text().len()
 }
 
 impl Core {

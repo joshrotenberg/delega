@@ -75,7 +75,11 @@ fn context(run: &Run, worker: Option<WorkerRef>, cleanup: Cleanup) -> RunContext
 /// `failed` result whose error and a provider note name the validation problems
 /// (fixed text about fields, never the user's), so a run still ends in exactly
 /// one valid result and the fault is visible to whoever reads it.
-fn seal(run: &Run, worker: Option<WorkerRef>, result: RunResult) -> RunResult {
+fn seal(run: &Run, worker: Option<WorkerRef>, mut result: RunResult) -> RunResult {
+    // The supervisor knows only what the caller said: the configuration file and
+    // the layer of each field. The rest of `applied` is decided when a run is
+    // prepared, which these runs never were.
+    result.applied = run.origin.clone().or_absent();
     #[cfg(test)]
     let result = corrupt_for_test(result);
     match result.validate() {
@@ -95,6 +99,7 @@ fn seal(run: &Run, worker: Option<WorkerRef>, result: RunResult) -> RunResult {
                 },
                 result.text,
             );
+            fallback.applied = run.origin.clone().or_absent();
             fallback.provider_notes.push(format!(
                 "the supervisor replaced a result it built because it failed validation: \
                  {message}"

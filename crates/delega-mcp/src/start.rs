@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use delega_core::contract::applied::{Applied, AppliedConfig, Layer};
 use delega_core::contract::partial::PartialRequest;
 use delega_core::contract::request::Request;
 use delega_core::contract::validate::Problem;
@@ -52,11 +53,19 @@ fn join(problems: &[Problem]) -> String {
 ///
 /// `defaults` come first (the configuration file's request defaults), then the
 /// profile, if named, and every other argument replaces the matching field,
-/// with the code `delega run` uses ([`profile::merge_unresolved_over`]). Only a
+/// with the code `delega run` uses ([`profile::merge_unresolved_tracked`]). Only a
 /// request with no provider or no prompt cannot be built; any other problem is
 /// left to the supervisor, which refuses the run, so the caller reads it with
 /// `read` as it would any refusal. The error is the text of a tool error.
-pub fn build_request(defaults: PartialRequest, mut args: Value) -> Result<Request, String> {
+///
+/// Also returns what the caller knows of `applied`: `config`, the file the
+/// defaults came from (`file`), and `sources`, the layer of each field, with the
+/// call's own arguments as `argument`.
+pub fn build_request(
+    defaults: PartialRequest,
+    file: Option<AppliedConfig>,
+    mut args: Value,
+) -> Result<(Request, Applied), String> {
     if args.is_null() {
         args = json!({});
     }
@@ -71,10 +80,14 @@ pub fn build_request(defaults: PartialRequest, mut args: Value) -> Result<Reques
     let explicit: PartialRequest =
         serde_json::from_value(args).map_err(|err| format!("invalid arguments: {err}"))?;
     let mut problems = Vec::new();
-    let mut merged = profile::merge_unresolved_over(
+    let profile::Merged {
+        request: mut merged,
+        sources,
+    } = profile::merge_unresolved_tracked(
         defaults,
         path.as_deref(),
         ErrorDetail::Position,
+        Layer::Argument,
         &mut problems,
         |_| explicit,
     );
@@ -98,7 +111,13 @@ pub fn build_request(defaults: PartialRequest, mut args: Value) -> Result<Reques
             }
         }
     }
+    let origin = Applied {
+        config: file,
+        sources,
+        ..Applied::default()
+    };
     merged
         .into_request_unvalidated()
+        .map(|request| (request, origin))
         .map_err(|problems| format!("invalid arguments: {}", join(&problems)))
 }

@@ -7,6 +7,7 @@
 
 use std::time::Instant;
 
+use crate::contract::applied::{Applied, Layer};
 use crate::contract::request::Request;
 use crate::contract::result::RunResult;
 
@@ -24,12 +25,14 @@ impl Core {
         &mut self,
         request: Request,
         preflight: Option<(String, String)>,
+        origin: Applied,
     ) -> Result<StartResponse, Error> {
         if self.mode != Mode::Active {
             return Err(Error::ShutDown);
         }
         let run_id = self.ids.run();
-        let run = Run::new(run_id.clone(), Kind::First, &request);
+        let mut run = Run::new(run_id.clone(), Kind::First, &request);
+        run.origin = origin.clone();
 
         if let Err(problems) = request.validate() {
             let result = results::refused_invalid(&run, None, &problems);
@@ -68,6 +71,7 @@ impl Core {
             name: request.name.clone(),
             provider: request.provider,
             template,
+            origin,
             state: WorkerState::Idle,
             session_id,
             current: None,
@@ -110,6 +114,19 @@ impl Core {
         let run_id = self.ids.run();
         let mut run = Run::new(run_id.clone(), Kind::FollowUp, &request);
         run.worker = Some(worker_id.to_string());
+        // A follow-up reports what its worker was started with, except that its
+        // prompt, and its time limit when it gives one, come from this call.
+        run.origin = worker.origin.clone();
+        if !run.origin.sources.is_empty() {
+            run.origin
+                .sources
+                .insert("prompt".to_string(), Layer::Argument);
+            if timeout_secs.is_some() {
+                run.origin
+                    .sources
+                    .insert("timeout_secs".to_string(), Layer::Argument);
+            }
+        }
 
         let worker = &self.workers[worker_id];
         let max = self.config.limits.max_queued_per_worker;

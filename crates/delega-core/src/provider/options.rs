@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::contract::applied::Applied;
 use crate::contract::request::Provider;
 use crate::contract::result::WorkerRef;
 
@@ -46,6 +47,12 @@ pub struct ProviderOptions {
     /// The environment to inherit from. `None` means this process's
     /// environment. Tests set it to stay independent of the real one.
     pub parent_env: Option<Vec<(OsString, OsString)>>,
+    /// The parts of a result's `applied` that only the caller knows: `config`,
+    /// the configuration file it read, and `sources`, which layer set each
+    /// request field. The other parts are filled in from the prepared run, and
+    /// anything set here for them is replaced. Empty by default, which reports
+    /// nothing about the caller's layers.
+    pub origin: Applied,
     /// The run id to report. One is generated when absent.
     pub run_id: Option<String>,
     /// The worker to report in the result, when an engine owns one.
@@ -103,6 +110,7 @@ impl fmt::Debug for ProviderOptions {
             .field("env_pass", &self.env_pass)
             .field("env_set_names", &set_names)
             .field("parent_env_names", &parent_names)
+            .field("origin", &self.origin)
             .field("run_id", &self.run_id)
             .field("worker", &self.worker)
             .field("max_output_bytes", &self.max_output_bytes)

@@ -28,6 +28,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
+use delega_core::contract::applied::AppliedConfig;
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::partial::PartialRequest;
 use delega_core::provider::ProviderOptions;
@@ -73,7 +74,9 @@ pub fn run(args: Args) -> ExitCode {
 fn go(args: &Args, log: &Log) -> ExitCode {
     // The configuration file is read once, now: a file that cannot be used
     // refuses to start the server, as a bad `--env` does.
-    let config = match super::config::read().into_config() {
+    let status = super::config::read();
+    let file = status.applied.clone();
+    let config = match status.into_config() {
         Ok(config) => config,
         Err(refusal) => {
             log.line(format!("delega mcp: refused: {refusal}"));
@@ -115,7 +118,12 @@ fn go(args: &Args, log: &Log) -> ExitCode {
             return ExitCode::from(EXIT_REFUSED);
         }
     };
-    let code = runtime.block_on(serve(supervisor_config, config.request_defaults(), log));
+    let code = runtime.block_on(serve(
+        supervisor_config,
+        config.request_defaults(),
+        file,
+        log,
+    ));
     // Every worker was stopped, or reported not to be, before this point. The
     // thread that reads standard input may still be blocked in `read`, and
     // dropping the runtime normally would wait for it.
@@ -123,7 +131,12 @@ fn go(args: &Args, log: &Log) -> ExitCode {
     code
 }
 
-async fn serve(config: SupervisorConfig, defaults: PartialRequest, log: &Log) -> ExitCode {
+async fn serve(
+    config: SupervisorConfig,
+    defaults: PartialRequest,
+    file: Option<AppliedConfig>,
+    log: &Log,
+) -> ExitCode {
     let signals = match Signals::install() {
         Ok(signals) => signals,
         Err(err) => {
@@ -134,10 +147,11 @@ async fn serve(config: SupervisorConfig, defaults: PartialRequest, log: &Log) ->
         }
     };
     let supervisor = Supervisor::new(config);
-    let router = match delega_mcp::router_with_defaults(
+    let router = match delega_mcp::router_with_config(
         supervisor.clone(),
         &version::build_info(),
         defaults,
+        file,
     ) {
         Ok(router) => router,
         Err(err) => {

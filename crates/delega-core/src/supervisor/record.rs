@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::contract::applied::Applied;
 use crate::contract::permissions::Mode;
 use crate::contract::request::{Provider, Request};
 use crate::contract::result::{RunResult, WorkerRef};
@@ -55,6 +56,9 @@ pub(super) struct Run {
     pub provider: Provider,
     pub mode: Mode,
     pub timeout_secs: u64,
+    /// What the caller said of `applied` for this run: the configuration file
+    /// and the layer of each request field.
+    pub origin: Applied,
     pub queued_at: SystemTime,
     pub queued: Instant,
     pub started_at: Option<SystemTime>,
@@ -87,6 +91,7 @@ impl Run {
             provider: request.provider,
             mode: request.permissions.mode,
             timeout_secs: request.timeout_secs,
+            origin: Applied::default(),
             queued_at: SystemTime::now(),
             queued: Instant::now(),
             started_at: None,
@@ -112,6 +117,8 @@ pub(super) struct Worker {
     pub name: Option<String>,
     /// The first request with an empty prompt: the settings a follow-up keeps.
     pub template: Request,
+    /// The `origin` the worker was started with, which its follow-ups keep.
+    pub origin: Applied,
     pub provider: Provider,
     pub state: WorkerState,
     /// The provider's latest session id.

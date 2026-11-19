@@ -148,6 +148,7 @@ pub(super) fn settle(
         }
     };
     result.provider_notes = notes;
+    result.applied = s.facts.result_applied();
     result.usage = parsed.usage.clone();
     if !s.ephemeral {
         result.session_id = parsed.session_id.clone();
