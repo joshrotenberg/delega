@@ -31,6 +31,14 @@ use rustix::io::Errno;
 
 use super::MAX_CONFIG_BYTES;
 
+/// The mode bits of a `stat`, as a `u32` on every platform: `st_mode` is a
+/// `u16` on macOS and already a `u32` on Linux, where the conversion is a
+/// no-op that clippy would otherwise flag.
+#[allow(clippy::useless_conversion)]
+fn mode_bits(st_mode: rustix::fs::RawMode) -> u32 {
+    u32::from(st_mode)
+}
+
 /// What reading gave.
 #[derive(Debug)]
 pub enum Read {
@@ -75,7 +83,7 @@ pub fn read(path: &Path, euid: u32) -> Result<Read, String> {
         }
         let holder =
             fstat(&dir).map_err(|e| format!("its directory cannot be examined ({})", kind(e)))?;
-        if holder.st_uid != euid || others_can_write(u32::from(holder.st_mode)) {
+        if holder.st_uid != euid || others_can_write(mode_bits(holder.st_mode)) {
             return Err(
                 "it is a symbolic link in a directory that the current user does not own or \
                  that group or others can write, so the link is not trusted"
@@ -105,7 +113,7 @@ pub fn read(path: &Path, euid: u32) -> Result<Read, String> {
     if handle.st_uid != euid {
         return Err("it is owned by another user".to_string());
     }
-    let mode = u32::from(handle.st_mode);
+    let mode = mode_bits(handle.st_mode);
     if others_can_write(mode) {
         return Err(format!(
             "it can be written by group or others (mode {:03o}); run `chmod go-w` on it",
