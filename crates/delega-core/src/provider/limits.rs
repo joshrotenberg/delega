@@ -69,3 +69,6 @@ pub const STDERR_SCAN_BYTES: usize = 8 * 1024;
 pub const MIN_REDACTED_VALUE_CHARS: usize = 6;
 /// Longest prefix of a rejected `native_args` option named in a message.
 pub const NATIVE_FLAG_NAME_CHARS: usize = 40;
+
+/// Longest message text in a progress event summary, in characters.
+pub const PROGRESS_SUMMARY_CHARS: usize = 80;

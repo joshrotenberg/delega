@@ -25,6 +25,7 @@ mod mapping;
 mod native;
 mod outcomes;
 mod prepare;
+mod progress;
 mod rules;
 mod streams;
 

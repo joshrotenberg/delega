@@ -240,7 +240,12 @@ async fn drive(
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
                 if stdout.is_some() => match n {
                 Ok(0) | Err(_) => stdout = None,
-                Ok(n) => out.push(&out_buf[..n]),
+                Ok(n) => {
+                    out.push(&out_buf[..n]);
+                    if let Some(tap) = &spec.stdout_tap {
+                        tap(&out_buf[..n]);
+                    }
+                }
             },
             n = async { stderr.as_mut().expect("guarded").read(&mut err_buf).await },
                 if stderr.is_some() => match n {

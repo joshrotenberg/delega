@@ -21,6 +21,7 @@ use super::limits::{
 };
 use super::options::ProviderOptions;
 use super::plan::{self, Plan};
+use super::progress::{Progress, ProgressEvent};
 use super::refusal::Refusal;
 use super::settle::{Settle, settle};
 use super::{claude, codex, program};
@@ -143,6 +144,7 @@ pub async fn run(request: Request, options: ProviderOptions) -> RunResult {
 pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
     let queued_at = SystemTime::now();
     let mut facts = Facts::new(&request, &options, queued_at);
+    let progress = Progress::new(options.progress.clone());
     let cancel = CancellationToken::new();
     match plan::build(&request, &options) {
         Err(refusal) => {
@@ -151,6 +153,7 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
                 &refusal.kind,
                 &refusal.message,
             );
+            progress.finished(&result);
             RunHandle {
                 cancel,
                 facts,
@@ -161,7 +164,13 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
         Ok(plan) => {
             facts.provenance.provider_executable = Some(plan.program.display().to_string());
             let ephemeral = request.session.ephemeral;
-            let join = tokio::spawn(execute(plan, facts.clone(), cancel.clone(), ephemeral));
+            let join = tokio::spawn(execute(
+                plan,
+                facts.clone(),
+                cancel.clone(),
+                ephemeral,
+                progress,
+            ));
             RunHandle {
                 cancel,
                 facts,
@@ -269,11 +278,25 @@ fn probe_failure(what: &str, report: &ProcessReport) -> Refusal {
     )
 }
 
+/// Follow one run to its result and report its end to the progress sink.
 async fn execute(
+    plan: Plan,
+    facts: Facts,
+    cancel: CancellationToken,
+    ephemeral: bool,
+    progress: Progress,
+) -> RunResult {
+    let result = execute_steps(plan, facts, cancel, ephemeral, &progress).await;
+    progress.finished(&result);
+    result
+}
+
+async fn execute_steps(
     plan: Plan,
     mut facts: Facts,
     cancel: CancellationToken,
     ephemeral: bool,
+    progress: &Progress,
 ) -> RunResult {
     let began = Instant::now();
     let notes = plan.notes.clone();
@@ -376,6 +399,11 @@ async fn execute(
     if let Some(grace) = plan.stop_grace {
         spec.stop_grace = grace;
     }
+    spec.stdout_tap = progress.tap(plan.provider, plan.redactor.clone());
+    progress.emit(ProgressEvent::Started {
+        provider: plan.provider,
+        program: plan.program.display().to_string(),
+    });
     let report = drive(spec, &cancel).await;
 
     let parsed = match plan.provider {

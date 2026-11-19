@@ -131,6 +131,6 @@ pub use report::{
     Diagnostics, Ending, LeaderExit, ProcessReport, ProcessTiming, SignalRecord, SignalTarget,
 };
 pub use run::PIPE_WARNING;
-pub use spec::{CaptureSpec, EnvPolicy, Keep, ProcessSpec};
+pub use spec::{CaptureSpec, EnvPolicy, Keep, OutputTap, ProcessSpec};
 pub use timestamp::rfc3339_utc;
 pub use tree::InspectionStats;
