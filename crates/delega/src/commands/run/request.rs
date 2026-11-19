@@ -10,7 +10,7 @@ use delega_core::contract::partial::{PartialPermissions, PartialRequest, Partial
 use delega_core::contract::permissions::Mode;
 use delega_core::contract::request::{Provider, Request};
 use delega_core::contract::validate::Problem;
-use delega_core::profile::{self, problem, read_limited};
+use delega_core::profile::{self, ErrorDetail, problem, read_limited};
 use serde_json::Value;
 
 use super::{Args, Effort, Provider as ProviderArg};
@@ -54,9 +54,12 @@ pub struct Failure {
 /// missing field.
 pub fn build(args: &Args) -> Result<Request, Failure> {
     let mut problems = Vec::new();
-    let merged = profile::merge(args.request.as_deref(), &mut problems, |problems| {
-        flags(args, problems)
-    });
+    let merged = profile::merge(
+        args.request.as_deref(),
+        ErrorDetail::Full,
+        &mut problems,
+        |problems| flags(args, problems),
+    );
     let facts = Facts {
         provider: merged.provider,
         mode: merged

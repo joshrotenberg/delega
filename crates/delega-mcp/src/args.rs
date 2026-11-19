@@ -4,13 +4,25 @@
 //! argument is an error and not a silently ignored setting. `start` takes the
 //! request fields and is read in [`crate::start`].
 
+use delega_core::contract::limits::{MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
 use delega_core::supervisor::Detail;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema};
 use serde::Deserialize;
+use serde_json::{Value, json};
+
+/// The range of `timeout_secs`, the contract's, so `follow_up` states what
+/// `start` does.
+fn timeout_range(schema: &mut Schema) {
+    if let Some(Value::Object(target)) = schema.pointer_mut("/properties/timeout_secs") {
+        target.insert("minimum".to_string(), json!(MIN_TIMEOUT_SECS));
+        target.insert("maximum".to_string(), json!(MAX_TIMEOUT_SECS));
+    }
+}
 
 /// Arguments of `follow_up`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = timeout_range)]
 pub struct FollowUpArgs {
     /// The worker to give another assignment.
     pub worker: String,

@@ -13,8 +13,9 @@
 //!
 //! Exit status: 0 after end of input, 130 after a signal (the status `delega
 //! run` gives an interrupted run, for all four signals), 1 when the workers
-//! could not be confirmed stopped, the supervisor itself had failed or reading
-//! or writing the transport failed after end of input, and 2 when the server
+//! could not be confirmed stopped or the supervisor itself had failed (after
+//! either, and before 0 and 130) or reading or writing the transport failed
+//! after end of input, and 2 when the server
 //! could not start, including when an `--env` is one `delega run` would refuse
 //! (the status `delega run` gives when nothing was started).
 //!
@@ -138,14 +139,17 @@ async fn serve(config: SupervisorConfig, log: &Log) -> ExitCode {
     .await;
     watcher.abort();
 
-    let mut failed = false;
+    // Workers that could not be confirmed stopped, or a supervisor that failed,
+    // make the status 1 whatever ended the server. A failing transport does so
+    // after end of input only: after a signal the status stays the signal's, a
+    // client that stopped reading standard output being no failure of the workers.
+    let mut workers_failed = false;
     if let Some(error) = &served.transport_error {
         log.line(format!("delega mcp: transport error: {error}"));
-        failed = true;
     }
     if let Some(why) = &served.shutdown.failed {
         log.line(format!("delega mcp: supervisor failed: {why}"));
-        failed = true;
+        workers_failed = true;
     }
     if !served.shutdown.unsettled.is_empty() {
         log.line(format!(
@@ -153,11 +157,26 @@ async fn serve(config: SupervisorConfig, log: &Log) -> ExitCode {
             served.shutdown.unsettled.len(),
             served.shutdown.unsettled.join(", ")
         ));
-        failed = true;
+        workers_failed = true;
+    }
+    for (run, cleanup) in &served.unconfirmed {
+        if let delega_core::contract::result::Cleanup::Unconfirmed {
+            pids,
+            process_groups,
+            reason,
+        } = cleanup
+        {
+            log.line(format!(
+                "delega mcp: cleanup not confirmed for run {run}: {reason} (pids {pids:?}, \
+                 process groups {process_groups:?})"
+            ));
+            workers_failed = true;
+        }
     }
     match served.ended {
+        _ if workers_failed => ExitCode::from(EXIT_FAILED),
         Ended::Stopped => ExitCode::from(EXIT_SIGNALLED),
-        Ended::EndOfInput if failed => ExitCode::from(EXIT_FAILED),
+        Ended::EndOfInput if served.transport_error.is_some() => ExitCode::from(EXIT_FAILED),
         Ended::EndOfInput => ExitCode::SUCCESS,
     }
 }

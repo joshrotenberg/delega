@@ -20,6 +20,7 @@ mod support;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -87,11 +88,17 @@ impl Rig {
 
     /// `delega mcp` with a controlled environment, started with its pipes.
     fn start(&self, args: &[&str]) -> Session {
+        self.start_with(args, &[])
+    }
+
+    /// Like [`Rig::start`], with more variables in the server's environment.
+    fn start_with(&self, args: &[&str], more_env: &[(&str, &str)]) -> Session {
         let config = self.root.join("home");
         let mut child = Command::new(env!("CARGO_BIN_EXE_delega"))
             .arg("mcp")
             .args(args)
             .env_clear()
+            .envs(more_env.iter().copied())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &config)
@@ -112,8 +119,15 @@ impl Rig {
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let (sender, receiver) = channel::<Value>();
         let reader_lines = lines.clone();
+        let paused = Arc::new(AtomicBool::new(false));
+        let reader_paused = paused.clone();
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
+                // A paused reader stops reading standard output, as a client
+                // that is frozen or no longer interested does.
+                while reader_paused.load(Ordering::SeqCst) {
+                    std::thread::sleep(POLL);
+                }
                 let Ok(line) = line else { break };
                 reader_lines
                     .lock()
@@ -141,6 +155,7 @@ impl Rig {
             lines,
             error_text,
             readers: vec![reader, error_reader],
+            paused,
             next_id: 1,
         }
     }
@@ -213,6 +228,7 @@ struct Session {
     lines: Arc<Mutex<Vec<String>>>,
     error_text: Arc<Mutex<String>>,
     readers: Vec<std::thread::JoinHandle<()>>,
+    paused: Arc<AtomicBool>,
     next_id: u64,
 }
 
@@ -223,27 +239,38 @@ impl Session {
         stdin.flush().expect("flush");
     }
 
-    /// Send a request and wait for its response.
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    /// Send a request without waiting, and return its id.
+    fn send_request(&mut self, method: &str, params: Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        id
+    }
+
+    /// Wait for the response to request `id`, which must not be an error.
+    fn response(&mut self, id: u64) -> Value {
         let began = Instant::now();
         loop {
             let left = EVENTUALLY.saturating_sub(began.elapsed());
             match self.messages.recv_timeout(left) {
                 Ok(message) if message["id"] == json!(id) => {
-                    assert!(message.get("error").is_none(), "{method}: {message}");
+                    assert!(message.get("error").is_none(), "request {id}: {message}");
                     return message["result"].clone();
                 }
                 // A notification, or the response to something else.
                 Ok(_) => {}
-                Err(RecvTimeoutError::Timeout) => panic!("no response to {method}"),
+                Err(RecvTimeoutError::Timeout) => panic!("no response to request {id}"),
                 Err(RecvTimeoutError::Disconnected) => {
-                    panic!("the server closed standard output before answering {method}")
+                    panic!("the server closed standard output before answering request {id}")
                 }
             }
         }
+    }
+
+    /// Send a request and wait for its response.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send_request(method, params);
+        self.response(id)
     }
 
     fn initialize(&mut self) -> Value {
@@ -278,6 +305,7 @@ impl Session {
     /// deadline, and return its status.
     fn exit(&mut self) -> ExitStatus {
         let status = support::wait_exit_only(&mut self.child, EVENTUALLY);
+        self.paused.store(false, Ordering::SeqCst);
         for reader in self.readers.drain(..) {
             reader.join().expect("reader thread");
         }
@@ -353,6 +381,29 @@ fn start_two_workers(rig: &Rig, session: &mut Session) -> Vec<Value> {
     started
 }
 
+/// Assert the exit status of a stop. Where the process listing taken before the
+/// first signal came late (a loaded machine), the process layer cannot confirm
+/// cleanup and says so, and the server then exits 1 and names that reason. That
+/// is the documented behaviour, so it is accepted here, and only for that
+/// reason; whether anything is left running is checked separately.
+fn assert_stop_status(session: &Session, status: ExitStatus, expected: i32) {
+    use delega_core::process::LATE_LISTING_REASON;
+    if status.code() == Some(expected) {
+        return;
+    }
+    let error = session.stderr();
+    let lines: Vec<&str> = error
+        .lines()
+        .filter(|l| l.contains("cleanup not confirmed"))
+        .collect();
+    assert!(
+        status.code() == Some(1)
+            && !lines.is_empty()
+            && lines.iter().all(|l| l.contains(LATE_LISTING_REASON)),
+        "expected status {expected}, or 1 for a late listing only: {status:?}; stderr: {error}"
+    );
+}
+
 fn assert_no_secret_value(session: &Session) {
     let lines = session.lines.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(
@@ -414,7 +465,7 @@ fn closing_standard_input_stops_every_worker_and_exits_zero() {
 
     session.close_stdin();
     let status = session.exit();
-    assert_eq!(status.code(), Some(0), "stderr: {}", session.stderr());
+    assert_stop_status(&session, status, 0);
     rig.assert_nothing_left();
 
     let messages = session.assert_only_json_rpc();
@@ -440,12 +491,9 @@ fn sigterm_stops_every_worker_and_exits_with_the_interrupted_status() {
         .stderr(Stdio::null())
         .status();
     let status = session.exit();
-    assert_eq!(
-        status.code(),
-        Some(130),
-        "the server must exit by itself with status 130, not be killed: {status:?}; stderr: {}",
-        session.stderr()
-    );
+    // By itself, with status 130, not killed by the second signal.
+    assert!(status.code().is_some(), "killed by a signal: {status:?}");
+    assert_stop_status(&session, status, 130);
     rig.assert_nothing_left();
 
     session.assert_only_json_rpc();
@@ -471,7 +519,7 @@ fn sighup_sigint_and_sigquit_stop_the_workers_like_sigterm() {
         rig.wait_for_workers(1);
         support::signal(session.pid(), name);
         let status = session.exit();
-        assert_eq!(status.code(), Some(130), "SIG{name}: {status:?}");
+        assert_stop_status(&session, status, 130);
         rig.assert_nothing_left();
         session.assert_only_json_rpc();
     }
@@ -536,28 +584,133 @@ fn an_env_name_the_policy_refuses_stops_the_server_before_it_serves_without_echo
 }
 
 #[test]
-fn a_call_in_flight_when_input_ends_is_still_answered_or_released() {
+fn a_call_in_flight_is_answered_by_the_shutdown_before_the_server_exits() {
+    // A `wait` whose cursor no run will pass, with the longest time limit, can
+    // only be released by the shutdown. It must be answered before the
+    // server exits: if the workers were stopped only
+    // after the transport finished, the transport's drain limit would abandon the
+    // call and no answer would come. No time is measured; the answer either
+    // arrives or the test waits out its generous deadline and fails.
+    for how in ["end of input", "SIGTERM"] {
+        let rig = Rig::new();
+        let mut session = rig.start(&[]);
+        session.initialize();
+        let started = session.call(
+            "start",
+            json!({"provider": "codex", "prompt": LONG_RUNNING, "cwd": rig.work}),
+        );
+        rig.wait_for_workers(1);
+        let id = session.send_request(
+            "tools/call",
+            json!({"name": "wait", "arguments": {
+                "runs": [started["run"]], "timeout_secs": 300, "after": 1_000_000,
+            }}),
+        );
+        // Make sure the server has read the call before it is told to stop: a
+        // later call is answered after it, on the same connection.
+        let listed = session.call("list", json!({}));
+        assert_eq!(listed["workers"].as_array().map(Vec::len), Some(1));
+        if how == "end of input" {
+            session.close_stdin();
+        } else {
+            support::signal(session.pid(), "TERM");
+        }
+        let answer = session.response(id);
+        assert_ne!(answer["isError"], json!(true), "{how}: {answer}");
+        let waited = &answer["structuredContent"];
+        assert_eq!(waited["timed_out"], false, "{how}: {answer}");
+        // Released when the shutdown began, so the run may still be stopping.
+        assert_eq!(waited["runs"][0]["run"], started["run"], "{how}: {answer}");
+        let status = session.exit();
+        assert_stop_status(&session, status, if how == "SIGTERM" { 130 } else { 0 });
+        rig.assert_nothing_left();
+        session.assert_only_json_rpc();
+    }
+}
+
+#[test]
+fn a_signal_stops_the_workers_and_the_server_exits_though_the_client_stopped_reading() {
     let rig = Rig::new();
     let mut session = rig.start(&[]);
     session.initialize();
-    let started = session.call(
+    session.call(
         "start",
         json!({"provider": "codex", "prompt": LONG_RUNNING, "cwd": rig.work}),
     );
     rig.wait_for_workers(1);
-    // A wait that would last 30 s, then the end of input: shutdown stops the
-    // run, which releases the wait, and the server exits by itself.
-    let id = session.next_id;
-    session.next_id += 1;
-    session.send(&json!({
-        "jsonrpc": "2.0", "id": id, "method": "tools/call",
-        "params": {"name": "wait", "arguments": {"runs": [started["run"]], "timeout_secs": 30}},
-    }));
-    session.close_stdin();
+    // The client stops reading standard output but keeps the pipe open, then
+    // keeps asking for the tool list until the pipe is full and the server's
+    // write blocks. The writes go on a thread: the server stops reading input
+    // once it is blocked, and a write would then block the test.
+    session.paused.store(true, Ordering::SeqCst);
+    let mut stdin = session.stdin.take().expect("stdin");
+    let flood = std::thread::spawn(move || {
+        for id in 1000..1400 {
+            let request = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+            if writeln!(stdin, "{request}")
+                .and_then(|()| stdin.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+        // Held open until the test ends: end of input must not be what stops it.
+        stdin
+    });
+    // Let the server fill the pipe. Whether it is blocked yet is not observable,
+    // so the flood is large and given this long; the signal then arrives in
+    // whichever state the server is in, and must be handled in either.
+    std::thread::sleep(Duration::from_secs(3));
+    support::signal(session.pid(), "TERM");
+    // Generous: the transport is given up on after its 15 s bound at the latest.
     let status = session.exit();
-    assert_eq!(status.code(), Some(0), "stderr: {}", session.stderr());
+    assert_stop_status(&session, status, 130);
     rig.assert_nothing_left();
-    session.assert_only_json_rpc();
+    drop(flood);
+}
+
+#[test]
+fn unconfirmed_cleanup_after_a_signal_exits_1_not_130() {
+    // `DELEGA_TEST_NO_PROCESS_LISTING` makes process inspection unavailable, so
+    // the process layer cannot confirm that anything stopped. The server must
+    // say so and exit 1, after a signal as after end of input.
+    for how in ["SIGTERM", "end of input"] {
+        let rig = Rig::new();
+        let mut session = rig.start_with(&[], &[("DELEGA_TEST_NO_PROCESS_LISTING", "1")]);
+        session.initialize();
+        session.call(
+            "start",
+            json!({"provider": "codex", "prompt": "acc:hang:child", "cwd": rig.work}),
+        );
+        // A child in the worker's group only: with process inspection off the
+        // layer can reach nothing else, so a grandchild in a session of its own
+        // would be left, which the unconfirmed verdict is the warning of.
+        let began = Instant::now();
+        while rig.recorded("provider") < 1 || rig.recorded("child") < 1 {
+            assert!(began.elapsed() < EVENTUALLY, "the worker did not start");
+            std::thread::sleep(POLL);
+        }
+        if how == "SIGTERM" {
+            support::signal(session.pid(), "TERM");
+        } else {
+            session.close_stdin();
+        }
+        let status = session.exit();
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "{how}: stderr: {}",
+            session.stderr()
+        );
+        assert!(
+            session.stderr().contains("cleanup not confirmed for run"),
+            "{how}: {}",
+            session.stderr()
+        );
+        // The workers were still stopped, as well as the layer could.
+        rig.assert_nothing_left();
+        session.assert_only_json_rpc();
+    }
 }
 
 #[test]
@@ -617,7 +770,8 @@ fn the_skills_and_the_identity_over_stdio_are_what_the_cli_prints() {
     );
 
     session.close_stdin();
-    assert_eq!(session.exit().code(), Some(0));
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
     rig.assert_nothing_left();
     session.assert_only_json_rpc();
 }

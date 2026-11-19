@@ -244,8 +244,12 @@ verdict.
   not go ahead on its own terms.
 - **shutdown** closes every live worker the same way, with the message
   `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits for
-  runs to settle within the bound, naming any that did not. Reads and `list`
-  keep working.
+  runs to settle within the bound, naming any that did not. It wakes every
+  `wait` that is registered, whatever its cursor, and each answers with the
+  states at that moment (a run may still be stopping). A `wait` with a cursor
+  made after it began answers at once too, so a call that arrives as shutdown
+  begins is released like the others; a `wait` without a cursor still waits for
+  the runs to settle. Reads and `list` keep working.
 - **Drop** of the last clone of a `Supervisor` signals everything and returns.
   It cancels one token that is the parent of every run's stop token, so every
   provider is signalled at once without the supervisor's task having to run,

@@ -114,10 +114,15 @@ A call that cannot go ahead is not always an error.
   reached limit (the result names it), a full queue, a closed worker, a worker
   with no session to continue, and an invalid request or prompt. A refused
   `start` creates no worker.
-- A call whose arguments cannot be understood, or that names an id that does not
-  exist, is a tool error with a message. This includes a `start` with no
-  `provider` or no `prompt`, and a `read` that gives neither `run` nor `worker`.
-  An id also does not exist once its result has aged out.
+- A call whose arguments cannot be understood is a tool error with a message.
+  This includes a `start` with no `provider` or no `prompt`, a `read` or
+  `interrupt` that gives neither `run` nor `worker` or both, and a `wait` that
+  names no run and no worker.
+- `follow_up`, `read`, `interrupt` and `close` return a tool error for an id
+  that does not exist. An id also does not exist once its result has aged out.
+- `wait` does not: an id that does not exist is listed in `unknown` and the
+  others are still waited for. If every id is unknown, it returns at once with
+  them all in `unknown`. Check `unknown` before you trust a quiet `wait`.
 
 `list` reports the limits on live workers and running runs. Check it before
 starting many workers. A run beyond the running limit is not refused: it stays

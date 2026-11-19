@@ -142,3 +142,19 @@ fn the_start_schema_states_the_ranges_of_the_request_schema() {
         "{text}"
     );
 }
+
+#[test]
+fn the_follow_up_schema_has_the_same_time_limit_range_as_start() {
+    use delega_core::contract::limits::{MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
+    let schemas = delega_mcp::tool_schemas();
+    let range = |name: &str| {
+        let tool = schemas.iter().find(|s| s.name == name).expect("tool");
+        let property = &tool.input["properties"]["timeout_secs"];
+        (property["minimum"].clone(), property["maximum"].clone())
+    };
+    assert_eq!(
+        range("follow_up"),
+        (MIN_TIMEOUT_SECS.into(), MAX_TIMEOUT_SECS.into())
+    );
+    assert_eq!(range("follow_up"), range("start"));
+}

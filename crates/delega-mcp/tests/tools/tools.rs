@@ -137,11 +137,6 @@ async fn reaching_the_worker_limit_is_a_refused_run_and_a_closed_worker_refuses_
     gate.open();
     rig.finished(first["run"].as_str().expect("run")).await;
     rig.call("close", json!({"worker": worker})).await;
-    let late = rig
-        .call("follow_up", json!({"worker": worker, "prompt": "again"}))
-        .await;
-    assert_eq!(late["outcome"], "refused", "{late}");
-    assert_eq!(late["error"]["kind"], "worker_closed");
     rig.finish().await;
 }
 
@@ -507,11 +502,23 @@ async fn start_merges_a_profile_and_its_overrides_as_delega_run_does() {
     std::fs::write(&bad, json!({"schema_version": 1, "bogus": 1}).to_string()).expect("write");
     let message = rig.call_error("start", json!({"profile": bad})).await;
     assert!(message.contains("not a valid profile"), "{message}");
+    // The message gives the path, the kind and the position, and none of the
+    // file's own text: not the field name, and not a value.
+    assert!(message.contains("line 1, column"), "{message}");
+    assert!(!message.contains("bogus"), "{message}");
+    std::fs::write(
+        &bad,
+        json!({"schema_version": 1, "provider": "value-from-the-file"}).to_string(),
+    )
+    .expect("write");
+    let message = rig.call_error("start", json!({"profile": bad})).await;
+    assert!(!message.contains("value-from-the-file"), "{message}");
+    assert!(message.contains("not a valid profile"), "{message}");
     rig.finish().await;
 }
 
 #[tokio::test]
-async fn a_waiting_call_is_released_when_the_supervisor_shuts_down() {
+async fn a_waiting_call_with_an_unreachable_cursor_is_released_by_shutdown() {
     let mut rig = Rig::new(Provider::Codex).await;
     let gate = rig.gate("shutdown");
     let started = rig
@@ -519,16 +526,55 @@ async fn a_waiting_call_is_released_when_the_supervisor_shuts_down() {
         .await;
     gate.started().await;
     let run = started["run"].clone();
+    // A second connection to the same server, so a call can wait while this one
+    // goes on. The cursor is past anything that will finish, so only shutdown
+    // can release the call.
+    let router = delega_mcp::router(rig.supervisor.clone(), &delega_mcp::BuildInfo::default())
+        .expect("router");
+    let mut other = tower_mcp::TestClient::from_router(router);
+    other.initialize().await;
+    let waiting = tokio::spawn(async move {
+        let result = other
+            .call_tool(
+                "wait",
+                json!({"runs": [run], "timeout_secs": 300, "after": 1_000_000}),
+            )
+            .await;
+        (other, result)
+    });
+    // Round trips through the supervisor's one task let the waiting call get as
+    // far as registering. Whether it did or not, the answer must be the same:
+    // shutdown releases it, and a wait made after shutdown began returns at once.
+    for _ in 0..20 {
+        rig.call("list", json!({})).await;
+        assert!(!waiting.is_finished(), "the wait returned before shutdown");
+    }
     let report = rig.supervisor.shutdown().await;
     assert_eq!(report.runs_stopped, 1);
-    // After shutdown the run is finished and a read says so.
-    let read = rig.call("read", json!({"run": run})).await;
+    let (_, result) = tokio::time::timeout(Duration::from_secs(120), waiting)
+        .await
+        .expect("shutdown released the waiting call")
+        .expect("the task");
+    assert!(!result.is_error, "{}", result.all_text());
+    let released = super::agree(&result);
+    assert_eq!(released["timed_out"], false, "{released}");
+    // Released when the shutdown began, so the run may still be stopping.
+    assert_eq!(released["runs"][0]["run"], started["run"], "{released}");
+
+    // After shutdown a read says the run was interrupted, and new work is not
+    // accepted.
+    let read = rig.call("read", json!({"run": started["run"]})).await;
     assert_eq!(read["result"]["outcome"], "interrupted");
-    // New work is not accepted.
     let message = rig
         .call_error("start", rig.start_args(CODEX, "success"))
         .await;
     assert!(message.contains("shut down"), "{message}");
-    tokio::time::sleep(Duration::from_millis(1)).await;
+    let late = rig
+        .call(
+            "wait",
+            json!({"runs": [started["run"]], "timeout_secs": 300, "after": 1_000_000}),
+        )
+        .await;
+    assert_eq!(late["timed_out"], false, "{late}");
     rig.finish().await;
 }

@@ -21,8 +21,9 @@
           "null"
         ],
         "format": "uint64",
-        "minimum": 0,
-        "default": null
+        "minimum": 1,
+        "default": null,
+        "maximum": 86400
       }
     },
     "additionalProperties": false,

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use delega_core::contract::partial::PartialRequest;
 use delega_core::contract::request::Request;
 use delega_core::contract::validate::Problem;
-use delega_core::profile;
+use delega_core::profile::{self, ErrorDetail};
 use schemars::generate::SchemaSettings;
 use serde_json::{Value, json};
 
@@ -61,7 +61,12 @@ pub fn build_request(mut args: Value) -> Result<Request, String> {
     let explicit: PartialRequest =
         serde_json::from_value(args).map_err(|err| format!("invalid arguments: {err}"))?;
     let mut problems = Vec::new();
-    let merged = profile::merge(path.as_deref(), &mut problems, |_| explicit);
+    let merged = profile::merge(
+        path.as_deref(),
+        ErrorDetail::Position,
+        &mut problems,
+        |_| explicit,
+    );
     if !problems.is_empty() {
         return Err(format!("invalid arguments: {}", join(&problems)));
     }

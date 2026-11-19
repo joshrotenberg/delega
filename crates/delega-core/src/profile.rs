@@ -68,9 +68,47 @@ pub fn resolve_paths(request: &mut PartialRequest) {
     }
 }
 
+/// How much of a profile's parse error a problem repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorDetail {
+    /// The parser's own message, which can quote values and field names from the
+    /// file. Right for a person reading their own file.
+    Full,
+    /// The path, the kind of error and its line and column, and nothing the file
+    /// said. For a caller that does not own the file, such as an MCP client that
+    /// names a path.
+    Position,
+}
+
+fn parse_problem(path: &Path, err: &serde_json::Error, detail: ErrorDetail) -> String {
+    match detail {
+        ErrorDetail::Full => format!("{} is not a valid profile: {err}", path.display()),
+        ErrorDetail::Position => {
+            let kind = match err.classify() {
+                serde_json::error::Category::Io => "could not be read",
+                serde_json::error::Category::Syntax => "is not valid JSON",
+                serde_json::error::Category::Eof => "ends before the JSON document does",
+                serde_json::error::Category::Data => {
+                    "has a field or value that a profile does not accept"
+                }
+            };
+            format!(
+                "{} is not a valid profile: it {kind} (line {}, column {})",
+                path.display(),
+                err.line(),
+                err.column()
+            )
+        }
+    }
+}
+
 /// Read the profile file at `path`. A problem in reading it is added to
 /// `problems` and gives `None`.
-pub fn read_profile(path: &Path, problems: &mut Vec<Problem>) -> Option<PartialRequest> {
+pub fn read_profile(
+    path: &Path,
+    problems: &mut Vec<Problem>,
+    detail: ErrorDetail,
+) -> Option<PartialRequest> {
     let text = match read_limited(path, MAX_PROFILE_BYTES) {
         Ok(text) => text,
         Err(err) => {
@@ -84,10 +122,7 @@ pub fn read_profile(path: &Path, problems: &mut Vec<Problem>) -> Option<PartialR
     match PartialRequest::from_profile_json(&text) {
         Ok(profile) => Some(profile),
         Err(err) => {
-            problems.push(problem(
-                "request",
-                format!("{} is not a valid profile: {err}", path.display()),
-            ));
+            problems.push(problem("request", parse_problem(path, &err, detail)));
             None
         }
     }
@@ -102,11 +137,12 @@ pub fn read_profile(path: &Path, problems: &mut Vec<Problem>) -> Option<PartialR
 /// but is not complete.
 pub fn merge(
     path: Option<&Path>,
+    detail: ErrorDetail,
     problems: &mut Vec<Problem>,
     explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
 ) -> PartialRequest {
     let profile = path
-        .and_then(|path| read_profile(path, problems))
+        .and_then(|path| read_profile(path, problems, detail))
         .unwrap_or_default();
     let explicit = explicit(problems);
     let mut merged = profile.merge(explicit);

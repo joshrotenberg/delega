@@ -3,7 +3,8 @@
 use std::future::Future;
 use std::time::Duration;
 
-use delega_core::supervisor::{ShutdownReport, Supervisor};
+use delega_core::contract::result::Cleanup;
+use delega_core::supervisor::{Detail, ResultView, ShutdownReport, Supervisor, Target};
 use tower_mcp::{McpRouter, StdioTransport};
 
 /// Most requests handled at once.
@@ -15,6 +16,13 @@ const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 /// reading. The supervisor's shutdown releases them first, so this only bounds
 /// a handler that does not return.
 const DRAIN: Duration = Duration::from_secs(10);
+/// How long past the drain the server waits for the transport once the workers
+/// are stopped. The transport writes each response inside its read loop, so a
+/// client that stopped reading standard output (the pipe full, the host frozen)
+/// blocks that write, and the loop never sees the stop; the drain limit only
+/// covers the phase after the loop. The workers are gone by then, so the server
+/// gives up on the transport and returns.
+const TRANSPORT_GRACE: Duration = Duration::from_secs(5);
 
 /// Why the server stopped accepting calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +41,11 @@ pub struct Served {
     /// What stopping the workers found. The report says whether every run
     /// stopped and whether the supervisor itself had failed.
     pub shutdown: ShutdownReport,
+    /// The latest run of each worker whose cleanup was not confirmed, with what
+    /// the result says could not be confirmed. Read after the workers were
+    /// stopped: a run stopped by the shutdown that the process layer could not
+    /// confirm gone is listed here, though the shutdown itself settled.
+    pub unconfirmed: Vec<(String, Cleanup)>,
     /// The transport's error, if reading or writing failed. End of file is not
     /// an error.
     pub transport_error: Option<String>,
@@ -44,7 +57,8 @@ pub struct Served {
 /// The order is fixed. The server stops reading, so no new call is accepted.
 /// It then calls [`Supervisor::shutdown`] and waits for it, bounded by the
 /// supervisor's own shutdown bound, while calls still running are released
-/// because their runs end. Only then does it return, and the caller drops the
+/// because their runs end, and waits for the transport at most the drain limit
+/// plus a short grace. Only then does it return, and the caller drops the
 /// runtime. Standard output carries protocol messages and nothing else; this
 /// function writes nothing to either stream.
 pub async fn serve(
@@ -82,13 +96,47 @@ pub async fn serve(
             result = &mut run, if finished.is_none() => finished = Some(result),
         }
     };
-    let result = match finished {
-        Some(result) => result,
-        None => run.await,
+    let transport_error = match finished {
+        Some(result) => result.err().map(|error| error.to_string()),
+        None => match tokio::time::timeout(DRAIN + TRANSPORT_GRACE, &mut run).await {
+            Ok(result) => result.err().map(|error| error.to_string()),
+            Err(_) => Some(
+                "the transport did not finish after the workers were stopped; a client that \
+                 does not read standard output can hold it, and it was given up on"
+                    .to_string(),
+            ),
+        },
     };
     Served {
         ended,
         shutdown: report,
-        transport_error: result.err().map(|error| error.to_string()),
+        unconfirmed: unconfirmed(supervisor).await,
+        transport_error,
     }
+}
+
+/// The latest run of every worker whose result did not confirm cleanup. Reads
+/// still work after a shutdown.
+async fn unconfirmed(supervisor: &Supervisor) -> Vec<(String, Cleanup)> {
+    let Ok(listed) = supervisor.list().await else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for worker in listed.workers {
+        let Some(run) = worker.brief.last_run else {
+            continue;
+        };
+        let Ok(read) = supervisor
+            .read(Target::Run(run.clone()), Detail::Compact, None, None)
+            .await
+        else {
+            continue;
+        };
+        if let Some(ResultView::Compact(result)) = read.result
+            && result.cleanup != Cleanup::Confirmed
+        {
+            found.push((run, result.cleanup));
+        }
+    }
+    found
 }
