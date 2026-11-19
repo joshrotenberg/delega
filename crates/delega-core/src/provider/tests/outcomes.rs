@@ -497,3 +497,17 @@ async fn codex_recoverable_error_event_does_not_fail_a_completed_run() {
     assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
     rig.assert_nothing_left().await;
 }
+
+async fn a_dropped_wait_future_stops_the_run(provider: Provider) {
+    let rig = Rig::new();
+    let handle = start(rig.request(provider, "hang"), rig.options(provider));
+    rig.wait_started().await;
+    // Poll the wait future, then drop it before the run has ended.
+    let waited = tokio::time::timeout(Duration::from_millis(100), handle.wait()).await;
+    assert!(waited.is_err(), "the run must still be going");
+    rig.assert_nothing_left().await;
+}
+both!(
+    dropping_the_wait_future_interrupts_the_run,
+    a_dropped_wait_future_stops_the_run
+);

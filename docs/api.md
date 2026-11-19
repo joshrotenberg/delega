@@ -1,8 +1,9 @@
 # The delega API: a proposal
 
 Status: agreed design. The request and result contract, the CLI commands
-`run`, `schema`, `skill` and `version`, and the provider layer behind `run` are
-built; `mcp`, `init`, `doctor` and the library `Engine` are not. Josh settled
+`run`, `schema`, `skill` and `version`, the provider layer behind `run` and the
+library `Supervisor` behind the MCP tools ([supervisor.md](supervisor.md)) are
+built; the MCP server, `init` and `doctor` are not. Josh settled
 the open questions on 2026-11-18; the decisions and what was deferred are listed
 at the end. Parts marked **Later** are not in the first version.
 
@@ -304,7 +305,7 @@ eighth, `respond`, when live asking is added.
 | `start` | The request fields, or `profile` plus overrides | At once: worker id, run id, state `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. Queues behind a running run. |
 | `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
-| `read` | `run` or `worker`, `detail`, `after` (cursor) | The result if finished; otherwise state, partial text and recent activity. |
+| `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state, partial text and recent activity. |
 | `list` | none | Workers on this connection, their state, queue length and session ids. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
@@ -313,16 +314,44 @@ eighth, `respond`, when live asking is added.
 Rules that hold for every tool:
 
 - **Starting returns at once.** Only `wait` and `interrupt` wait for anything,
-  and both are bounded.
+  and `close` waits while it stops a running run; each is bounded. `wait` is
+  capped by the wait ceiling (300 s); `interrupt` and `close` wait for the run to
+  settle for at most 30 s, after which the response says it has not settled.
+  The MCP layer should keep waits short and pass the cursor back instead of
+  waiting long.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
   **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
-  an outcome.
+  an outcome. A worker is `queued` when nothing is running and a run waits for a
+  running slot, `running` while a run goes (more may wait behind it), `idle` when
+  nothing is running or queued, and `closed` for good after `close`. The
+  transition tables are in [supervisor.md](supervisor.md#states).
 - **Detail.** Every response is compact by default. `detail: "full"` adds
   process diagnostics, activity history and every field of the result.
 - **Limits** are admission limits on live workers and running runs, reported by
   `list` and `delega doctor`. A closed worker frees its slot. Reaching a limit
   is a `refused` outcome with the limit named, not a dead end that needs a
-  restart.
+  restart. The supervisor applies them so: a `start` beyond the live-worker limit
+  is refused (`limit_reached`); a `follow_up` beyond the per-worker queue limit
+  is refused (`queue_full`); a run beyond the running-runs limit is not refused,
+  it stays `queued` until a slot frees. Defaults are in
+  [supervisor.md](supervisor.md#limits-and-defaults).
+- **Refusals are runs.** A `start` or `follow_up` that cannot go ahead returns a
+  run id whose result is `refused`, and `read` returns it. A refused `start`
+  creates no worker. A `follow_up` is refused when the worker is closed
+  (`worker_closed`), its queue is full, the worker has no session to continue
+  (`no_session`, as for an `ephemeral` worker) or the prompt is invalid. An id
+  that names nothing is an error, not a run.
+- **Cursors** number every finished run and every activity entry in one
+  sequence. The `after` argument of `wait` and `read` is that cursor, called
+  `after_cursor` in the library. `wait` with a cursor returns when something
+  named finished after it; `read` with a cursor returns only activity after it.
+- **Long answers.** A compact `read` returns the first 20000 characters of the
+  answer and says so, with the full length; `text_offset` reads the window that
+  starts at that character, with the total and whether more follows. `detail:
+  full` returns everything.
+- **Retention.** Finished results stay readable for a bounded count (256) and
+  time (1 hour), after which their ids are unknown. Closing a worker discards its
+  queued runs, each finished `interrupted` with the message `discarded by close`.
 - **Ownership.** Workers belong to the connection that started them and stop
   when it closes.
 - **History is data.** Text a worker returns is never an instruction to the
@@ -382,9 +411,11 @@ review layer.
 ## Library
 
 The CLI and the MCP server are thin layers over one Rust API with the same
-nouns: build a `Request`, `start` it on an `Engine` to get a `Worker` and a
-`Run`, `wait` for the `Result`, `follow_up`, `interrupt`, `close`. Anything both
-surfaces compute lives in the library.
+nouns: build a `Request`, `start` it on a `Supervisor` to get a worker id and a
+run id, `wait` for the result, `read` it, `follow_up`, `interrupt`, `close`.
+Anything both surfaces compute lives in the library. `delega run` uses the
+provider layer's `run` directly, for one assignment in the foreground; the
+supervisor is for several at once.
 
 ## Not in this surface
 
