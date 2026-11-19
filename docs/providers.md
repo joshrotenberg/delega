@@ -281,8 +281,8 @@ A Claude worker starts with `--setting-sources ""`, so Claude Code loads none of
 the user's or the project's settings. One part of them is carried over: the
 `permissions.deny` rules. A rule the user wrote can only narrow a run, so delega
 reads those rules itself at launch and adds them to the worker. The earlier
-project (commit `8fa4645`) did the same for its reviewer workers; this layer
-applies it to every Claude worker and passes rules as written (see Anchoring).
+project (commit `8fa4645`) merged them for every worker and anchored only its
+reviewer workers' rules; this layer passes rules as written (see Anchoring).
 
 **Files, in order.** The directories come from the environment the worker will
 receive (`ProviderOptions::parent_env`, `env_pass`, `env_set` and the base
@@ -300,7 +300,14 @@ variables), not from the calling process.
    checkout when that root is a linked worktree. The root is the nearest ancestor
    holding `.git`. For a worktree, the `.git` file's `gitdir:` line is followed to
    the main checkout's `.git/worktrees/<name>`; if that cannot be followed only
-   the nearest root is read. `git` is not run.
+   the nearest root is read. `git` is not run. As Claude Code does, a root that is
+   the user's home directory, or that is not owned by the current user, or whose
+   settings file is not owned by the current user, is skipped: the file is not
+   read, and a note and the dry run's `deny_rules.skipped` name its path and the
+   reason. The `gitdir:` line is followed only to a directory directly under a
+   `worktrees` directory inside a `.git` directory, in a checkout the user owns (a
+   worktree may be named `worktrees`). The working directory's own files are
+   always read.
 
 Home and configuration directories are resolved to their real paths, so paths in
 notes are real paths. Managed (enterprise) settings are not read. A symbolic link
@@ -336,9 +343,11 @@ working directory), so those need no help. The one form that loses its meaning
 inline is a `Read` or `Edit` rule with exactly one leading slash, which Claude
 Code defines as relative to the settings file's location: for it the original
 rule is passed and an absolute rule `//BASE/path` is added beside it, where BASE
-is the directory holding the user's `settings.json` (the configuration
-directory, also when `CLAUDE_CONFIG_DIR` is set) or the directory holding the
-project's `.claude`. Adding a rule can only narrow a run. Rules for other tools
+is, for the user's `settings.json`, the directory holding it (the configuration
+directory, also when `CLAUDE_CONFIG_DIR` is set). For a project or local file
+there is one added rule for the working directory and, when the file is in the
+repository root or main checkout, another for the directory holding its
+`.claude`, which covers either reading of the documentation. Adding a rule can only narrow a run. Rules for other tools
 and rules starting `//` or `~/` are unchanged. Glob characters in BASE are
 escaped. Duplicates are removed, keeping the first.
 

@@ -1139,3 +1139,163 @@ async fn what_a_dry_run_reports_is_what_a_run_passes() {
     assert_eq!(passed, json!(plan.deny_rules.user_deny_rules));
     assert_eq!(plan.deny_rules.applied, passed.as_array().unwrap().len());
 }
+
+// ---- one-slash rules in project files, and which roots are trusted ----
+
+#[test]
+fn a_one_slash_rule_in_the_root_of_a_worktree_gets_the_working_directory_and_the_files_directory() {
+    let rig = Rig::new();
+    let main = rig.home.join("main");
+    git_dir(&main);
+    std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
+    put(
+        &main.join(".claude/settings.local.json"),
+        &deny_file(&["Edit(/out/main)"]),
+    );
+    std::fs::write(
+        rig.work.join(".git"),
+        format!("gitdir: {}/.git/worktrees/w\n", main.display()),
+    )
+    .unwrap();
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Read(/out/root)"]),
+    );
+    let sub = rig.work.join("sub");
+    put(
+        &sub.join(".claude/settings.json"),
+        &deny_file(&["Read(/out/start)"]),
+    );
+    let mut request = rig.request(Provider::Claude, "p");
+    request.cwd = Some(sub.clone());
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    let (sub, work, main) = (sub.display(), rig.work.display(), main.display());
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        [
+            "Read(/out/start)".to_string(),
+            format!("Read(/{sub}/out/start)"),
+            "Read(/out/root)".to_string(),
+            format!("Read(/{sub}/out/root)"),
+            format!("Read(/{work}/out/root)"),
+            "Edit(/out/main)".to_string(),
+            format!("Edit(/{sub}/out/main)"),
+            format!("Edit(/{main}/out/main)"),
+        ]
+    );
+}
+
+#[test]
+fn a_repository_root_that_is_the_home_directory_is_skipped_and_named() {
+    let rig = Rig::new();
+    git_dir(&rig.home);
+    put(
+        &rig.home.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(from-home-root)"]),
+    );
+    let sub = rig.home.join("proj");
+    std::fs::create_dir(&sub).unwrap();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.cwd = Some(sub);
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    assert_eq!(plan.deny_rules.applied, 0);
+    let skipped = &plan.deny_rules.skipped;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        skipped[0].path,
+        rig.home
+            .join(".claude/settings.local.json")
+            .display()
+            .to_string()
+    );
+    assert!(skipped[0].reason.contains("home directory"));
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("was ignored") && n.contains(&skipped[0].path)),
+        "{:?}",
+        plan.notes
+    );
+    assert!(!plan.notes.join("\n").contains("from-home-root"));
+    // Started in the home directory itself, its own file is read as today.
+    let plan = dry_run(
+        &{
+            let mut r = rig.request(Provider::Claude, "p");
+            r.cwd = Some(rig.home.clone());
+            r
+        },
+        &rig.options(Provider::Claude),
+    )
+    .unwrap();
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(from-home-root)"]);
+}
+
+#[test]
+fn a_root_not_owned_by_the_current_user_is_not_read_and_is_named() {
+    let rig = Rig::new();
+    git_dir(&rig.work);
+    let sub = rig.work.join("sub");
+    put(
+        &sub.join(".claude/settings.json"),
+        &deny_file(&["Bash(start)"]),
+    );
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Bash(root)"]),
+    );
+    let home = rig.home.clone().into_os_string();
+    let config = rig.config.clone().into_os_string();
+    let deny =
+        |euid| crate::provider::deny::collect_as(Some(&home), Some(&config), &sub, euid).unwrap();
+    let me = rustix::process::geteuid().as_raw();
+    assert_eq!(deny(me).rules, ["Bash(start)", "Bash(root)"]);
+    // Another user's view: the files here belong to someone else.
+    let other = deny(me.wrapping_add(1));
+    assert_eq!(other.rules, ["Bash(start)"]);
+    assert_eq!(other.skipped.len(), 1);
+    assert!(other.skipped[0].reason.contains("not owned"));
+    assert!(other.notes().iter().any(|n| n.contains("was ignored")));
+}
+
+#[test]
+fn a_gitdir_line_is_followed_only_to_a_worktrees_directory_of_an_owned_checkout() {
+    let rig = Rig::new();
+    let sub = rig.work.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let main = rig.home.join("main");
+    git_dir(&main);
+    put(
+        &main.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(main)"]),
+    );
+    let read = |gitdir: &str| {
+        std::fs::write(rig.work.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
+        let mut request = rig.request(Provider::Claude, "p");
+        request.cwd = Some(sub.clone());
+        dry_run(&request, &rig.options(Provider::Claude))
+            .unwrap()
+            .deny_rules
+            .applied
+    };
+    // An unrelated directory, a directory not under `worktrees`, and one that
+    // is not in a `.git` directory are not followed.
+    let unrelated = rig.home.join("unrelated");
+    std::fs::create_dir_all(&unrelated).unwrap();
+    put(
+        &unrelated.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(no)"]),
+    );
+    assert_eq!(read(&unrelated.display().to_string()), 0);
+    std::fs::create_dir_all(main.join(".git/refs")).unwrap();
+    assert_eq!(read(&format!("{}/.git/refs", main.display())), 0);
+    std::fs::create_dir_all(main.join("worktrees/w")).unwrap();
+    assert_eq!(read(&format!("{}/worktrees/w", main.display())), 0);
+    // A proper one is, including a worktree named `worktrees`.
+    std::fs::create_dir_all(main.join(".git/worktrees/worktrees")).unwrap();
+    assert_eq!(
+        read(&format!("{}/.git/worktrees/worktrees", main.display())),
+        1
+    );
+    std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
+    assert_eq!(read(&format!("{}/.git/worktrees/w", main.display())), 1);
+}

@@ -236,6 +236,12 @@ fn dry_run_text(plan: &DryRun) -> String {
             line(format!("  {}: {} deny rules", file.path, file.rules));
         }
     }
+    for file in &plan.deny_rules.skipped {
+        line(format!(
+            "Claude Code settings file ignored: {}: {}",
+            file.path, file.reason
+        ));
+    }
     if !plan.deny_rules.user_deny_rules.is_empty() {
         line(format!(
             "user deny rules ({} applied; permission patterns from those files, as they are \

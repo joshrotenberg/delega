@@ -279,7 +279,7 @@ Behavior:
   prints the same groups. It lists environment variable names, never values,
   never the names of withheld variables, and not the assignment, instructions or settings text, which are replaced by their
   size. For Claude it adds `deny_rules`: the settings files read with their rule
-  counts, `applied`, and the user's own deny rules under `user_deny_rules`
+  counts, any local settings files ignored with the reason (`skipped`), `applied`, and the user's own deny rules under `user_deny_rules`
   (bounded, with `omitted`); the launch arguments show a count in their place.
   A request that would be refused prints the refusal as for a run (a
   `refused` result in JSON, a line on standard error in text) and exits 2.

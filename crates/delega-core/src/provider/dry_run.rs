@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::contract::request::{Provider, Request};
 
 use super::codex::MCP_PLACEHOLDER;
-use super::deny::DenyFile;
+use super::deny::{DenyFile, SkippedFile};
 use super::env::EnvReport;
 use super::limits::{DRY_RUN_DENY_RULE_CHARS, DRY_RUN_DENY_RULES_SHOWN, MIN_CLAUDE_HOOK_VERSION};
 use super::options::ProviderOptions;
@@ -19,6 +19,8 @@ use super::refusal::{Refusal, clip};
 pub struct DenyReport {
     /// The settings files that exist and were read, with their rule counts.
     pub files: Vec<DenyFile>,
+    /// Existing local settings files that would be ignored, with the reason.
+    pub skipped: Vec<SkippedFile>,
     /// How many rules would be passed after deduplication and adding absolute forms.
     pub applied: usize,
     /// The rules themselves: the user's own permission patterns, as they would
@@ -86,6 +88,7 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
     let passed = take_deny_rules(&mut args);
     let deny_rules = DenyReport {
         files: plan.deny.files.clone(),
+        skipped: plan.deny.skipped.clone(),
         applied: passed.len(),
         user_deny_rules: passed
             .iter()

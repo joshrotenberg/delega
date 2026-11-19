@@ -64,7 +64,7 @@ mod structured;
 #[cfg(test)]
 mod tests;
 
-pub use deny::DenyFile;
+pub use deny::{DenyFile, SkippedFile};
 pub use dry_run::{DenyReport, DryRun, dry_run};
 pub use hook::HookCommand;
 pub use options::ProviderOptions;
