@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+jsonschema.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,7 +22,6 @@ tokio-util.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
-jsonschema.workspace = true
 tempfile.workspace = true
 
 [lints]
