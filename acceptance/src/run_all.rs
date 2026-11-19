@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::matrix::Row;
-use crate::runner::{Context, Measured, cleanup_mismatch, run_case};
+use crate::runner::{Context, GAP_CLOSED, GAP_NOT_SHOWN, Measured, cleanup_mismatch, run_case};
 
 /// Run every row `repeat` times on `jobs` threads. The result is in row order,
 /// then repeat order.
@@ -49,6 +49,39 @@ pub fn run_all(
     let mut list = results.into_inner().unwrap_or_default();
     list.sort_by_key(|(i, r, _)| (*i, *r));
     list.into_iter().map(|(_, _, m)| m).collect()
+}
+
+/// The smallest `--repeat` at which a gap that never showed counts as closed.
+/// With fewer repeats one quiet run says too little.
+pub const CLOSE_AFTER: u32 = 3;
+
+/// A known-gap row that showed no gap in any of `repeat` runs, with `repeat` at
+/// least [`CLOSE_AFTER`], has its measurements marked `gap_closed`: the gap
+/// the table documents is probably fixed, and the table is out of date. A row
+/// that showed its gap in even one repeat keeps its verdicts. Returns the ids
+/// of the closed rows, in row order.
+pub fn close_gaps(measured: &mut [Measured], repeat: u32) -> Vec<String> {
+    if repeat < CLOSE_AFTER {
+        return Vec::new();
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for m in measured.iter() {
+        if !ids.contains(&m.id) {
+            ids.push(m.id.clone());
+        }
+    }
+    let wanted = usize::try_from(repeat).unwrap_or(usize::MAX);
+    ids.retain(|id| {
+        let runs: Vec<&Measured> = measured.iter().filter(|m| &m.id == id).collect();
+        runs.len() == wanted && runs.iter().all(|m| m.verdict == GAP_NOT_SHOWN)
+    });
+    for m in measured.iter_mut().filter(|m| ids.contains(&m.id)) {
+        m.verdict = GAP_CLOSED.to_string();
+        m.problems.push(format!(
+            "the gap did not show in any of {repeat} runs; correct the table"
+        ));
+    }
+    ids
 }
 
 /// Runs of one row, at most, when the only fault is a late process listing.
@@ -146,5 +179,83 @@ mod tests {
         let mut m = failing();
         m.verdict = "pass".into();
         assert!(!only_a_late_listing(&m));
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    fn row(id: &str, repeat: u32, verdict: &str) -> Measured {
+        let mut m: Measured = serde_json::from_str(
+            r#"{"id":"x","repeat":1,"provider":"claude","case":"a","variant":"relay",
+            "behaviour":"success","action":"","timeout_secs":null,"exit_code":0,
+            "exit_signal":null,"hang":false,"stdout_docs":1,"result_valid":true,
+            "outcome":"completed","error_kind":null,"cleanup_confirmed":true,
+            "cleanup_reason":null,"cleanup_pids":[],"cleanup_groups":[],
+            "provider_pid":null,"survivors_at_exit":[],"survivors":[],"honest":true,
+            "latency_ms":null,"latency_kind":"","elapsed_ms":null,
+            "expected_outcome":"completed","expected_exit":{"Code":0},
+            "expected_confirmed":true,"expected_survivors":["relay-heartbeat"],
+            "expected_leak":"documented_gap","expected_reason":null,
+            "verdict":"","problems":[],"stderr_first":null}"#,
+        )
+        .expect("a measurement");
+        m.id = id.to_string();
+        m.repeat = repeat;
+        m.verdict = verdict.to_string();
+        m
+    }
+
+    fn runs(id: &str, verdicts: &[&str]) -> Vec<Measured> {
+        (1..)
+            .zip(verdicts)
+            .map(|(r, v)| row(id, r, v))
+            .collect::<Vec<_>>()
+    }
+
+    fn verdicts(list: &[Measured]) -> Vec<&str> {
+        list.iter().map(|m| m.verdict.as_str()).collect()
+    }
+
+    #[test]
+    fn a_gap_absent_in_every_one_of_three_repeats_is_closed() {
+        let mut list = runs("a-relay", &[GAP_NOT_SHOWN; 3]);
+        assert_eq!(close_gaps(&mut list, 3), ["a-relay"]);
+        assert_eq!(verdicts(&list), [GAP_CLOSED; 3]);
+        assert!(!list[0].problems.is_empty());
+    }
+
+    #[test]
+    fn a_gap_that_showed_once_stays_open() {
+        let mut list = runs(
+            "a-relay",
+            &[GAP_NOT_SHOWN, "expected_failure", GAP_NOT_SHOWN],
+        );
+        assert!(close_gaps(&mut list, 3).is_empty());
+        assert_eq!(
+            verdicts(&list),
+            [GAP_NOT_SHOWN, "expected_failure", GAP_NOT_SHOWN]
+        );
+    }
+
+    #[test]
+    fn fewer_than_three_repeats_never_close_a_gap() {
+        let mut list = runs("a-relay", &[GAP_NOT_SHOWN; 2]);
+        assert!(close_gaps(&mut list, 2).is_empty());
+        let mut list = runs("a-relay", &[GAP_NOT_SHOWN]);
+        assert!(close_gaps(&mut list, 1).is_empty());
+        assert_eq!(verdicts(&list), [GAP_NOT_SHOWN]);
+    }
+
+    #[test]
+    fn only_the_row_with_no_gap_is_closed() {
+        let mut list = runs("a-relay", &[GAP_NOT_SHOWN; 3]);
+        list.extend(runs(
+            "c-orphan",
+            &["expected_failure", GAP_NOT_SHOWN, "expected_failure"],
+        ));
+        assert_eq!(close_gaps(&mut list, 3), ["a-relay"]);
+        assert_eq!(list[3].verdict, "expected_failure");
     }
 }

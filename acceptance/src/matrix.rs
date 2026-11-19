@@ -238,10 +238,15 @@ pub const CASES: &[Case] = &[
     Case {
         id: "ed",
         behaviour: "crash",
-        timeout_secs: Some(3),
+        // The row is about a crash that happens while a time limit is pending,
+        // not about the limit. The limit is far longer than the crash so that
+        // a slow start on a loaded machine cannot let it fire first; a `delega`
+        // that waited for the pipe to close would run into the 30 s hang limit
+        // and fail the row as a hang.
+        timeout_secs: Some(25),
         action: Action::Wait,
         variants: &["plain", "pipe"],
-        desc: "provider SIGKILLs itself 0.5 s in, timeout 3 s",
+        desc: "provider SIGKILLs itself 0.5 s in, timeout 25 s",
         ps_unavailable: false,
         expect: ok("failed", 1),
     },

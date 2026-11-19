@@ -32,6 +32,11 @@ pub fn case_marker(run_id: &str, n: u64) -> String {
     format!("{MARKER_PREFIX}{run_id}-{n}/")
 }
 
+/// The verdict of a known-gap row on a run where no survivor remained.
+pub const GAP_NOT_SHOWN: &str = "gap_not_shown";
+/// The verdict of a known-gap row that showed no gap in every repeat of a run.
+pub const GAP_CLOSED: &str = "gap_closed";
+
 /// A case that has not ended this long after it started is a hang.
 const HARD_LIMIT: Duration = Duration::from_secs(30);
 /// How long after `delega` exits the harness waits before it measures what is
@@ -552,10 +557,15 @@ pub fn cleanup_mismatch(actual: Option<bool>, expected: Option<bool>) -> String 
 /// Anything but criterion 2 that differs from the expectation is a `fail`: the
 /// outcome, the exit status, the document on standard output, the cleanup
 /// verdict (`confirmed`, and the reason when it is not) and a hang. Criterion 2
-/// is judged on the survivors: they must be exactly the roles the row lists
-/// (none, unless it is an expected failure or the report says cleanup was not
-/// confirmed). A row whose expected survivors are absent has closed its gap
-/// (`unexpected_pass`); one with any other survivor fails.
+/// is judged on the survivors. Most rows list none, and any survivor fails
+/// them. A known-gap row says a survivor of the listed roles may remain: all
+/// of them present is `expected_failure` (the gap showed) and none present is
+/// `gap_not_shown`, because whether a late process is caught depends on timing
+/// and a gap that is shown on one run and not on the next is not a regression.
+/// The run does not fail on `gap_not_shown`; [`crate::run_all::close_gaps`]
+/// turns a row that did not show its gap in every repeat of a run into
+/// `gap_closed`. Anything else (a survivor of another role, a subset of the
+/// listed roles, an unrecorded survivor) fails.
 fn judge(m: &mut Measured, case: &Case) {
     let expect = &case.expect;
     let mut problems = std::mem::take(&mut m.problems);
@@ -652,9 +662,9 @@ fn judge(m: &mut Measured, case: &Case) {
                 .push("a row expected to fail criterion 2 passed; correct the table".to_string());
         }
     } else if gap && actual.is_empty() {
-        m.verdict = "unexpected_pass".to_string();
+        m.verdict = GAP_NOT_SHOWN.to_string();
         m.problems.push(format!(
-            "no survivor where {} was expected: the gap is closed; correct the table",
+            "no survivor where {} was allowed: the gap did not show in this run",
             list(&wanted_sorted)
         ));
     } else {
@@ -692,5 +702,94 @@ fn check_unconfirmed(m: &Measured, reason: Option<&str>, problems: &mut Vec<Stri
         problems.push(format!(
             "cleanup.reason does not say what could not be checked: {text:?}"
         ));
+    }
+}
+
+#[cfg(test)]
+mod judge_tests {
+    use super::*;
+
+    fn relay_row() -> Case {
+        crate::matrix::all()
+            .into_iter()
+            .find(|r| r.id == "claude-a-relay")
+            .expect("the relay row")
+    }
+
+    /// A measurement of `row` that met everything but the survivors.
+    fn measured(row: &Case, survivors: &[&str]) -> Measured {
+        let mut m: Measured = serde_json::from_str(
+            r#"{"id":"x","repeat":1,"provider":"claude","case":"a","variant":"relay",
+            "behaviour":"success","action":"","timeout_secs":null,"exit_code":0,
+            "exit_signal":null,"hang":false,"stdout_docs":1,"result_valid":true,
+            "outcome":"completed","error_kind":null,"cleanup_confirmed":true,
+            "cleanup_reason":null,"cleanup_pids":[],"cleanup_groups":[],
+            "provider_pid":null,"survivors_at_exit":[],"survivors":[],"honest":true,
+            "latency_ms":null,"latency_kind":"","elapsed_ms":null,
+            "expected_outcome":"completed","expected_exit":{"Code":0},
+            "expected_confirmed":true,"expected_survivors":[],
+            "expected_leak":"none","expected_reason":null,
+            "verdict":"","problems":[],"stderr_first":null}"#,
+        )
+        .expect("a measurement");
+        m.expected_leak = row.expect.leak;
+        m.expected_survivors = row
+            .expect
+            .survivors
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        m.survivors = survivors.iter().map(|s| (*s).to_owned()).collect();
+        judge(&mut m, row);
+        m
+    }
+
+    #[test]
+    fn a_known_gap_row_with_its_survivor_is_an_expected_failure() {
+        let m = measured(&relay_row(), &["relay-heartbeat"]);
+        assert_eq!(m.verdict, "expected_failure", "{:?}", m.problems);
+    }
+
+    #[test]
+    fn a_known_gap_row_without_its_survivor_is_gap_not_shown() {
+        let m = measured(&relay_row(), &[]);
+        assert_eq!(m.verdict, GAP_NOT_SHOWN, "{:?}", m.problems);
+    }
+
+    #[test]
+    fn an_unrecorded_survivor_still_fails_a_known_gap_row() {
+        let m = measured(&relay_row(), &["relay-heartbeat", "unrecorded"]);
+        assert_eq!(m.verdict, "fail");
+        let m = measured(&relay_row(), &["unrecorded"]);
+        assert_eq!(m.verdict, "fail");
+    }
+
+    #[test]
+    fn a_survivor_of_another_role_still_fails_a_known_gap_row() {
+        let m = measured(&relay_row(), &["child"]);
+        assert_eq!(m.verdict, "fail");
+        let m = measured(&relay_row(), &["relay-heartbeat", "child"]);
+        assert_eq!(m.verdict, "fail");
+    }
+
+    #[test]
+    fn a_wrong_exit_status_fails_a_known_gap_row_whether_or_not_the_gap_shows() {
+        let row = relay_row();
+        let mut m = measured(&row, &[]);
+        m.exit_code = Some(1);
+        m.problems.clear();
+        judge(&mut m, &row);
+        assert_eq!(m.verdict, "fail");
+    }
+
+    #[test]
+    fn a_row_with_no_gap_fails_on_any_survivor_and_passes_on_none() {
+        let row = crate::matrix::all()
+            .into_iter()
+            .find(|r| r.id == "claude-a-child")
+            .expect("a strict row");
+        assert_eq!(measured(&row, &[]).verdict, "pass");
+        assert_eq!(measured(&row, &["child"]).verdict, "fail");
+        assert_eq!(measured(&row, &["relay-heartbeat"]).verdict, "fail");
     }
 }

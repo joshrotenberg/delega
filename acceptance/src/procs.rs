@@ -8,7 +8,8 @@
 //! the fakes write is read instead: it counts when its recorded pid is alive
 //! and its command is exactly the one the fake starts, `sleep 300` (which rules out a reused pid). The
 //! ledger also maps a pid to a role; a marked process it does not know is
-//! reported as `unrecorded`, with one exception: a copy of a live recorded
+//! reported as `unrecorded` once it has had time to record itself
+//! (`settle_unrecorded`), with one exception: a copy of a live recorded
 //! provider script that the script forked and that has not yet called `exec`
 //! (same command line, parent the recorded provider) is a transient of the
 //! provider and is not counted (`is_forked_copy_of_a_provider`). A copy whose
@@ -19,7 +20,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 
 #[derive(Debug, Clone)]
 pub struct Proc {
@@ -104,21 +105,26 @@ pub fn carries(command: &str, marker: &str) -> bool {
 /// line carries `marker`, or that the ledger names with a role in
 /// `BARE_ROLES`; other than the pids in `except`.
 pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
-    let ledger = ledger(dir);
+    // The process table is read first and the ledger after it, so a process the
+    // table shows has had the longest possible time to record itself.
     let table = ps();
+    let ledger = ledger(dir);
     let mut found: Vec<Survivor> = table
         .iter()
         .filter(|p| !p.stat.starts_with('Z') && carries(&p.command, marker))
         .filter(|p| !except.contains(&p.pid))
         .filter(|p| !is_forked_copy_of_a_provider(p, &table, &ledger))
         .map(|p| Survivor {
-            role: ledger
-                .iter()
-                .find(|(_, pid)| *pid == p.pid)
-                .map_or_else(|| "unrecorded".to_owned(), |(r, _)| r.clone()),
+            role: role_in(&ledger, p.pid).unwrap_or_else(|| UNRECORDED.to_owned()),
             pid: p.pid,
         })
         .collect();
+    settle_unrecorded(
+        &mut found,
+        &|| self::ledger(dir),
+        &pid_exists,
+        UNRECORDED_GRACE,
+    );
     for (role, pid) in &ledger {
         let alive_bare = BARE_ROLES.contains(&role.as_str())
             && table
@@ -133,6 +139,69 @@ pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
     }
     found.sort_by_key(|s| s.pid);
     found
+}
+
+/// The role of a marked process the ledger does not know.
+pub const UNRECORDED: &str = "unrecorded";
+
+/// How long a marked process the ledger does not yet know is given to record
+/// itself. Every process the fakes start appends its role as its first act, but
+/// the first act of a process that was only just forked can wait for the
+/// scheduler for as long as the machine is busy. Only a process that is still
+/// alive and unknown after this is `unrecorded`, a real finding.
+const UNRECORDED_GRACE: Duration = Duration::from_secs(2);
+
+fn role_in(ledger: &[(String, i32)], pid: i32) -> Option<String> {
+    ledger
+        .iter()
+        .find(|(_, recorded)| *recorded == pid)
+        .map(|(role, _)| role.clone())
+}
+
+fn pid_exists(pid: i32) -> bool {
+    Pid::from_raw(pid).is_some_and(|pid| test_kill_process(pid).is_ok())
+}
+
+/// Give the survivors that the ledger did not know when the process table was
+/// read a chance to appear in it. The ledger is read again until each one is
+/// attributed to its role, until `grace` has passed, or until every one that is
+/// left has exited (the ledger is read once more after that, because a process
+/// records itself before it does anything else, so one that has exited has
+/// either recorded itself or never will). Whatever is still unknown keeps the
+/// role `unrecorded`.
+fn settle_unrecorded(
+    found: &mut [Survivor],
+    read_ledger: &dyn Fn() -> Vec<(String, i32)>,
+    alive: &dyn Fn(i32) -> bool,
+    grace: Duration,
+) {
+    let began = std::time::Instant::now();
+    let attribute = |found: &mut [Survivor]| {
+        let ledger = read_ledger();
+        for s in found.iter_mut().filter(|s| s.role == UNRECORDED) {
+            if let Some(role) = role_in(&ledger, s.pid) {
+                s.role = role;
+            }
+        }
+        found.iter().filter(|s| s.role == UNRECORDED).count()
+    };
+    loop {
+        if attribute(found) == 0 {
+            return;
+        }
+        let all_gone = found
+            .iter()
+            .filter(|s| s.role == UNRECORDED)
+            .all(|s| !alive(s.pid));
+        if all_gone {
+            attribute(found);
+            return;
+        }
+        if began.elapsed() >= grace {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Whether `p` is a copy of a provider script that the script forked and that
@@ -309,5 +378,79 @@ mod forked_copy_tests {
         // recorded child is not excused.
         let copy = proc(301, 300, "S", "sh /case/7/acc-child.sh plain");
         assert!(!dropped(&copy, &table()));
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn unknown(pid: i32) -> Survivor {
+        Survivor {
+            role: UNRECORDED.to_owned(),
+            pid,
+        }
+    }
+
+    #[test]
+    fn a_process_that_records_itself_in_time_is_attributed_to_its_role() {
+        let reads = Cell::new(0);
+        let ledger = || {
+            reads.set(reads.get() + 1);
+            if reads.get() >= 3 {
+                vec![("relay-heartbeat".to_owned(), 7)]
+            } else {
+                Vec::new()
+            }
+        };
+        let mut found = vec![unknown(7)];
+        settle_unrecorded(&mut found, &ledger, &|_| true, Duration::from_secs(5));
+        assert_eq!(found[0].role, "relay-heartbeat");
+    }
+
+    #[test]
+    fn a_process_that_stays_unknown_is_unrecorded_after_the_grace() {
+        let mut found = vec![unknown(7)];
+        let began = std::time::Instant::now();
+        settle_unrecorded(&mut found, &Vec::new, &|_| true, Duration::from_millis(100));
+        assert_eq!(found[0].role, UNRECORDED);
+        assert!(began.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_process_that_exited_without_recording_is_unrecorded_at_once() {
+        let mut found = vec![unknown(7)];
+        let began = std::time::Instant::now();
+        settle_unrecorded(&mut found, &Vec::new, &|_| false, Duration::from_secs(30));
+        assert_eq!(found[0].role, UNRECORDED);
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_process_that_recorded_itself_and_exited_is_attributed() {
+        let reads = Cell::new(0);
+        let ledger = || {
+            reads.set(reads.get() + 1);
+            // Visible only from the second read, after the process is seen gone.
+            if reads.get() >= 2 {
+                vec![("relay-heartbeat".to_owned(), 7)]
+            } else {
+                Vec::new()
+            }
+        };
+        let mut found = vec![unknown(7)];
+        settle_unrecorded(&mut found, &ledger, &|_| false, Duration::from_secs(30));
+        assert_eq!(found[0].role, "relay-heartbeat");
+    }
+
+    #[test]
+    fn recorded_survivors_are_left_alone() {
+        let mut found = vec![Survivor {
+            role: "child".to_owned(),
+            pid: 3,
+        }];
+        settle_unrecorded(&mut found, &Vec::new, &|_| true, Duration::from_secs(30));
+        assert_eq!(found[0].role, "child");
     }
 }

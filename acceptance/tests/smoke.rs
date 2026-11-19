@@ -27,7 +27,12 @@ fn the_smoke_rows_meet_their_expectations_and_leave_nothing_running() {
 
     let bad: Vec<String> = measured
         .iter()
-        .filter(|m| !matches!(m.verdict.as_str(), "pass" | "expected_failure"))
+        .filter(|m| {
+            !matches!(
+                m.verdict.as_str(),
+                "pass" | "expected_failure" | "gap_not_shown"
+            )
+        })
         .map(|m| format!("{}: {}: {}", m.id, m.verdict, m.problems.join("; ")))
         .collect();
     assert!(

@@ -115,6 +115,7 @@ struct Counts {
     honest: (usize, usize),
     pass: usize,
     expected_failure: usize,
+    gap_not_shown: usize,
     unexpected_pass: usize,
     fail: usize,
 }
@@ -137,6 +138,7 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
         match m.verdict.as_str() {
             "pass" => c.pass += 1,
             "expected_failure" => c.expected_failure += 1,
+            "gap_not_shown" => c.gap_not_shown += 1,
             "unexpected_pass" => c.unexpected_pass += 1,
             _ => c.fail += 1,
         }
@@ -146,7 +148,7 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
 
 fn counts_row(name: &str, c: &Counts) -> String {
     format!(
-        "| {name} | {} | {} | {} | {} of {} | {} | {} of {} | {} | {} | {} | {} |\n",
+        "| {name} | {} | {} | {} | {} of {} | {} | {} of {} | {} | {} | {} | {} | {} |\n",
         c.rows,
         c.outcome_exit,
         c.cleanup_ok,
@@ -157,12 +159,13 @@ fn counts_row(name: &str, c: &Counts) -> String {
         c.honest.1,
         c.pass,
         c.expected_failure,
+        c.gap_not_shown,
         c.unexpected_pass,
         c.fail,
     )
 }
 
-const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Honest report | Pass | Expected failure | Unexpected pass | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
+const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Honest report | Pass | Expected failure | Gap not shown | Unexpected pass | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
 
 fn ms_label(v: Option<u64>) -> String {
     v.map_or("-".to_string(), |x| format!("{x} ms"))
@@ -335,7 +338,12 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
 
     let bad: Vec<&Measured> = rows
         .iter()
-        .filter(|m| matches!(m.verdict.as_str(), "fail" | "unexpected_pass" | "skipped"))
+        .filter(|m| {
+            matches!(
+                m.verdict.as_str(),
+                "fail" | "unexpected_pass" | "skipped" | "gap_closed"
+            )
+        })
         .collect();
     out.push_str("## Failures that are not expected\n\n");
     if bad.is_empty() {
@@ -491,7 +499,7 @@ fn variation(repeats: &[Measured]) -> String {
         runs.len(),
         repeats.len() / runs.len().max(1)
     );
-    out.push_str("| Run | Pass | Expected failure | Unexpected pass | Fail | p99 latency (not SIGKILL) | Max latency |\n| --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| Run | Pass | Expected failure | Gap not shown | Unexpected pass | Fail | p99 latency (not SIGKILL) | Max latency |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for r in &runs {
         let c = counts(repeats.iter().filter(|m| m.repeat == *r));
         let mut lat: Vec<u64> = repeats
@@ -502,9 +510,10 @@ fn variation(repeats: &[Measured]) -> String {
         lat.sort_unstable();
         let _ = writeln!(
             out,
-            "| {r} | {} | {} | {} | {} | {} | {} |",
+            "| {r} | {} | {} | {} | {} | {} | {} | {} |",
             c.pass,
             c.expected_failure,
+            c.gap_not_shown,
             c.unexpected_pass,
             c.fail,
             ms_label(percentile(&lat, 99)),
