@@ -305,7 +305,7 @@ eighth, `respond`, when live asking is added.
 | `start` | The request fields, or `profile` plus overrides | At once: worker id, run id, state `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. Queues behind a running run. |
 | `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
-| `read` | `run` or `worker`, `detail`, `after` (cursor) | The result if finished; otherwise state, partial text and recent activity. |
+| `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state, partial text and recent activity. |
 | `list` | none | Workers on this connection, their state, queue length and session ids. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
@@ -345,6 +345,10 @@ Rules that hold for every tool:
   sequence. The `after` argument of `wait` and `read` is that cursor, called
   `after_cursor` in the library. `wait` with a cursor returns when something
   named finished after it; `read` with a cursor returns only activity after it.
+- **Long answers.** A compact `read` returns the first 20000 characters of the
+  answer and says so, with the full length; `text_offset` reads the window that
+  starts at that character, with the total and whether more follows. `detail:
+  full` returns everything.
 - **Retention.** Finished results stay readable for a bounded count (256) and
   time (1 hour), after which their ids are unknown. Closing a worker discards its
   queued runs, each finished `interrupted` with the message `discarded by close`.
