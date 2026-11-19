@@ -94,9 +94,3 @@ pub(crate) fn apply_env(options: &mut delega_core::provider::ProviderOptions, gi
         }
     }
 }
-
-/// Report that a planned subcommand is not built yet.
-pub(super) fn not_implemented(name: &str) -> ExitCode {
-    eprintln!("delega {name}: not implemented yet");
-    ExitCode::from(EXIT_REFUSED)
-}
