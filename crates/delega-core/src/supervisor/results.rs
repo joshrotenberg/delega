@@ -1,0 +1,147 @@
+//! Results for runs the provider layer never saw, built with the contract's
+//! constructors.
+//!
+//! A run that never started, one that was stopped in the queue, one refused at
+//! admission and one whose task failed all still end in exactly one valid
+//! result. The queued time counts: `timing.queued_at` is when the supervisor
+//! admitted the run.
+
+use std::time::SystemTime;
+
+use crate::VERSION;
+use crate::contract::result::{
+    AppliedPermissions, Cleanup, ErrorDetail, Provenance, RefusalContext, RunContext, RunResult,
+    Timing, WorkerRef,
+};
+use crate::contract::validate::Problem;
+use crate::process::rfc3339_utc;
+
+use super::record::Run;
+
+pub(super) fn provenance() -> Provenance {
+    Provenance {
+        delega_version: VERSION.to_string(),
+        build: None,
+        provider_executable: None,
+        provider_version: None,
+    }
+}
+
+fn permissions(run: &Run) -> AppliedPermissions {
+    AppliedPermissions {
+        mode: run.mode,
+        denied: Vec::new(),
+    }
+}
+
+/// The timing of a run that ends now, whether or not it started.
+pub(super) fn timing(run: &Run, finished: SystemTime) -> Timing {
+    Timing {
+        queued_at: rfc3339_utc(run.queued_at),
+        started_at: run.started_at.map(rfc3339_utc),
+        finished_at: rfc3339_utc(finished),
+        duration_ms: run.started.map_or(0, |s| {
+            s.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+        }),
+        timeout_secs: run.timeout_secs,
+    }
+}
+
+fn refusal_context(run: &Run, worker: Option<WorkerRef>) -> RefusalContext {
+    RefusalContext {
+        run: run.id.clone(),
+        worker,
+        provider: Some(run.provider),
+        permissions: permissions(run),
+        timing: timing(run, SystemTime::now()),
+        provenance: provenance(),
+    }
+}
+
+fn context(run: &Run, worker: Option<WorkerRef>, cleanup: Cleanup) -> RunContext {
+    RunContext {
+        run: run.id.clone(),
+        worker,
+        provider: run.provider,
+        permissions: permissions(run),
+        cleanup,
+        timing: timing(run, SystemTime::now()),
+        provenance: provenance(),
+    }
+}
+
+/// The run did not go ahead, for a stated reason.
+pub(super) fn refused(
+    run: &Run,
+    worker: Option<WorkerRef>,
+    kind: &str,
+    message: &str,
+) -> RunResult {
+    RunResult::refused_before_start(refusal_context(run, worker), kind, message)
+}
+
+/// The request failed validation. `problems` is never empty here.
+pub(super) fn refused_invalid(
+    run: &Run,
+    worker: Option<WorkerRef>,
+    problems: &[Problem],
+) -> RunResult {
+    RunResult::refused_invalid(refusal_context(run, worker.clone()), problems)
+        .unwrap_or_else(|_| refused(run, worker, "invalid_request", "the request is not valid"))
+}
+
+/// The run was stopped before its provider started.
+pub(super) fn interrupted_unstarted(run: &Run, worker: Option<WorkerRef>, why: &str) -> RunResult {
+    RunResult::interrupted(context(run, worker, Cleanup::Confirmed), why, "")
+}
+
+/// The task that followed the run ended without a result. Whatever it started
+/// was sent an interrupt, and nothing confirmed it stopped.
+pub(super) fn crashed(
+    run: &Run,
+    worker: Option<WorkerRef>,
+    why: &str,
+    partial_text: String,
+) -> RunResult {
+    let cleanup = Cleanup::Unconfirmed {
+        pids: Vec::new(),
+        process_groups: Vec::new(),
+        reason: format!(
+            "{why}; the provider process, if one started, was sent an interrupt but nothing \
+             confirmed it stopped"
+        ),
+    };
+    RunResult::failed(
+        context(run, worker, cleanup),
+        ErrorDetail {
+            kind: "internal_error".to_string(),
+            message: why.to_string(),
+            provider_exit_code: None,
+        },
+        partial_text,
+    )
+}
+
+/// A result that failed `RunResult::validate`, replaced by one that does not.
+pub(super) fn invalid_result(
+    run: &Run,
+    worker: Option<WorkerRef>,
+    problems: &[Problem],
+    cleanup: Cleanup,
+    partial_text: String,
+) -> RunResult {
+    let message = problems
+        .iter()
+        .map(Problem::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    RunResult::failed(
+        context(run, worker, cleanup),
+        ErrorDetail {
+            kind: "internal_error".to_string(),
+            message: format!("the provider layer returned an inconsistent result: {message}"),
+            provider_exit_code: None,
+        },
+        partial_text,
+    )
+}

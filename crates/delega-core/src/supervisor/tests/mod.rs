@@ -1,0 +1,289 @@
+//! Tests for the supervisor, against the fake provider executables.
+//!
+//! Each test copies the fakes into a directory of its own, so the path of that
+//! directory is in the command line of every process the test starts. The
+//! test ends by listing the process table and failing if any process still
+//! carries it. Every test runs with a temporary home and a parent environment
+//! it builds itself, so none reads or writes real provider state.
+//!
+//! A run is held open by a gate: the prompt `gate:<file>` makes the fake write
+//! `<file>.started`, then wait until `<file>` exists. That makes the order of
+//! events a test depends on a fact about files, not about timing.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use tempfile::TempDir;
+
+use crate::contract::request::{Provider, Request};
+use crate::contract::result::RunResult;
+use crate::provider::ProviderOptions;
+
+use super::{
+    Detail, Limits, ReadResponse, ResultView, Supervisor, SupervisorConfig, Target, WaitTargets,
+};
+
+mod lifecycle;
+mod limits;
+mod reads;
+mod state;
+mod stops;
+mod stress;
+mod waits;
+
+/// A private area per test.
+pub(super) struct Rig {
+    _tmp: TempDir,
+    root: PathBuf,
+    work: PathBuf,
+    record: PathBuf,
+    home: PathBuf,
+    config: PathBuf,
+    fakes: PathBuf,
+    session: String,
+}
+
+/// A run held open until the test lets it go.
+pub(super) struct Gate(PathBuf);
+
+impl Gate {
+    /// The prompt that holds a run on this gate.
+    pub fn prompt(&self) -> String {
+        format!("gate:{}", self.0.display())
+    }
+
+    /// Let the run finish.
+    pub fn open(&self) {
+        std::fs::write(&self.0, b"").expect("open the gate");
+    }
+
+    fn started_marker(&self) -> PathBuf {
+        let mut name = self.0.clone().into_os_string();
+        name.push(".started");
+        PathBuf::from(name)
+    }
+
+    /// Whether the fake has begun the run held on this gate.
+    pub fn has_started(&self) -> bool {
+        self.started_marker().exists()
+    }
+
+    /// Wait until the fake has begun the run held on this gate.
+    pub async fn started(&self) {
+        for _ in 0..1500 {
+            if self.has_started() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the run held on {} never started", self.0.display());
+    }
+
+    /// Assert that the fake has not begun the run held on this gate, after
+    /// giving it time it would have needed.
+    pub async fn assert_not_started(&self) {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !self.has_started(),
+            "the run held on {} started too early",
+            self.0.display()
+        );
+    }
+}
+
+impl Rig {
+    pub fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("create temporary directory");
+        let root = std::fs::canonicalize(tmp.path()).expect("resolve temporary directory");
+        let make = |name: &str| {
+            let path = root.join(name);
+            std::fs::create_dir(&path).expect("create directory");
+            path
+        };
+        let fakes = make("fakes");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/provider/tests/fakes");
+        for name in [
+            "fake-claude.sh",
+            "fake-codex.sh",
+            "acc-lib.sh",
+            "acc-child.sh",
+        ] {
+            std::fs::copy(source.join(name), fakes.join(name)).expect("copy a fake");
+        }
+        let session = format!(
+            "session-{}",
+            root.file_name().and_then(|n| n.to_str()).unwrap_or("x")
+        );
+        Self {
+            work: make("work"),
+            record: make("record"),
+            home: make("home"),
+            config: make("config"),
+            fakes,
+            root,
+            session,
+            _tmp: tmp,
+        }
+    }
+
+    /// The session id the fakes report when they are not resuming one.
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    pub fn gate(&self, name: &str) -> Gate {
+        Gate(self.root.join(format!("gate-{name}")))
+    }
+
+    /// Options that run the fake for `provider` with a controlled environment.
+    pub fn options(&self, provider: Provider) -> ProviderOptions {
+        let name = match provider {
+            Provider::Claude => "fake-claude.sh",
+            Provider::Codex => "fake-codex.sh",
+        };
+        let text = |p: &PathBuf| p.to_string_lossy().into_owned();
+        ProviderOptions {
+            executable: Some(self.fakes.join(name)),
+            parent_env: Some(vec![
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), self.home.clone().into_os_string()),
+            ]),
+            env_set: vec![
+                ("FAKE_RECORD_DIR".into(), text(&self.record)),
+                ("FAKE_SESSION_ID".into(), self.session.clone()),
+                ("XDG_CONFIG_HOME".into(), text(&self.config)),
+                ("CLAUDE_CONFIG_DIR".into(), text(&self.config)),
+                ("CODEX_HOME".into(), text(&self.config)),
+            ],
+            stop_grace: Some(Duration::from_millis(200)),
+            ..ProviderOptions::default()
+        }
+    }
+
+    pub fn config(&self, provider: Provider) -> SupervisorConfig {
+        SupervisorConfig {
+            provider: self.options(provider),
+            ..SupervisorConfig::default()
+        }
+    }
+
+    pub fn config_with(&self, provider: Provider, limits: Limits) -> SupervisorConfig {
+        SupervisorConfig {
+            limits,
+            ..self.config(provider)
+        }
+    }
+
+    pub fn supervisor(&self, provider: Provider) -> Supervisor {
+        Supervisor::new(self.config(provider))
+    }
+
+    pub fn request(&self, provider: Provider, prompt: &str) -> Request {
+        let mut request = Request::new(provider, prompt);
+        request.cwd = Some(self.work.clone());
+        request
+    }
+
+    /// The arguments the fake received on its latest start.
+    pub fn argv(&self) -> Vec<String> {
+        let bytes = std::fs::read(self.record.join("argv")).unwrap_or_default();
+        let mut parts: Vec<String> = bytes
+            .split(|b| *b == 0)
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        parts.pop();
+        parts
+    }
+
+    /// Processes whose command line carries this rig's directory.
+    fn survivors(&self) -> Vec<String> {
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-axww", "-o", "pid=,command="])
+            .output()
+            .expect("run ps");
+        let marker = self.root.to_string_lossy().into_owned();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains(&marker))
+            .map(|l| l.trim().to_string())
+            .collect()
+    }
+
+    /// Fail if a process started for this test is still alive after ten
+    /// seconds.
+    pub async fn assert_nothing_left(&self) {
+        let mut left = Vec::new();
+        for _ in 0..1000 {
+            left = self.survivors();
+            if left.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("processes are still running: {left:#?}");
+    }
+}
+
+/// Wait for the runs to finish; the wait must not time out.
+pub(super) async fn finished(supervisor: &Supervisor, runs: &[&str]) -> super::WaitResponse {
+    let targets = WaitTargets {
+        runs: runs.iter().map(ToString::to_string).collect(),
+        workers: Vec::new(),
+    };
+    let response = supervisor
+        .wait(targets, Some(60), None)
+        .await
+        .expect("wait answers");
+    assert!(!response.timed_out, "{response:#?}");
+    response
+}
+
+/// Wait for one run to finish and return its whole result, checked.
+pub(super) async fn result_of(supervisor: &Supervisor, run: &str) -> RunResult {
+    loop {
+        let waited = finished(supervisor, &[run]).await;
+        if waited.runs.iter().all(|r| r.outcome.is_some()) {
+            break;
+        }
+    }
+    let read = read_full(supervisor, run).await;
+    let Some(ResultView::Full(result)) = read.result else {
+        panic!("run {run} has no full result: {read:#?}");
+    };
+    assert_eq!(result.validate(), Ok(()), "{result:#?}");
+    *result
+}
+
+pub(super) async fn read_full(supervisor: &Supervisor, run: &str) -> ReadResponse {
+    supervisor
+        .read(Target::Run(run.to_string()), Detail::Full, None)
+        .await
+        .expect("read answers")
+}
+
+pub(super) async fn read_compact(supervisor: &Supervisor, run: &str) -> ReadResponse {
+    supervisor
+        .read(Target::Run(run.to_string()), Detail::Compact, None)
+        .await
+        .expect("read answers")
+}
+
+/// Poll `read` until the run has begun writing, so partial text exists.
+pub(super) async fn read_until_text(supervisor: &Supervisor, run: &str) -> ReadResponse {
+    for _ in 0..1500 {
+        let read = read_compact(supervisor, run).await;
+        if read
+            .progress
+            .as_ref()
+            .is_some_and(|p| !p.partial_text.is_empty())
+        {
+            return read;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run} never showed partial text");
+}
+
+/// A request for each provider.
+pub(super) const BOTH: [Provider; 2] = [Provider::Claude, Provider::Codex];
