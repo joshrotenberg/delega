@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::contract::request::{Provider, Request};
 
 use super::codex::MCP_PLACEHOLDER;
+use super::env::EnvReport;
 use super::limits::MIN_CLAUDE_HOOK_VERSION;
 use super::options::ProviderOptions;
 use super::permissions::Mapping;
@@ -25,6 +26,11 @@ pub struct DryRun {
     /// The names of the environment variables the provider would receive,
     /// sorted.
     pub env_names: Vec<String>,
+    /// The same names by reason (base, network, provider, named by the
+    /// caller, set), the names the caller asked for that are not set, and the
+    /// count of the caller's variables that are withheld. Names of withheld
+    /// variables are not reported.
+    pub env: EnvReport,
     /// The working directory, absolute.
     pub cwd: String,
     /// The time limit in seconds.
@@ -75,6 +81,7 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
         program,
         args,
         env_names: plan.env.names(),
+        env: plan.env.report().clone(),
         cwd: plan.scope.cwd.display().to_string(),
         time_limit_secs: plan.time_limit.as_secs(),
         stdin_bytes: plan.stdin.len(),

@@ -80,6 +80,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         Provider::Claude => claude::build(&inputs)?,
         Provider::Codex => codex::build(&inputs)?,
     };
+    env::check_names(&options.env_pass, &options.env_set, &built.env)?;
     let env = env::resolve(&EnvInputs {
         provider: request.provider,
         parent: &parent,
@@ -91,6 +92,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
     let mut notes = built.notes;
     notes.extend(wide_scope_note(&scope, &parent));
     notes.extend(assembled.notes);
+    notes.extend(env.notes());
     let mapping = Mapping {
         mode: scope.mode,
         commands: built.commands,

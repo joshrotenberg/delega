@@ -58,6 +58,19 @@ Use it when the request is built from several sources. With `--output json` it
 prints a versioned object that lists the environment variable names the worker
 would receive, never their values.
 
+## Environment
+
+A worker does not inherit your environment. It gets the user, shell, locale and
+directory variables, proxy and certificate settings, and the provider's own
+variables, and nothing else. Give it what a task needs with `--env NAME`, which
+passes your value of `NAME`, or `--env NAME=VALUE`, which sets it; repeat the
+flag for more, short form `-e`. Typical needs are a cloud credential for Claude
+on Bedrock or Vertex, or a toolchain home such as `JAVA_HOME` for a command you
+allow. Prefer the `NAME` form for secrets: a value on the command line is
+visible in the process table and in shell history. A `NAME` that is not set is
+ignored, and `--dry-run` lists what would be passed by reason, with the count
+of what is withheld.
+
 ## Outcomes and exit status
 
 Every run ends in exactly one outcome, and the exit status follows it.

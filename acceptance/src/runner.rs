@@ -190,6 +190,9 @@ impl Fixture {
             "-C",
         ]);
         command.arg(&self.work);
+        // Workers do not inherit the caller's environment; the fakes write
+        // their records to the directory this variable names.
+        command.args(["--env", "FAKE_RECORD_DIR"]);
         if let Some(secs) = case.case.timeout_secs {
             command.args(["--timeout", &format!("{secs}s")]);
         }

@@ -59,6 +59,8 @@ for arg in "$@"; do
   if [ "$prev" = "-c" ]; then
     case "$arg" in
       sandbox_mode=*) sandbox=$(printf '%s' "${arg#sandbox_mode=}" | tr -d '"') ;;
+      # Accepted, and nothing else: the fake starts no shell profile.
+      allow_login_shell=*) ;;
     esac
   fi
   prev="$arg"

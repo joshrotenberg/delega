@@ -24,11 +24,16 @@ pub struct ProviderOptions {
     /// it, `permissions.commands` is not granted to a Claude worker and the
     /// result says so. See [`super::hook`].
     pub hook: Option<HookCommand>,
-    /// Names of inherited variables to pass even though the policy would strip
-    /// them, such as a cloud credential a provider needs.
+    /// Names of variables of the parent environment to pass although the
+    /// allowlist does not cover them, such as a cloud credential or a
+    /// toolchain home. A name that is not set in the parent is ignored. A name
+    /// that is not a valid variable name, that describes the calling session or
+    /// that starts with `DELEGA_` is refused before start.
     pub env_pass: Vec<String>,
     /// Variables to set for the provider, after the policy has run. A name the
-    /// adapter owns cannot be overridden.
+    /// adapter owns cannot be overridden. A name that is not valid, that
+    /// describes the calling session or that starts with `DELEGA_` is refused
+    /// before start, as for `env_pass`.
     pub env_set: Vec<(String, String)>,
     /// The environment to inherit from. `None` means this process's
     /// environment. Tests set it to stay independent of the real one.
