@@ -298,20 +298,42 @@ variables), not from the calling process.
    of the git repository the working directory is inside (Claude Code reads it
    from the repository root as well as the start directory), then under the main
    checkout when that root is a linked worktree. The root is the nearest ancestor
-   holding `.git`. For a worktree, the `.git` file's `gitdir:` line is followed to
-   the main checkout's `.git/worktrees/<name>`; if that cannot be followed only
-   the nearest root is read. `git` is not run. As Claude Code does, a root that is
-   the user's home directory, or that is not owned by the current user, or whose
-   settings file is not owned by the current user, is skipped: the file is not
-   read, and a note and the dry run's `deny_rules.skipped` name its path and the
-   reason. The `gitdir:` line is followed only to a directory directly under a
-   `worktrees` directory inside a `.git` directory, in a checkout the user owns (a
-   worktree may be named `worktrees`). The working directory's own files are
+   holding `.git`. `git` is not run. The working directory's own files are
    always read.
 
+   *A root is skipped.* As Claude Code does, a root that is the user's home
+   directory is skipped, and so is a root whose root directory, `.git` entry,
+   `.claude` directory or settings file is not owned by the current user. This
+   applies to the main checkout as to any other root. The file is not read, and a
+   note and the dry run's `deny_rules.skipped` name its path and the reason.
+
+   *Links.* A symbolic link is never followed in a repository root: if `.git`,
+   `.claude` or the settings file there is a symbolic link, the root's file is
+   skipped for that reason, whoever owns the target. The reason is that another
+   user can plant links in a tree the user owns but others can write (a
+   group-writable directory, or one under `/tmp`) so that the user's own files
+   are read as that project's rules. The file is opened through each directory
+   from the one above without following links, and its owner is judged on the
+   open file, so it cannot be swapped between the check and the read. The user's
+   own settings file (item 1) and the working directory's files (items 2 and 3)
+   may be symbolic links, as a dotfiles setup makes them; a link to a regular
+   file is followed.
+
+   *The main checkout.* For a worktree, the `.git` file's `gitdir:` line is
+   followed only to a directory directly under a `worktrees` directory inside a
+   directory called `.git` (a worktree may be named `worktrees`), and only when
+   that directory's `gitdir` file names this worktree's `.git` file. A `.git`
+   file planted in a tree such as an unpacked archive therefore cannot borrow
+   another checkout's rules. When the main checkout cannot be identified (a
+   `.git` file that is not owned by the user, that has no `gitdir:` line or names
+   nothing, a `.git` that is a symbolic link or a git directory kept elsewhere,
+   or a `gitdir` file that does not name this worktree) only the nearest root is
+   read and a note says the main checkout could not be identified and why. A
+   `.git` file that points elsewhere than a `worktrees` directory, as a
+   submodule's does, is not a linked worktree and gets no note.
+
 Home and configuration directories are resolved to their real paths, so paths in
-notes are real paths. Managed (enterprise) settings are not read. A symbolic link
-to a regular file is followed. A missing file contributes nothing, and an empty
+notes are real paths. Managed (enterprise) settings are not read. A missing file contributes nothing, and an empty
 file (or one with only whitespace) is a file with no rules. A UTF-8 byte order
 mark is ignored.
 
@@ -371,9 +393,11 @@ launch with and without rules and find only the added `permissions` key.
 **What a user sees.** A note on every Claude run says that settings other than
 deny rules were not applied (hooks, env, apiKeyHelper, plugins, skills, MCP
 servers, instructions), and another gives the number of rules applied with the
-path and count of each file, or says none were found. The mapping lists
+path and count of each file, or says none were found. A settings file that was
+ignored (see the roots above) and a main checkout that could not be identified
+each get their own note naming the path and the reason. The mapping lists
 `denyRules=N`. `dry_run` has a `deny_rules` object: the files read with their
-rule counts, `applied`, and `user_deny_rules`, the rules as they would be passed,
+rule counts, any local settings files ignored with the reason (`skipped`), `applied`, and `user_deny_rules`, the rules as they would be passed,
 at most `DRY_RUN_DENY_RULES_SHOWN` (100) of them and each at most
 `DRY_RUN_DENY_RULE_CHARS` (200) characters, with `omitted` counting the rest. The
 rules are permission patterns the user wrote, not secrets, and they appear only

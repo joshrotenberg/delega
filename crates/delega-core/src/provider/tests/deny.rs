@@ -957,6 +957,25 @@ fn git_dir(path: &Path) {
     std::fs::create_dir_all(path.join(".git")).unwrap();
 }
 
+/// Make `linked` a linked worktree of `main` as git does: an administrative
+/// directory `main/.git/worktrees/<name>` whose `gitdir` file names
+/// `linked/.git`, and that `.git` file pointing back at the directory.
+fn link_worktree(main: &Path, name: &str, linked: &Path) {
+    let admin = main.join(".git/worktrees").join(name);
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", linked.join(".git").display()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(linked).unwrap();
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+}
+
 #[test]
 fn local_settings_are_also_read_from_the_repository_root_and_shared_settings_are_not() {
     let rig = Rig::new();
@@ -1014,17 +1033,12 @@ fn a_linked_worktree_also_reads_the_main_checkouts_local_settings() {
     let rig = Rig::new();
     let main = rig.home.join("main");
     git_dir(&main);
-    std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
     put(
         &main.join(".claude/settings.local.json"),
         &deny_file(&["Bash(main-local)"]),
     );
     let linked = rig.work.clone();
-    std::fs::write(
-        linked.join(".git"),
-        format!("gitdir: {}/.git/worktrees/w\n", main.display()),
-    )
-    .unwrap();
+    link_worktree(&main, "w", &linked);
     put(
         &project_file(&rig, "settings.local.json"),
         &deny_file(&["Bash(linked-local)"]),
@@ -1039,10 +1053,16 @@ fn a_linked_worktree_also_reads_the_main_checkouts_local_settings() {
         ["Bash(linked-local)", "Bash(main-local)"]
     );
 
-    // A `.git` file that points nowhere useful leaves the nearest root only.
+    // A `.git` file that points nowhere useful leaves the nearest root only, and
+    // a note says so.
     std::fs::write(linked.join(".git"), "gitdir: /nonexistent/x\n").unwrap();
     let plan = dry(&rig);
     assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(linked-local)"]);
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("could not be identified"))
+    );
 }
 
 // ---- file handling ----
@@ -1147,16 +1167,11 @@ fn a_one_slash_rule_in_the_root_of_a_worktree_gets_the_working_directory_and_the
     let rig = Rig::new();
     let main = rig.home.join("main");
     git_dir(&main);
-    std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
     put(
         &main.join(".claude/settings.local.json"),
         &deny_file(&["Edit(/out/main)"]),
     );
-    std::fs::write(
-        rig.work.join(".git"),
-        format!("gitdir: {}/.git/worktrees/w\n", main.display()),
-    )
-    .unwrap();
+    link_worktree(&main, "w", &rig.work);
     put(
         &project_file(&rig, "settings.local.json"),
         &deny_file(&["Read(/out/root)"]),
@@ -1230,6 +1245,14 @@ fn a_repository_root_that_is_the_home_directory_is_skipped_and_named() {
     assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(from-home-root)"]);
 }
 
+fn owner<'a>(euid: u32, foreign: &'a [std::path::PathBuf]) -> crate::provider::deny::Owner<'a> {
+    crate::provider::deny::Owner { euid, foreign }
+}
+
+fn me() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 #[test]
 fn a_root_not_owned_by_the_current_user_is_not_read_and_is_named() {
     let rig = Rig::new();
@@ -1239,22 +1262,117 @@ fn a_root_not_owned_by_the_current_user_is_not_read_and_is_named() {
         &sub.join(".claude/settings.json"),
         &deny_file(&["Bash(start)"]),
     );
-    put(
-        &project_file(&rig, "settings.local.json"),
-        &deny_file(&["Bash(root)"]),
-    );
+    let file = project_file(&rig, "settings.local.json");
+    put(&file, &deny_file(&["Bash(root)"]));
     let home = rig.home.clone().into_os_string();
     let config = rig.config.clone().into_os_string();
-    let deny =
-        |euid| crate::provider::deny::collect_as(Some(&home), Some(&config), &sub, euid).unwrap();
-    let me = rustix::process::geteuid().as_raw();
-    assert_eq!(deny(me).rules, ["Bash(start)", "Bash(root)"]);
+    let deny = |euid: u32, foreign: &[std::path::PathBuf]| {
+        crate::provider::deny::collect_as(Some(&home), Some(&config), &sub, owner(euid, foreign))
+            .unwrap()
+    };
+    assert_eq!(deny(me(), &[]).rules, ["Bash(start)", "Bash(root)"]);
     // Another user's view: the files here belong to someone else.
-    let other = deny(me.wrapping_add(1));
+    let other = deny(me().wrapping_add(1), &[]);
     assert_eq!(other.rules, ["Bash(start)"]);
     assert_eq!(other.skipped.len(), 1);
     assert!(other.skipped[0].reason.contains("not owned"));
     assert!(other.notes().iter().any(|n| n.contains("was ignored")));
+
+    // Each entry on the way to the file is judged on its own: with only that
+    // entry owned by someone else, the file is skipped for that reason.
+    let entries = [
+        (
+            rig.work.clone(),
+            "the repository root is not owned by the current user",
+        ),
+        (
+            rig.work.join(".git"),
+            "the .git entry of the repository root is not owned by the current user",
+        ),
+        (
+            rig.work.join(".claude"),
+            "the .claude directory is not owned by the current user",
+        ),
+        (
+            file.clone(),
+            "the settings file is not owned by the current user",
+        ),
+    ];
+    for (entry, reason) in entries {
+        let foreign = [entry.clone()];
+        let got = deny(me(), &foreign);
+        assert_eq!(got.rules, ["Bash(start)"], "{}", entry.display());
+        assert_eq!(got.skipped.len(), 1, "{}", entry.display());
+        assert_eq!(got.skipped[0].path, file.display().to_string());
+        assert_eq!(got.skipped[0].reason, reason);
+        let note = got
+            .notes()
+            .into_iter()
+            .find(|n| n.contains("was ignored"))
+            .expect("a note");
+        assert!(note.contains(&file.display().to_string()) && note.contains(reason));
+        assert!(!note.contains("Bash(root)"));
+    }
+}
+
+#[test]
+fn an_unowned_main_checkout_is_skipped_and_named_like_any_other_root() {
+    let rig = Rig::new();
+    let main = rig.home.join("main");
+    git_dir(&main);
+    let file = main.join(".claude/settings.local.json");
+    put(&file, &deny_file(&["Bash(main-local)"]));
+    link_worktree(&main, "w", &rig.work);
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Bash(linked-local)"]),
+    );
+    let home = rig.home.clone().into_os_string();
+    let config = rig.config.clone().into_os_string();
+    let deny = |foreign: &[std::path::PathBuf]| {
+        crate::provider::deny::collect_as(
+            Some(&home),
+            Some(&config),
+            &rig.work,
+            owner(me(), foreign),
+        )
+        .unwrap()
+    };
+    assert_eq!(deny(&[]).rules, ["Bash(linked-local)", "Bash(main-local)"]);
+    for (entry, reason) in [
+        (
+            main.clone(),
+            "the repository root is not owned by the current user",
+        ),
+        (
+            main.join(".git"),
+            "the .git entry of the repository root is not owned by the current user",
+        ),
+    ] {
+        let got = deny(std::slice::from_ref(&entry));
+        assert_eq!(got.rules, ["Bash(linked-local)"], "{}", entry.display());
+        assert_eq!(got.skipped.len(), 1, "{}", entry.display());
+        assert_eq!(got.skipped[0].path, file.display().to_string());
+        assert_eq!(got.skipped[0].reason, reason);
+        assert!(
+            got.notes()
+                .iter()
+                .any(|n| n.contains("was ignored") && n.contains(&file.display().to_string())),
+            "{:?}",
+            got.notes()
+        );
+    }
+    // A `.git` file of the linked worktree that the user does not own is not
+    // followed, and a note says why.
+    let got = deny(&[rig.work.join(".git")]);
+    assert_eq!(got.rules, ["Bash(linked-local)"]);
+    assert!(
+        got.notes()
+            .iter()
+            .any(|n| n.contains("could not be identified") && n.contains("not owned")),
+        "{:?}",
+        got.notes()
+    );
 }
 
 #[test]
@@ -1268,34 +1386,224 @@ fn a_gitdir_line_is_followed_only_to_a_worktrees_directory_of_an_owned_checkout(
         &main.join(".claude/settings.local.json"),
         &deny_file(&["Bash(main)"]),
     );
-    let read = |gitdir: &str| {
-        std::fs::write(rig.work.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
+    // The directory the `.git` file names, with a `gitdir` file naming this
+    // worktree back, so only the shape of the path is in question.
+    let read = |gitdir: &Path| {
+        std::fs::create_dir_all(gitdir).unwrap();
+        std::fs::write(
+            gitdir.join("gitdir"),
+            format!("{}\n", rig.work.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            rig.work.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
         let mut request = rig.request(Provider::Claude, "p");
         request.cwd = Some(sub.clone());
-        dry_run(&request, &rig.options(Provider::Claude))
-            .unwrap()
-            .deny_rules
-            .applied
+        dry_run(&request, &rig.options(Provider::Claude)).unwrap()
     };
-    // An unrelated directory, a directory not under `worktrees`, and one that
-    // is not in a `.git` directory are not followed.
+    // An unrelated directory is not followed.
     let unrelated = rig.home.join("unrelated");
-    std::fs::create_dir_all(&unrelated).unwrap();
     put(
         &unrelated.join(".claude/settings.local.json"),
         &deny_file(&["Bash(no)"]),
     );
-    assert_eq!(read(&unrelated.display().to_string()), 0);
-    std::fs::create_dir_all(main.join(".git/refs")).unwrap();
-    assert_eq!(read(&format!("{}/.git/refs", main.display())), 0);
-    std::fs::create_dir_all(main.join("worktrees/w")).unwrap();
-    assert_eq!(read(&format!("{}/worktrees/w", main.display())), 0);
-    // A proper one is, including a worktree named `worktrees`.
-    std::fs::create_dir_all(main.join(".git/worktrees/worktrees")).unwrap();
-    assert_eq!(
-        read(&format!("{}/.git/worktrees/worktrees", main.display())),
-        1
+    assert_eq!(read(&unrelated).deny_rules.applied, 0);
+    // A directory in a `.git` directory that is not under `worktrees`: were the
+    // `worktrees` name not required, `main` would be taken from it.
+    assert_eq!(read(&main.join(".git/refs/w")).deny_rules.applied, 0);
+    // A directory under `worktrees` that is not in a `.git` directory: were the
+    // `.git` name not required, `outer` would be taken from it.
+    let outer = rig.home.join("outer");
+    put(
+        &outer.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(outer)"]),
     );
-    std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
-    assert_eq!(read(&format!("{}/.git/worktrees/w", main.display())), 1);
+    git_dir(&outer);
+    let plan = read(&outer.join("repo/worktrees/w"));
+    assert_eq!(plan.deny_rules.applied, 0);
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("main checkout") && n.contains("could not be identified")),
+        "{:?}",
+        plan.notes
+    );
+    // A proper one is, including a worktree named `worktrees`.
+    let plan = read(&main.join(".git/worktrees/worktrees"));
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(main)"]);
+    let plan = read(&main.join(".git/worktrees/w"));
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(main)"]);
+    assert!(
+        !plan
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be identified")),
+        "{:?}",
+        plan.notes
+    );
+}
+
+#[test]
+fn a_git_file_planted_in_a_tree_cannot_borrow_another_checkouts_rules() {
+    let rig = Rig::new();
+    let main = rig.home.join("main");
+    git_dir(&main);
+    put(
+        &main.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(main)"]),
+    );
+    // A real linked worktree of `main` is `rig.work`.
+    link_worktree(&main, "w", &rig.work);
+    let admin = main.join(".git/worktrees/w");
+    // An unpacked tree whose `.git` file names that worktree's directory.
+    let planted = rig.home.join("planted");
+    std::fs::create_dir_all(&planted).unwrap();
+    std::fs::write(
+        planted.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+    let plan_in = |dir: &Path| {
+        let mut request = rig.request(Provider::Claude, "p");
+        request.cwd = Some(dir.to_path_buf());
+        dry_run(&request, &rig.options(Provider::Claude)).unwrap()
+    };
+    let plan = plan_in(&planted);
+    assert_eq!(plan.deny_rules.applied, 0);
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains(&planted.display().to_string())
+                && n.contains("does not name this worktree")),
+        "{:?}",
+        plan.notes
+    );
+    // The real worktree is still followed.
+    assert_eq!(
+        plan_in(&rig.work).deny_rules.user_deny_rules,
+        ["Bash(main)"]
+    );
+    // With no `gitdir` file in the directory the tree is not a worktree of it.
+    std::fs::remove_file(admin.join("gitdir")).unwrap();
+    let plan = plan_in(&rig.work);
+    assert_eq!(plan.deny_rules.applied, 0);
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("could not be identified"))
+    );
+}
+
+#[test]
+fn a_main_checkout_that_cannot_be_identified_is_named_in_a_note() {
+    let rig = Rig::new();
+    let plan_in_work = || dry(&rig);
+    let note = |plan: &DryRun| {
+        plan.notes
+            .iter()
+            .find(|n| n.contains("could not be identified"))
+            .cloned()
+    };
+    // A `.git` directory that is a symbolic link to a git directory elsewhere.
+    let main = rig.home.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    let real_git = rig.home.join("elsewhere/real-git");
+    std::fs::create_dir_all(&real_git).unwrap();
+    std::os::unix::fs::symlink(&real_git, main.join(".git")).unwrap();
+    put(
+        &main.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(main)"]),
+    );
+    link_worktree(&main, "w", &rig.work);
+    let plan = plan_in_work();
+    assert_eq!(plan.deny_rules.applied, 0);
+    let text = note(&plan).expect("a note");
+    assert!(text.contains(&rig.work.display().to_string()), "{text}");
+    // A git directory kept elsewhere under another name.
+    std::fs::remove_file(main.join(".git")).unwrap();
+    let separate = rig.home.join("repo.git");
+    std::fs::create_dir_all(&separate).unwrap();
+    git_dir(&main);
+    let admin = separate.join("worktrees/w");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", rig.work.join(".git").display()),
+    )
+    .unwrap();
+    std::fs::write(
+        rig.work.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+    let plan = plan_in_work();
+    assert_eq!(plan.deny_rules.applied, 0);
+    assert!(note(&plan).is_some(), "{:?}", plan.notes);
+    // A gitdir line that names nothing, and a `.git` file with no such line.
+    std::fs::write(rig.work.join(".git"), "gitdir: /nonexistent/x\n").unwrap();
+    assert!(
+        note(&plan_in_work())
+            .expect("a note")
+            .contains("does not exist")
+    );
+    std::fs::write(rig.work.join(".git"), "not a gitdir line\n").unwrap();
+    assert!(note(&plan_in_work()).is_some());
+}
+
+#[test]
+fn a_link_is_never_followed_in_a_repository_root() {
+    let rig = Rig::new();
+    git_dir(&rig.work);
+    let sub = rig.work.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let elsewhere = rig.home.join("elsewhere");
+    put(
+        &elsewhere.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(other-project)"]),
+    );
+    let file = project_file(&rig, "settings.local.json");
+    let plan_in_sub = || {
+        let mut request = rig.request(Provider::Claude, "p");
+        request.cwd = Some(sub.clone());
+        dry_run(&request, &rig.options(Provider::Claude)).unwrap()
+    };
+    let assert_skipped = |plan: &DryRun, why: &str| {
+        assert_eq!(plan.deny_rules.applied, 0, "{:?}", plan.notes);
+        assert_eq!(plan.deny_rules.skipped.len(), 1, "{:?}", plan.notes);
+        assert_eq!(plan.deny_rules.skipped[0].path, file.display().to_string());
+        assert!(
+            plan.deny_rules.skipped[0].reason.contains(why),
+            "{:?}",
+            plan.deny_rules.skipped
+        );
+        assert!(plan.notes.iter().any(|n| n.contains("was ignored")));
+    };
+    // `.claude` is a link to a directory.
+    std::os::unix::fs::symlink(elsewhere.join(".claude"), rig.work.join(".claude")).unwrap();
+    assert_skipped(&plan_in_sub(), "`.claude` is a symbolic link");
+    std::fs::remove_file(rig.work.join(".claude")).unwrap();
+    // The settings file is a link to a file, then to nothing.
+    std::fs::create_dir_all(rig.work.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join(".claude/settings.local.json"), &file).unwrap();
+    assert_skipped(&plan_in_sub(), "is a symbolic link");
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("missing"), &file).unwrap();
+    assert_skipped(&plan_in_sub(), "is a symbolic link");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::remove_dir(rig.work.join(".claude")).unwrap();
+    // `.git` is a link to a git directory.
+    std::fs::remove_dir(rig.work.join(".git")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join(".claude"), rig.work.join(".git")).unwrap();
+    put(&file, &deny_file(&["Bash(root)"]));
+    assert_skipped(
+        &plan_in_sub(),
+        ".git entry of the repository root is a symbolic link",
+    );
+    // Without links the same file is read.
+    std::fs::remove_file(rig.work.join(".git")).unwrap();
+    git_dir(&rig.work);
+    assert_eq!(plan_in_sub().deny_rules.user_deny_rules, ["Bash(root)"]);
 }

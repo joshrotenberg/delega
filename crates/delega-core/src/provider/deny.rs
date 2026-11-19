@@ -18,10 +18,20 @@
 //!    root of the git repository the working directory is inside, then under the
 //!    main checkout when that root is a linked worktree. The root is found by
 //!    walking up to the nearest `.git` directory or file; `git` is not run. As
-//!    Claude Code does, a root that is the home directory, or that or whose
-//!    settings file is not owned by the current user, is not used; the file is
-//!    not read and is reported as ignored. A `gitdir:` line is followed only to
-//!    a `.git/worktrees/<name>` directory of a checkout the user owns.
+//!    Claude Code does, a root that is the home directory is not used. A root is
+//!    also not used when the root, its `.git` entry, its `.claude` directory or
+//!    the settings file is not owned by the current user, or when `.git`,
+//!    `.claude` or the file is a symbolic link: links are never followed in a
+//!    repository root, because another user can plant them in a tree the user
+//!    owns but others can write. The file is then not read and is reported as
+//!    ignored. The owner of the file is judged on the handle that is read, and
+//!    the file is reached by opening each directory from the one above without
+//!    following links, so it cannot be swapped after the check. A `gitdir:` line
+//!    is followed only to a `.git/worktrees/<name>` directory of a `.git`
+//!    directory whose `gitdir` file names this worktree's `.git` file; when it is
+//!    not followed, a note says the main checkout could not be identified.
+//!    The user's own file and the working directory's files may be symbolic
+//!    links, as a dotfiles setup makes them.
 //!
 //! The directories come from the environment the worker will receive, not from
 //! the calling process. Managed (enterprise) settings are not read.
@@ -42,7 +52,8 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -83,6 +94,9 @@ pub(super) struct DenyRules {
     pub files: Vec<DenyFile>,
     /// Existing files that were not read, and why.
     pub skipped: Vec<SkippedFile>,
+    /// Other things the user should know, such as a main checkout that could
+    /// not be identified.
+    pub notices: Vec<String>,
     /// Whether the worker would have neither a configuration directory nor a
     /// home directory, so no user settings file could be located.
     pub user_settings_unlocated: bool,
@@ -99,6 +113,7 @@ impl DenyRules {
                     .to_string(),
             );
         }
+        notes.extend(self.notices.iter().cloned());
         notes.extend(self.skipped.iter().map(|f| {
             format!(
                 "the Claude Code settings file {} was ignored, so its deny rules were not \
@@ -136,16 +151,52 @@ pub(super) fn collect(
     config_dir: Option<&OsStr>,
     cwd: &Path,
 ) -> Result<DenyRules, Refusal> {
-    collect_as(home, config_dir, cwd, rustix::process::geteuid().as_raw())
+    let owner = Owner {
+        euid: rustix::process::geteuid().as_raw(),
+        foreign: &[],
+    };
+    collect_as(home, config_dir, cwd, owner)
 }
 
-/// [`collect`] for a given effective user id, so a test can stand in for a user
-/// who does not own what a temporary directory holds.
+/// The user that must own what is read, with a way for a test to stand in for
+/// another user.
+#[derive(Clone, Copy)]
+pub(super) struct Owner<'a> {
+    /// The effective user id.
+    pub euid: u32,
+    /// Paths treated as owned by someone else whatever their real owner. Only
+    /// a test sets this: the files it can make all belong to the test's user.
+    pub foreign: &'a [PathBuf],
+}
+
+impl Owner<'_> {
+    /// Whether the current user owns `path`, whose owner is `uid`.
+    fn owns(&self, path: &Path, uid: u32) -> bool {
+        if uid != self.euid {
+            return false;
+        }
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let here = real(path);
+        !self.foreign.iter().any(|f| real(f) == here)
+    }
+}
+
+/// A file to read, the directories a one-slash rule in it means, and, for a file
+/// in a repository root, that root (real path), which makes the read refuse
+/// links and judge owners.
+struct Source {
+    path: PathBuf,
+    bases: Vec<PathBuf>,
+    guarded_root: Option<PathBuf>,
+}
+
+/// [`collect`] for a given owner, so a test can stand in for a user who does
+/// not own what a temporary directory holds.
 pub(super) fn collect_as(
     home: Option<&OsStr>,
     config_dir: Option<&OsStr>,
     cwd: &Path,
-    euid: u32,
+    owner: Owner<'_>,
 ) -> Result<DenyRules, Refusal> {
     let absolute = |value: Option<&OsStr>| {
         value.filter(|v| !v.is_empty()).map(|v| {
@@ -158,12 +209,17 @@ pub(super) fn collect_as(
     let mut out = DenyRules::default();
 
     // Each source is a file and the directories a one-slash rule in it means.
-    let mut sources: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    let plain = |path: PathBuf, bases: Vec<PathBuf>| Source {
+        path,
+        bases,
+        guarded_root: None,
+    };
+    let mut sources: Vec<Source> = Vec::new();
     match (&config_dir, &home) {
-        (Some(dir), _) => sources.push((dir.join("settings.json"), vec![dir.clone()])),
+        (Some(dir), _) => sources.push(plain(dir.join("settings.json"), vec![dir.clone()])),
         (None, Some(home)) => {
             let dir = home.join(".claude");
-            sources.push((dir.join("settings.json"), vec![dir]));
+            sources.push(plain(dir.join("settings.json"), vec![dir]));
         }
         (None, None) => out.user_settings_unlocated = true,
     }
@@ -176,32 +232,59 @@ pub(super) fn collect_as(
         }
         (dir.join(".claude").join(name), bases)
     };
-    sources.push(project(cwd, "settings.json"));
-    sources.push(project(cwd, "settings.local.json"));
-    for root in repository_roots(cwd, euid) {
+    for name in ["settings.json", "settings.local.json"] {
+        let (path, bases) = project(cwd, name);
+        sources.push(plain(path, bases));
+    }
+    let (roots, notices) = repository_roots(cwd, owner);
+    out.notices = notices;
+    for root in roots {
         if root == cwd {
             continue;
         }
-        let source = project(&root, "settings.local.json");
-        if sources.iter().any(|(path, _)| *path == source.0) {
+        let (path, bases) = project(&root, "settings.local.json");
+        if sources.iter().any(|s| s.path == path) {
             continue;
         }
-        if let Some(reason) = untrusted_root(&root, &source.0, home.as_deref(), euid) {
-            if source.0.exists() {
+        let real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        if let Some(reason) = untrusted_root(&real, home.as_deref(), owner) {
+            if std::fs::symlink_metadata(&path).is_ok() {
                 out.skipped.push(SkippedFile {
-                    path: source.0.display().to_string(),
+                    path: path.display().to_string(),
                     reason,
                 });
             }
             continue;
         }
-        sources.push(source);
+        sources.push(Source {
+            path,
+            bases,
+            guarded_root: Some(real),
+        });
     }
 
-    for (path, bases) in sources {
+    for Source {
+        path,
+        bases,
+        guarded_root,
+    } in sources
+    {
         let shown = path.display().to_string();
-        let Some(bytes) = read(&path).map_err(|why| unreadable(&shown, &why))? else {
-            continue;
+        let outcome = match &guarded_root {
+            None => read(&path),
+            Some(root) => read_guarded(root, &path, owner),
+        }
+        .map_err(|why| unreadable(&shown, &why))?;
+        let bytes = match outcome {
+            Got::Missing => continue,
+            Got::Skipped(reason) => {
+                out.skipped.push(SkippedFile {
+                    path: shown,
+                    reason,
+                });
+                continue;
+            }
+            Got::Content(bytes) => bytes,
         };
         let rules = parse(&bytes).map_err(|why| unreadable(&shown, &why))?;
         if rules.len() > MAX_DENY_RULES_PER_FILE {
@@ -261,10 +344,21 @@ fn unreadable(path: &str, why: &str) -> Refusal {
     )
 }
 
-/// The content of a regular file of at most [`SETTINGS_FILE_BYTES`], `None`
-/// when it does not exist. A device, pipe or directory is refused before it is
-/// opened, so reading cannot block or run without end.
-fn read(path: &Path) -> Result<Option<Vec<u8>>, String> {
+/// What reading a settings file gave.
+enum Got {
+    /// The file does not exist.
+    Missing,
+    /// The file's content.
+    Content(Vec<u8>),
+    /// The file exists and must not be used, for this reason.
+    Skipped(String),
+}
+
+/// The content of a regular file of at most [`SETTINGS_FILE_BYTES`]; a missing
+/// file is [`Got::Missing`]. A symbolic link is followed. A device, pipe or
+/// directory is refused before it is opened, so reading cannot block or run
+/// without end.
+fn read(path: &Path) -> Result<Got, String> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(e)
@@ -273,7 +367,7 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>, String> {
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            return Ok(None);
+            return Ok(Got::Missing);
         }
         Err(e) => return Err(format!("it cannot be inspected ({})", e.kind())),
     };
@@ -293,6 +387,11 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>, String> {
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return Err("it is not a regular file".to_string());
     }
+    read_limited(file).map(Got::Content)
+}
+
+/// The bytes of an open file, at most [`SETTINGS_FILE_BYTES`].
+fn read_limited(file: std::fs::File) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     file.take(SETTINGS_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -302,7 +401,103 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>, String> {
             "it is larger than the limit of {SETTINGS_FILE_BYTES} bytes"
         ));
     }
-    Ok(Some(bytes))
+    Ok(bytes)
+}
+
+const SYMLINK_REASON: &str = "a symbolic link is not followed in a repository root";
+
+/// Open `name` in the directory `dir` (a handle) without following a link.
+/// `Ok(None)` when it does not exist or is not a directory; `Err` with the reason
+/// when it is a symbolic link.
+fn open_below(
+    dir: &std::fs::File,
+    name: &str,
+    flags: OFlags,
+) -> Result<Option<std::fs::File>, String> {
+    match rustix::fs::openat(
+        dir,
+        name,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(Some(std::fs::File::from(fd))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(e @ (Errno::LOOP | Errno::NOTDIR)) => {
+            // A link, or a plain file where a directory was wanted.
+            match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Symlink => {
+                    Err(format!("`{name}` is a symbolic link: {SYMLINK_REASON}"))
+                }
+                Ok(_) if e == Errno::NOTDIR => Ok(None),
+                _ => Err(format!(
+                    "`{name}` cannot be opened ({})",
+                    std::io::Error::from(e).kind()
+                )),
+            }
+        }
+        Err(e) => Err(format!(
+            "`{name}` cannot be opened ({})",
+            std::io::Error::from(e).kind()
+        )),
+    }
+}
+
+/// Read the settings file `file` (`<root>/.claude/<name>`) of a repository
+/// `root` (a real path) without following a link and only when the current user
+/// owns the root, `.claude` and the file, judged on the open handles: each
+/// directory is opened from the one above, so nothing swapped in after a check
+/// can be read. A missing file is [`Got::Missing`] whoever owns the directories.
+fn read_guarded(root: &Path, file: &Path, owner: Owner<'_>) -> Result<Got, String> {
+    let Some(name) = file.file_name().and_then(OsStr::to_str) else {
+        return Ok(Got::Missing);
+    };
+    let skipped = |why: String| Ok(Got::Skipped(why));
+    let root_dir = match rustix::fs::open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(Errno::NOENT | Errno::NOTDIR) => return Ok(Got::Missing),
+        Err(e) => {
+            return Err(format!(
+                "its repository root cannot be opened ({})",
+                std::io::Error::from(e).kind()
+            ));
+        }
+    };
+    let claude = match open_below(&root_dir, ".claude", OFlags::RDONLY | OFlags::DIRECTORY) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return Ok(Got::Missing),
+        Err(why) => return skipped(why),
+    };
+    let handle = match open_below(&claude, name, OFlags::RDONLY | OFlags::NONBLOCK) {
+        Ok(Some(handle)) => handle,
+        Ok(None) => return Ok(Got::Missing),
+        Err(why) => return skipped(why),
+    };
+    let uid_of = |f: &std::fs::File| {
+        f.metadata()
+            .map(|m| m.uid())
+            .map_err(|e| format!("it cannot be inspected ({})", e.kind()))
+    };
+    let dot_claude = root.join(".claude");
+    if !owner.owns(root, uid_of(&root_dir)?) {
+        return skipped("the repository root is not owned by the current user".to_string());
+    }
+    if !owner.owns(&dot_claude, uid_of(&claude)?) {
+        return skipped("the .claude directory is not owned by the current user".to_string());
+    }
+    let meta = handle
+        .metadata()
+        .map_err(|e| format!("it cannot be inspected ({})", e.kind()))?;
+    if !meta.is_file() {
+        return Err("it is not a regular file".to_string());
+    }
+    if !owner.owns(&dot_claude.join(name), meta.uid()) {
+        return skipped("the settings file is not owned by the current user".to_string());
+    }
+    read_limited(handle).map(Got::Content)
 }
 
 /// The `permissions.deny` strings of a settings file. Everything else in the
@@ -413,71 +608,119 @@ fn expanded(rule: &str, bases: &[PathBuf]) -> Vec<String> {
 
 /// The roots of the git repository the working directory is inside: the nearest
 /// ancestor holding `.git`, and the main checkout when that `.git` is a file
-/// of a linked worktree. Nothing is run, and a `.git` file that cannot be
-/// followed leaves only the nearest root.
-fn repository_roots(cwd: &Path, euid: u32) -> Vec<PathBuf> {
+/// of a linked worktree, with notes for a linked worktree whose main checkout
+/// could not be identified. Nothing is run.
+fn repository_roots(cwd: &Path, owner: Owner<'_>) -> (Vec<PathBuf>, Vec<String>) {
     let Some(root) = cwd.ancestors().find(|d| d.join(".git").exists()) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut roots = vec![root.to_path_buf()];
-    if let Some(main) = main_checkout(root, euid)
-        && main != root
-    {
-        roots.push(main);
+    let mut notices = Vec::new();
+    match main_checkout(root, owner) {
+        Ok(Some(main)) if main != root => roots.push(main),
+        Ok(_) => {}
+        Err(why) => notices.push(format!(
+            "the main checkout of the git worktree at {} could not be identified, so its local \
+             Claude Code settings were not read: {why}",
+            root.display()
+        )),
     }
-    roots
+    (roots, notices)
 }
 
 /// For a linked worktree, whose `.git` is a file reading `gitdir: <main>/.git/
-/// worktrees/<name>`, the main checkout `<main>`. The line is followed only when
-/// it names a directory directly under a `worktrees` directory of a `.git`
-/// directory, in a checkout owned by the user (a worktree may itself be named
-/// `worktrees`).
-fn main_checkout(root: &Path, euid: u32) -> Option<PathBuf> {
+/// worktrees/<name>`, the main checkout `<main>`; `Ok(None)` when `.git` is not a
+/// file or does not point into a `worktrees` directory (a submodule, say), and
+/// `Err` with the reason when a linked worktree's main checkout cannot be
+/// identified.
+///
+/// The line is followed only when it names a directory directly under a
+/// `worktrees` directory of a directory called `.git` (a worktree may itself be
+/// named `worktrees`), and when that directory's `gitdir` file names this
+/// worktree's `.git` file, so a `.git` file planted in an unpacked archive cannot
+/// borrow another checkout's rules. A `.git` that is a symbolic link or a git
+/// directory kept elsewhere is not followed. Whether the main checkout may be
+/// read is decided where its files are read.
+fn main_checkout(root: &Path, owner: Owner<'_>) -> Result<Option<PathBuf>, String> {
     let git = root.join(".git");
-    if !std::fs::metadata(&git).ok()?.is_file() {
-        return None;
+    let Ok(meta) = std::fs::symlink_metadata(&git) else {
+        return Ok(None);
+    };
+    if !meta.is_file() {
+        return Ok(None);
     }
-    let text = read(&git).ok()??;
-    let text = String::from_utf8(text).ok()?;
-    let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
-    let target = std::fs::canonicalize(root.join(target)).ok()?;
-    if !target.is_dir() {
-        return None;
+    if !owner.owns(&git, meta.uid()) {
+        return Err("its .git file is not owned by the current user".to_string());
     }
-    let worktrees = target.parent()?;
-    let common = worktrees.parent()?;
-    if worktrees.file_name()? != "worktrees" || common.file_name()? != ".git" {
-        return None;
+    let text = match read(&git) {
+        Ok(Got::Content(text)) => text,
+        _ => return Err("its .git file cannot be read".to_string()),
+    };
+    let text = String::from_utf8(text).map_err(|_| "its .git file is not text".to_string())?;
+    let target = text
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .ok_or("its .git file has no gitdir line")?;
+    let target = std::fs::canonicalize(root.join(target))
+        .ok()
+        .filter(|t| t.is_dir())
+        .ok_or("the directory its .git file names does not exist")?;
+    let Some(worktrees) = target.parent() else {
+        return Ok(None);
+    };
+    if worktrees.file_name() != Some(OsStr::new("worktrees")) {
+        return Ok(None);
     }
-    let main = common.parent()?.to_path_buf();
-    let owned = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.uid() == euid);
-    (common.is_dir() && owned(&main) && owned(common)).then_some(main)
+    let common = worktrees.parent().filter(|c| c.is_dir());
+    let Some(main) = common
+        .filter(|c| c.file_name() == Some(OsStr::new(".git")))
+        .and_then(Path::parent)
+    else {
+        return Err(
+            "the repository it belongs to is not a .git directory directly under a checkout (a \
+             .git that is a symbolic link, or a git directory kept elsewhere, is not followed)"
+                .to_string(),
+        );
+    };
+    // The worktree's directory must name this worktree back.
+    let back = match read(&target.join("gitdir")) {
+        Ok(Got::Content(text)) => String::from_utf8(text).ok(),
+        _ => None,
+    };
+    let names_this_worktree = back
+        .as_deref()
+        .and_then(|t| t.lines().next())
+        .map(|line| target.join(line.trim()))
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .is_some_and(|p| Some(p) == std::fs::canonicalize(&git).ok());
+    if !names_this_worktree {
+        return Err(
+            "the gitdir file in the worktree directory its .git file names does not name this \
+             worktree, so it is not a linked worktree of that checkout"
+                .to_string(),
+        );
+    }
+    Ok(Some(main.to_path_buf()))
 }
 
-/// Why a local settings file at a repository root must not be read, as Claude
-/// Code skips it: the root is the home directory, or the root or the file is
-/// not owned by the current user.
-fn untrusted_root(root: &Path, file: &Path, home: Option<&Path>, euid: u32) -> Option<String> {
-    let uid = |p: &Path| std::fs::metadata(p).ok().map(|m| m.uid());
-    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    trust_problem(&canonical, home, uid(root), uid(file), euid).map(str::to_string)
-}
-
-/// The decision behind [`untrusted_root`], on the facts alone.
-fn trust_problem(
-    root: &Path,
-    home: Option<&Path>,
-    root_uid: Option<u32>,
-    file_uid: Option<u32>,
-    euid: u32,
-) -> Option<&'static str> {
+/// Why a local settings file in the repository root `root` (a real path) must
+/// not be read, before it is opened: the root is the home directory, or its `.git`
+/// entry is a symbolic link or not owned by the current user. The root, `.claude`
+/// and the file are judged when the file is opened ([`read_guarded`]).
+fn untrusted_root(root: &Path, home: Option<&Path>, owner: Owner<'_>) -> Option<String> {
     if home == Some(root) {
-        Some("the repository root is the user's home directory")
-    } else if root_uid != Some(euid) {
-        Some("the repository root is not owned by the current user")
-    } else if file_uid.is_some_and(|u| u != euid) {
-        Some("the settings file is not owned by the current user")
+        return Some("the repository root is the user's home directory".to_string());
+    }
+    let git = root.join(".git");
+    let meta = std::fs::symlink_metadata(&git).ok()?;
+    if meta.file_type().is_symlink() {
+        Some(format!(
+            "the .git entry of the repository root is a symbolic link: {SYMLINK_REASON}"
+        ))
+    } else if !owner.owns(&git, meta.uid()) {
+        Some("the .git entry of the repository root is not owned by the current user".to_string())
     } else {
         None
     }
@@ -528,30 +771,5 @@ mod tests {
         );
         let same = [PathBuf::from("/work"), PathBuf::from("/work")];
         assert_eq!(expanded("Read(/x)", &same).len(), 2);
-    }
-
-    #[test]
-    fn a_root_is_trusted_only_when_it_is_not_home_and_the_user_owns_it_and_the_file() {
-        let root = Path::new("/r");
-        let home = Some(Path::new("/h"));
-        assert_eq!(trust_problem(root, home, Some(5), Some(5), 5), None);
-        assert_eq!(trust_problem(root, home, Some(5), None, 5), None);
-        assert!(
-            trust_problem(Path::new("/h"), home, Some(5), Some(5), 5)
-                .unwrap()
-                .contains("home directory")
-        );
-        assert!(
-            trust_problem(root, home, Some(6), Some(5), 5)
-                .unwrap()
-                .contains("root is not owned")
-        );
-        assert!(trust_problem(root, home, None, Some(5), 5).is_some());
-        assert!(
-            trust_problem(root, home, Some(5), Some(6), 5)
-                .unwrap()
-                .contains("file is not owned")
-        );
-        assert_eq!(trust_problem(root, None, Some(5), Some(5), 5), None);
     }
 }
