@@ -89,7 +89,16 @@ done_ok() {
   emit '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":7,"reasoning_output_tokens":3}}'
 }
 
+# The acceptance harness's process behaviours (`acc:<behaviour>:<variant>`, see
+# acc-lib.sh). No unit test uses them.
+acc_success() { final '"fake final answer"'; done_ok; }
+acc_chatter() { emit '{"type":"item.completed","item":{"id":"i","type":"agent_message","phase":"commentary","text":"x"}}'; }
+
 case "$mode" in
+  acc:*)
+    . "$(dirname "$0")/acc-lib.sh"
+    acc_run "${mode#acc:}"
+    ;;
   success)
     init
     final '"fake final answer"'
