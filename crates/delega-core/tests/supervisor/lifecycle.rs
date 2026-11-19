@@ -26,10 +26,7 @@ async fn a_started_run_ends_in_one_valid_completed_result(provider: Provider) {
         result.worker.as_ref().map(|w| &w.id),
         started.worker.as_ref()
     );
-    assert_eq!(
-        result.cleanup,
-        delega_core::contract::result::Cleanup::Confirmed
-    );
+    crate::assert_exit_cleanup(&result.cleanup);
     assert!(result.timing.started_at.is_some());
 
     supervisor.shutdown().await;
