@@ -93,6 +93,32 @@ fn credential_shaped(token: &str) -> bool {
 /// The longest label looked at after `-----BEGIN `, in bytes.
 const BEGIN_LABEL_WINDOW: usize = 64;
 
+// Test builds count the bytes the private key scan looks at, so a test can
+// bound the work by the length of the input instead of timing it. Other
+// builds compile the call away.
+#[cfg(test)]
+thread_local! {
+    static EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn examined(bytes: usize) {
+    EXAMINED.with(|total| total.set(total.get() + bytes));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn examined(_bytes: usize) {}
+
+/// The bytes the private key scan has looked at on this thread since the last
+/// call, then reset. Counted at each place it searches: up to the marker the
+/// search found (or the whole rest when it found none), the label window, and
+/// up to the end line of a key body.
+#[cfg(test)]
+pub(super) fn take_examined() -> usize {
+    EXAMINED.with(|total| total.replace(0))
+}
+
 /// Replace private key blocks, up to their end line or the end of the text.
 /// One forward pass: every search starts where the last one stopped, and a
 /// begin marker that is not a key is skipped after a bounded look.
@@ -102,8 +128,10 @@ fn without_private_keys(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find(BEGIN) {
+        examined(start + BEGIN.len());
         let after = &rest[start + BEGIN.len()..];
         let window = &after.as_bytes()[..after.len().min(BEGIN_LABEL_WINDOW)];
+        examined(window.len());
         let label_end = window.windows(5).position(|w| w == b"-----");
         let is_key = label_end.is_some_and(|i| after.as_bytes()[..i].ends_with(b"PRIVATE KEY"));
         if !is_key {
@@ -115,10 +143,18 @@ fn without_private_keys(text: &str) -> String {
         out.push_str(MASK);
         let body = &after[label_end.unwrap_or(0) + 5..];
         rest = match body.find(END) {
-            Some(end) => &body[end + END.len()..],
-            None => "",
+            Some(end) => {
+                examined(end + END.len());
+                &body[end + END.len()..]
+            }
+            None => {
+                examined(body.len());
+                ""
+            }
         };
     }
+    // The search that found no further marker looked at all of what was left.
+    examined(rest.len());
     out.push_str(rest);
     out
 }
