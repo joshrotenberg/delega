@@ -479,6 +479,39 @@ fn closing_standard_input_stops_every_worker_and_exits_zero() {
 }
 
 #[test]
+fn a_start_without_an_absolute_cwd_is_refused_and_starts_nothing() {
+    let rig = Rig::new();
+    let mut session = rig.start(&["--env", "FAKE_RECORD_DIR"]);
+    session.initialize();
+    for args in [
+        json!({"provider": "codex", "prompt": "success"}),
+        json!({"provider": "codex", "prompt": "success", "cwd": "relative/dir"}),
+    ] {
+        let refused = session.call("start", args);
+        assert_eq!(refused["state"], "finished", "{refused}");
+        assert_eq!(refused["outcome"], "refused", "{refused}");
+        assert!(refused.get("worker").is_none(), "{refused}");
+        assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+        let read = session.call("read", json!({"run": refused["run"]}));
+        assert_eq!(read["result"]["outcome"], "refused", "{read}");
+        assert_eq!(read["result"]["error"]["kind"], "cwd_required", "{read}");
+    }
+    let listed = session.call("list", json!({}));
+    assert!(
+        listed["workers"].as_array().expect("workers").is_empty(),
+        "{listed}"
+    );
+    assert!(
+        !rig.record.join("argv").exists(),
+        "no provider process was started"
+    );
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
+}
+
+#[test]
 fn sigterm_stops_every_worker_and_exits_with_the_interrupted_status() {
     let rig = Rig::new();
     let mut session = rig.start(&[]);

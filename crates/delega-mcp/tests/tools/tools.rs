@@ -111,6 +111,125 @@ async fn an_invalid_request_is_a_refused_run_that_read_returns() {
 }
 
 #[tokio::test]
+async fn a_start_without_an_absolute_cwd_is_refused_as_a_run_and_starts_nothing() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let mut missing = rig.start_args(CODEX, "success");
+    missing.as_object_mut().expect("object").remove("cwd");
+    let mut relative = rig.start_args(CODEX, "success");
+    relative["cwd"] = json!("work");
+    for args in [missing, relative] {
+        let refused = rig.call("start", args).await;
+        assert_eq!(refused["state"], "finished", "{refused}");
+        assert_eq!(refused["outcome"], "refused");
+        assert!(refused.get("worker").is_none(), "a refusal makes no worker");
+        assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+
+        let read = rig.call("read", json!({"run": refused["run"]})).await;
+        assert_eq!(read["result"]["outcome"], "refused", "{read}");
+        assert_eq!(read["result"]["error"]["kind"], "cwd_required");
+        let message = read["result"]["error"]["message"]
+            .as_str()
+            .expect("message");
+        assert!(message.contains("absolute"), "{message}");
+        assert!(message.contains("host"), "{message}");
+    }
+    assert!(rig.argv().is_empty(), "no process was started");
+    let listed = rig.call("list", json!({})).await;
+    assert!(
+        listed["workers"].as_array().expect("workers").is_empty(),
+        "{listed}"
+    );
+
+    // A profile without a cwd is refused the same way; an explicit absolute cwd
+    // given with it runs.
+    let profile = rig.work.join("profile.json");
+    std::fs::write(
+        &profile,
+        json!({"schema_version": 1, "provider": "codex", "prompt": "success"}).to_string(),
+    )
+    .expect("write profile");
+    let refused = rig.call("start", json!({"profile": profile})).await;
+    assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+    let started = rig
+        .call("start", json!({"profile": profile, "cwd": rig.work}))
+        .await;
+    assert!(started["worker"].is_string(), "{started}");
+    rig.finished(started["run"].as_str().expect("run")).await;
+    assert!(!rig.argv().is_empty());
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_relative_cwd_in_a_profile_or_a_dot_cwd_is_refused() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let profile = rig.work.join("relative.json");
+    std::fs::write(
+        &profile,
+        json!({"schema_version": 1, "provider": "codex", "prompt": "success", "cwd": "work"})
+            .to_string(),
+    )
+    .expect("write profile");
+    let refused = rig.call("start", json!({"profile": profile})).await;
+    assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+    let mut dot = rig.start_args(CODEX, "success");
+    dot["cwd"] = json!(".");
+    let refused = rig.call("start", dot).await;
+    assert_eq!(refused["error"]["kind"], "cwd_required", "{refused}");
+    assert!(rig.argv().is_empty(), "no process was started");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_relative_extra_directory_resolves_under_cwd_not_the_servers_directory() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    std::fs::create_dir(rig.work.join("extra")).expect("create extra");
+    let mut args = rig.start_args(CODEX, "success");
+    args["permissions"] = json!({"directories": ["extra"]});
+    let started = rig.call("start", args).await;
+    assert!(started["worker"].is_string(), "{started}");
+    rig.finished(started["run"].as_str().expect("run")).await;
+
+    let mut args = rig.start_args(CODEX, "success");
+    args["permissions"] = json!({"directories": ["absent"]});
+    let refused = rig.call("start", args).await;
+    assert_eq!(refused["error"]["kind"], "directory_unusable", "{refused}");
+    let message = refused["error"]["message"].as_str().expect("message");
+    let under_cwd = rig.work.join("absent");
+    assert!(
+        message.contains(under_cwd.to_str().expect("utf-8")),
+        "{message}"
+    );
+    let server = std::env::current_dir().expect("server directory");
+    assert!(
+        !message.contains(server.to_str().expect("utf-8")),
+        "{message}"
+    );
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_profile_supplying_an_absolute_cwd_satisfies_the_requirement() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let profile = rig.work.join("with-cwd.json");
+    std::fs::write(
+        &profile,
+        json!({
+            "schema_version": 1,
+            "provider": "codex",
+            "prompt": "success",
+            "cwd": rig.work,
+        })
+        .to_string(),
+    )
+    .expect("write profile");
+    let started = rig.call("start", json!({"profile": profile})).await;
+    assert!(started["worker"].is_string(), "{started}");
+    let done = rig.finished(started["run"].as_str().expect("run")).await;
+    assert_eq!(done["runs"][0]["outcome"], "completed", "{done}");
+    rig.finish().await;
+}
+
+#[tokio::test]
 async fn start_with_strict_permissions_refuses_codex_read_and_read_returns_it() {
     let mut rig = Rig::new(Provider::Codex).await;
     let mut args = rig.start_args(CODEX, "success");

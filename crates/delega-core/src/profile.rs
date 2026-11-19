@@ -141,11 +141,24 @@ pub fn merge(
     problems: &mut Vec<Problem>,
     explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
 ) -> PartialRequest {
+    let mut merged = merge_unresolved(path, detail, problems, explicit);
+    resolve_paths(&mut merged);
+    merged
+}
+
+/// [`merge`] without [`resolve_paths`]: the merged request keeps `cwd` and
+/// `permissions.directories` as the profile or the caller wrote them. For a
+/// caller that must see whether `cwd` was absolute before this process's
+/// working directory is applied to it.
+pub fn merge_unresolved(
+    path: Option<&Path>,
+    detail: ErrorDetail,
+    problems: &mut Vec<Problem>,
+    explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
+) -> PartialRequest {
     let profile = path
         .and_then(|path| read_profile(path, problems, detail))
         .unwrap_or_default();
     let explicit = explicit(problems);
-    let mut merged = profile.merge(explicit);
-    resolve_paths(&mut merged);
-    merged
+    profile.merge(explicit)
 }

@@ -41,11 +41,11 @@ pass first, `settled` is false: `read` the run later.
 `start` takes the same request fields as a run: `provider`, `prompt`, `cwd`,
 `name`, `instructions`, `model`, `effort`, `timeout_secs`, `permissions`,
 `answer_schema`, `session` and `native_args`. `provider` and `prompt` are
-required. The worker does not see your conversation, so write each `prompt` as a
-standalone assignment. Always pass `cwd`, an absolute path to the directory the
-worker should work in. Without it the worker runs in the server's own working
-directory, which is whatever the host started the server in, and that may not
-be your project.
+required, and so is an absolute `cwd`, the directory the worker should work in,
+given in the call or by the profile. A start with no `cwd`, or a relative one,
+is refused as a run of kind `cwd_required`: the server's own working directory
+is chosen by the host, so it is never used as a default. The worker does not see
+your conversation, so write each `prompt` as a standalone assignment.
 
 `profile` is the path of a profile file, a partial request saved as JSON. Fields
 you give in the same call replace the profile's. A list replaces the profile's

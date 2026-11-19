@@ -15,6 +15,12 @@ const PROFILE_DESCRIPTION: &str = "Path of a profile file: a partial request sav
     with schema_version. Fields given in this call replace the profile's; lists replace, they \
     are not added. A relative path resolves against the server's working directory.";
 
+/// `cwd` is optional in the schema because a `profile` may supply it; the
+/// requirement is enforced on the merged request.
+const CWD_DESCRIPTION: &str = "Absolute working directory of the worker. Required: the server \
+    refuses a start whose merged request, after any profile, has no cwd or a relative one, as \
+    cwd_required. A profile may supply it.";
+
 /// The input schema of `start`: the schema of a partial request, which rejects
 /// unknown fields, with `profile` added.
 pub fn input_schema() -> Value {
@@ -23,6 +29,9 @@ pub fn input_schema() -> Value {
         .into_root_schema_for::<PartialRequest>();
     let mut schema = serde_json::to_value(root).unwrap_or_else(|_| json!({"type": "object"}));
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        if let Some(cwd) = properties.get_mut("cwd").and_then(Value::as_object_mut) {
+            cwd.insert("description".to_string(), json!(CWD_DESCRIPTION));
+        }
         properties.insert(
             "profile".to_string(),
             json!({"type": ["string", "null"], "description": PROFILE_DESCRIPTION}),
@@ -42,7 +51,7 @@ fn join(problems: &[Problem]) -> String {
 /// Build the request from the arguments of `start`.
 ///
 /// The profile, if named, is read first and every other argument replaces the
-/// matching field, with the code `delega run` uses ([`profile::merge`]). Only a
+/// matching field, with the code `delega run` uses ([`profile::merge_unresolved`]). Only a
 /// request with no provider or no prompt cannot be built; any other problem is
 /// left to the supervisor, which refuses the run, so the caller reads it with
 /// `read` as it would any refusal. The error is the text of a tool error.
@@ -61,7 +70,7 @@ pub fn build_request(mut args: Value) -> Result<Request, String> {
     let explicit: PartialRequest =
         serde_json::from_value(args).map_err(|err| format!("invalid arguments: {err}"))?;
     let mut problems = Vec::new();
-    let merged = profile::merge(
+    let mut merged = profile::merge_unresolved(
         path.as_deref(),
         ErrorDetail::Position,
         &mut problems,
@@ -69,6 +78,23 @@ pub fn build_request(mut args: Value) -> Result<Request, String> {
     );
     if !problems.is_empty() {
         return Err(format!("invalid arguments: {}", join(&problems)));
+    }
+    // A missing or relative `cwd` is refused by the supervisor, so nothing is
+    // made absolute against the server's own working directory, which the host
+    // chooses. With an absolute `cwd`, a relative extra directory is relative to
+    // it, so the worker's directory, not the server's, is what it resolves under
+    // and what a refusal names.
+    if let Some(cwd) = merged.cwd.clone().filter(|cwd| cwd.is_absolute())
+        && let Some(dirs) = merged
+            .permissions
+            .as_mut()
+            .and_then(|p| p.directories.as_mut())
+    {
+        for dir in dirs {
+            if dir.is_relative() {
+                *dir = cwd.join(&dir);
+            }
+        }
     }
     merged
         .into_request_unvalidated()

@@ -78,7 +78,7 @@ result reports what happened.
 | --- | --- | --- |
 | `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `full`: no restriction from delega. |
 | `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly. They add to `read` and `write`; `full` already allows every command. |
-| `permissions.directories` | list of paths | Extra directories the worker may read. |
+| `permissions.directories` | list of paths | Extra directories the worker may read. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
 | `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: the run goes ahead and a `provider_notes` entry says what is wider than requested. `full` asks for nothing confined, so it is never refused for this. |
 
@@ -107,6 +107,12 @@ So a strict request that Codex cannot enforce and that also has an invalid
 environment name is refused as `permissions_not_enforceable`; without strict it
 is refused as `invalid_env_name`. `unsupported_provider_version` is found later,
 after the provider's version is read.
+
+`delega mcp` adds one refusal, `cwd_required`, for a `start` whose merged request
+(after any `profile`) has no `cwd` or a relative one. It is found after
+`invalid_request`, a name in use and the live-worker limit, and before every
+provider check above, so no provider check or process runs. See
+[MCP](#mcp). `delega run` has no such refusal.
 
 `permissions.strict` is an optional field with a default, so a request without it
 means what it meant before and `schema_version` stays 1. The result does not
@@ -511,10 +517,9 @@ ownership.
 The manifests set no `cwd`. A host decides the server's working directory: the
 Agent Plugins specification makes it the plugin root when `cwd` is omitted, so on
 Codex the server starts in the plugin's directory, and Claude Code does not
-document it for plugin MCP servers. A `start` without `cwd` runs the worker in
-the server's working directory, which is whatever directory the host gave the
-server, so here it could be the plugin's directory. A caller should pass `cwd`
-explicitly, always for a `write` worker.
+document it for plugin MCP servers. That is why `delega mcp` refuses a `start`
+without an absolute `cwd` (`cwd_required`): the server's own directory is never
+used as a worker's default.
 
 Claude Code puts an enabled plugin's `bin/` directory on the Bash tool's `PATH`,
 so `delega` becomes a bare command in Claude Code sessions. Claude.ai and Cowork
@@ -570,7 +575,7 @@ eighth, `respond`, when live asking is added.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `start` | The request fields, or `profile` plus overrides | At once: worker id, run id, state `queued` or `running`. |
+| `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | At once: worker id, run id, state `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. Queues behind a running run. |
 | `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state, partial text and recent activity. |
@@ -578,6 +583,19 @@ eighth, `respond`, when live asking is added.
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
 | `close` | `worker` | Stops the worker, discards queued assignments, frees its slot. Results already produced stay readable for a bounded time. |
+
+`start` requires an absolute `cwd`. The MCP server's own working directory is
+chosen by the host (Codex starts a plugin's server in the plugin root), so it is
+never a default: a merged request with no `cwd` or a relative one is refused as
+a finished run, kind `cwd_required`, readable with `read`, with no worker and no
+process. The input schema lists `cwd` as optional, because a `profile` may supply
+it and a schema that required it would reject a call with only a `profile`; the
+requirement is checked on the merged request. `follow_up` takes no `cwd`: it
+runs in the first request's, which was absolute. `delega run` keeps defaulting to
+the caller's current directory. Over MCP a relative `permissions.directories`
+entry is relative to the call's `cwd`, never to the server's own working
+directory, and a refusal names the resulting path. The check is `Supervisor::start_requiring_cwd`,
+which only the MCP adapter calls.
 
 Rules that hold for every tool:
 
@@ -651,10 +669,9 @@ Rules that hold for every tool:
   `profile`, the path of a profile file. The profile is read first and every
   other argument replaces the matching field, with the same code `delega run`
   uses (`delega_core::profile`): lists replace, `resume` and `ephemeral`
-  exclude each other, a relative path resolves against the server's working
-  directory. A `start` without `cwd` runs the worker in the server's working
-  directory, which is whatever directory the host gave the server, so a caller
-  should pass `cwd` explicitly, always for a `write` worker. A request that has a provider and a prompt but fails the contract
+  exclude each other, and a relative `profile` path resolves against the server's
+  working directory. The merged request must have an absolute `cwd`, or the start
+  is refused `cwd_required`. A request that has a provider and a prompt but fails the contract
   (a blank prompt, for example) is a refused run, not a tool error. The input
   schema states the request schema's ranges and lengths (`timeout_secs`
   between 1 and 86400, the list limits) from the same refinements, so a value
