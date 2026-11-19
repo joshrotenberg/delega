@@ -166,12 +166,14 @@ pub fn is_calling_session(name: &str) -> bool {
 /// Whether a name looks like it holds a secret or grants access to one.
 ///
 /// A name matches when, in upper case, it contains `SECRET`, `TOKEN`,
-/// `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY` or `ACCESS_KEY`, ends in
-/// `_KEY`, `_PAT` or `APIKEY`, or is `SSH_AUTH_SOCK`. It is a heuristic: a
-/// secret under an unremarkable name is passed.
+/// `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY`, `ACCESS_KEY` or
+/// `CONNECTION_STRING`, ends in `_KEY`, `_PAT`, `APIKEY`, `_URL`, `_URI` or
+/// `_DSN`, or is `SSH_AUTH_SOCK`. Connection addresses count because they
+/// often carry a user name and password. It is a heuristic: a secret under an
+/// unremarkable name is passed.
 pub fn is_secret_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    const CONTAINS: [&str; 7] = [
+    const CONTAINS: [&str; 8] = [
         "SECRET",
         "TOKEN",
         "PASSWORD",
@@ -179,8 +181,9 @@ pub fn is_secret_name(name: &str) -> bool {
         "CREDENTIAL",
         "PRIVATE_KEY",
         "ACCESS_KEY",
+        "CONNECTION_STRING",
     ];
-    const ENDS: [&str; 3] = ["_KEY", "_PAT", "APIKEY"];
+    const ENDS: [&str; 6] = ["_KEY", "_PAT", "APIKEY", "_URL", "_URI", "_DSN"];
     upper == "SSH_AUTH_SOCK"
         || CONTAINS.iter().any(|c| upper.contains(c))
         || ENDS.iter().any(|e| upper.ends_with(e))
