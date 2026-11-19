@@ -26,7 +26,14 @@
 //! is the only sender of signals. While the child runs, a periodic `ps` scan
 //! records its descendants with their start times, so a descendant that left
 //! the group or the session is still found and a recycled pid is never
-//! signalled. A stop is SIGTERM to the group, then SIGCONT (so a stopped
+//! signalled. A scan follows ancestry from the child and from every live
+//! member of the child's group or session, not from the child alone: a member
+//! stays alive after the child exits, and the children of the child are
+//! reparented at that moment, so the members are the only parents left to
+//! follow. When the child exits by itself (normally, with an error or by a
+//! crash) the owner takes one such listing before it sends the first signal,
+//! because the TERM that follows can end a member and orphan what it started. A
+//! stop is SIGTERM to the group, then SIGCONT (so a stopped
 //! process receives it), then the same to everything a sweep finds outside the
 //! group; SIGKILL follows after the grace period, and the group KILL repeats on
 //! a timer that does not wait for inspection. A leader that is only stopped has
@@ -75,17 +82,23 @@
 //!
 //! # What remains possible
 //!
-//! Two gaps remain, tracked as delega issue 1. Both end with `Confirmed` while
-//! a descendant runs, and both have an ignored test in `tests/gaps.rs` that
-//! states the wanted behaviour:
+//! Two gaps remain. Both end with `Confirmed` while a descendant runs, and both
+//! have an ignored test in `tests/gaps.rs` that states the wanted behaviour
+//! (the relay, and a descendant whose parent was the child itself):
 //!
-//! - A descendant that calls `setsid` and is orphaned before any scan saw it
-//!   while its parent lived (a detached grandchild whose parent exits at once,
-//!   or a crash before the next scan). It is in no group or session of the
-//!   child and has no known ancestry. The scan runs every 500 ms and once more,
-//!   within a budget, before a stop the owner starts; it does not run for a
-//!   crash. [`Diagnostics::capture_gap_observed`] says when the scan is known
-//!   to have missed its budget or failed, which widens that window.
+//! - A descendant that calls `setsid` and whose parent exited before any
+//!   listing saw the two together. The parent is the child itself (it exits, or
+//!   crashes, within one scan interval of the descendant calling `setsid`) or a
+//!   member of the session that exits at once. A process whose parent exits is
+//!   a child of init from that moment, in a session of its own, so no later
+//!   listing can tie it to the child, and nothing in the process table says who
+//!   its parent was. The scan runs every 500 ms and once more, within a budget,
+//!   before every stop and before the signals that follow a natural exit; it
+//!   cannot run earlier than the exit itself.
+//!   [`Diagnostics::capture_gap_observed`] says when a scan is known to have
+//!   missed its budget or failed, which widens that window. A descendant whose
+//!   parent is still alive in the session when the child exits is not part of
+//!   this gap: the listing before the first signal adopts it.
 //! - A fast fork relay: a descendant that ignores TERM, changes process group
 //!   each generation, and forks a successor and exits within a few
 //!   milliseconds. Every listing holds a row that is gone when its session is
@@ -95,7 +108,38 @@
 //!   possibly ours kept honest runs unconfirmed on a machine with churn.
 //!
 //! A descendant that stays in the session, even in a group of its own, is not
-//! part of either gap.
+//! part of either gap. Neither is a descendant that left the session while a
+//! scan or the listing at the exit saw its parent as a member or as a tracked
+//! process.
+//!
+//! What would close the first gap is a process table cannot supply: a kernel
+//! facility that reparents orphans to the owner (a child subreaper on Linux,
+//! which would make the host process the reaper of every orphan and is not done
+//! here) or reports each fork as it happens (`kqueue` process events on macOS).
+//! Marking descendants through their environment would follow them past
+//! `setsid` but not past a program that clears its environment. Reporting
+//! `Unconfirmed` whenever a process of the right age is a child of init was
+//! rejected: on a machine that starts daemons it would make ordinary runs
+//! unconfirmed.
+//!
+//! # Why the owner never signals a foreign process
+//!
+//! A process is signalled only if it is a live member of the child's group (the
+//! group id is the child's pid, which the unreaped child pins), a live member of
+//! its session (read with `getsid` and read again just before the signal), or a
+//! tracked process whose pid and start time match what was recorded. A process
+//! becomes tracked only by being a member, or by having a parent that is owned
+//! at that listing: the child itself, a member, or a tracked process with a
+//! matching start time. Init and the process that runs the owner are never
+//! owned, so a process reparented to init is not adopted through its parent, and
+//! it is signalled only if it was tracked earlier and still has the same start
+//! time. No process can join another session or group, so a member is a
+//! descendant of the child by construction. What remains is a pid recycled
+//! between the two rows of one listing (the child's `ppid` names the pid of a
+//! process that died and whose number a new member took within the run of one
+//! `ps`), and two processes with one pid and one start time within the
+//! resolution of `ps` (one second on macOS); both need a pid to wrap within that
+//! time.
 //!
 //! # What no in-process code can do
 //!
@@ -124,7 +168,12 @@
 //! - `waitid` with `WNOWAIT` for a stopped leader: macOS reports a stop as a
 //!   result; the code accepts only exit, kill and core dump, which is the
 //!   Linux behaviour too, but the stopped-leader tests have not run there.
-//! - `getsid` of processes in other sessions and of other users' processes.
+//! - `getsid` of processes in other sessions and of other users' processes, now
+//!   read for every row of every listing.
+//! - A zombie leader keeps its session: `getsid` of the members it left behind
+//!   answers its pid, and its children are reparented when it exits, not when it
+//!   is reaped. Both hold on macOS; the adoption of a `setsid` descendant whose
+//!   parent is a member depends on them.
 //! - SIGCONT after TERM: on Linux a stopped process holds a TERM pending until
 //!   it is continued, so `a_stopped_descendant_receives_terminate_when_the_group_does`
 //!   can fail there if the SIGCONT is removed; on macOS it cannot fail.

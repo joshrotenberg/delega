@@ -210,10 +210,10 @@ output and `cleanup.confirmed`, and a list of expected failures (`GAPS`), each
 with a class, a reason and exactly which roles may survive:
 
 - **documented gap**: the process module's docs list it as known (a descendant
-  that calls `setsid` and is orphaned unseen, a fast fork relay, SIGKILL of
-  `delega`).
+  that calls `setsid` and whose parent exited before any listing saw it, which
+  is the `orphan` and `bare` rows; a fast fork relay; SIGKILL of `delega`).
 - **undocumented gap**: a failure this harness found that the docs do not
-  describe.
+  describe. None is listed now.
 - **defect**: a failure that is neither. None is listed now.
 
 A row's verdict is `pass`, `expected_failure` (it failed criterion 2 as the

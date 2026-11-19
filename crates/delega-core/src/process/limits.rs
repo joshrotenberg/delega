@@ -28,6 +28,12 @@ pub const CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
 /// almost every stop; 150 ms covers that with margin and delays a stop by at
 /// most this much.
 pub const PRE_STOP_CAPTURE_BUDGET: Duration = Duration::from_millis(150);
+/// How long the signals that follow a natural exit of the child wait for a
+/// listing taken after the exit. The scan in progress at the exit began before
+/// it and cannot stand in for that listing, so up to two runs of `ps` are
+/// needed one after the other; a hung `ps` delays the first signal by at most
+/// this much.
+pub const EXIT_LISTING_BUDGET: Duration = Duration::from_millis(300);
 /// Poll interval while a stop waits for that scan.
 pub const PRE_STOP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 

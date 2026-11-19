@@ -166,6 +166,10 @@ pub struct ProcessSpec {
     /// Test seam: panic in the owner loop right after the child starts.
     #[cfg(test)]
     pub(crate) panic_in_loop: bool,
+    /// Test seam: the interval between periodic scans, in place of
+    /// `limits::CAPTURE_INTERVAL`, so a test can rule a periodic scan out.
+    #[cfg(test)]
+    pub(crate) capture_interval: Option<Duration>,
 }
 
 impl ProcessSpec {
@@ -199,6 +203,8 @@ impl ProcessSpec {
             swallow_group_kills: 0,
             #[cfg(test)]
             panic_in_loop: false,
+            #[cfg(test)]
+            capture_interval: None,
         }
     }
 

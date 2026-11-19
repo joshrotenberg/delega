@@ -5,9 +5,21 @@
 //! while the child is alive. Start times are kept with each pid, so a recycled
 //! pid is never signalled by number alone.
 //!
-//! A descendant that was never observed (started and detached between two
-//! scans, then orphaned) is not known to this tracker. That is a known gap, see
-//! the module documentation of [`crate::process`].
+//! What is owned. In every listing the owned set starts from the child and
+//! from every live process that is in the child's process group or session (the
+//! session is read with `getsid`, which the kernel answers exactly), and from
+//! every process already tracked with a matching start time. Every process
+//! whose parent is in the owned set is then owned, repeatedly, and is tracked
+//! from then on. So a descendant that calls `setsid` is kept as long as one
+//! listing saw it while its parent was still owned, whether that parent is the
+//! child or any other member. The child's own row is only a seed: once it
+//! exits its children are reparented, but the members it left behind are still
+//! found through the session.
+//!
+//! A descendant that was never in such a listing (started and detached between
+//! two scans, whose parent then exited before the next) is not known to this
+//! tracker. That is a known gap, see the module documentation of
+//! [`crate::process`].
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -270,9 +282,22 @@ pub(crate) fn push_warning(warnings: &Warnings, warning: String) {
     }
 }
 
+/// Whether a pid may ever be owned: not the child (it seeds the set), not init
+/// or the kernel, and not the process that runs this code.
+fn adoptable(child: i32, pid: i32) -> bool {
+    pid > 1 && pid != child && u32::try_from(pid).is_ok_and(|p| p != std::process::id())
+}
+
 fn clip(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
 }
+/// One listing and the session of each of its live rows that is not in the
+/// child's group, read once so adoption and classification agree.
+pub(crate) struct Snapshot {
+    pub rows: Vec<ProcessRow>,
+    sessions: HashMap<i32, sys::SessionLookup>,
+}
+
 pub(crate) struct ProcessTree {
     pid: i32,
     root_started: Option<String>,
@@ -396,12 +421,30 @@ impl ProcessTree {
         result
     }
 
+    /// The session of every live row outside the child's group.
+    fn read_sessions(&self, rows: &[ProcessRow]) -> HashMap<i32, sys::SessionLookup> {
+        rows.iter()
+            .filter(|r| !r.zombie && r.group != self.pid)
+            .map(|r| (r.pid, sys::session_lookup(r.pid)))
+            .collect()
+    }
+
     /// Adopt ancestry from every inspection, including cleanup and signal
-    /// snapshots. Known descendants may fork after periodic capture stops.
-    fn adopt(&mut self, rows: &[ProcessRow]) {
+    /// snapshots. The owned set is seeded with the child, the live members of
+    /// its group and session, and the tracked processes with a matching start
+    /// time, and grows by every process whose parent is owned. A process is
+    /// never owned by its number alone, by being a child of pid 1, or by
+    /// anything but one of these links.
+    ///
+    /// The group and session seeds need the child's own row with its recorded
+    /// start time: while the child is unreaped its pid cannot name another
+    /// group or session, and a listing that does not show it is not trusted for
+    /// them.
+    fn adopt(&mut self, rows: &[ProcessRow], sessions: &HashMap<i32, sys::SessionLookup>) {
         if !self.enabled {
             return;
         }
+        let root_pid = self.pid;
         let root = rows.iter().find(|row| row.pid == self.pid);
         if self.root_started.is_none() {
             self.root_started = root.map(|r| r.started.clone());
@@ -411,6 +454,17 @@ impl ProcessTree {
             && Some(&root.started) == self.root_started.as_ref()
         {
             owned.insert(self.pid);
+            for row in rows
+                .iter()
+                .filter(|r| !r.zombie && adoptable(root_pid, r.pid))
+            {
+                let member = row.group == self.pid
+                    || sessions.get(&row.pid) == Some(&sys::SessionLookup::In(self.pid));
+                if member {
+                    owned.insert(row.pid);
+                    self.known.insert(row.pid, row.started.clone());
+                }
+            }
         }
         for row in rows {
             if self.known.get(&row.pid) == Some(&row.started) {
@@ -420,7 +474,10 @@ impl ProcessTree {
         for _ in 0..rows.len() {
             let before = owned.len();
             for row in rows {
-                if row.pid != self.pid && owned.contains(&row.parent) && !owned.contains(&row.pid) {
+                if adoptable(root_pid, row.pid)
+                    && owned.contains(&row.parent)
+                    && !owned.contains(&row.pid)
+                {
                     owned.insert(row.pid);
                     self.known.insert(row.pid, row.started.clone());
                 }
@@ -431,9 +488,12 @@ impl ProcessTree {
         }
     }
 
-    async fn snapshot(&mut self) -> Result<Vec<ProcessRow>, InspectError> {
+    /// Whether a pid may ever be owned: not the child (it seeds the set), not
+    /// init or the kernel, and not the process that runs this code.
+    async fn snapshot(&mut self) -> Result<Snapshot, InspectError> {
         let rows = self.rows().await?;
-        self.adopt(&rows);
+        let sessions = self.read_sessions(&rows);
+        self.adopt(&rows, &sessions);
         let tracked: Vec<i32> = rows
             .iter()
             .filter(|r| !r.zombie && self.known.get(&r.pid) == Some(&r.started))
@@ -444,7 +504,7 @@ impl ProcessTree {
         obs.stats.root_identity_observed = self.root_started.is_some();
         obs.stats.retained_descendant_identities = self.known.len();
         drop(obs);
-        Ok(rows)
+        Ok(Snapshot { rows, sessions })
     }
 
     /// Classify the live processes in one table. The child is the session
@@ -452,24 +512,24 @@ impl ProcessTree {
     /// still reports that session id was started by the child and never left.
     /// The session id is read per pid with `getsid`, because `ps` keywords for
     /// it differ between systems (macOS reports 0 for every process).
-    fn view(&self, rows: &[ProcessRow]) -> SweepView {
+    fn view(&self, snapshot: &Snapshot) -> SweepView {
         let mut view = SweepView::default();
-        for row in rows.iter().filter(|r| !r.zombie) {
+        for row in snapshot.rows.iter().filter(|r| !r.zombie) {
             if row.group == self.pid {
                 view.group.push(row.pid);
                 continue;
             }
             let tracked = self.known.get(&row.pid) == Some(&row.started);
-            match sys::session_lookup(row.pid) {
-                sys::SessionLookup::In(session) if session == self.pid => {
+            match snapshot.sessions.get(&row.pid) {
+                Some(sys::SessionLookup::In(session)) if *session == self.pid => {
                     view.session.push(row.pid);
                 }
-                sys::SessionLookup::In(_) => {
+                Some(sys::SessionLookup::In(_)) => {
                     if tracked {
                         view.tracked.push(row.pid);
                     }
                 }
-                sys::SessionLookup::Gone | sys::SessionLookup::Unknown => {
+                Some(sys::SessionLookup::Gone | sys::SessionLookup::Unknown) | None => {
                     if tracked {
                         view.tracked.push(row.pid);
                     } else {
@@ -486,8 +546,8 @@ impl ProcessTree {
     /// is signalled from that same snapshot; a TERM is followed by CONT so a
     /// stopped process receives it.
     pub async fn sweep(&mut self, signal: Option<Signal>) -> Result<SweepView, InspectError> {
-        let rows = self.snapshot().await?;
-        let view = self.view(&rows);
+        let snapshot = self.snapshot().await?;
+        let view = self.view(&snapshot);
         if view.vanished > 0 {
             let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
             obs.stats.vanished_rows += view.vanished as u64;
@@ -809,6 +869,124 @@ mod tests {
         assert!(!tree.group_live().await.unwrap());
         assert!(tree.cleanup_state().await.unwrap().is_empty());
         assert!(tree.sweep(Some(Signal::TERM)).await.unwrap().is_empty());
+    }
+
+    /// Rows as (pid, parent, group, started, zombie).
+    fn table(rows: Vec<(i32, i32, i32, &'static str, bool)>) -> Vec<ProcessRow> {
+        rows.into_iter()
+            .map(|(pid, parent, group, started, zombie)| ProcessRow {
+                pid,
+                parent,
+                group,
+                zombie,
+                started: started.into(),
+            })
+            .collect()
+    }
+
+    fn fixed(frames: Vec<Vec<ProcessRow>>) -> Lister {
+        let frames = Arc::new(Mutex::new(frames.into_iter()));
+        Arc::new(move || {
+            let next = frames.lock().unwrap().next().unwrap_or_default();
+            Box::pin(async move { Ok(next) })
+        })
+    }
+
+    #[tokio::test]
+    async fn children_of_a_group_member_are_adopted_after_the_leader_has_exited() {
+        // The leader (10) is a zombie, so its own children were reparented. 11
+        // is still in its group, and 12 is a child of 11 that left the group.
+        // 13 is unrelated and so is its child 14; 15 is an orphan of init.
+        let lister = fixed(vec![table(vec![
+            (1, 0, 1, "init", false),
+            (10, 1, 10, "root", true),
+            (11, 1, 10, "member", false),
+            (12, 11, 12, "grandchild", false),
+            (13, 1, 13, "other", false),
+            (14, 13, 13, "other-child", false),
+            (15, 1, 15, "orphan", false),
+        ])]);
+        let mut tree = ProcessTree::new(10, lister, true);
+        // The listing of the child while it ran gave it its identity.
+        tree.root_started = Some("root".into());
+        tree.capture().await;
+        let mut known: Vec<_> = tree.known.keys().copied().collect();
+        known.sort_unstable();
+        assert_eq!(known, vec![11, 12]);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_adopted_from_a_listing_that_does_not_show_the_child() {
+        // Without the child's own row its pid cannot be trusted to name its
+        // group, so a row with that group is not a member.
+        let lister = fixed(vec![table(vec![
+            (1, 0, 1, "init", false),
+            (11, 1, 10, "stranger", false),
+            (12, 11, 12, "stranger-child", false),
+        ])]);
+        let mut tree = ProcessTree::new(10, lister, true);
+        tree.root_started = Some("root".into());
+        tree.capture().await;
+        assert_eq!(tree.known_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_shows_another_process_under_the_childs_pid_adopts_nothing() {
+        // The pid of the child is held by a process with another start time.
+        let lister = fixed(vec![table(vec![
+            (1, 0, 1, "init", false),
+            (10, 1, 10, "reused", false),
+            (11, 10, 10, "its-child", false),
+        ])]);
+        let mut tree = ProcessTree::new(10, lister, true);
+        tree.root_started = Some("root".into());
+        tree.capture().await;
+        assert_eq!(tree.known_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_recycled_pid_and_children_of_init_are_not_adopted() {
+        let lister = fixed(vec![
+            table(vec![
+                (1, 0, 1, "init", false),
+                (10, 1, 10, "root", false),
+                (11, 10, 10, "member", false),
+                (12, 11, 12, "grandchild", false),
+            ]),
+            // The member and the grandchild are gone. 11 and 12 are reused by
+            // unrelated processes, one of them the parent of a new process.
+            table(vec![
+                (1, 0, 1, "init", false),
+                (10, 1, 10, "root", true),
+                (11, 1, 11, "reused-11", false),
+                (12, 1, 12, "reused-12", false),
+                (16, 12, 12, "child-of-reused", false),
+                (17, 1, 17, "child-of-init", false),
+            ]),
+        ]);
+        let mut tree = ProcessTree::new(10, lister, true);
+        tree.capture().await;
+        assert_eq!(tree.known_count(), 2);
+        tree.capture().await;
+        assert_eq!(tree.known.get(&11).map(String::as_str), Some("member"));
+        assert_eq!(tree.known.get(&12).map(String::as_str), Some("grandchild"));
+        assert!(!tree.known.contains_key(&16));
+        assert!(!tree.known.contains_key(&17));
+        assert!(!tree.known.contains_key(&1));
+    }
+
+    #[tokio::test]
+    async fn the_process_that_runs_the_tracker_is_never_adopted() {
+        let own = i32::try_from(std::process::id()).unwrap();
+        let lister = fixed(vec![table(vec![
+            (1, 0, 1, "init", false),
+            (10, 1, 10, "root", false),
+            (11, 10, 10, "member", false),
+            (own, 11, 11, "ours", false),
+        ])]);
+        let mut tree = ProcessTree::new(10, lister, true);
+        tree.capture().await;
+        assert!(!tree.known.contains_key(&own));
     }
 
     #[tokio::test]

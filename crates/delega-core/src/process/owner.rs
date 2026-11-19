@@ -158,7 +158,7 @@ impl Shared {
     /// detached children before TERM reparents them. This never cancels an
     /// inspector: slow captures continue under their owner while signalling
     /// resumes after at most the budget.
-    pub(super) async fn before_stop(&self) {
+    pub(super) async fn before_stop(&self, budget: Duration) {
         let requested_at = Instant::now();
         let requested = {
             let mut wait = lock(&self.stop_wait);
@@ -168,7 +168,7 @@ impl Shared {
             requested
         };
         self.capture_notify.notify_one();
-        let deadline = requested_at + PRE_STOP_CAPTURE_BUDGET;
+        let deadline = requested_at + budget;
         while self.capture_completed.load(Ordering::SeqCst) < requested && Instant::now() < deadline
         {
             tokio::time::sleep(PRE_STOP_POLL_INTERVAL).await;
@@ -181,7 +181,7 @@ impl Shared {
             self.budget_exceeded.fetch_add(1, Ordering::SeqCst);
             self.warn(format!(
                 "Pre-stop process capture exceeded {} ms; newly detached children may be unobserved",
-                PRE_STOP_CAPTURE_BUDGET.as_millis()
+                budget.as_millis()
             ));
         }
     }
@@ -361,6 +361,9 @@ impl OwnedProcess {
             Err(error) => owner.watch_error = Some(error.to_string()),
         }
         let stop = owner.capture_stop.clone();
+        let interval = CAPTURE_INTERVAL;
+        #[cfg(test)]
+        let interval = spec.capture_interval.unwrap_or(interval);
         owner.capture_task = Some(tokio::spawn(async move {
             loop {
                 let requested = shared.capture_requested.load(Ordering::SeqCst);
@@ -376,7 +379,7 @@ impl OwnedProcess {
                 tokio::select! {
                     _ = stop.cancelled() => break,
                     _ = shared.capture_notify.notified() => {},
-                    _ = tokio::time::sleep(CAPTURE_INTERVAL) => {},
+                    _ = tokio::time::sleep(interval) => {},
                 }
             }
         }));
@@ -401,7 +404,7 @@ impl OwnedProcess {
     ) -> Settled {
         let shared = self.shared.clone();
         if hard_stop {
-            shared.before_stop().await;
+            shared.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
         }
         let first_term = term_at.unwrap_or_else(Instant::now);
         if term_at.is_none() && !hard_stop {

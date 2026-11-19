@@ -15,7 +15,10 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::capture::{Bounded, Captured};
-use super::limits::{FAR_FUTURE, FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
+use super::limits::{
+    EXIT_LISTING_BUDGET, FAR_FUTURE, FINAL_CLEANUP_PASS, PRE_STOP_CAPTURE_BUDGET,
+    STDERR_READ_CHUNK, STDOUT_READ_CHUNK,
+};
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
@@ -207,7 +210,7 @@ async fn drive(
             _ = stop.cancelled(), if !stop_seen => {
                 stop_seen = true;
                 if !exited && term_at.is_none() && !shared.leader_has_exited() {
-                    shared.before_stop().await;
+                    shared.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
                     // The child may have exited while the scan ran. Then it
                     // ended on its own and is reported as it exited.
                     if !shared.leader_has_exited() {
@@ -220,7 +223,7 @@ async fn drive(
             _ = tokio::time::sleep_until(limit_at), if !limit_seen && !exited => {
                 limit_seen = true;
                 if term_at.is_none() && !shared.leader_has_exited() {
-                    shared.before_stop().await;
+                    shared.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
                     if !shared.leader_has_exited() {
                         ending = Some(Ending::TimedOut { limit: spec.time_limit });
                         term_at = Some(Instant::now());
@@ -241,8 +244,12 @@ async fn drive(
                     shared.warn("Leader exit observation failed".into());
                 }
                 // A natural exit begins cleanup of the rest of the group
-                // without changing how the run is reported.
+                // without changing how the run is reported. One listing comes
+                // first: the TERM that follows can end a member that has a
+                // descendant in a session of its own, and that descendant is
+                // then orphaned and cannot be told from any other process.
                 if term_at.is_none() {
+                    shared.before_stop(EXIT_LISTING_BUDGET).await;
                     term_at = Some(Instant::now());
                     shared.terminate().await;
                 }
