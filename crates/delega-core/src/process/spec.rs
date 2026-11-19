@@ -109,9 +109,11 @@ pub struct CaptureSpec {
     pub keep: Keep,
 }
 
-/// A function called with each chunk read from the child's standard output, in
-/// order, while the child runs. It runs inside the owner loop, so it must
-/// return quickly and must not block.
+/// A function called with chunks read from the child's standard output, in
+/// order, while the child runs. It runs on a thread of its own and is fed
+/// through a bounded queue: a tap that is slow loses chunks (the report's
+/// warnings count them) and a tap that panics receives nothing more, but
+/// neither delays the run, its time limit or the capture.
 pub type OutputTap = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 /// A child process to run.

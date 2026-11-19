@@ -21,11 +21,10 @@ use delega_core::process::rfc3339_utc;
 use delega_core::provider::{DryRun, Refusal};
 use serde_json::json;
 
+use super::log::Log;
 use super::request::{Facts, Failure};
 use crate::commands::OutputFormat;
-use crate::commands::output::{Written, report, write};
-
-const COMMAND: &str = "run";
+use crate::commands::output::{Written, write};
 
 /// The outcome as the contract spells it.
 pub fn outcome_name(outcome: Outcome) -> &'static str {
@@ -93,15 +92,24 @@ pub fn refused_result(facts: &Facts, kind: &str, message: &str) -> RunResult {
     RunResult::refused_before_start(context(facts), kind, message)
 }
 
-fn emit(text: &str) -> Written {
-    write(COMMAND, text.as_bytes())
+/// Write a document or the answer to standard output. A failure is reported
+/// through the log and the exit status accounts for it; nothing here waits on
+/// standard error.
+fn emit(log: &Log, text: &str) -> bool {
+    match write(text.as_bytes()) {
+        Written::Done | Written::Closed => true,
+        Written::Failed(message) => {
+            log.line(format!("delega run: {message}"));
+            false
+        }
+    }
 }
 
-/// The status to exit with: the outcome's, unless a write to standard output
-/// failed in a way other than a closed pipe and the outcome said success.
-fn status(outcome: Outcome, written: Written) -> ExitCode {
+/// The status to exit with: the outcome's, unless the result could not be
+/// written to standard output and the outcome said success.
+fn status(outcome: Outcome, written: bool) -> ExitCode {
     let code = outcome.exit_status();
-    if written == Written::Failed && code == 0 {
+    if !written && code == 0 {
         ExitCode::from(1)
     } else {
         ExitCode::from(code)
@@ -117,19 +125,19 @@ fn json_document(value: &impl serde::Serialize) -> String {
 
 /// Print a refusal found before a run existed, and exit with the refused
 /// status. In JSON mode the refused result is the document.
-pub fn refuse(format: OutputFormat, failure: &Failure) -> ExitCode {
+pub fn refuse(format: OutputFormat, failure: &Failure, log: &Log) -> ExitCode {
     match format {
         OutputFormat::Json => {
             let result = RunResult::refused_invalid(context(&failure.facts), &failure.problems)
                 .unwrap_or_else(|_| {
                     refused_result(&failure.facts, "invalid_request", "the request is invalid")
                 });
-            let written = emit(&json_document(&result));
+            let written = emit(log, &json_document(&result));
             status(Outcome::Refused, written)
         }
         OutputFormat::Text => {
             for problem in &failure.problems {
-                report(&format!("delega run: refused: {problem}"));
+                log.line(format!("delega run: refused: {problem}"));
             }
             ExitCode::from(Outcome::Refused.exit_status())
         }
@@ -137,22 +145,27 @@ pub fn refuse(format: OutputFormat, failure: &Failure) -> ExitCode {
 }
 
 /// Print the refusal of a dry run.
-pub fn refuse_dry_run(format: OutputFormat, facts: &Facts, refusal: &Refusal) -> ExitCode {
+pub fn refuse_dry_run(
+    format: OutputFormat,
+    facts: &Facts,
+    refusal: &Refusal,
+    log: &Log,
+) -> ExitCode {
     match format {
         OutputFormat::Json => {
             let result = refused_result(facts, &refusal.kind, &refusal.message);
-            let written = emit(&json_document(&result));
+            let written = emit(log, &json_document(&result));
             status(Outcome::Refused, written)
         }
         OutputFormat::Text => {
-            report(&format!("delega run: refused: {refusal}"));
+            log.line(format!("delega run: refused: {refusal}"));
             ExitCode::from(Outcome::Refused.exit_status())
         }
     }
 }
 
 /// Print what a dry run found and exit 0.
-pub fn dry_run(format: OutputFormat, plan: &DryRun) -> ExitCode {
+pub fn dry_run(format: OutputFormat, plan: &DryRun, log: &Log) -> ExitCode {
     let text = match format {
         OutputFormat::Json => json_document(&json!({
             "schema_version": SCHEMA_VERSION,
@@ -160,9 +173,10 @@ pub fn dry_run(format: OutputFormat, plan: &DryRun) -> ExitCode {
         })),
         OutputFormat::Text => dry_run_text(plan),
     };
-    match emit(&text) {
-        Written::Failed => ExitCode::from(1),
-        Written::Done | Written::Closed => ExitCode::SUCCESS,
+    if emit(log, &text) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
@@ -209,20 +223,22 @@ fn dry_run_text(plan: &DryRun) -> String {
 }
 
 /// Print a run's result as the format asks and return the exit status.
-pub fn print_result(format: OutputFormat, result: &RunResult) -> ExitCode {
+pub fn print_result(format: OutputFormat, result: &RunResult, log: &Log) -> ExitCode {
     let written = match format {
-        OutputFormat::Json => emit(&json_document(result)),
+        OutputFormat::Json => emit(log, &json_document(result)),
         OutputFormat::Text => {
-            summarize(result);
-            emit(&answer_text(result))
+            summarize(result, log);
+            emit(log, &answer_text(result))
         }
     };
     status(result.outcome, written)
 }
 
-/// The answer, ending in a newline, or nothing when there is none.
+/// The answer, ending in a newline, when the run completed. Any other outcome
+/// prints nothing on standard output: whatever partial text exists is in the
+/// result, which `--output json` prints.
 fn answer_text(result: &RunResult) -> String {
-    if result.text.is_empty() {
+    if result.outcome != Outcome::Completed || result.text.is_empty() {
         return String::new();
     }
     let mut text = result.text.clone();
@@ -234,9 +250,9 @@ fn answer_text(result: &RunResult) -> String {
 
 /// What a person needs beside the answer, on standard error: how a run that did
 /// not complete ended, what was denied, and cleanup that could not be confirmed.
-fn summarize(result: &RunResult) {
+fn summarize(result: &RunResult, log: &Log) {
     if let Some(error) = &result.error {
-        report(&format!(
+        log.line(format!(
             "delega run: {}: {}: {}",
             outcome_name(result.outcome),
             error.kind,
@@ -244,7 +260,7 @@ fn summarize(result: &RunResult) {
         ));
     }
     for denied in &result.permissions.denied {
-        report(&format!("delega run: denied: {}", denied.request));
+        log.line(format!("delega run: denied: {}", denied.request));
     }
     if let Cleanup::Unconfirmed {
         pids,
@@ -252,7 +268,7 @@ fn summarize(result: &RunResult) {
         reason,
     } = &result.cleanup
     {
-        report(&format!(
+        log.line(format!(
             "delega run: cleanup not confirmed: {reason} (pids {pids:?}, process groups {process_groups:?})"
         ));
     }

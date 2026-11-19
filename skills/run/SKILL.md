@@ -68,13 +68,15 @@ Every run ends in exactly one outcome, and the exit status follows it.
 | `failed` | 1 | The provider or delega hit an error. `error.kind` says which. |
 | `refused` | 2 | The run did not go ahead: invalid request, a limit reached, or a needed permission denied. Usage errors also exit 2. |
 | `timed_out` | 124 | The time limit passed. |
-| `interrupted` | 130 | Ctrl-C or SIGTERM stopped the run. delega cleans up and prints the result first. |
+| `interrupted` | 130 | Ctrl-C, SIGTERM, SIGHUP or SIGQUIT stopped the run. delega cleans up and prints the result first. SIGKILL cannot be handled and leaves the worker running, so use SIGTERM to stop delega. |
 
 ## Read the result
 
 By default the answer is printed as text, and nothing else is on standard
-output. When the run did not complete, one line on standard error gives the
-outcome and the error, and each denied request is listed there too. Use
+output. Only a run that completed prints an answer; for any other outcome
+standard output is empty (use `--output json` to read partial text), one line on
+standard error gives the outcome and the error, and each denied request is
+listed there too. Use
 `--output json` to get the whole result; with it the result is always printed,
 whatever the exit status. Add `--progress` to see one line per provider event on
 stderr, each starting with `progress: `; standard output does not change.

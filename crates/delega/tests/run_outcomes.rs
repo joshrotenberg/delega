@@ -4,7 +4,9 @@ mod support;
 
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::result::Cleanup;
-use support::{PROVIDERS, Rig, result_of, signal, text, wait_bounded};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use support::{PROVIDERS, Rig, result_of, signal, text, wait_bounded, wait_exit_only};
 
 #[test]
 fn a_completed_run_prints_the_answer_alone_and_exits_zero() {
@@ -179,6 +181,8 @@ fn interrupted(provider: &str, names: &[&str]) -> (std::process::Output, Rig) {
     rig.wait_started();
     for name in names {
         signal(child.id(), name);
+        // Far enough apart that each one is a signal of its own.
+        std::thread::sleep(Duration::from_millis(100));
     }
     (wait_bounded(child), rig)
 }
@@ -219,7 +223,14 @@ fn signals_while_the_worker_is_stopping_do_not_end_delega_early() {
         assert_eq!(result.outcome, Outcome::Interrupted);
         assert_eq!(result.cleanup, Cleanup::Confirmed);
         let err = text(&out.stderr);
-        assert!(err.contains("stopping the worker"), "{err}");
+        // Each message is said exactly once, the first by the first signal and
+        // the second by a later one, so neither can satisfy the other's check.
+        assert_eq!(
+            err.matches("signal received, stopping the worker").count(),
+            1,
+            "{err}"
+        );
+        assert_eq!(err.matches("still stopping the worker").count(), 1, "{err}");
         rig.assert_nothing_left();
     }
 }
@@ -268,6 +279,188 @@ fn a_closed_stdout_pipe_does_not_panic_and_keeps_the_outcome_status() {
             let err = text(&out.stderr);
             assert!(!err.contains("panicked"), "{provider} {format}: {err}");
             assert_eq!(out.status.code(), Some(0), "{provider} {format}: {err}");
+            rig.assert_nothing_left();
+        }
+    }
+}
+
+#[test]
+fn sighup_and_sigquit_stop_the_worker_like_sigterm() {
+    for name in ["HUP", "QUIT"] {
+        for provider in PROVIDERS {
+            let (out, rig) = interrupted(provider, &[name]);
+            assert_eq!(out.status.code(), Some(130), "{provider} {name}");
+            let result = result_of(&out);
+            assert_eq!(result.outcome, Outcome::Interrupted, "{provider} {name}");
+            assert_eq!(result.cleanup, Cleanup::Confirmed, "{provider} {name}");
+            rig.assert_nothing_left();
+        }
+    }
+}
+
+#[test]
+fn a_signal_during_the_version_probe_stops_the_probe_and_starts_no_worker() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let child = rig
+            .command()
+            .env("FAKE_VERSION_SLEEP", "30")
+            .args(rig.run_args(provider, "success", &["--output", "json"]))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn delega");
+        let began = std::time::Instant::now();
+        while !rig.record.join("probe-started").exists() {
+            assert!(
+                began.elapsed() < Duration::from_secs(30),
+                "the probe never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        signal(child.id(), "TERM");
+        let out = wait_bounded(child);
+        assert_eq!(out.status.code(), Some(130), "{provider}");
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Interrupted);
+        assert_eq!(result.cleanup, Cleanup::Confirmed);
+        assert!(
+            !rig.record.join("argv").exists(),
+            "{provider}: the worker started"
+        );
+        // The probe slept in a shell of its own; nothing of it remains.
+        let ps = Command::new("/bin/ps")
+            .args(["-ax", "-o", "command="])
+            .output()
+            .expect("ps");
+        let root = rig.path("");
+        let leftovers = text(&ps.stdout)
+            .lines()
+            .filter(|l| l.contains("fake-") && l.contains(root.to_string_lossy().as_ref()))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+}
+
+#[test]
+fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
+    // Signals at a spread of moments around a quick run's end. Whatever the
+    // timing, the exit status matches the outcome that was printed, a run
+    // killed before the handlers existed started nothing, and nothing is left.
+    for delay_ms in [0u64, 20, 40, 60, 80, 100, 130, 160, 200, 260] {
+        let rig = Rig::new();
+        let child = rig.spawn_run("codex", "success", &["--output", "json"]);
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        signal(child.id(), "TERM");
+        let out = wait_bounded(child);
+        match out.status.code() {
+            Some(0) => assert_eq!(result_of(&out).outcome, Outcome::Completed, "{delay_ms}"),
+            Some(130) => assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}"),
+            // The signal came before delega could handle it: nothing had started.
+            None => assert!(
+                !rig.record.join("argv").exists() || delay_ms > 0,
+                "{delay_ms}"
+            ),
+            other => panic!(
+                "{delay_ms}: unexpected status {other:?}: {}",
+                text(&out.stderr)
+            ),
+        }
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn a_blocked_standard_error_does_not_delay_stopping_the_worker() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        // The fake writes about 10000 progress events, far more than a pipe
+        // holds, and nobody reads standard error.
+        let mut child = rig.spawn_run(provider, "chatty-hang", &["--progress", "--output", "json"]);
+        rig.wait_started();
+        std::thread::sleep(Duration::from_millis(500));
+        signal(child.id(), "TERM");
+        let status = wait_exit_only(&mut child, Duration::from_secs(15));
+        assert_eq!(status.code(), Some(130), "{provider}");
+        rig.assert_nothing_left();
+        // The result went to standard output without waiting for standard error.
+        let mut stdout = String::new();
+        std::io::Read::read_to_string(&mut child.stdout.take().expect("stdout"), &mut stdout)
+            .expect("read stdout");
+        let result: delega_core::contract::result::RunResult =
+            serde_json::from_str(&stdout).expect("a result document");
+        assert_eq!(result.outcome, Outcome::Interrupted);
+        assert_eq!(result.cleanup, Cleanup::Confirmed);
+    }
+}
+
+#[test]
+fn text_mode_prints_an_answer_only_for_a_completed_run() {
+    for provider in PROVIDERS {
+        for (prompt, extra, code) in [
+            ("provider-error", &[][..], 1),
+            ("denied-refused", &[][..], 2),
+            ("hang", &["--timeout", "1"][..], 124),
+        ] {
+            let rig = Rig::new();
+            let out = rig.run(provider, prompt, extra);
+            assert_eq!(out.status.code(), Some(code), "{provider} {prompt}");
+            assert_eq!(
+                text(&out.stdout),
+                "",
+                "{provider} {prompt}: {}",
+                text(&out.stdout)
+            );
+            assert!(!text(&out.stderr).is_empty(), "{provider} {prompt}");
+            rig.assert_nothing_left();
+        }
+        let rig = Rig::new();
+        let child = rig.spawn_run(provider, "hang", &[]);
+        rig.wait_started();
+        signal(child.id(), "INT");
+        let out = wait_bounded(child);
+        assert_eq!(out.status.code(), Some(130));
+        assert_eq!(text(&out.stdout), "", "{provider} interrupted");
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn partial_text_stays_available_in_json_for_a_run_that_did_not_complete() {
+    let rig = Rig::new();
+    let out = rig.run("claude", "provider-error", &["--output", "json"]);
+    let result = result_of(&out);
+    assert_eq!(result.outcome, Outcome::Failed);
+    assert_eq!(result.text, "working");
+}
+
+#[test]
+fn an_unwritable_standard_output_is_a_write_failure_not_a_silent_success() {
+    for format in ["text", "json"] {
+        for provider in PROVIDERS {
+            let rig = Rig::new();
+            // `1</dev/null` makes descriptor 1 a read-only file, so every write to it
+            // fails with EBADF. (A closed descriptor 1 would be reopened as
+            // /dev/null by the Rust runtime before delega's code runs.)
+            let mut command = Command::new("/bin/sh");
+            rig.configure(&mut command);
+            let out = command
+                .args([
+                    "-c",
+                    "exec \"$0\" \"$@\" 1</dev/null",
+                    env!("CARGO_BIN_EXE_delega"),
+                ])
+                .args(rig.run_args(provider, "success", &["--output", format]))
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run delega");
+            let err = text(&out.stderr);
+            assert!(!err.contains("panicked"), "{provider} {format}: {err}");
+            assert_eq!(out.status.code(), Some(1), "{provider} {format}: {err}");
+            assert!(
+                err.contains("cannot write to stdout"),
+                "{provider} {format}: {err}"
+            );
             rig.assert_nothing_left();
         }
     }

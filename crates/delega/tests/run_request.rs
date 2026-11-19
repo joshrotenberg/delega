@@ -9,7 +9,7 @@ use delega_core::contract::request::Provider;
 use serde_json::Value;
 use std::io::Write;
 use std::process::Stdio;
-use support::{PROVIDERS, Rig, result_of, text, wait_bounded};
+use support::{PROVIDERS, Rig, result_of, text, wait_bounded, wait_bounded_for};
 
 fn profile(rig: &Rig, body: &str) -> String {
     rig.file("profile.json", body)
@@ -54,6 +54,7 @@ fn a_profile_supplies_the_request_and_flags_override_it_field_by_field() {
     assert_eq!(result.provider, Some(Provider::Claude));
     assert_eq!(result.permissions.mode, Mode::Read);
     assert_eq!(result.timing.timeout_secs, 30);
+    rig.assert_nothing_left();
 }
 
 #[test]
@@ -71,6 +72,7 @@ fn an_explicit_prompt_replaces_the_prompt_in_the_profile() {
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "fake final answer\n");
+    rig.assert_nothing_left();
 }
 
 #[test]
@@ -215,6 +217,7 @@ fn resume_and_ephemeral_reach_the_provider() {
     let out = rig.run("claude", "success", &["--ephemeral", "--output", "json"]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(result_of(&out).session_id, None);
+    rig.assert_nothing_left();
 }
 
 #[test]
@@ -545,4 +548,278 @@ fn progress_for_a_refused_request_is_the_finish_line_only() {
         "{err}"
     );
     assert_eq!(lines.len(), 2, "{err}");
+}
+
+fn dry_json(rig: &Rig, args: &[&str]) -> Value {
+    let out = rig
+        .command()
+        .args(["run", "--dry-run", "--output", "json"])
+        .args(args)
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    serde_json::from_slice(&out.stdout).expect("JSON")
+}
+
+#[test]
+fn a_relative_extra_directory_resolves_against_the_callers_directory() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.path("shared")).expect("create shared");
+    // From the rig's root, the worker runs in `work` and may read `shared`, a
+    // sibling. Resolved against the worker's directory it would not exist.
+    let out = rig
+        .command()
+        .current_dir(rig.path(""))
+        .args([
+            "run",
+            "--dry-run",
+            "--output",
+            "json",
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+        ])
+        .args(["-C", "work", "--add-dir", "shared"])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let dirs = value["dry_run"]["mapping"]["directories"]
+        .as_array()
+        .expect("directories");
+    assert_eq!(dirs.len(), 1);
+    assert_eq!(dirs[0], rig.path("shared").to_string_lossy().as_ref());
+    assert_eq!(value["dry_run"]["cwd"], rig.work.to_string_lossy().as_ref());
+}
+
+#[test]
+fn relative_paths_in_a_profile_resolve_against_the_callers_directory_too() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.path("shared")).expect("create shared");
+    let file = profile(
+        &rig,
+        r#"{"schema_version":1,"provider":"claude","prompt":"x","cwd":"work",
+            "permissions":{"directories":["shared"]}}"#,
+    );
+    let out = rig
+        .command()
+        .current_dir(rig.path(""))
+        .args(["run", "--dry-run", "--output", "json", "--request", &file])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(value["dry_run"]["cwd"], rig.work.to_string_lossy().as_ref());
+    assert_eq!(
+        value["dry_run"]["mapping"]["directories"][0],
+        rig.path("shared").to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn a_relative_request_and_schema_path_are_read_from_the_callers_directory() {
+    let rig = Rig::new();
+    rig.file(
+        "profile.json",
+        r#"{"schema_version":1,"provider":"codex","prompt":"success"}"#,
+    );
+    rig.file("schema.json", r#"{"type":"object"}"#);
+    let out = rig
+        .command()
+        .current_dir(rig.path(""))
+        .args([
+            "run",
+            "--request",
+            "profile.json",
+            "--schema",
+            "schema.json",
+            "-C",
+            "work",
+        ])
+        .args(["--dry-run"])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+#[test]
+fn a_list_flag_replaces_the_profiles_list() {
+    let rig = Rig::new();
+    let file = profile(
+        &rig,
+        r#"{"schema_version":1,"provider":"claude","prompt":"x",
+            "permissions":{"commands":["from profile"]}}"#,
+    );
+    let cwd = rig.work.to_string_lossy().into_owned();
+    let kept = dry_json(&rig, &["--request", &file, "-C", &cwd]);
+    assert_eq!(
+        kept["dry_run"]["mapping"]["commands"],
+        serde_json::json!(["from profile"])
+    );
+    let replaced = dry_json(
+        &rig,
+        &[
+            "--request",
+            &file,
+            "-C",
+            &cwd,
+            "--allow-command",
+            "from flag",
+        ],
+    );
+    assert_eq!(
+        replaced["dry_run"]["mapping"]["commands"],
+        serde_json::json!(["from flag"])
+    );
+}
+
+#[test]
+fn resume_replaces_an_ephemeral_session_from_the_profile() {
+    let rig = Rig::new();
+    let file = profile(
+        &rig,
+        r#"{"schema_version":1,"provider":"codex","prompt":"success","session":{"ephemeral":true}}"#,
+    );
+    let out = rig
+        .command()
+        .args(["run", "--request", &file, "--resume", "sess-4", "-C"])
+        .arg(&rig.work)
+        .args(["--output", "json"])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // An ephemeral run reports no session id; this one reports the resumed id.
+    assert_eq!(result_of(&out).session_id.as_deref(), Some("sess-4"));
+    rig.assert_nothing_left();
+}
+
+#[test]
+fn a_prompt_may_start_with_a_hyphen() {
+    let rig = Rig::new();
+    let out = rig.run("claude", "-text that starts with a hyphen", &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(rig.recorded("stdin").starts_with("-text that starts"));
+    rig.assert_nothing_left();
+}
+
+#[test]
+fn a_request_refused_while_it_is_built_ends_the_progress_with_a_finish_line() {
+    let rig = Rig::new();
+    let out = rig
+        .command()
+        .args(["run", "--progress"])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(2));
+    let err = text(&out.stderr);
+    assert!(err.starts_with("progress: finished: refused\n"), "{err}");
+    assert!(err.contains("refused: provider: is required"), "{err}");
+}
+
+#[test]
+fn a_profile_or_schema_that_is_not_a_regular_file_or_too_large_is_refused_naming_why() {
+    let rig = Rig::new();
+    // A device that never ends must be refused, not read.
+    for (flag, field) in [("--request", "request"), ("--schema", "answer_schema")] {
+        let out = rig
+            .command()
+            .args([
+                "run",
+                "--provider",
+                "codex",
+                "-p",
+                "x",
+                flag,
+                "/dev/zero",
+                "--output",
+                "json",
+            ])
+            .output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(2), "{flag}");
+        let message = result_of(&out).error.expect("error").message;
+        assert!(message.starts_with(&format!("{field}:")), "{message}");
+        assert!(message.contains("not a regular file"), "{message}");
+    }
+    // A file over the limit is refused, and the message names the limit.
+    let big = rig.file("big.json", &" ".repeat(6 * 1024 * 1024));
+    let big = big.to_string_lossy().into_owned();
+    for flag in ["--request", "--schema"] {
+        let out = rig
+            .command()
+            .args([
+                "run",
+                "--provider",
+                "codex",
+                "-p",
+                "x",
+                flag,
+                &big,
+                "--output",
+                "json",
+            ])
+            .output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(2), "{flag}");
+        let message = result_of(&out).error.expect("error").message;
+        assert!(
+            message.contains("larger than the limit of"),
+            "{flag}: {message}"
+        );
+    }
+}
+
+#[test]
+fn an_assignment_on_stdin_over_the_prompt_limit_is_refused() {
+    let rig = Rig::new();
+    let args = [
+        "run",
+        "--provider",
+        "codex",
+        "--stdin",
+        "--output",
+        "json",
+        "-C",
+        &rig.work.to_string_lossy(),
+    ]
+    .map(String::from);
+    let out = rig.with_stdin(&args, &"x".repeat(4 * 1024 * 1024 + 100));
+    assert_eq!(out.status.code(), Some(2));
+    let message = result_of(&out).error.expect("error").message;
+    assert!(
+        message.contains("prompt:") && message.contains("limit of 4194304"),
+        "{message}"
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn wait_bounded_reads_the_pipes_while_it_waits() {
+    // More output than a pipe holds, on both streams. Without reading while
+    // waiting the child blocks on its own output and looks hung.
+    let child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "head -c 300000 /dev/zero | tr '\\0' x; head -c 300000 /dev/zero | tr '\\0' y >&2",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sh");
+    let out = wait_bounded_for(child, std::time::Duration::from_secs(20));
+    assert_eq!(out.stdout.len(), 300_000);
+    assert_eq!(out.stderr.len(), 300_000);
+}
+
+#[test]
+#[should_panic(expected = "did not exit within")]
+fn wait_bounded_kills_a_child_that_does_not_exit_and_fails_the_test() {
+    let child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sleep");
+    let _ = wait_bounded_for(child, std::time::Duration::from_millis(200));
 }

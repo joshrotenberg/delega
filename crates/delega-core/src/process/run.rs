@@ -19,6 +19,7 @@ use super::limits::{FAR_FUTURE, FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_RE
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
+use super::tap::TapWorker;
 
 /// Warning recorded when the owner closed pipes that something still held.
 pub const PIPE_WARNING: &str =
@@ -83,6 +84,7 @@ pub(super) async fn run_owned(
         ));
     }
 
+    let tap = spec.stdout_tap.clone().map(TapWorker::start);
     let driven = AssertUnwindSafe(drive(
         &mut owner,
         &spec,
@@ -90,6 +92,7 @@ pub(super) async fn run_owned(
         &shared,
         started,
         cleanup_deadline,
+        tap.as_ref(),
     ))
     .catch_unwind()
     .await;
@@ -112,6 +115,9 @@ pub(super) async fn run_owned(
     let settled = owner
         .cleanup(spec.stop_grace, deadline, driven.hard_stop, driven.term_at)
         .await;
+    if let Some(tap) = tap {
+        tap.finish(&shared).await;
+    }
     build_report(
         &spec,
         Some(shared.pid),
@@ -134,6 +140,7 @@ async fn drive(
     shared: &Arc<Shared>,
     started: Instant,
     cleanup_deadline: Duration,
+    tap: Option<&TapWorker>,
 ) -> Driven {
     let Some(mut exit_rx) = owner.exit_rx.take() else {
         // The exit watcher could not start. Stop the child and say so.
@@ -242,8 +249,8 @@ async fn drive(
                 Ok(0) | Err(_) => stdout = None,
                 Ok(n) => {
                     out.push(&out_buf[..n]);
-                    if let Some(tap) = &spec.stdout_tap {
-                        tap(&out_buf[..n]);
+                    if let Some(tap) = tap {
+                        tap.offer(&out_buf[..n]);
                     }
                 }
             },

@@ -155,12 +155,20 @@ Behavior:
   `session.resume`. The prompt comes from `-p` or from `--stdin`, which reads
   standard input as UTF-8 up to the prompt limit; giving both is a refusal, not
   a usage error. `--schema FILE` is read as JSON and becomes `answer_schema`.
-  A relative `-C` or `--add-dir` resolves against the caller's working
-  directory.
+  The profile and the schema file must be regular files; a device or a pipe is
+  refused, and so is a file over the limit (the prompt, instructions and
+  headroom for a profile; four times the schema limit for a schema), with the
+  limit named. A value after `-p` may start with a hyphen. Every relative path
+  resolves against the caller's working directory: `--request`, `--schema`,
+  `-C`, `--add-dir`, and `cwd` and `permissions.directories` in a profile. (The
+  provider layer would otherwise resolve a relative extra directory against the
+  worker's own working directory, so the CLI makes the paths absolute first.)
 - **Output.** `--output text` (the default) prints the answer text to standard
-  output, with a newline added when it lacks one, and nothing else there. For a
-  run that did not complete, the outcome and the error go to standard error as
-  one line, `delega run: <outcome>: <error.kind>: <error.message>`. Each denied
+  output, with a newline added when it lacks one, and nothing else there, and
+  only when the outcome is `completed`. For any other outcome nothing is printed
+  on standard output, whatever partial text the provider produced; that text is
+  in `text` of `--output json`. The outcome and the error of a run that did not
+  complete go to standard error as one line, `delega run: <outcome>: <error.kind>: <error.message>`. Each denied
   request goes there as `delega run: denied: <request>`, whatever the outcome,
   and cleanup that could not be confirmed as `delega run: cleanup not
   confirmed: ...`. `--output json` prints the whole result as one
@@ -168,9 +176,10 @@ Behavior:
 - **Exit status** follows the outcome: 0 `completed`, 1 `failed`, 2 `refused`
   (including usage errors), 124 `timed_out`, 130 `interrupted`. With
   `--output json` the result is always printed, whatever the exit status. A
-  closed standard output (`delega run ... | head -1`) is not an error and does
-  not change the status; any other failure to write the result makes a
-  completed run exit 1.
+  closed pipe on standard output (`delega run ... | head -1`) is not an error and
+  does not change the status; any other failure to write the result, such as a
+  standard output that is not open for writing, is reported on standard error
+  and makes a completed run exit 1.
 - **Refusal before a run exists.** An unreadable or invalid profile, a missing
   prompt or provider, `--prompt` together with `--stdin`, an unreadable or
   malformed schema file, and any other validation problem are printed as a
@@ -184,16 +193,30 @@ Behavior:
   message and no result. Such a result has no `worker`, no `started_at` and a
   confirmed `cleanup`, and the CLI makes its run id.
 - **Interrupt.** The worker runs in a session of its own, so a terminal Ctrl-C
-  reaches only `delega`. SIGINT or SIGTERM to `delega` stops the run, waits for
-  the worker and its descendants to be stopped, prints the result, which
-  carries the cleanup verdict, and exits. The exit status follows the outcome,
-  so it is 130 unless the provider had already finished when the signal came.
-  The first signal starts the stop. Signals that arrive while it goes on are
-  acknowledged once on standard error and otherwise ignored, so a second
-  Ctrl-C cannot end `delega` while processes are still being stopped. The wait
-  is bounded by the process layer's cleanup deadline, after which the result
-  says what could not be confirmed. A signal during `--dry-run`, or before the
-  worker starts, has no worker to stop and takes the default action.
+  or a hangup when the terminal closes reaches only `delega`. SIGINT, SIGTERM,
+  SIGHUP and SIGQUIT to `delega` are handled alike: `delega` interrupts the run
+  first, before writing anything, then waits for the worker and its descendants
+  to be stopped, prints the result, which carries the cleanup verdict, and
+  exits. The exit status follows the outcome, so it is 130 unless the provider
+  had already finished when the signal came. The first signal starts the stop.
+  Signals that arrive while it goes on are acknowledged once on standard error
+  and otherwise ignored, so a second Ctrl-C cannot end `delega` while processes
+  are still being stopped. The wait is bounded by the process layer's cleanup
+  deadline, after which the result says what could not be confirmed. A signal
+  during `--dry-run`, or before the handlers are installed at startup, has no
+  worker to stop and takes the default action. **SIGKILL cannot be handled**:
+  if `delega` is killed with it, or crashes without running its exit code, the
+  worker keeps running and nothing enforces its time limit. Stop `delega` with
+  SIGTERM or SIGINT, not SIGKILL.
+- **Standard error never holds up the run.** Everything `delega run` writes to
+  standard error (progress, summaries, problems, signal acknowledgements) goes
+  through one writer thread fed by a bounded queue (1024 lines). A line that
+  finds the queue full is dropped and counted, and the writer says how many were
+  dropped if standard error becomes writable. Stopping the worker, the result on
+  standard output and the exit never wait for standard error: at the end
+  `delega` waits at most one second for the queue to be written and then
+  exits. A caller that does not read standard error can therefore lose lines
+  but not the result.
 - **Dry run.** `--dry-run` validates the merged request and prints the provider
   executable, arguments, working directory and applied permissions without
   starting anything, not even a version probe. Text output is a readable list.
@@ -211,10 +234,14 @@ Behavior:
   provider output line as `<provider event type>: <summary>`, then `denied:
   <request>` for each request the result lists as denied, then `finished:
   <outcome>`. Denials come after the provider ends because Claude Code reports
-  them only in its final event. A summary is at most 80 characters of a
-  message with credentials removed; it never holds a command, a path or an
-  environment value. `finished` is always the last line, also for a request
-  refused before it starts. **Later:** due's trace files, heartbeats and
+  them only in its final event. What a summary holds: for an agent message, its
+  length in characters (`message: 120 chars`) and no text; for a tool call or an
+  item, the tool name, or the item type and status, and no command; for an
+  error event, at most 80 characters of its text with credentials removed,
+  which is free text the provider chose to write. A `denied:` line carries the
+  denied request as `permissions.denied` lists it, so it can name a command or
+  a path. `finished` is always the last line, also for a request refused before
+  it starts, including one refused while it is built. **Later:** due's trace files, heartbeats and
   summaries.
 - **Provider executable.** The CLI honours `DELEGA_CLAUDE_BIN` and
   `DELEGA_CODEX_BIN` in its own environment, as the provider layer does

@@ -64,11 +64,17 @@ process is about to start), `Provider { kind, summary }` (one per output line,
 as it is read), `Denied { request }` (one per entry of `permissions.denied`,
 after the provider has ended) and `Finished { outcome }` (always last, also for
 a request refused before start). `kind` is the provider's own event type. The
-summary is empty or short: at most 80 characters of a message with credentials
-removed, or the item type and status for a Codex item. A command, a path or an
-environment value is never in one. The probes (`--version`, `mcp list`) report
-nothing. The process layer's `ProcessSpec::stdout_tap` is the hook that
-delivers the output chunks.
+summary is empty or short: for an agent message its length in characters and no
+text; for a tool call, the tool name; for a Codex item, its type and status and
+no command; for an error event, at most 80 characters of its text with
+credentials removed (free text the provider chose to write). A `Denied` request
+is the text `permissions.denied` lists, so it can name a command or a path. The
+probes (`--version`, `mcp list`) report
+nothing. The process layer's `ProcessSpec::stdout_tap` delivers the output chunks
+through a bounded queue to a thread of its own: a slow tap loses chunks (counted
+in the report's warnings) and a tap that panics gets no more, and neither delays
+the run, its time limit or its capture. After the run the owner waits at most
+250 ms for the tap to catch up.
 
 ## Outcomes
 

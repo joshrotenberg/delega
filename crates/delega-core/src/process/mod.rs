@@ -87,6 +87,18 @@
 //! A descendant that stays in the session, even in a group of its own, is not
 //! part of either gap.
 //!
+//! # What no in-process code can do
+//!
+//! If the process that owns the child is killed with SIGKILL, or is stopped
+//! for good, no code of this crate runs: the owner's `Drop`, the time limit and
+//! the cleanup all go with it. The child, which leads a session of its own and
+//! so does not receive the signals its owner's terminal sends, keeps running
+//! with nothing left to enforce its time limit. The same holds for a crash that
+//! skips destructors, a power loss, and `exit` called from another thread. A
+//! caller that must survive this needs a supervisor outside the owning process;
+//! this crate has none. A graceful signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT) is
+//! the caller's to turn into an interrupt, as `delega run` does.
+//!
 //! # Platform
 //!
 //! Unix only; the module is empty elsewhere. It has the workspace's one
@@ -119,6 +131,7 @@ mod report;
 mod run;
 mod spec;
 mod sys;
+mod tap;
 mod timestamp;
 mod tree;
 

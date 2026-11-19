@@ -71,8 +71,14 @@ impl Rig {
 
     /// `delega` with a controlled environment and no standard input.
     pub fn command(&self) -> Command {
-        let config = self.path("home");
         let mut command = Command::new(env!("CARGO_BIN_EXE_delega"));
+        self.configure(&mut command);
+        command
+    }
+
+    /// Give a command the controlled environment, whatever program it runs.
+    pub fn configure(&self, command: &mut Command) {
+        let config = self.path("home");
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -84,7 +90,6 @@ impl Rig {
             .env("DELEGA_CODEX_BIN", fake("codex"))
             .env("FAKE_RECORD_DIR", &self.record)
             .stdin(Stdio::null());
-        command
     }
 
     /// Run `delega` with these arguments to its end.
@@ -139,12 +144,13 @@ impl Rig {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn delega");
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(input.as_bytes())
-            .expect("write stdin");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let input = input.to_string();
+        // On a thread, and errors ignored: delega may stop reading (an
+        // oversize assignment) and close the pipe before all of it is written.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
         wait_bounded(child)
     }
 
@@ -172,15 +178,46 @@ impl Rig {
         }
     }
 
-    /// Assert that the fake and its background child, when they started, are
-    /// gone.
+    /// Assert that the fake, its background child and everything in the
+    /// session it led are gone. The fake leads its own session and process
+    /// group, so its pid is also the group id, and a process left in that
+    /// group is found even when its pid was never recorded.
     pub fn assert_nothing_left(&self) {
         for name in ["pid", "child.pid"] {
             if let Ok(pid) = self.recorded(name).trim().parse::<i32>() {
                 assert_gone(name, pid);
             }
         }
+        if let Ok(leader) = self.recorded("pid").trim().parse::<i32>() {
+            let began = Instant::now();
+            while !group_members(leader).is_empty() {
+                assert!(
+                    began.elapsed() < WAIT_LIMIT,
+                    "processes {:?} are still in the worker's group {leader}",
+                    group_members(leader)
+                );
+                std::thread::sleep(POLL);
+            }
+        }
     }
+}
+
+/// Pids of live processes (zombies excluded) in process group `group`.
+fn group_members(group: i32) -> Vec<i32> {
+    let out = Command::new("/bin/ps")
+        .args(["-ax", "-o", "pid=,pgid=,stat="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let pgid: i32 = fields.next()?.parse().ok()?;
+            let stat = fields.next()?;
+            (pgid == group && !stat.starts_with('Z')).then_some(pid)
+        })
+        .collect()
 }
 
 /// Whether a process is alive. A zombie counts as gone.
@@ -206,20 +243,64 @@ fn assert_gone(what: &str, pid: i32) {
     }
 }
 
-/// Wait for a child to end, killing it and failing the test if it takes too
-/// long, so a hang cannot hold a test run.
-pub fn wait_bounded(mut child: Child) -> Output {
+/// Wait for a child to end and collect its output, killing it and failing the
+/// test if it takes longer than [`WAIT_LIMIT`]. The pipes are read while
+/// waiting, so a child that writes more than a pipe holds cannot block on its
+/// own output and be mistaken for a hang.
+pub fn wait_bounded(child: Child) -> Output {
+    wait_bounded_for(child, WAIT_LIMIT)
+}
+
+/// [`wait_bounded`] with a limit of the caller's choosing.
+pub fn wait_bounded_for(mut child: Child, limit: Duration) -> Output {
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
     let began = Instant::now();
-    loop {
-        match child.try_wait().expect("poll delega") {
-            Some(_) => return child.wait_with_output().expect("collect output"),
-            None if began.elapsed() > WAIT_LIMIT => {
+    let status = loop {
+        match child.try_wait().expect("poll child") {
+            Some(status) => break status,
+            None if began.elapsed() > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("delega did not exit within {WAIT_LIMIT:?}");
+                panic!("the child did not exit within {limit:?}");
             }
             None => std::thread::sleep(POLL),
         }
+    };
+    let collect = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        handle
+            .map(|h| h.join().expect("reader thread"))
+            .unwrap_or_default()
+    };
+    Output {
+        status,
+        stdout: collect(stdout),
+        stderr: collect(stderr),
+    }
+}
+
+fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+/// Wait for a child to exit without reading its pipes, for a test that needs
+/// them left undrained. Kills it and fails the test past `limit`.
+pub fn wait_exit_only(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
+    let began = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            return status;
+        }
+        if began.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the child did not exit within {limit:?}");
+        }
+        std::thread::sleep(POLL);
     }
 }
 

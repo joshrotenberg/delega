@@ -13,9 +13,17 @@
 //! 4. [`ProgressEvent::Finished`], always last, also for a run that never
 //!    started.
 //!
-//! A summary carries at most [`PROGRESS_SUMMARY_CHARS`] characters of a
-//! message, with credentials removed, and never a command, a path or an
-//! environment value.
+//! What a summary holds, exactly:
+//!
+//! - an agent message: its length in characters, never its text,
+//! - a tool call or result (Claude Code): the tool name or ok/error,
+//! - an item (Codex): its type and status, never its command,
+//! - an error event: at most [`PROGRESS_SUMMARY_CHARS`] characters of its
+//!   text, with credentials removed. Provider error text is free text, so it
+//!   can name anything the provider chose to say.
+//!
+//! A [`ProgressEvent::Denied`] carries the request exactly as the result lists
+//! it in `permissions.denied`, which includes the denied command or path.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -170,6 +178,11 @@ fn short(text: &str, redactor: &Redactor) -> String {
     clip(&redactor.apply(&one_line), PROGRESS_SUMMARY_CHARS)
 }
 
+/// How an agent message is shown: its length, never its text.
+fn message_size(text: &str) -> String {
+    format!("message: {} chars", text.chars().count())
+}
+
 fn kind_of(event: &Map<String, Value>) -> String {
     str_field(event, "type").unwrap_or("unknown").to_string()
 }
@@ -190,7 +203,7 @@ fn describe_claude(event: &Map<String, Value>) -> Vec<(String, String)> {
                 .filter_map(|block| match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                        Some(("assistant".to_string(), format!("message: {text}")))
+                        Some(("assistant".to_string(), message_size(text)))
                     }
                     Some("tool_use") => {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
@@ -246,7 +259,7 @@ fn describe_codex(event: &Map<String, Value>) -> Vec<(String, String)> {
                     .and_then(|i| i.get("text"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                format!("message: {text}")
+                message_size(text)
             } else {
                 let status = item
                     .and_then(|i| i.get("status"))
@@ -309,15 +322,37 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_is_cut_to_the_summary_length_and_credentials_are_removed() {
+    fn an_agent_message_is_shown_by_length_only() {
         let redactor = Redactor::default();
-        let long = "word ".repeat(100);
         let event = serde_json::json!({
             "type": "assistant",
-            "message": {"content": [{"type": "text", "text": long}]}
+            "message": {"content": [{"type": "text", "text": "see /etc/passwd and run rm -rf x"}]}
         });
         let out = describe_line(Provider::Claude, event.to_string().as_bytes(), &redactor);
-        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out,
+            [("assistant".to_string(), "message: 32 chars".to_string())]
+        );
+
+        let event = serde_json::json!({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "secret-looking text"}
+        });
+        let out = describe_line(Provider::Codex, event.to_string().as_bytes(), &redactor);
+        assert_eq!(
+            out,
+            [(
+                "item.completed".to_string(),
+                "message: 19 chars".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn an_error_text_is_cut_and_has_credentials_removed() {
+        let redactor = Redactor::default();
+        let long = serde_json::json!({"type": "error", "message": "word ".repeat(100)});
+        let out = describe_line(Provider::Claude, long.to_string().as_bytes(), &redactor);
         assert!(
             out[0].1.chars().count() <= PROGRESS_SUMMARY_CHARS + 3,
             "{out:?}"

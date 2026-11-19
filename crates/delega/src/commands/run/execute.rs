@@ -7,6 +7,7 @@ use delega_core::contract::result::RunResult;
 use delega_core::provider::{ProviderOptions, start};
 use tokio::runtime::Builder;
 
+use super::log::Log;
 use super::output::refused_result;
 use super::request::Facts;
 use super::signals::{Signals, follow};
@@ -18,7 +19,7 @@ const RUNTIME_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// Run `request` and return its result. A failure to set up the runtime or the
 /// signal handlers is a refused result: nothing was started, and starting a
 /// worker `delega` could not stop would be worse.
-pub fn run(request: Request, options: ProviderOptions, facts: &Facts) -> RunResult {
+pub fn run(request: Request, options: ProviderOptions, facts: &Facts, log: &Log) -> RunResult {
     let runtime = match Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -31,7 +32,7 @@ pub fn run(request: Request, options: ProviderOptions, facts: &Facts) -> RunResu
     };
     let result = runtime.block_on(async {
         match Signals::install() {
-            Ok(signals) => follow(start(request, options), signals).await,
+            Ok(signals) => follow(start(request, options), signals, log).await,
             Err(err) => refused_result(
                 facts,
                 "signals_unavailable",
