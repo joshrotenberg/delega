@@ -133,6 +133,10 @@ pub struct Measured {
     pub expected_confirmed: Option<bool>,
     pub expected_survivors: Vec<String>,
     pub expected_leak: LeakClass,
+    /// The row's gap depends on timing, so a run without a survivor is
+    /// `gap_not_shown` and not a failure (`Expect::timing_dependent`).
+    #[serde(default)]
+    pub timing_dependent: bool,
     pub expected_reason: Option<String>,
     pub verdict: String,
     pub problems: Vec<String>,
@@ -330,6 +334,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
             .map(|s| (*s).to_string())
             .collect(),
         expected_leak: case.expect.leak,
+        timing_dependent: case.expect.timing_dependent,
         expected_reason: case.expect.reason.map(str::to_string),
         verdict: String::new(),
         problems: Vec::new(),
@@ -559,9 +564,11 @@ pub fn cleanup_mismatch(actual: Option<bool>, expected: Option<bool>) -> String 
 /// verdict (`confirmed`, and the reason when it is not) and a hang. Criterion 2
 /// is judged on the survivors. Most rows list none, and any survivor fails
 /// them. A known-gap row says a survivor of the listed roles may remain: all
-/// of them present is `expected_failure` (the gap showed) and none present is
-/// `gap_not_shown`, because whether a late process is caught depends on timing
-/// and a gap that is shown on one run and not on the next is not a regression.
+/// of them present is `expected_failure` (the gap showed). None present is
+/// `gap_not_shown` when the gap depends on timing (relay, orphan, bare: whether
+/// a late process is caught varies, and a gap shown on one run and not on the
+/// next is not a regression) and `unexpected_pass` when it does not (SIGKILL of
+/// `delega`, after which the worker always survives), which fails.
 /// The run does not fail on `gap_not_shown`; [`crate::run_all::close_gaps`]
 /// turns a row that did not show its gap in every repeat of a run into
 /// `gap_closed`. Anything else (a survivor of another role, a subset of the
@@ -661,10 +668,16 @@ fn judge(m: &mut Measured, case: &Case) {
             m.problems
                 .push("a row expected to fail criterion 2 passed; correct the table".to_string());
         }
-    } else if gap && actual.is_empty() {
+    } else if gap && actual.is_empty() && expect.timing_dependent {
         m.verdict = GAP_NOT_SHOWN.to_string();
         m.problems.push(format!(
             "no survivor where {} was allowed: the gap did not show in this run",
+            list(&wanted_sorted)
+        ));
+    } else if gap && actual.is_empty() {
+        m.verdict = "unexpected_pass".to_string();
+        m.problems.push(format!(
+            "no survivor where {} is certain: this gap does not depend on timing, so the row no longer shows it; correct the table or find the regression",
             list(&wanted_sorted)
         ));
     } else {
@@ -733,6 +746,7 @@ mod judge_tests {
         )
         .expect("a measurement");
         m.expected_leak = row.expect.leak;
+        m.timing_dependent = row.expect.timing_dependent;
         m.expected_survivors = row
             .expect
             .survivors
@@ -754,6 +768,36 @@ mod judge_tests {
     fn a_known_gap_row_without_its_survivor_is_gap_not_shown() {
         let m = measured(&relay_row(), &[]);
         assert_eq!(m.verdict, GAP_NOT_SHOWN, "{:?}", m.problems);
+    }
+
+    fn sigkill_row() -> Case {
+        crate::matrix::all()
+            .into_iter()
+            .find(|r| r.id == "claude-k-plain")
+            .expect("the SIGKILL row")
+    }
+
+    /// The SIGKILL rows measured with `delega` killed: no output, signal 9.
+    fn killed(row: &Case, survivors: &[&str]) -> Measured {
+        let mut m = measured(row, survivors);
+        m.exit_code = None;
+        m.exit_signal = Some(9);
+        m.stdout_docs = Some(0);
+        m.problems.clear();
+        m.survivors = survivors.iter().map(|s| (*s).to_owned()).collect();
+        judge(&mut m, row);
+        m
+    }
+
+    #[test]
+    fn a_gap_that_does_not_depend_on_timing_is_strict() {
+        let row = sigkill_row();
+        assert!(!row.expect.timing_dependent);
+        assert!(relay_row().expect.timing_dependent);
+        assert_eq!(killed(&row, &["provider"]).verdict, "expected_failure");
+        // No survivor after SIGKILL is not load noise: the worker cannot have gone.
+        assert_eq!(killed(&row, &[]).verdict, "unexpected_pass");
+        assert_eq!(killed(&row, &["child"]).verdict, "fail");
     }
 
     #[test]

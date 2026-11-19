@@ -141,8 +141,10 @@ variant starts, so the action lands with the descendants running.
 `ed` is about a crash that happens while a time limit is pending, not about the
 limit, so its limit is 25 s, far longer than the 0.5 s to the crash. With a 3 s
 limit a slow start on a loaded machine let the limit fire first and the row
-exited 124. A `delega` that waited for the pipe of `ed-pipe` to close would
-still be noticed: it would run into the harness's 30 s hang limit.
+exited 124. The row checks that a crash while a limit is pending is reported as
+`failed`, not `timed_out`. It does not test the limit: once the provider has
+exited the limit is disarmed, so a `delega` that waited for the pipe of
+`ed-pipe` to close would hit the harness's 30 s hang limit with either limit.
 
 The fakes wait for events, not for time, before they let the provider go on.
 The `relay` variant waits for the heartbeat file, `bare` for a marker file the
@@ -254,27 +256,45 @@ document or hang is always `fail`. A row with no gap passes only with no
 survivor. A known-gap row says a survivor of the listed roles may remain:
 
 - **`expected_failure`**: the listed roles survived, so the gap showed.
-- **`gap_not_shown`**: nothing survived. Whether `delega` catches a process
+- **`gap_not_shown`**: nothing survived, on a row whose gap depends on timing
+  (`relay`, `orphan` and `bare`, 22 runs of the matrix). Whether `delega` catches a process
   that left the worker's session before any listing saw it depends on timing, so
   on a busy machine a gap that showed on one run may not on the next. This is
   not a failure and not counted as an unexpected pass. The summary says how many
   known-gap runs did not show their gap and lists them.
-- **`gap_closed`**: with `--repeat N` and N at least 3, a known-gap row that was
-  `gap_not_shown` in every one of the N runs. The gap is probably fixed and the
-  table is out of date, so the run fails. Run with `--repeat 3` after a change
-  that may close a gap.
+- **`gap_closed`**: the gap is probably fixed and the table is out of date, so
+  the run fails. Two rules produce it, both only for timing-dependent rows:
+  with `--repeat N` and N at least 3, a row that was `gap_not_shown` in every
+  one of the N runs; and in any single run, when there are at least 3
+  timing-dependent gap runs and every one of them is `gap_not_shown` (all of
+  them failing to show at once is not load noise). CI runs `--all` once, which
+  applies the second rule, and then the timing-dependent gap rows with
+  `--repeat 3`, which applies the first:
+
+  ```sh
+  cargo run --release --locked -p delega-acceptance -- \
+    --filter relay --filter orphan --filter bare --repeat 3 --out acceptance-gaps.jsonl
+  ```
+
+  `--filter` is a substring match on the row id. These three select 44 rows:
+  the 22 timing-dependent gap rows and 22 others (`orphan-late` and the rows of
+  those variants whose process listing is unavailable), which are judged as
+  before. Locally the repeat takes about a minute.
+- **`unexpected_pass`**: a known-gap row whose gap does not depend on timing
+  (the SIGKILL `k` rows: after `delega` is killed nothing can stop the worker,
+  so the provider always survives) had no survivor. That is not load noise and
+  fails the run: either the gap is fixed and the table is out of date, or
+  `delega` stopped before it started the worker.
 - **`fail`**: anything else about the survivors: a role the row does not list, a
   subset of the listed roles, or an `unrecorded` survivor (a process that carries
   the case marker and that the ledger does not know, which is a real finding). An
   expected failure cannot hide a second leak.
-- **`unexpected_pass`** is kept for a known-gap row that meets its survivor
-  expectation with cleanup honestly reported; no row produces it now.
 
 Every process a fake starts appends its role to the ledger as its first act.
 That includes each generation of the `relay` variant (role `relay-heartbeat`),
 so a relay process that is sampled is attributed to its role. A marked process
 the ledger does not know yet is given two seconds to record itself, which only
 matters on a machine busy enough to delay a forked process that long, before it
-is reported as `unrecorded`.
+is reported as `unrecorded`. A zombie counts as exited for that wait.
 
 `delega`'s behaviour is never changed to make a row pass.

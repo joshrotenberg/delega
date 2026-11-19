@@ -456,6 +456,12 @@ pub struct Expect {
     /// with any other survivor, or without these, does not meet it.
     pub survivors: Vec<&'static str>,
     pub reason: Option<&'static str>,
+    /// Whether the gap depends on timing: a late scan can catch the process,
+    /// so a run in which no survivor remains is `gap_not_shown` and does not
+    /// fail. A gap that does not depend on timing (SIGKILL of `delega`, after
+    /// which nothing can stop the worker) is strict: no survivor is
+    /// `unexpected_pass`, which fails.
+    pub timing_dependent: bool,
 }
 
 /// An expected failure of criterion 2 for the rows that match. An empty list
@@ -466,6 +472,8 @@ struct Gap {
     class: LeakClass,
     survivors: &'static [&'static str],
     reason: &'static str,
+    /// See [`Expect::timing_dependent`].
+    timing_dependent: bool,
 }
 
 const SIGKILL_REASON: &str = "SIGKILL of delega cannot be handled, so the worker keeps running with nothing enforcing its time limit (docs/api.md, process module docs). Documented gap.";
@@ -482,6 +490,7 @@ const GAPS: &[Gap] = &[
         class: LeakClass::DocumentedGap,
         survivors: &["child", "provider"],
         reason: SIGKILL_REASON,
+        timing_dependent: false,
     },
     Gap {
         cases: &["k"],
@@ -489,6 +498,7 @@ const GAPS: &[Gap] = &[
         class: LeakClass::DocumentedGap,
         survivors: &["leaf-setsid", "mid", "provider"],
         reason: SIGKILL_REASON,
+        timing_dependent: false,
     },
     Gap {
         cases: &["k"],
@@ -496,6 +506,7 @@ const GAPS: &[Gap] = &[
         class: LeakClass::DocumentedGap,
         survivors: PROVIDER_ONLY,
         reason: SIGKILL_REASON,
+        timing_dependent: false,
     },
     Gap {
         cases: &[],
@@ -503,6 +514,7 @@ const GAPS: &[Gap] = &[
         class: LeakClass::DocumentedGap,
         survivors: &["relay-heartbeat"],
         reason: RELAY_REASON,
+        timing_dependent: true,
     },
     Gap {
         cases: &[],
@@ -510,6 +522,7 @@ const GAPS: &[Gap] = &[
         class: LeakClass::DocumentedGap,
         survivors: &["leaf-setsid"],
         reason: ORPHAN_REASON,
+        timing_dependent: true,
     },
     Gap {
         cases: &["a"],
@@ -517,6 +530,7 @@ const GAPS: &[Gap] = &[
         class: LeakClass::DocumentedGap,
         survivors: &["bare"],
         reason: BARE_REASON,
+        timing_dependent: true,
     },
 ];
 
@@ -541,6 +555,7 @@ pub fn expect_for(case: &Case, variant: &str) -> Expect {
         leak: LeakClass::None,
         survivors: Vec::new(),
         reason: None,
+        timing_dependent: false,
     };
     if case.ps_unavailable {
         expect.survivors = unlisted_survivors(variant);
@@ -553,6 +568,7 @@ pub fn expect_for(case: &Case, variant: &str) -> Expect {
             expect.leak = gap.class;
             expect.survivors = gap.survivors.to_vec();
             expect.reason = Some(gap.reason);
+            expect.timing_dependent = gap.timing_dependent;
             break;
         }
     }

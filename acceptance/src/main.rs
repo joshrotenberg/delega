@@ -251,7 +251,7 @@ fn summarize(
         })
         .count();
     println!(
-        "{} of {} known-gap runs did not show their gap (not a failure; a row that shows none in every run of --repeat 3 or more is gap_closed and fails)",
+        "{} of {} known-gap runs did not show their gap (not a failure, unless every timing-dependent gap run of this run shows none, or a row shows none in every run of --repeat 3 or more: that is gap_closed and fails)",
         not_shown.len(),
         known_gap_runs
     );

@@ -59,6 +59,16 @@ jobs:
         with:
           name: acceptance-results-${{ matrix.os }}
           path: acceptance-results.jsonl
+      # A gap row that shows no survivor is not a failure in one run (it depends
+      # on timing), so a fixed gap is noticed by running the timing-dependent
+      # gap rows three times: a row that shows no gap in all three is gap_closed.
+      - name: Timing-dependent known-gap rows, three repeats
+        run: cargo run --release --locked -p delega-acceptance -- --filter relay --filter orphan --filter bare --repeat 3 --out acceptance-gaps.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-gap-repeats-${{ matrix.os }}
+          path: acceptance-gaps.jsonl
 
   msrv:
     name: build on the minimum supported Rust

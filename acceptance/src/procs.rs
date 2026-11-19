@@ -20,7 +20,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal, kill_process, test_kill_process};
+use rustix::process::{Pid, Signal, kill_process};
 
 #[derive(Debug, Clone)]
 pub struct Proc {
@@ -158,8 +158,11 @@ fn role_in(ledger: &[(String, i32)], pid: i32) -> Option<String> {
         .map(|(role, _)| role.clone())
 }
 
+/// Whether `pid` is a live process. A zombie has exited, and `kill(pid, 0)`
+/// still sees it, so the process table and its `stat` field decide.
 fn pid_exists(pid: i32) -> bool {
-    Pid::from_raw(pid).is_some_and(|pid| test_kill_process(pid).is_ok())
+    ps().iter()
+        .any(|p| p.pid == pid && !p.stat.starts_with('Z'))
 }
 
 /// Give the survivors that the ledger did not know when the process table was

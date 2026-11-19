@@ -55,33 +55,60 @@ pub fn run_all(
 /// With fewer repeats one quiet run says too little.
 pub const CLOSE_AFTER: u32 = 3;
 
-/// A known-gap row that showed no gap in any of `repeat` runs, with `repeat` at
-/// least [`CLOSE_AFTER`], has its measurements marked `gap_closed`: the gap
-/// the table documents is probably fixed, and the table is out of date. A row
-/// that showed its gap in even one repeat keeps its verdicts. Returns the ids
-/// of the closed rows, in row order.
+/// The fewest timing-dependent known-gap runs in one run of the harness for
+/// "none of them showed its gap" to mean anything. The matrix has 30 gap runs,
+/// 22 of them timing dependent; a filtered run of one or two rows is not
+/// evidence.
+pub const CLOSE_ALL_AFTER: usize = 3;
+
+/// Mark known gaps as closed, and return the ids of the rows marked, in row
+/// order. Two rules, both on timing-dependent known-gap rows, and both turn
+/// `gap_not_shown` into `gap_closed`, which fails the run:
+///
+/// - A row that showed no gap in any of `repeat` runs, with `repeat` at least
+///   [`CLOSE_AFTER`]. A row that showed its gap in even one repeat keeps its
+///   verdicts.
+/// - Every timing-dependent known-gap run of this harness run, when there are
+///   at least [`CLOSE_ALL_AFTER`] of them. One row failing to show its gap is
+///   load; all of them failing at once is a fix, or a harness that stopped
+///   measuring.
 pub fn close_gaps(measured: &mut [Measured], repeat: u32) -> Vec<String> {
-    if repeat < CLOSE_AFTER {
-        return Vec::new();
-    }
     let mut ids: Vec<String> = Vec::new();
+    let timing = |m: &Measured| m.timing_dependent && m.verdict != "skipped";
+    let gap_runs: Vec<&Measured> = measured.iter().filter(|m| timing(m)).collect();
+    if gap_runs.len() >= CLOSE_ALL_AFTER && gap_runs.iter().all(|m| m.verdict == GAP_NOT_SHOWN) {
+        for m in measured.iter_mut().filter(|m| m.timing_dependent) {
+            m.verdict = GAP_CLOSED.to_string();
+            m.problems.push(
+                "no timing-dependent known gap showed in this run; correct the table".to_string(),
+            );
+            if !ids.contains(&m.id) {
+                ids.push(m.id.clone());
+            }
+        }
+        return ids;
+    }
+    if repeat < CLOSE_AFTER {
+        return ids;
+    }
+    let mut all_ids: Vec<String> = Vec::new();
     for m in measured.iter() {
-        if !ids.contains(&m.id) {
-            ids.push(m.id.clone());
+        if !all_ids.contains(&m.id) {
+            all_ids.push(m.id.clone());
         }
     }
     let wanted = usize::try_from(repeat).unwrap_or(usize::MAX);
-    ids.retain(|id| {
+    all_ids.retain(|id| {
         let runs: Vec<&Measured> = measured.iter().filter(|m| &m.id == id).collect();
         runs.len() == wanted && runs.iter().all(|m| m.verdict == GAP_NOT_SHOWN)
     });
-    for m in measured.iter_mut().filter(|m| ids.contains(&m.id)) {
+    for m in measured.iter_mut().filter(|m| all_ids.contains(&m.id)) {
         m.verdict = GAP_CLOSED.to_string();
         m.problems.push(format!(
             "the gap did not show in any of {repeat} runs; correct the table"
         ));
     }
-    ids
+    all_ids
 }
 
 /// Runs of one row, at most, when the only fault is a late process listing.
@@ -202,6 +229,7 @@ mod gap_tests {
         )
         .expect("a measurement");
         m.id = id.to_string();
+        m.timing_dependent = true;
         m.repeat = repeat;
         m.verdict = verdict.to_string();
         m
@@ -246,6 +274,43 @@ mod gap_tests {
         let mut list = runs("a-relay", &[GAP_NOT_SHOWN]);
         assert!(close_gaps(&mut list, 1).is_empty());
         assert_eq!(verdicts(&list), [GAP_NOT_SHOWN]);
+    }
+
+    #[test]
+    fn a_run_where_every_timing_gap_row_shows_nothing_is_closed_even_once() {
+        let mut list: Vec<Measured> = (0..3)
+            .map(|i| row(&format!("r{i}"), 1, GAP_NOT_SHOWN))
+            .collect();
+        assert_eq!(close_gaps(&mut list, 1).len(), 3);
+        assert_eq!(verdicts(&list), [GAP_CLOSED; 3]);
+    }
+
+    #[test]
+    fn one_timing_gap_row_that_shows_keeps_a_single_run_open() {
+        let mut list: Vec<Measured> = (0..3)
+            .map(|i| row(&format!("r{i}"), 1, GAP_NOT_SHOWN))
+            .collect();
+        list[1].verdict = "expected_failure".to_string();
+        assert!(close_gaps(&mut list, 1).is_empty());
+    }
+
+    #[test]
+    fn a_run_with_fewer_than_three_timing_gap_rows_is_not_closed() {
+        let mut list: Vec<Measured> = (0..2)
+            .map(|i| row(&format!("r{i}"), 1, GAP_NOT_SHOWN))
+            .collect();
+        assert!(close_gaps(&mut list, 1).is_empty());
+    }
+
+    #[test]
+    fn rows_that_do_not_depend_on_timing_do_not_count_toward_closing_a_run() {
+        let mut list: Vec<Measured> = (0..3)
+            .map(|i| row(&format!("r{i}"), 1, GAP_NOT_SHOWN))
+            .collect();
+        for m in &mut list {
+            m.timing_dependent = false;
+        }
+        assert!(close_gaps(&mut list, 1).is_empty());
     }
 
     #[test]
