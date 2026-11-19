@@ -67,10 +67,15 @@ impl Preflight {
     }
 
     /// Release every `start` that is waiting, and every later one. They are
-    /// answered as if nothing was refused, which the supervisor turns into
-    /// `Error::ShutDown`.
+    /// answered as if nothing was refused; `Supervisor::start` sees
+    /// [`is_closed`](Self::is_closed) and answers `Error::ShutDown`.
     pub(super) fn close(&self) {
         self.closed.cancel();
+    }
+
+    /// Whether [`close`](Self::close) has been called.
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed.is_cancelled()
     }
 
     /// Check `request` on a thread of its own and wait for it. Returns the
@@ -100,6 +105,7 @@ impl Preflight {
         let deadline = Instant::now() + self.bound;
         let acquire = self.slots.clone().acquire_owned();
         let permit = tokio::select! {
+            biased;
             () = self.closed.cancelled() => return None,
             got = tokio::time::timeout_at(deadline, acquire) => match got {
                 Ok(Ok(permit)) => permit,
@@ -125,6 +131,7 @@ impl Preflight {
             return Some(internal("checking the request could not be started"));
         }
         tokio::select! {
+            biased;
             () = self.closed.cancelled() => None,
             got = tokio::time::timeout_at(deadline, rx) => match got {
                 Ok(Ok(refusal)) => refusal,
