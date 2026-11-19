@@ -24,6 +24,7 @@
 # Environment (set by the test, never inherited from a real session):
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
+#   FAKE_SESSION_ID  the session id reported when the run is not resuming one
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -55,7 +56,7 @@ for arg in "$@"; do
   esac
   prev="$arg"
 done
-sid="${resume:-fake-claude-session-1}"
+sid="${resume:-${FAKE_SESSION_ID:-fake-claude-session-1}}"
 
 # The strings of the `permissions.deny` array of the settings JSON, one per
 # line. The scan follows JSON strings, so a comma, bracket or escaped quote in a
@@ -232,9 +233,50 @@ case "$mode" in
     init
     success '"fake final answer"' '[]'
     ;;
+  echo:*)
+    # Answers with its own mode and the session it ran in, so a test can tell
+    # which run produced the answer and whether the session was resumed.
+    init
+    success "\"answered $mode sid=$sid\"" '[]'
+    ;;
+  trace:*)
+    # Records how many `trace:` runs with the same directory are alive when it
+    # starts, in `DIR/peak.PID`, so a test can measure concurrency from outside
+    # the code under test. The directory is the text up to the first `#`.
+    init
+    trace_rest=${mode#trace:}
+    trace_dir=${trace_rest%%#*}
+    : > "$trace_dir/run.$$"
+    printf '%s\n' "$(ls "$trace_dir" | grep -c '^run\.')" > "$trace_dir/peak.$$"
+    sleep 0.3
+    rm -f "$trace_dir/run.$$"
+    success "\"answered $mode sid=$sid\"" '[]'
+    ;;
+  secret-message)
+    # Agent messages that hold a secret and an oversize text.
+    init
+    big=$(head -c 5000 /dev/zero | tr '\0' 'x')
+    emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"token=$MY_SERVICE_API_TOKEN key sk-ant-abcdefghijklmnopqrstuvwx\"},{\"type\":\"text\",\"text\":\"$big\"}]}}"
+    success '"done"' '[]'
+    ;;
+  gate:*)
+    # Runs until the file named after `gate:` exists, then answers as `echo:`.
+    # Writes `<file>.started` when it begins, so a test can tell it is running.
+    init
+    gate=${mode#gate:}
+    : > "$gate.started"
+    while [ ! -e "$gate" ]; do sleep 0.05; done
+    success "\"answered $mode sid=$sid\"" '[]'
+    ;;
   structured)
     init
     success '"{\"answer\":42}"' '[]'
+    ;;
+  structured-large)
+    # A structured answer well over the compact bound.
+    init
+    big=$(head -c 20000 /dev/zero | tr '\0' 'x')
+    success "\"{\\\"answer\\\":\\\"$big\\\"}\"" '[]'
     ;;
   structured-fenced)
     init

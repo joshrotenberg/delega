@@ -86,3 +86,8 @@ pub const NATIVE_FLAG_NAME_CHARS: usize = 40;
 
 /// Longest message text in a progress event summary, in characters.
 pub const PROGRESS_SUMMARY_CHARS: usize = 80;
+
+/// Longest agent message text in a [`ProgressEvent::Message`](super::ProgressEvent::Message),
+/// in characters. Sent only when
+/// [`ProviderOptions::progress_text`](super::ProviderOptions::progress_text) is set.
+pub const PROGRESS_TEXT_CHARS: usize = 4_000;

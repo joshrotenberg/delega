@@ -12,6 +12,8 @@ pub mod provider;
 
 pub mod skills;
 
+pub mod supervisor;
+
 /// The version of this build, as set in the workspace manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
