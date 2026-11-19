@@ -393,14 +393,20 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
     );
 }
 
-/// Proves the private key scan is linear without a clock: the scan counts the
-/// bytes it looks at (a counter that exists only in test builds), and that
-/// count must stay within a constant factor of the length of the input at two
-/// sizes. A scan that looked at the rest of the text for every begin marker
-/// counts a number that grows with the square of the length, which is far over
-/// the factor at the larger size. Linear work counts about four times the
-/// length here: once for the search, and at most 64 bytes of label window for
-/// each 22 byte marker.
+/// Checks the private key scan is linear without a clock: each search in the
+/// scan counts the bytes it looks at (a counter that exists only in test
+/// builds), and that count must stay within a constant factor of the length of
+/// the input at two sizes. A counted search that looked at the rest of the text
+/// for every begin marker counts a number that grows with the square of the
+/// length, far over the factor. Linear work counts about four times the length
+/// here: once for the search, and at most 64 bytes of label window for each 22
+/// byte marker.
+///
+/// The test sees only searches that call `redact::examined`: a new search in
+/// the scan must call it too, or this test cannot see it. The count must also
+/// be at least the input length, so a scan that stopped counting, or that ran
+/// on another thread (the counter is per thread), fails instead of passing on
+/// zero.
 #[test]
 fn private_key_removal_is_linear_in_the_input() {
     const FACTOR: usize = 8;
@@ -412,6 +418,13 @@ fn private_key_removal_is_linear_in_the_input() {
         let out = redactor.apply(&noise);
         let examined = crate::provider::redact::take_examined();
         assert_eq!(out.len(), noise.len());
+        assert!(
+            examined >= noise.len(),
+            "only {} bytes were counted for {} bytes of input: the scan no longer counts \
+             what it examines",
+            examined,
+            noise.len()
+        );
         assert!(
             examined <= FACTOR * noise.len(),
             "{} bytes were scanned for {} bytes of input; linear is about {}",
