@@ -26,7 +26,7 @@ run ends in exactly one outcome and produces one result.
 | `close` | `worker` | Stops the worker, discards queued assignments, frees its slot. |
 
 `start` and `follow_up` return at once. Only `wait` and `interrupt` wait, and
-both are bounded.
+`close` while it stops a running run; each is bounded.
 
 ## Start a worker
 

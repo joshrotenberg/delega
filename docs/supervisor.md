@@ -38,8 +38,11 @@ run that cannot go ahead is never an error: it is a run that ends `refused`.
 
 A run is `queued`, `running` or `finished`. A finished run has exactly one
 `RunResult`, built by the contract's constructors and checked with
-`RunResult::validate` before it is stored; a result that fails the check is
-replaced by a `failed` result of kind `internal_error` that says so.
+`RunResult::validate` before it is stored. That covers the results the provider
+layer returns and the ones the supervisor builds itself (refused, discarded,
+interrupted while queued, a task that failed). A result that fails the check is
+a bug: a debug build fails loudly, and a release build replaces it with a
+`failed` result of kind `internal_error` that says so.
 
 | Run from | to | When |
 | --- | --- | --- |
@@ -76,11 +79,14 @@ All defaults are named constants in `supervisor/limits.rs`.
 | --- | --- | --- |
 | `max_live_workers` | 16 | Live workers at once. A closed worker frees its slot at once. A start beyond it is refused, kind `limit_reached`. |
 | `max_running_runs` | 4 | Runs running at once. A run beyond it waits `queued`; it is not refused. Runs start in the order they became eligible, so one busy worker cannot starve another. |
-| `max_queued_per_worker` | 16 | Runs waiting behind a worker's running run. A follow-up beyond it is refused, kind `queue_full`. |
+| `max_queued_per_worker` | 16 | Runs waiting behind a worker's running run. A follow-up beyond it is refused, kind `queue_full`. 0 means no waiting behind a running run: an idle worker still takes a follow-up, which starts at once. |
 | `retained_results` | 256 | Finished results kept readable, across the supervisor. |
+| `retained_bytes` | 64 MiB | Estimated bytes of finished results kept (answer, structured answer, notes and partial text, plus a fixed amount each). The oldest are dropped first; the newest is always kept. |
 | `retention` | 1 hour | How long a finished result stays readable. |
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
-| default wait | 60 s | Used when `wait` gets no `timeout_secs`. |
+| default wait | 30 s | Used when `wait` gets no `timeout_secs`. The ceiling is kept high for library callers; the MCP layer should keep each wait short, well inside what a tool-calling client allows for one call, and rely on the cursor to continue. |
+| preflight bound | 10 s | The longest `start` spends checking paths, the executable and the schema before it is admitted. |
+| compact answer | 20000 characters | A compact read returns at most this much of the answer. |
 | `shutdown_bound` | 30 s | The longest `shutdown` waits for runs to settle. |
 | `interrupt_bound` | 30 s | The longest `interrupt` or `close` waits for a running run to settle. |
 
@@ -94,8 +100,14 @@ the environment options. For each run the supervisor sets `run_id`, `worker`,
 ## Starting and refusing
 
 `start` validates the request, checks the name, checks the live-worker limit and
-asks the provider layer for a dry run, which checks the working directory, the
-`native_args`, the executable and the permission mapping. If any step fails the
+reports what the provider layer's dry run found, which checks the working
+directory, the `native_args`, the executable and the answer schema. The dry run
+touches the filesystem, so it is not done on the supervisor's task: the caller's
+`start` runs it on the blocking pool, bounded by the preflight bound, and posts
+the result to the supervisor, so a hung filesystem can delay only that `start`,
+never `wait` or `interrupt`. If the bound passes the start is refused (kind
+`preflight_timeout`); the blocking thread cannot be cancelled and is left to
+finish. If any step fails the
 request is still a run: the response is `finished`, the outcome is `refused`, the
 error says why, and `read` returns the result. **A refused start creates no
 worker**, so the result has no `worker`, as the contract says. Names are unique
@@ -125,7 +137,15 @@ A follow-up is refused as a finished run, not an error, when:
 - the prompt is not valid, kind `invalid_request`.
 
 A follow-up queued behind a run that ended without reporting a session is
-refused, kind `no_session`, when its turn comes. An unknown worker is an error.
+refused, kind `no_session`, when its turn comes. If the worker is idle when the
+follow-up is made, the refusal is immediate and the response says so: every
+response that says a run is `finished` carries its `outcome` and its `error`
+(kind and message). An unknown worker is an error.
+
+A worker whose first run ended without reporting a session, such as one whose
+provider failed before it started, cannot take a follow-up. `list` flags it:
+`can_follow_up` is false for a closed worker, an `ephemeral` one, and one that
+has no session and no run that might still report one.
 
 ## Waiting and cursors
 
@@ -153,7 +173,10 @@ the wait and later builds the answer from current states, so it never blocks.
 
 A finished run returns its result: compact by default (run, worker, provider,
 outcome, text, structured answer, error, cleanup, denied requests, provider
-notes, session id, timing) or whole with `Detail::Full`. An unfinished run
+notes, session id, timing) or whole with `Detail::Full`. Compact returns the
+first 20000 characters of the answer; a longer answer sets `text_truncated` and
+`text_chars` gives its full length. `interrupt` and `close` return the compact
+form. An unfinished run
 returns its state and progress: time queued and running, the time limit, the
 partial text, and recent activity.
 
@@ -193,24 +216,43 @@ verdict.
   `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits for
   runs to settle within the bound, naming any that did not. Reads and `list`
   keep working.
-- **Drop** of the last clone of a `Supervisor` stops every worker. On a
-  multi-threaded runtime it blocks, bounded, until the supervisor's task has
-  ended, so no process is left when it returns. On a current-thread runtime it
-  cannot block, because nothing else could run the stop; the runtime stops the
-  processes as soon as it runs again, and a caller there should `shutdown().await`
-  first.
+- **Drop** of the last clone of a `Supervisor` first cancels one token that is
+  the parent of every run's stop token, which signals every provider at once
+  without the supervisor's task having to run, and then asks that task to close
+  every worker. What it guarantees depends on where it runs:
+  - on a thread of a multi-threaded runtime, inside a spawned task, it waits
+    with `tokio::task::block_in_place` until the task has ended, which hands that
+    thread's other work to another thread. With ten workers the tests require it to return within 10 s,
+    with four runtime threads and with one, and to leave no process. The wait is bounded by `shutdown_bound` plus 2 s;
+  - on the thread that called `block_on` of a multi-threaded runtime, or from a
+    plain thread when the supervisor's runtime is multi-threaded, it waits the
+    same way and leaves no process;
+  - on a current-thread runtime it cannot wait, because nothing else could run
+    the stop, and it returns at once. Every provider has been signalled; the
+    processes are gone when that runtime is next polled (the tests poll it and
+    find none). If the runtime is dropped first, the process layer kills each
+    child's group when its owner task is dropped.
+
+  Call `shutdown().await` before dropping when the report matters.
 
 A panic in the task that follows a run ends that run `failed`, error kind
 `internal_error`, with an unconfirmed cleanup that says what could not be
 checked. The supervisor and every other worker are unaffected.
 
+A panic in the supervisor's own task stops every provider on the way out (the
+state it owned is dropped, and dropping it signals every run), and from then on
+every call returns `Error::Failed`, and `shutdown()` returns a report with
+`failed` set that says nothing confirmed any provider ended. It is never a clean
+report.
+
 ## Retention
 
-Finished results are kept for `retention` and at most `retained_results` at a
-time, oldest dropped first. Pruning runs before each command, so a read never
+Finished results are kept for `retention`, at most `retained_results` at a
+time and at most `retained_bytes` estimated bytes, oldest dropped first. Pruning runs before each command, so a read never
 returns a result past its time. A closed worker is listed while any of its
-results is kept and then disappears; an id that has gone is reported as unknown.
-Live workers are never dropped, but their old results are.
+results is kept and then disappears, also when none was kept by the time it was
+closed; an id that has gone is reported as unknown. Live workers are never
+dropped, but their old results are.
 
 ## Timing
 
@@ -234,15 +276,19 @@ panics. They run the fake providers in `provider/tests/fakes`, copied per test
 into a directory whose path is in every process's command line. At most three
 run at once, and `cargo test` runs the target apart from the library's unit
 tests, because many shell processes polled in parallel starved the timing tests
-of the process layer on a busy machine. A test ends by
-checking the process table for any process that carries it. A run is held open by
+of the process layer on a busy machine. Every test that starts a provider ends by checking the process table for any
+process that carries that path. The concurrency limit of a batch is measured
+from outside, by the fakes' own records (`trace:` runs), not by the supervisor's
+counter. A run is held open by
 a gate (`gate:FILE`), so the order of events depends on files, not on timing. The
 tests cover every operation, the state tables, queue order, resuming a session,
 limits reached and freed, retention, wait with and without a cursor, on timeout,
 with several runs and with unknown ids, reads during a run, interrupt of a
 running, queued and finished run, close with a running run and a queue, shutdown
-and drop with ten workers running, a panic in a run's task, and fifty runs across
-ten workers.
+and drop with ten workers running (on the `block_on` thread, inside a spawned
+task with four runtime threads and with one, and on a current-thread runtime), a
+panic in a run's task and one in the supervisor's own task, and fifty runs
+across ten workers.
 
 ## Not built
 

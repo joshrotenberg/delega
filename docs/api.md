@@ -314,7 +314,11 @@ eighth, `respond`, when live asking is added.
 Rules that hold for every tool:
 
 - **Starting returns at once.** Only `wait` and `interrupt` wait for anything,
-  and both are bounded.
+  and `close` waits while it stops a running run; each is bounded. `wait` is
+  capped by the wait ceiling (300 s); `interrupt` and `close` wait for the run to
+  settle for at most 30 s, after which the response says it has not settled.
+  The MCP layer should keep waits short and pass the cursor back instead of
+  waiting long.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
   **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
   an outcome. A worker is `queued` when nothing is running and a run waits for a
