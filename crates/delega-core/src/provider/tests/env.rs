@@ -212,7 +212,7 @@ async fn session_variables_do_not_reach_the_child(provider: Provider) {
     let mut env = options.parent_env.take().unwrap();
     for name in SESSION
         .iter()
-        .chain(&["CLAUDE_CONFIG_DIR_EXTRA_NOT_SESSION"])
+        .chain(&["PLAIN_CONTROL_VARIABLE"])
     {
         env.push((OsString::from(name), OsString::from(CANARY)));
     }
@@ -223,6 +223,12 @@ async fn session_variables_do_not_reach_the_child(provider: Provider) {
         assert!(!seen.contains(&name.to_string()), "{name}: {seen:?}");
     }
     assert!(seen.contains(&"HOME".to_string()), "{seen:?}");
+    // The control has an ordinary name, so a rule that withholds too much
+    // fails here.
+    assert!(
+        seen.contains(&"PLAIN_CONTROL_VARIABLE".to_string()),
+        "{seen:?}"
+    );
     rig.assert_nothing_left().await;
 }
 both!(
