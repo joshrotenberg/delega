@@ -128,13 +128,12 @@ pub(super) fn session_lookup(target: i32) -> SessionLookup {
 
 #[cfg(target_os = "linux")]
 fn platform_session(target: i32) -> SessionLookup {
-    // ESRCH: the process exited while its proc entry was being read.
-    const ESRCH: i32 = 3;
     match std::fs::read(format!("/proc/{target}/stat")) {
         Ok(bytes) => parse_stat_session(&bytes).map_or(SessionLookup::Unknown, SessionLookup::In),
+        // ESRCH: the process exited while its proc entry was being read.
         Err(error)
             if error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(ESRCH) =>
+                || error.raw_os_error() == Some(Errno::SRCH.raw_os_error()) =>
         {
             SessionLookup::Gone
         }
@@ -316,9 +315,12 @@ mod tests {
     #[test]
     fn a_missing_process_is_gone_on_linux() {
         assert_eq!(session_lookup(i32::MAX - 1), SessionLookup::Gone);
+        // A live process reads as a session. It may be 0 when the test's
+        // session leader is outside its pid namespace (a container), so only
+        // the kind of answer is checked.
         assert!(matches!(
             session_lookup(std::process::id() as i32),
-            SessionLookup::In(session) if session > 0
+            SessionLookup::In(_)
         ));
     }
 

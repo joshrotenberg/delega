@@ -131,7 +131,9 @@
 //! - A fast fork relay: a descendant that ignores TERM, changes process group
 //!   each generation, and forks a successor and exits within a few
 //!   milliseconds. Every listing holds a row that is gone when its session is
-//!   read, and the successor is not in the listing. Such rows are counted in
+//!   read, and the successor is not in the listing. Such rows, and rows whose
+//!   session cannot be read (for example another user's process under a `/proc`
+//!   mounted with `hidepid=1`), are counted in
 //!   `diagnostics.inspection.vanished_rows` and are not treated as members: a
 //!   process that short-lived is far more often unrelated, and treating each as
 //!   possibly ours kept honest runs unconfirmed on a machine with churn.
@@ -194,8 +196,12 @@
 //! panics in a debug build and is undefined behaviour in a release build). A
 //! missing proc entry is a process that is gone; a session of 0 is read as an
 //! ordinary answer that is never the child's. On macOS `getsid` is called
-//! through rustix; `ps -ax` lists no pid 0 row there and no listed process
-//! answered 0 when checked. It has the workspace's one
+//! through rustix for pids above 0; `ps -ax` lists no pid 0 row there and no
+//! listed process answered 0 when checked. Nothing else guards that call: if
+//! `getsid` answered 0 there, rustix would hit the same undefined behaviour in a
+//! release build. macOS and Linux are the supported systems; on other Unix
+//! systems (FreeBSD, where kernel processes can share session 0) the same path
+//! is compiled but has not been checked. It has the workspace's one
 //! `unsafe`: a `pre_exec` hook in `sys.rs` that calls only `setsid`.
 //!
 //! Verified on macOS only. Not yet verified on Linux, for the Linux run to
