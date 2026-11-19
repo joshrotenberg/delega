@@ -560,6 +560,33 @@ async fn starts_waiting_for_a_check_slot_are_released_at_shutdown_with_shut_down
     dir.assert_nothing_left().await;
 }
 
+/// The moment between `shutdown` closing the request checks and its `Shutdown`
+/// reaching the supervisor's task, held open: a `start` in that moment, or one
+/// released by the close, is answered `ShutDown` and starts nothing. Before the
+/// fix it sent `Start`, which the task admitted because no `Shutdown` had
+/// arrived yet.
+#[tokio::test]
+async fn a_start_after_the_checks_are_closed_is_shut_down_and_starts_nothing() {
+    let dir = Dir::new();
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _release = Release(released.clone());
+    let supervisor = holding_supervisor(&dir, &released, Duration::from_secs(3600));
+    // One start held in its check, released by the close.
+    let held = {
+        let (supervisor, request) = (supervisor.clone(), dir.request("hold 0"));
+        tokio::spawn(async move { supervisor.start(request).await })
+    };
+    supervisor.shared.preflight.close();
+    let late = supervisor.start(dir.request("echo")).await;
+    assert!(matches!(late, Err(Error::ShutDown)), "{late:?}");
+    let held = held.await.expect("the start task did not panic");
+    assert!(matches!(held, Err(Error::ShutDown)), "{held:?}");
+    let list = supervisor.list().await.expect("list");
+    assert!(list.workers.is_empty(), "{:?}", list.workers);
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
     use super::limits::MAX_PENDING_PREFLIGHTS;
