@@ -304,8 +304,9 @@ Behavior:
   and a refusal for it is printed as a `refused` result with its own kind
   (`config_unreadable`, `config_invalid`, or an environment kind), the status 2,
   and, with `--progress`, the `finished: refused` line, whatever else is wrong
-  with the request. The result then carries the provider, the mode and the time
-  limit the flags named, or the defaults, because the file is what could not be
+  with the request. The result then carries the provider and the mode the flags named,
+  and the time limit of `--timeout` when it is within 1 to 86400 seconds and the
+  default (600) otherwise, because the file is what could not be
   read. An unreadable or invalid profile, a missing
   prompt or provider, `--prompt` together with `--stdin`, an unreadable or
   malformed schema file, and any other validation problem are printed as a
@@ -704,7 +705,7 @@ otherwise, and an unknown key is refused at any level, naming it (such as
 | `[env]` `pass` | A list of names, as `--env NAME`. |
 | `[env.set]` | Names set to string values, as `--env NAME=VALUE`. A value is never printed, in a result, a report, a message or a debug text. |
 | `[providers.claude]`, `[providers.codex]` `executable` | An absolute path. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` overrides it; it comes before `PATH` ([providers.md](providers.md#finding-the-executable)). |
-| `[mcp]` | The supervisor's limits, each bounded by the constant that is its default today, so the file can lower a limit and cannot raise one: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300 and `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300). Only `delega mcp` uses them; `delega doctor` shows them. |
+| `[mcp]` | The supervisor's limits, each bounded by the constant that is its default today, so the file can lower a limit and cannot raise one: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300 and `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300). A file that lowers only the ceiling lowers the default with it, so `list` and `doctor` report what a wait applies. Only `delega mcp` uses them; `delega doctor` shows them. |
 
 The names in `[env]` follow the rules and have the refusals of `--env` ([Command
 line](#command-line)): an invalid name is `invalid_env_name`, a calling-session,
@@ -724,11 +725,16 @@ apply, the file's first, so a flag that sets the same variable wins. `DELEGA_*`
 variables override only executables (`DELEGA_CLAUDE_BIN`, `DELEGA_CODEX_BIN`) and
 the location (`DELEGA_CONFIG`); no other setting has a variable.
 
-**Safety.** The file is used only when, judged on the open handle so nothing can
-be swapped in after the check, it is a regular file owned by the current user and
-not writable by group or others, and at most 1 MiB. A device, a pipe or a
-directory is refused without being opened for reading. A symbolic link at the
-file, as a dotfiles manager makes, is followed only when the user owns the link
+**Safety.** The file is used only when it is a regular file owned by the current
+user and not writable by group or others, and at most 1 MiB, and the directory
+that holds it is owned by the user and not writable by group or others (link or
+not, because whoever can write the directory can swap the file or plant a link
+or a hard link). The entry is looked at without following a link first: a
+device, a pipe, a directory or a socket is refused from that result, before it is
+opened, because opening some of them has effects. A regular file is then opened
+without following a link and without blocking, and the owner, the type and the
+mode are checked again on the open handle, so a swap between the look and the
+open is caught; a link swapped in is refused. A symbolic link at the file, as a dotfiles manager makes, is followed only when the user owns the link
 and the directory that holds it, that directory is not writable by group or
 others, and the target passes the same checks; a link to nothing is refused. This
 is the rule `delega` applies to a link in a repository root when it reads Claude
@@ -741,7 +747,7 @@ line, and never a value from the file:
 
 | Kind | When |
 | --- | --- |
-| `config_unreadable` | It cannot be used as a file: it cannot be opened or read, is not a regular file, is owned by another user, is writable by group or others (the message gives the mode), is a link that fails the rule above, is over 1 MiB, or `DELEGA_CONFIG` names a file that does not exist or a path that is not absolute. |
+| `config_unreadable` | It cannot be used as a file: it cannot be opened or read, is not a regular file, is owned by another user, is writable by group or others (the message gives the mode), is in a directory that is not the user's or that group or others can write, is a link that fails the rule above, is over 1 MiB, or `DELEGA_CONFIG` names a file that does not exist or a path that is not absolute. |
 | `config_invalid` | It is not UTF-8 or TOML (the message gives the line and column, not the parser's text, which can quote the file), has an unknown key, a value of the wrong type or outside its bound (the message names the key and the bound, or the accepted names for an enumeration), a path that is not absolute, or `mcp.wait_default_secs` above the ceiling. At most ten problems are listed. |
 | `invalid_env_name`, `forbidden_env_name` | A name in `[env]` that `--env` would refuse for the same reason. |
 

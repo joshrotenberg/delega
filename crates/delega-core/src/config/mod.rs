@@ -332,6 +332,10 @@ impl Config {
         if let Some(v) = m.wait_default_secs {
             limits.wait_default = Duration::from_secs(v);
         }
+        // A wait is capped at the ceiling, so what is reported as the default is
+        // what applies: a file that lowers only the ceiling lowers the default
+        // with it.
+        limits.wait_default = limits.wait_default.min(limits.wait_ceiling);
         limits
     }
 

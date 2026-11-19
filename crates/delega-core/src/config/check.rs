@@ -122,8 +122,8 @@ pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Config, Refusal> {
     };
     let mut problems: Vec<String> = Vec::new();
     for error in validator.iter_errors(&document) {
-        let at = location(&error.instance_path().to_string());
-        problems.extend(describe(&at, error.kind()));
+        let at = location(&error.instance_path().to_string(), &document);
+        problems.extend(describe(&at, error.kind(), &document));
     }
     problems.sort();
     problems.dedup();
@@ -148,12 +148,35 @@ pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Config, Refusal> {
     Ok(config)
 }
 
-/// A JSON pointer as a dotted key path.
-fn location(pointer: &str) -> String {
-    pointer
+/// A JSON pointer as a dotted key path. A key under `env.set` is a variable
+/// name the file chose, and a mistaken `NAME=value` there would put a value in
+/// the message, so it is shown as its position among the keys of `env.set` in
+/// alphabetical order, as `<entry 2>`. Entries of `env.pass` are already shown
+/// by index.
+fn location(pointer: &str, document: &Value) -> String {
+    let parts: Vec<String> = pointer
         .split('/')
         .skip(1)
-        .map(|part| key(&part.replace("~1", "/").replace("~0", "~")))
+        .map(|part| part.replace("~1", "/").replace("~0", "~"))
+        .collect();
+    let under_set = parts.len() > 2 && parts[0] == "env" && parts[1] == "set";
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if under_set && i == 2 {
+                let mut names: Vec<&String> = document
+                    .pointer("/env/set")
+                    .and_then(Value::as_object)
+                    .map(|m| m.keys().collect())
+                    .unwrap_or_default();
+                names.sort();
+                let at = names.iter().position(|n| *n == part).map_or(0, |p| p + 1);
+                format!("<entry {at}>")
+            } else {
+                key(part)
+            }
+        })
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -167,7 +190,7 @@ fn join(at: &str, name: &str) -> String {
 }
 
 /// The text for one schema error, with the key it is about. Never a value.
-fn describe(at: &str, kind: &ValidationErrorKind) -> Vec<String> {
+fn describe(at: &str, kind: &ValidationErrorKind, document: &Value) -> Vec<String> {
     let at_or_file = if at.is_empty() { "the file" } else { at };
     match kind {
         ValidationErrorKind::AdditionalProperties { unexpected } => unexpected
@@ -206,7 +229,7 @@ fn describe(at: &str, kind: &ValidationErrorKind) -> Vec<String> {
             let mut others: Vec<String> = Vec::new();
             for errors in context {
                 for error in errors {
-                    collect(error, &mut accepted, &mut others);
+                    collect(error, &mut accepted, &mut others, document);
                 }
             }
             others.sort();
@@ -243,8 +266,9 @@ fn collect(
     error: &ValidationError<'_>,
     accepted: &mut Vec<(String, String)>,
     others: &mut Vec<String>,
+    document: &Value,
 ) {
-    let at = location(&error.instance_path().to_string());
+    let at = location(&error.instance_path().to_string(), document);
     match error.kind() {
         ValidationErrorKind::Constant { expected_value } => {
             accepted.push((at, expected_value.to_string()));
@@ -257,13 +281,13 @@ fn collect(
         ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
             for errors in context {
                 for error in errors {
-                    collect(error, accepted, others);
+                    collect(error, accepted, others, document);
                 }
             }
         }
         ValidationErrorKind::Type { kind }
             if expected_type(&format!("{kind:?}")).starts_with("of another") => {}
-        other => others.extend(describe(&at, other)),
+        other => others.extend(describe(&at, other, document)),
     }
 }
 
@@ -345,9 +369,12 @@ fn rules(config: &Config) -> Vec<String> {
             ));
         }
     }
-    for (name, value) in &config.env.set {
+    for (index, value) in config.env.set.values().enumerate() {
         if value.contains('\0') {
-            problems.push(format!("env.set.{} must not contain NUL bytes", key(name)));
+            problems.push(format!(
+                "env.set.<entry {}> must not contain NUL bytes",
+                index + 1
+            ));
         }
     }
     let ceiling = config.mcp.wait_ceiling_secs.unwrap_or(WAIT_BOUND_SECS);

@@ -42,7 +42,8 @@ const FOLLOW_UP: &str = "Give an existing worker another assignment that continu
     full, it has no session to continue or the prompt is invalid.";
 
 const WAIT: &str = "Wait until any named run finishes, or the current run of any named worker \
-    does, or the time passes (default 30 s, capped by the server). A timeout is not an error: \
+    does, or the time passes (default 30 s unless the server's configuration file sets another, \
+    capped by the server; list reports both). A timeout is not an error: \
     timed_out is true and the states are current. Pass the cursor back as after to be told only \
     of what finishes later, instead of waiting long. Next, read a run that finished.";
 

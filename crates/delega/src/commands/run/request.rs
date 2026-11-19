@@ -5,7 +5,8 @@ use std::path::Path;
 
 use delega_core::config::Config;
 use delega_core::contract::limits::{
-    DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_PROMPT_BYTES,
+    DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_PROMPT_BYTES, MAX_TIMEOUT_SECS,
+    MIN_TIMEOUT_SECS,
 };
 use delega_core::contract::partial::{PartialPermissions, PartialRequest, PartialSession};
 use delega_core::contract::permissions::Mode;
@@ -56,7 +57,12 @@ pub fn flag_facts(args: &Args) -> Facts {
     Facts {
         provider: provider(args),
         mode: mode(args).unwrap_or_default(),
-        timeout_secs: args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS),
+        // A raw `--timeout` outside the contract's range is not carried into a
+        // result: it would state a limit that no run could have had.
+        timeout_secs: args
+            .timeout
+            .filter(|t| (MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(t))
+            .unwrap_or(DEFAULT_TIMEOUT_SECS),
     }
 }
 

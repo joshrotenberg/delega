@@ -242,6 +242,53 @@ fn the_full_file_is_read_and_applied() {
 }
 
 #[test]
+fn the_default_wait_never_exceeds_the_ceiling_that_applies() {
+    // Only the ceiling is lowered: the reported default follows it.
+    let config = config_of("schema_version = 1\n[mcp]\nwait_ceiling_secs = 10\n").expect("valid");
+    let limits = config.limits();
+    assert_eq!(limits.wait_ceiling, std::time::Duration::from_secs(10));
+    assert_eq!(limits.wait_default, std::time::Duration::from_secs(10));
+    // A default below the ceiling stays.
+    let config =
+        config_of("schema_version = 1\n[mcp]\nwait_ceiling_secs = 100\nwait_default_secs = 5\n")
+            .expect("valid");
+    assert_eq!(
+        config.limits().wait_default,
+        std::time::Duration::from_secs(5)
+    );
+    // No setting: the built-in 30 s.
+    assert_eq!(
+        Config::empty().limits().wait_default,
+        std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn a_key_under_env_set_that_looks_like_name_equals_value_is_shown_by_position() {
+    let refused = refusal_of(&format!(
+        "schema_version = 1\n[env.set]\n\"API_KEY={SECRET}\" = 12345\nZED = \"v\"\n\"AAA={SECRET}\" = \"x\\u0000\"\n"
+    ));
+    assert_eq!(refused.kind, INVALID);
+    assert!(
+        refused
+            .message
+            .contains("env.set.<entry 2> must be a string"),
+        "{refused}"
+    );
+    assert!(!refused.message.contains(SECRET), "{refused}");
+    // The NUL message uses a position too.
+    let nul = refusal_of(&format!(
+        "schema_version = 1\n[env.set]\n\"AAA={SECRET}\" = \"x\\u0000\"\n"
+    ));
+    assert!(
+        nul.message
+            .contains("env.set.<entry 1> must not contain NUL bytes"),
+        "{nul}"
+    );
+    assert!(!nul.message.contains(SECRET), "{nul}");
+}
+
+#[test]
 fn the_empty_configuration_changes_nothing() {
     let config = Config::empty();
     assert_eq!(config.request_defaults(), PartialRequest::default());
@@ -369,7 +416,7 @@ fn a_value_of_the_wrong_type_or_outside_its_bound_is_refused_without_the_value()
         ),
         (
             format!("schema_version = 1\n[env.set]\nTOKEN_A = 99{SECRET_NUM}\n"),
-            "env.set.TOKEN_A must be a string",
+            "env.set.<entry 1> must be a string",
         ),
         (
             format!("schema_version = 1\n[providers.claude]\nexecutable = 5{SECRET_NUM}\n"),
@@ -459,7 +506,7 @@ fn model_and_executable_rules_are_checked_and_never_repeat_the_value() {
     assert!(
         value_nul
             .message
-            .contains("env.set.A_B must not contain NUL bytes"),
+            .contains("env.set.<entry 1> must not contain NUL bytes"),
         "{value_nul}"
     );
 }
@@ -632,9 +679,50 @@ fn a_file_owned_by_another_user_is_refused() {
     let status = read_as(lookup(&pairs), euid().wrapping_add(1));
     let refusal = status.refusal().expect("refused");
     assert_eq!(refusal.kind, UNREADABLE);
+    // The directory the test made is not that user's either, which is found first.
     assert!(
-        refusal.message.contains("owned by another user"),
+        refusal.message.contains("not owned by the current user"),
         "{refusal}"
+    );
+}
+
+#[test]
+fn a_file_in_a_directory_others_can_write_is_refused() {
+    let area = Area::new();
+    let path = area.file("shared/c.toml", "schema_version = 1\n");
+    let dir = path.parent().expect("parent").to_path_buf();
+    for mode in [0o775, 0o777, 0o770, 0o757] {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).expect("mode");
+        let refusal = area.read(&path).into_config().expect_err("refused");
+        assert_eq!(refusal.kind, UNREADABLE, "{mode:o}");
+        assert!(
+            refusal.message.contains("directory that holds it"),
+            "{refusal}"
+        );
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    assert!(area.read(&path).into_config().is_ok());
+}
+
+#[test]
+fn a_file_swapped_for_a_link_is_not_followed_and_a_hard_link_dir_is_not_trusted() {
+    // The entry is a regular file when it is looked at and opened with
+    // O_NOFOLLOW, so a link in its place is refused as a link, not read.
+    let area = Area::new();
+    let target = area.file("t.toml", "schema_version = 1\n");
+    let dir = area.root.join("d");
+    std::fs::create_dir(&dir).expect("directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    symlink(&target, dir.join("c.toml")).expect("link");
+    // A link in the user's private directory to the user's file is the dotfiles
+    // case and is followed.
+    assert!(area.read(&dir.join("c.toml")).into_config().is_ok());
+    // Seen as another user, the same link is refused.
+    let pairs = [("DELEGA_CONFIG", dir.join("c.toml").display().to_string())];
+    assert!(
+        read_as(lookup(&pairs), euid().wrapping_add(1))
+            .refusal()
+            .is_some()
     );
 }
 

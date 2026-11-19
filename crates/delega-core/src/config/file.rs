@@ -10,7 +10,9 @@
 //! 2. What is read must be a regular file, owned by the current user, and not
 //!    writable by group or others. A device, a pipe or a directory is refused
 //!    before anything is read, and the open does not block.
-//! 3. A symbolic link at the file is followed only when the user owns the link
+//! 3. The directory that holds the file must be owned by the user and not
+//!    writable by group or others, link or not, and a regular file is opened with
+//!    `O_NOFOLLOW`. A symbolic link at the file is followed only when the user owns the link
 //!    and the directory that holds it, and that directory is not writable by
 //!    group or others. Another user can plant a link only in a directory they
 //!    can write, so a link the user owns in a directory only the user can write
@@ -76,34 +78,45 @@ pub fn read(path: &Path, euid: u32) -> Result<Read, String> {
         Err(Errno::NOENT) => return Ok(Read::Missing),
         Err(e) => return Err(format!("it cannot be inspected ({})", kind(e))),
     };
-    let is_link = FileType::from_raw_mode(entry.st_mode) == FileType::Symlink;
-    if is_link {
-        if entry.st_uid != euid {
-            return Err("it is a symbolic link that the current user does not own".to_string());
+    let entry_type = FileType::from_raw_mode(entry.st_mode);
+    let is_link = entry_type == FileType::Symlink;
+    // A device, a pipe, a directory or a socket is refused before it is opened:
+    // opening some of them has side effects.
+    if !is_link && entry_type != FileType::RegularFile {
+        return Err("it is not a regular file".to_string());
+    }
+    if is_link && entry.st_uid != euid {
+        return Err("it is a symbolic link that the current user does not own".to_string());
+    }
+    // Whoever can write the directory can swap the entry or plant a link or a
+    // hard link, so the directory must be the user's and closed to group and
+    // others, whether or not the entry is a link.
+    let holder =
+        fstat(&dir).map_err(|e| format!("its directory cannot be examined ({})", kind(e)))?;
+    if holder.st_uid != euid || others_can_write(mode_bits(holder.st_mode)) {
+        return Err(if is_link {
+            "it is a symbolic link in a directory that the current user does not own or \
+             that group or others can write, so the link is not trusted"
+        } else {
+            "the directory that holds it is not owned by the current user or can be written \
+             by group or others, so the file is not trusted"
         }
-        let holder =
-            fstat(&dir).map_err(|e| format!("its directory cannot be examined ({})", kind(e)))?;
-        if holder.st_uid != euid || others_can_write(mode_bits(holder.st_mode)) {
-            return Err(
-                "it is a symbolic link in a directory that the current user does not own or \
-                 that group or others can write, so the link is not trusted"
-                    .to_string(),
-            );
-        }
+        .to_string());
     }
     // Without blocking, so a pipe swapped in after the look above cannot hold
-    // the command; the handle is checked below.
-    let fd = match openat(
-        &dir,
-        name,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
+    // the command, and without following a link when the entry was not one, so
+    // a link swapped in is not followed; the handle is checked below.
+    let mut flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    if !is_link {
+        flags |= OFlags::NOFOLLOW;
+    }
+    let fd = match openat(&dir, name, flags, Mode::empty()) {
         Ok(fd) => fd,
         Err(Errno::NOENT) if is_link => {
             return Err("it is a symbolic link that points at nothing".to_string());
         }
         Err(Errno::NOENT) => return Ok(Read::Missing),
+        Err(Errno::LOOP) => return Err("it was replaced by a symbolic link".to_string()),
         Err(e) => return Err(format!("it cannot be opened ({})", kind(e))),
     };
     let handle = fstat(&fd).map_err(|e| format!("it cannot be examined ({})", kind(e)))?;
