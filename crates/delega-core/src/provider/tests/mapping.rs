@@ -82,7 +82,7 @@ fn claude_base(rig: &Rig, tools: &str, allowed: &str, settings: &Value) -> Vec<S
 fn claude_read_mode_grants_reading_the_working_directory_and_nothing_else() {
     let rig = Rig::new();
     let plan = dry(&rig, &rig.request(Provider::Claude, "p"));
-    let allowed = format!("{},Glob,Grep", rule(&rig, "Read"));
+    let allowed = rule(&rig, "Read");
     let expected = claude_base(
         &rig,
         "Read,Glob,Grep",
@@ -95,9 +95,8 @@ fn claude_read_mode_grants_reading_the_working_directory_and_nothing_else() {
     assert!(plan.mapping.commands.is_empty());
     assert_eq!(plan.mapping.on_request, "deny");
     assert!(
-        plan.notes
-            .iter()
-            .any(|n| n.contains("Glob and Grep are granted without a path scope"))
+        !plan.notes.iter().any(|n| n.contains("Glob and Grep")),
+        "Glob and Grep are governed by the Read rules and need no note"
     );
     assert!(
         plan.notes
@@ -113,7 +112,7 @@ fn claude_write_mode_adds_edit_and_write_scoped_to_the_working_directory() {
     request.permissions.mode = Mode::Write;
     let plan = dry(&rig, &request);
     let allowed = format!(
-        "{},Glob,Grep,{},{}",
+        "{},{},{}",
         rule(&rig, "Read"),
         rule(&rig, "Edit"),
         rule(&rig, "Write")
@@ -161,10 +160,7 @@ fn claude_commands_become_exact_rules_and_the_guard_hook() {
         "cargo test".into(),
     ];
     let plan = dry(&rig, &request);
-    let allowed = format!(
-        "{},Glob,Grep,Bash(cargo test),Bash(git status)",
-        rule(&rig, "Read")
-    );
+    let allowed = format!("{},Bash(cargo test),Bash(git status)", rule(&rig, "Read"));
     let settings = json!({
         "disableAllHooks": false,
         "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{

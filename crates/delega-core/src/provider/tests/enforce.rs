@@ -138,6 +138,41 @@ async fn claude_reads_the_working_directory_and_listed_directories_but_not_elsew
 }
 
 #[tokio::test]
+async fn claude_grep_and_glob_follow_the_scoped_read_rules_in_read_and_write_modes() {
+    let rig = Rig::new();
+    let extra = std::fs::canonicalize(&rig.config).unwrap();
+    for mode in [Mode::Read, Mode::Write] {
+        for tool in ["grep", "glob"] {
+            for (path, listed, expect_denied) in [
+                (rig.work.join("src"), false, false),
+                (extra.join("docs"), true, false),
+                (extra.join("docs"), false, true),
+                (rig.home.join("elsewhere"), true, true),
+            ] {
+                let result = claude(&rig, mode, format!("tool-{tool}:{}", path.display()), |r| {
+                    if listed {
+                        r.permissions.directories = vec![extra.clone()];
+                    }
+                })
+                .await;
+                let name = if tool == "grep" { "Grep" } else { "Glob" };
+                let want = if expect_denied {
+                    vec![format!("{name}: {}", path.display())]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    denied(&result),
+                    want,
+                    "{mode:?} {tool} {} listed={listed}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn claude_runs_a_listed_command_through_the_hook_and_denies_an_unlisted_one() {
     let rig = Rig::new();
     let listed = claude(&rig, Mode::Read, "tool-bash:cargo test".to_string(), |r| {
