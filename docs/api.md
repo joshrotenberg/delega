@@ -97,8 +97,12 @@ stated: <part>; <part>`. A dry run reports the same refusal.
 Refusals before start come in a fixed order, and the first one found is
 reported: `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
 `cwd_unusable` or `directory_unusable`, `provider_not_found`, Claude Code's
-`settings_unreadable` and `deny_rules_over_limit`, `unsupported_command`,
-`permissions_not_enforceable`, then `invalid_env_name` and `forbidden_env_name`.
+`settings_unreadable` and `deny_rules_over_limit` from reading the settings
+files, then the provider's own mapping of the request (for Claude Code:
+`cwd_unusable` or `directory_unusable` for a path it cannot write as a rule,
+`unsupported_command`, and `deny_rules_over_limit` for the generated settings
+argument), then `permissions_not_enforceable`, then `invalid_env_name` and
+`forbidden_env_name`.
 So a strict request that Codex cannot enforce and that also has an invalid
 environment name is refused as `permissions_not_enforceable`; without strict it
 is refused as `invalid_env_name`. `unsupported_provider_version` is found later,
