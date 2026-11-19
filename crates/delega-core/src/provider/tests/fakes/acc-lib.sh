@@ -34,7 +34,8 @@
 #   pipe         a child that keeps the provider's stdin, stdout and stderr
 #   orphan       a child that starts a setsid grandchild and exits at once
 #   orphan-late  as orphan, but the child lives 1.3 s first
-#   relay        a fork relay (see acc-child.sh)
+#   relay        a fork relay (see acc-child.sh); every generation records
+#                itself as `relay-heartbeat` before it does anything else
 #   bare         a `sleep 300` in a session of its own whose command line does
 #                not carry the case directory; only the ledger (and its
 #                command name) identifies it, so a harness that looks for the
@@ -66,29 +67,49 @@ acc_start_variant() {
     orphan-late) acc_spawn sh "$ACC_DIR/acc-child.sh" orphan-late </dev/null >/dev/null 2>&1 ;;
     relay) acc_spawn sh "$ACC_DIR/acc-child.sh" relay </dev/null >/dev/null 2>&1 ;;
     bare)
-      perl -MPOSIX -e 'POSIX::setsid(); $SIG{INT}="DEFAULT"; exec @ARGV' sleep 300 </dev/null >/dev/null 2>&1 &
+      # The path of the marker file travels in the environment, not in the
+      # command line, so the process carries no case directory name before or
+      # after it becomes `sleep 300`. It writes the file once it has left the
+      # session, which is the moment the variant is about.
+      ACC_DETACHED="$ACC_DIR/detached" perl -MPOSIX -e 'POSIX::setsid(); $SIG{INT}="DEFAULT"; open(F, ">", $ENV{ACC_DETACHED}); close(F); exec @ARGV' sleep 300 </dev/null >/dev/null 2>&1 &
       acc_record bare $!
       ;;
   esac
 }
 
-# Wait (at most 3 s) until the descendants of a variant exist, so a provider
-# that finishes at once does so with them running. The run then measures
-# delega's cleanup, not whether the descendants had started yet.
+# Wait until the descendants of a variant exist and have reached the state the
+# variant is about, so a provider that finishes at once does so with them
+# running. The run then measures delega's cleanup, not whether the descendants
+# had started yet. It waits on a recorded event (a ledger entry or a marker
+# file), never a fixed sleep, with a deadline of 60 s that only a broken
+# machine reaches.
 acc_wait_ready() {
   acc_n=0
-  while [ $acc_n -lt 60 ]; do
+  while [ $acc_n -lt 1200 ]; do
     case "$1" in
       child | pipe) grep -q '^child ' "$ACC_DIR/pids" 2>/dev/null && return ;;
       ignore) grep -q '^child-ignore ' "$ACC_DIR/pids" 2>/dev/null && return ;;
-      setsid | orphan | orphan-late) grep -q '^leaf-setsid ' "$ACC_DIR/pids" 2>/dev/null && return ;;
+      setsid | orphan-late) grep -q '^leaf-setsid ' "$ACC_DIR/pids" 2>/dev/null && return ;;
+      orphan) acc_orphaned && return ;;
       relay) [ -e "$ACC_DIR/beat" ] && return ;;
-      bare) sleep 0.2; return ;;
+      bare) [ -e "$ACC_DIR/detached" ] && return ;;
       *) return ;;
     esac
     sleep 0.05
     acc_n=$((acc_n + 1))
   done
+}
+
+# Whether the `orphan` variant's grandchild has started its own session and its
+# parent, the short-lived `mid`, is no longer its parent. Only then is the
+# situation the gap describes in place: a descendant in a session of its own
+# whose parent is gone, which no listing can tie to the worker.
+acc_orphaned() {
+  acc_leaf=$(sed -n 's/^leaf-setsid //p' "$ACC_DIR/pids" 2>/dev/null | head -n 1)
+  [ -n "$acc_leaf" ] || return 1
+  acc_mid=$(sed -n 's/^mid //p' "$ACC_DIR/pids" 2>/dev/null | head -n 1)
+  acc_parent=$(ps -o ppid= -p "$acc_leaf" 2>/dev/null | tr -d ' ')
+  [ "$acc_parent" != "$acc_mid" ]
 }
 
 # acc_run BEHAVIOUR:VARIANT
