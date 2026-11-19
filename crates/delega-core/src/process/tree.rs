@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
-use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
+use super::limits::{
+    MAX_ERROR_CHARS, PROBE_PASSES, PROBE_WINDOW_PIDS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT,
+};
 use super::sys::{self, Signal, SignalError};
 
 /// Why a process table could not be read.
@@ -254,12 +256,23 @@ pub(crate) struct SweepView {
     /// Tracked descendants with a matching start identity, outside the group
     /// and the session.
     pub tracked: Vec<i32>,
+    /// Rows that were alive in the listing but gone, or unreadable, by the time
+    /// their session was read, and that are not provably foreign. Such a
+    /// process may have been one of ours that forked a successor the listing
+    /// does not hold, so the sweep cannot be called conclusive.
+    pub vanished: Vec<i32>,
 }
 
 impl SweepView {
     /// Whether the sweep found nothing alive.
     pub fn is_empty(&self) -> bool {
         self.group.is_empty() && self.session.is_empty() && self.tracked.is_empty()
+    }
+
+    /// Whether the sweep found nothing alive and could check every row it
+    /// could not rule out.
+    pub fn is_clean(&self) -> bool {
+        self.is_empty() && self.vanished.is_empty()
     }
 
     /// Every pid found, once.
@@ -405,16 +418,69 @@ impl ProcessTree {
     /// it differ between systems (macOS reports 0 for every process).
     fn view(&self, rows: &[ProcessRow]) -> SweepView {
         let mut view = SweepView::default();
+        let child_started = self.root_started.as_deref().and_then(parse_started);
+        let own_pid = i32::try_from(std::process::id()).unwrap_or(-1);
+        let by_pid: HashMap<i32, &ProcessRow> = rows.iter().map(|r| (r.pid, r)).collect();
         for row in rows.iter().filter(|r| !r.zombie) {
             if row.group == self.pid {
                 view.group.push(row.pid);
-            } else if sys::session_of(row.pid) == Some(self.pid) {
-                view.session.push(row.pid);
-            } else if self.known.get(&row.pid) == Some(&row.started) {
-                view.tracked.push(row.pid);
+                continue;
+            }
+            match sys::session_lookup(row.pid) {
+                sys::SessionLookup::In(session) if session == self.pid => {
+                    view.session.push(row.pid)
+                }
+                sys::SessionLookup::In(_) => {
+                    if self.known.get(&row.pid) == Some(&row.started) {
+                        view.tracked.push(row.pid);
+                    }
+                }
+                sys::SessionLookup::Gone | sys::SessionLookup::Unknown => {
+                    if self.known.get(&row.pid) == Some(&row.started) {
+                        view.tracked.push(row.pid);
+                    } else if self.possibly_ours(row, &by_pid, child_started, own_pid) {
+                        view.vanished.push(row.pid);
+                    }
+                }
             }
         }
         view
+    }
+
+    /// Whether a row that vanished before its session could be read may have
+    /// been one of ours, from what the listing says about it. It is provably
+    /// foreign when it started before the child, is a child of this process
+    /// (another run's child, or the listing itself), or its live parent is
+    /// itself foreign: older than the child, or in another session and not
+    /// tracked. A row whose parent is init, vanished, or ours may have been a
+    /// descendant that forked a successor the listing does not hold.
+    fn possibly_ours(
+        &self,
+        row: &ProcessRow,
+        by_pid: &HashMap<i32, &ProcessRow>,
+        child_started: Option<(i32, u32, u32, u32, u32, u32)>,
+        own_pid: i32,
+    ) -> bool {
+        if row.parent == own_pid || started_before(row, child_started) {
+            return false;
+        }
+        if row.parent <= 1 {
+            return true;
+        }
+        let Some(parent) = by_pid.get(&row.parent) else {
+            return true;
+        };
+        if parent.pid == self.pid || parent.group == self.pid {
+            return true;
+        }
+        if started_before(parent, child_started) {
+            return false;
+        }
+        match sys::session_lookup(parent.pid) {
+            sys::SessionLookup::In(session) if session == self.pid => true,
+            sys::SessionLookup::In(_) => self.known.get(&parent.pid) == Some(&parent.started),
+            sys::SessionLookup::Gone | sys::SessionLookup::Unknown => true,
+        }
     }
 
     /// One sweep from a fresh snapshot, adopting descendants still attached to
@@ -423,17 +489,49 @@ impl ProcessTree {
     /// stopped process receives it.
     pub async fn sweep(&mut self, signal: Option<Signal>) -> Result<SweepView, InspectError> {
         let rows = self.snapshot().await?;
-        let view = self.view(&rows);
+        let mut view = self.view(&rows);
         if let Some(signal) = signal {
             for pid in view.all() {
                 // A session member is checked again just before it is signalled.
-                if view.session.contains(&pid) && sys::session_of(pid) != Some(self.pid) {
+                if view.session.contains(&pid)
+                    && sys::session_lookup(pid) != sys::SessionLookup::In(self.pid)
+                {
                     continue;
                 }
                 self.deliver(pid, signal);
             }
+            // A process that vanished may have forked a successor the listing
+            // does not hold. Probe the pids just above it for members of the
+            // session and signal them.
+            if let Some(from) = view.vanished.iter().min().copied() {
+                for pid in self.probe_session(from, signal) {
+                    if !view.session.contains(&pid) && !view.group.contains(&pid) {
+                        view.session.push(pid);
+                    }
+                }
+            }
         }
         Ok(view)
+    }
+
+    /// Read the session of every pid in a window above `from`, several times,
+    /// and signal each member of the child's session. This needs no listing, so
+    /// it can catch a relay of processes that each live for less than one
+    /// listing. It relies on pids being handed out in ascending order; where
+    /// they wrap, the sweep stays inconclusive instead.
+    fn probe_session(&self, from: i32, signal: Signal) -> Vec<i32> {
+        let mut found = Vec::new();
+        for _ in 0..PROBE_PASSES {
+            for pid in from.saturating_add(1)..from.saturating_add(PROBE_WINDOW_PIDS) {
+                if pid != self.pid && sys::session_lookup(pid) == sys::SessionLookup::In(self.pid) {
+                    self.deliver(pid, signal);
+                    if !found.contains(&pid) {
+                        found.push(pid);
+                    }
+                }
+            }
+        }
+        found
     }
 
     fn deliver(&self, pid: i32, signal: Signal) {
@@ -493,6 +591,37 @@ impl ProcessTree {
                 }
             }
         }
+    }
+}
+
+/// A start time as `ps` prints it (`Tue Nov 18 12:00:00 2026`), as a tuple that
+/// orders chronologically.
+fn parse_started(text: &str) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let [_, month, day, time, year] = parts.as_slice() else {
+        return None;
+    };
+    let month = MONTHS.iter().position(|m| m == month)? as u32 + 1;
+    let mut clock = time.split(':').map(|p| p.parse::<u32>().ok());
+    Some((
+        year.parse().ok()?,
+        month,
+        day.parse().ok()?,
+        clock.next()??,
+        clock.next()??,
+        clock.next()??,
+    ))
+}
+
+/// Whether a row started strictly before the child did, so it cannot be a
+/// descendant. `ps` times have one-second resolution, so equal is not before.
+fn started_before(row: &ProcessRow, child_started: Option<(i32, u32, u32, u32, u32, u32)>) -> bool {
+    match (parse_started(&row.started), child_started) {
+        (Some(row), Some(child)) => row < child,
+        _ => false,
     }
 }
 
@@ -704,5 +833,31 @@ mod tests {
             tree.group_live().await.unwrap_err(),
             InspectError::Failed("EPERM".into())
         );
+    }
+
+    #[test]
+    fn start_times_order_chronologically_and_reject_other_shapes() {
+        let a = parse_started("Tue Nov 18 12:00:00 2026").unwrap();
+        let b = parse_started("Tue Nov 18 12:00:01 2026").unwrap();
+        let c = parse_started("Wed Dec  2 01:02:03 2026").unwrap();
+        assert!(a < b && b < c);
+        assert_eq!(parse_started("garbage"), None);
+        assert_eq!(parse_started("Tue Xyz 18 12:00:00 2026"), None);
+    }
+
+    #[test]
+    fn only_a_row_that_started_before_the_child_is_provably_foreign() {
+        let row = |started: &str| ProcessRow {
+            pid: 5,
+            parent: 1,
+            group: 5,
+            zombie: false,
+            started: started.into(),
+        };
+        let child = parse_started("Tue Nov 18 12:00:05 2026");
+        assert!(started_before(&row("Tue Nov 18 12:00:04 2026"), child));
+        assert!(!started_before(&row("Tue Nov 18 12:00:05 2026"), child));
+        assert!(!started_before(&row("Tue Nov 18 12:00:06 2026"), child));
+        assert!(!started_before(&row("Tue Nov 18 12:00:04 2026"), None));
     }
 }

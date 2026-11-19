@@ -41,6 +41,18 @@ impl Scratch {
         panic!("the script never wrote {name}");
     }
 
+    /// Wait until a file exists and is not empty.
+    pub(super) async fn exists(&self, name: &str) {
+        let path = self.path(name);
+        for _ in 0..1000 {
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the script never wrote {name}");
+    }
+
     /// The pid in a file that must already exist.
     pub(super) fn pid_now(&self, name: &str) -> i32 {
         std::fs::read_to_string(self.path(name))
@@ -159,4 +171,15 @@ pub(super) async fn wait_own_group(pid: i32) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("process {pid} never became a group leader");
+}
+
+/// Wait until the periodic scan has recorded `pid` as a tracked descendant.
+pub(super) async fn wait_tracked(handle: &ProcessHandle, pid: i32) {
+    for _ in 0..1000 {
+        if handle.tracked_pids().contains(&(pid as u32)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the scan never tracked {pid}");
 }

@@ -83,6 +83,12 @@ impl ProcessHandle {
         }
     }
 
+    /// The tracked descendants seen at the latest scan.
+    #[cfg(test)]
+    pub(crate) fn tracked_pids(&self) -> Vec<u32> {
+        self.registry.tracked_pids()
+    }
+
     /// Ask the owner to stop the child. See [`Interrupter`].
     pub fn interrupt(&self) {
         self.stop.cancel();

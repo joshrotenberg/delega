@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::fixtures::{
     OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
-    run_guarded, sh, wait_own_group,
+    run_guarded, sh, wait_own_group, wait_tracked,
 };
 use crate::contract::result::Cleanup;
 use crate::process::tree::{InspectError, Lister, lister_for};
@@ -84,7 +84,7 @@ async fn a_descendant_in_its_own_session_is_found_by_the_scan_and_cleaned_up() {
     let s = Scratch::new();
     // A session of its own is beyond the sweep. Only a scan that saw it while
     // its parent lived can track it. The leader lives long enough for two.
-    let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; sleep 1.3; exit 0");
+    let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; sleep 1.0; exit 0");
     let (report, pids, _reaper) = run_guarded(&s, sh(&s, &script, LONG), &["gc"]).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert_confirmed(&report);
@@ -109,13 +109,13 @@ async fn interrupting_stops_a_tracked_descendant_that_holds_the_pipes_without_wa
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
     // Let the periodic scan see the descendant.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    wait_tracked(&handle, gc).await;
     let stopped = Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert!(
-        stopped.elapsed() < Duration::from_millis(1500),
+        stopped.elapsed() < Duration::from_millis(2500),
         "stopping took {:?}",
         stopped.elapsed()
     );
@@ -176,7 +176,7 @@ async fn a_leader_that_keeps_forking_own_group_children_leaves_none_behind() {
         open F, q(>>), q(kids); print F qq($p\\n); close F; \
         select(undef, undef, undef, 0.05); }'";
     let handle = ProcessHandle::start(sh(&s, script, LONG));
-    let _ = s.pid("kids").await;
+    s.exists("kids").await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     handle.interrupt();
     let report = handle.wait().await;
@@ -383,7 +383,10 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     )
     .with_lister(hung);
     spec.swallow_group_kills = 2;
-    spec.cleanup_deadline = Duration::from_secs(3);
+    spec.stop_grace = Duration::from_millis(100);
+    spec.drain_bound = Duration::from_millis(100);
+    // Raised to the least allowed, which keeps the test short.
+    spec.cleanup_deadline = Duration::from_millis(1);
     let (report, pids, _reaper) = run_guarded(&s, spec, &["leader", "gc"]).await;
     assert_eq!(
         report.outcome(),
@@ -396,4 +399,58 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     );
     assert_gone("leader and sleep", &pids).await;
     assert!(matches!(report.cleanup, Cleanup::Unconfirmed { .. }));
+}
+
+/// A relay: each process ignores TERM, leads a group of its own, lives a few
+/// milliseconds, forks a successor and exits, so no process stays alive for
+/// longer than one listing. It stops itself after a few hundred generations.
+const RELAY: &str = "exec perl -e 'use POSIX; \
+    my $p = fork(); \
+    if ($p == 0) { $SIG{TERM} = q(IGNORE); \
+      for (1..300) { setpgid(0,0); select(undef, undef, undef, 0.005); \
+        my $q = fork(); \
+        if ($q) { open F, q(>>), q(kids); print F qq($q\\n); close F; exit 0 } } \
+      exit 0 } \
+    open F, q(>>), q(kids); print F qq($p\\n); close F; sleep 60'";
+
+#[tokio::test]
+async fn a_relay_of_short_lived_processes_is_never_called_confirmed_while_one_is_alive() {
+    require_perl!();
+    let mut killed = 0;
+    const ROUNDS: usize = 4;
+    for round in 0..ROUNDS {
+        let s = Scratch::new();
+        let mut spec = sh(&s, RELAY, LONG);
+        spec.cleanup_deadline = Duration::from_secs(4);
+        spec.stop_grace = Duration::from_millis(100);
+        let handle = ProcessHandle::start(spec);
+        s.exists("kids").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.interrupt();
+        let report = handle.wait().await;
+        let kids: Vec<i32> = std::fs::read_to_string(s.path("kids"))
+            .expect("kids file")
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect();
+        let _reaper = Reaper(kids.clone());
+        let alive = kids.iter().any(|pid| super::fixtures::is_running(*pid));
+        if alive {
+            assert!(
+                matches!(report.cleanup, Cleanup::Unconfirmed { .. }),
+                "round {round}: a relay process is alive but cleanup says Confirmed: {report:#?}"
+            );
+        } else {
+            assert_confirmed(&report);
+        }
+        // The relay runs 300 generations by itself; fewer means it was stopped.
+        if kids.len() < 300 {
+            killed += 1;
+        }
+    }
+    // In the common case the sweep catches and kills the relay.
+    assert!(
+        killed * 2 >= ROUNDS,
+        "the relay was killed in only {killed} of {ROUNDS} rounds"
+    );
 }

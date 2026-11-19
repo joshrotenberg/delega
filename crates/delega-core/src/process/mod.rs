@@ -33,7 +33,8 @@
 //! not exited and is stopped like any other. The leader's exit is observed
 //! without reaping it.
 //!
-//! Cleanup is a sweep, repeated until it finds nothing: every live process in
+//! Cleanup is a sweep, repeated until two in a row find nothing and could check
+//! every row: every live process in
 //! the child's group, every live process whose session id is the child's (read
 //! with `getsid` for each row of the table, because `ps` has no session keyword
 //! that works on both macOS and Linux), and every tracked descendant with a
@@ -52,13 +53,26 @@
 //!
 //! # What `Confirmed` means
 //!
-//! `Cleanup::Confirmed` means a final sweep, taken after the leader exited and
-//! before it was reaped, found no live process in the child's group, none in
-//! its session, and no tracked descendant. It does not cover a descendant that
+//! `Cleanup::Confirmed` means two consecutive final sweeps, taken after the
+//! leader exited and before it was reaped, each found no live process in the
+//! child's group, none in its session, and no tracked descendant, and each
+//! could check every process it listed. It does not cover a descendant that
 //! left the session with its own `setsid` and was never seen by a scan.
-//! Anything else is `Unconfirmed`, naming the pids and groups.
+//! Anything else is `Unconfirmed`, naming the pids and groups and saying why.
 //!
 //! # What remains possible
+//!
+//! A row can be alive in the listing and gone when its session is read. If it
+//! cannot be shown to be foreign (it started before the child, is a child of
+//! this process, or has a live foreign parent), it may have been a descendant
+//! that forked a successor the listing does not hold, so that sweep is
+//! inconclusive and repeated. To catch such a relay the sweep also reads the
+//! session of the pids just above the vanished one, several times, and signals
+//! members; this assumes pids are handed out in ascending order. If the
+//! sweeps stay inconclusive until `cleanup_deadline`, the verdict is
+//! `Unconfirmed` and the reason says a fast-forking descendant could not be
+//! ruled out. On a machine with heavy process churn this can also happen when
+//! nothing of ours is left.
 //!
 //! One gap remains, tracked as delega issue 1: a descendant that calls `setsid`
 //! and is orphaned before any scan saw it while its parent lived (a detached
@@ -88,6 +102,12 @@
 //!   result; the code accepts only exit, kill and core dump, which is the
 //!   Linux behaviour too, but the stopped-leader tests have not run there.
 //! - `getsid` of processes in other sessions and of other users' processes.
+//! - SIGCONT after TERM: on Linux a stopped process holds a TERM pending until
+//!   it is continued, so `a_stopped_descendant_receives_terminate_when_the_group_does`
+//!   can fail there if the SIGCONT is removed; on macOS it cannot fail.
+//! - The pid probe for vanished rows assumes ascending pid allocation, and
+//!   the rule that a live parent in another session makes a vanished row
+//!   foreign; the relay test checks both.
 //! - Fixtures use `perl` to start descendants in their own group or session and
 //!   skip with a printed message when it is missing.
 

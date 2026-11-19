@@ -89,11 +89,35 @@ pub(super) fn wait_for_exit(child: i32) -> Result<(), String> {
 }
 
 /// The session id of a process, when it can be read.
+#[cfg(test)]
 pub(super) fn session_of(target: i32) -> Option<i32> {
     let target = Pid::from_raw(target)?;
     rustix::process::getsid(Some(target))
         .ok()
         .map(|pid| pid.as_raw_nonzero().get())
+}
+
+/// What `getsid` said about one process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionLookup {
+    /// The process is in this session.
+    In(i32),
+    /// The process no longer exists (ESRCH).
+    Gone,
+    /// The OS would not say.
+    Unknown,
+}
+
+/// The session of a process, telling a vanished process from an unreadable one.
+pub(super) fn session_lookup(target: i32) -> SessionLookup {
+    let Some(target) = Pid::from_raw(target) else {
+        return SessionLookup::Unknown;
+    };
+    match rustix::process::getsid(Some(target)) {
+        Ok(pid) => SessionLookup::In(pid.as_raw_nonzero().get()),
+        Err(Errno::SRCH) => SessionLookup::Gone,
+        Err(_) => SessionLookup::Unknown,
+    }
 }
 
 /// What `kill(-pgid, 0)` says about a process group.
@@ -126,8 +150,9 @@ pub(super) fn new_session(command: &mut tokio::process::Command) {
     // SAFETY: the closure calls only `setsid(2)`, which is async-signal-safe,
     // through rustix's direct syscall. It allocates nothing, takes no locks and
     // touches no state of the parent; a failure becomes an `io::Error` built
-    // from the raw errno, which does not allocate either. Between fork and
-    // exec nothing else runs in the child.
+    // from the raw errno, which does not allocate either. Nothing else of ours
+    // runs between fork and exec (std does its own setup there, outside this
+    // closure).
     unsafe {
         command.pre_exec(|| {
             rustix::process::setsid()

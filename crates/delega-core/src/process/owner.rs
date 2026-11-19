@@ -18,9 +18,9 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::limits::{
-    CAPTURE_INTERVAL, CLEANUP_POLL_INTERVAL, DESCENDANT_SIGNAL_BUDGET, EXIT_POLL_INTERVAL,
-    INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS,
-    MAX_SWEPT_RECORDS, PRE_STOP_CAPTURE_BUDGET, PRE_STOP_POLL_INTERVAL,
+    CAPTURE_INTERVAL, CLEAN_SWEEPS_REQUIRED, CLEANUP_POLL_INTERVAL, DESCENDANT_SIGNAL_BUDGET,
+    EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT,
+    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_CAPTURE_BUDGET, PRE_STOP_POLL_INTERVAL,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -431,6 +431,7 @@ impl OwnedProcess {
             }
             shared.tree.lock().await.capture().await;
             let mut failures = 0u32;
+            let mut clean_sweeps = 0u32;
             loop {
                 let signal = if hard_stop || first_term.elapsed() >= grace {
                     Signal::KILL
@@ -442,7 +443,16 @@ impl OwnedProcess {
                     Ok(view) => {
                         failures = 0;
                         let leader_exited = shared.leader_has_exited();
-                        let clean = view.is_empty() && leader_exited;
+                        // Only a sweep that found nothing and could check every
+                        // row counts, and it takes several in a row: a
+                        // descendant that forks successors faster than a
+                        // listing is taken can slip through one.
+                        if view.is_clean() && leader_exited {
+                            clean_sweeps += 1;
+                        } else {
+                            clean_sweeps = 0;
+                        }
+                        let clean = clean_sweeps >= CLEAN_SWEEPS_REQUIRED;
                         if shared.pending_eperm.load(Ordering::SeqCst) && !view.group.is_empty() {
                             lock(&shared.signal_error).get_or_insert_with(|| "kill EPERM".into());
                             shared.warn(
@@ -527,7 +537,9 @@ impl OwnedProcess {
         deadline: Instant,
     ) -> Settled {
         let shared = self.shared.clone();
-        if next_kill > Instant::now() && next_kill < deadline {
+        // A leader that has exited needs no grace: the group got TERM when it
+        // exited, and nothing can be inspected to tell whether waiting helps.
+        if !shared.leader_has_exited() && next_kill > Instant::now() && next_kill < deadline {
             tokio::time::sleep_until(next_kill).await;
         }
         shared.signal_group(Signal::KILL);
@@ -547,6 +559,12 @@ impl OwnedProcess {
             let exit = self.reap().await;
             // After the reap the group id is no longer pinned; the probe only
             // asks, it never signals.
+            // Members that just received the KILL need a moment to go.
+            let until = Instant::now() + LEADER_EXIT_WAIT;
+            while sys::probe_group(shared.pid) == sys::GroupProbe::Present && Instant::now() < until
+            {
+                tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+            }
             let checked = match sys::probe_group(shared.pid) {
                 sys::GroupProbe::Empty => "no process has the child's group id".to_string(),
                 sys::GroupProbe::Present => {
@@ -633,8 +651,15 @@ impl Shared {
                     "processes in the child's session were still running".to_string()
                 } else if !view.tracked.is_empty() {
                     "tracked descendants were still running".to_string()
+                } else if !view.vanished.is_empty() {
+                    format!(
+                        "a fast-forking descendant could not be ruled out: {} process(es) \
+                         vanished between the listing and the check",
+                        view.vanished.len()
+                    )
                 } else {
-                    "the child had not exited".to_string()
+                    "the child had not exited or the sweeps were not yet clean twice in a row"
+                        .to_string()
                 }
             }
             Some(Err(error)) => {
