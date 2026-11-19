@@ -161,7 +161,10 @@ impl Rig {
             "acc-lib.sh",
             "acc-child.sh",
         ] {
-            std::fs::copy(source.join(name), fakes.join(name)).expect("copy a fake");
+            // A link, never a written copy: a file open for writing cannot be
+            // executed on Linux (`ETXTBSY`), and a `fork` on another thread
+            // inherits the descriptor of a copy being written.
+            std::os::unix::fs::symlink(source.join(name), fakes.join(name)).expect("link a fake");
         }
         let session = format!(
             "session-{}",
