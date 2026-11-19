@@ -2,11 +2,11 @@
   "delega_version": {
     "features": [],
     "name": "delega",
-    "revision": "7debbf9769e8",
+    "revision": "32c7447b12bd",
     "schema_version": 1,
     "version": "0.1.0-dev"
   },
-  "harness_commit": "7debbf9",
+  "harness_commit": "32c7447",
   "jobs": 8,
   "os": "Darwin 27.2.0 arm64",
   "repeat": 3,
