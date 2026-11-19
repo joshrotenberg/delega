@@ -70,15 +70,29 @@
 //! It also requires that the listing taken before the first signal completed
 //! (see "How a child is owned"). That listing is the only one that can see a
 //! member alive together with a descendant that left the session, because the
-//! first signal can end the member and orphan the descendant. When it was not
-//! completed (the scan timed out or failed, or did not finish within
-//! `PRE_STOP_CAPTURE_BUDGET`, before a stop or after a natural exit), the
-//! verdict is `Unconfirmed` even if every later sweep found nothing, with a reason that says the listing did not complete. A later
-//! listing does not make up for it, since it is taken after the signals. A
-//! periodic scan that failed earlier does not matter once a later one
-//! succeeded, so it does not change the verdict. The wait is up to
-//! `PRE_STOP_CAPTURE_BUDGET` (two listing timeouts); in the normal case it is
-//! one listing.
+//! first signal can end the member and orphan the descendant. When it did not
+//! complete (the scan timed out or failed, or was not done within its budget),
+//! the verdict is `Unconfirmed` even if every later sweep found nothing, with a
+//! reason that says the listing did not complete. A later listing does not make
+//! up for it, since it is taken after the signals. A periodic scan that failed
+//! earlier does not matter once a later one succeeded.
+//!
+//! Three budgets bound the wait for that listing, and trade a prompt stop
+//! against a verdict that can be trusted:
+//!
+//! - After a natural exit, `EXIT_LISTING_BUDGET` (two listing timeouts, 3.1 s).
+//!   The leader is gone, so nothing is delayed for anyone; the normal cost is
+//!   one listing.
+//! - Before a requested stop (an interrupt or the time limit),
+//!   `STOP_LISTING_BUDGET` (500 ms). A caller is waiting for the stop, so when
+//!   the listing is not done by then the stop is sent anyway and the verdict is
+//!   `Unconfirmed`. A second interrupt while the owner waits ends the wait at
+//!   once.
+//! - Dropping a [`ProcessHandle`] or the future of [`run`] does not wait at all:
+//!   the child is stopped immediately, as before the listing existed.
+//!
+//! A stop on a machine where `ps` takes longer than 500 ms is therefore prompt
+//! and honestly unconfirmed, not slow and confirmed.
 //!
 //! Anything else is `Unconfirmed`, naming the pids and groups and saying why.
 //! Cleanup runs to `cleanup_deadline` only for processes that are seen and do

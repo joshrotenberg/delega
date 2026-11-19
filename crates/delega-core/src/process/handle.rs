@@ -22,13 +22,40 @@ use super::spec::ProcessSpec;
 /// settles cleanup, and the report's ending is [`Ending::Interrupted`], unless
 /// the child had already exited, in which case it reports how it exited.
 #[derive(Debug, Clone)]
-pub struct Interrupter(CancellationToken);
+pub struct Interrupter(Stop);
 
 impl Interrupter {
-    /// Ask the owner to stop the child. Returns at once; any number of calls
-    /// is the same as one. Safe to call from any thread.
+    /// Ask the owner to stop the child. Returns at once. Safe to call from any
+    /// thread. The owner first waits briefly for a process listing (see
+    /// [`STOP_LISTING_BUDGET`](super::limits::STOP_LISTING_BUDGET)); a second
+    /// call while it waits ends the wait and stops the child at once.
     pub fn interrupt(&self) {
-        self.0.cancel();
+        self.0.interrupt();
+    }
+}
+
+/// The two ways to ask for a stop: `stop` is the first request, and `hurry`
+/// ends the owner's wait for a process listing. A second interrupt and a drop
+/// both set `hurry`.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Stop {
+    pub(super) stop: CancellationToken,
+    pub(super) hurry: CancellationToken,
+}
+
+impl Stop {
+    fn interrupt(&self) {
+        if self.stop.is_cancelled() {
+            self.hurry.cancel();
+        } else {
+            self.stop.cancel();
+        }
+    }
+
+    /// A drop never waits for a listing.
+    fn stop_at_once(&self) {
+        self.hurry.cancel();
+        self.stop.cancel();
     }
 }
 
@@ -40,7 +67,7 @@ impl Interrupter {
 /// child's process group. Either way the report is discarded.
 #[derive(Debug)]
 pub struct ProcessHandle {
-    stop: CancellationToken,
+    stop: Stop,
     registry: Arc<Registry>,
     join: Option<JoinHandle<ProcessReport>>,
     started_wall: SystemTime,
@@ -57,7 +84,7 @@ impl ProcessHandle {
     ///
     /// Panics if called outside a Tokio runtime.
     pub fn start(spec: ProcessSpec) -> Self {
-        let stop = CancellationToken::new();
+        let stop = Stop::default();
         let registry = Arc::new(Registry::default());
         let started_wall = SystemTime::now();
         let started = Instant::now();
@@ -91,7 +118,7 @@ impl ProcessHandle {
 
     /// Ask the owner to stop the child. See [`Interrupter`].
     pub fn interrupt(&self) {
-        self.stop.cancel();
+        self.stop.interrupt();
     }
 
     /// A cloneable interrupter for another task or thread.
@@ -172,7 +199,7 @@ impl ProcessHandle {
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
         if self.join.is_some() {
-            self.stop.cancel();
+            self.stop.stop_at_once();
         }
     }
 }

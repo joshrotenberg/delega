@@ -10,13 +10,14 @@ use std::time::{Duration, SystemTime};
 use futures_util::FutureExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use crate::contract::result::Cleanup;
 
 use super::capture::{Bounded, Captured};
+use super::handle::Stop;
 use super::limits::{
-    FAR_FUTURE, FINAL_CLEANUP_PASS, PRE_STOP_CAPTURE_BUDGET, STDERR_READ_CHUNK, STDOUT_READ_CHUNK,
+    EXIT_LISTING_BUDGET, FAR_FUTURE, FINAL_CLEANUP_PASS, STDERR_READ_CHUNK, STDOUT_READ_CHUNK,
+    STOP_LISTING_BUDGET,
 };
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
@@ -63,7 +64,7 @@ struct Driven {
 /// child's group and to the descendants seen at the latest scan.
 pub(super) async fn run_owned(
     spec: ProcessSpec,
-    stop: CancellationToken,
+    stop: Stop,
     registry: Arc<Registry>,
 ) -> ProcessReport {
     let started_wall = SystemTime::now();
@@ -141,7 +142,7 @@ pub(super) async fn run_owned(
 async fn drive(
     owner: &mut OwnedProcess,
     spec: &ProcessSpec,
-    stop: &CancellationToken,
+    stop: &Stop,
     shared: &Arc<Shared>,
     started: Instant,
     cleanup_deadline: Duration,
@@ -210,13 +211,16 @@ async fn drive(
             break;
         }
         tokio::select! {
-            _ = stop.cancelled(), if !stop_seen => {
+            _ = stop.stop.cancelled(), if !stop_seen => {
                 stop_seen = true;
                 if !exited && term_at.is_none() && !shared.leader_has_exited() {
-                    shared.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
+                    let listed = shared.before_stop(STOP_LISTING_BUDGET, &stop.hurry).await;
                     // The child may have exited while the scan ran. Then it
                     // ended on its own and is reported as it exited.
                     if !shared.leader_has_exited() {
+                        if !listed {
+                            shared.note_listing_missed();
+                        }
                         ending = Some(Ending::Interrupted);
                         term_at = Some(Instant::now());
                         shared.terminate().await;
@@ -226,8 +230,11 @@ async fn drive(
             _ = tokio::time::sleep_until(limit_at), if !limit_seen && !exited => {
                 limit_seen = true;
                 if term_at.is_none() && !shared.leader_has_exited() {
-                    shared.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
+                    let listed = shared.before_stop(STOP_LISTING_BUDGET, &stop.hurry).await;
                     if !shared.leader_has_exited() {
+                        if !listed {
+                            shared.note_listing_missed();
+                        }
                         ending = Some(Ending::TimedOut { limit: spec.time_limit });
                         term_at = Some(Instant::now());
                         shared.terminate().await;
@@ -253,8 +260,11 @@ async fn drive(
                 // then orphaned and cannot be told from any other process.
                 if term_at.is_none() {
                     let listing = shared.clone();
+                    let hurry = stop.hurry.clone();
                     exit_listing = Some(Box::pin(async move {
-                        listing.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
+                        if !listing.before_stop(EXIT_LISTING_BUDGET, &hurry).await {
+                            listing.note_listing_missed();
+                        }
                     }));
                 }
             },

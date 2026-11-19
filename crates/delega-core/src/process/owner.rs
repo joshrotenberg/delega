@@ -20,8 +20,8 @@ use crate::contract::result::Cleanup;
 use super::limits::{
     CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
     DESCENDANT_SIGNAL_BUDGET, EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL,
-    LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_CAPTURE_BUDGET,
-    PRE_STOP_POLL_INTERVAL,
+    LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
+    STOP_LISTING_BUDGET,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -162,7 +162,7 @@ impl Shared {
     /// detached children before TERM reparents them. This never cancels an
     /// inspector: slow captures continue under their owner while signalling
     /// resumes after at most the budget.
-    pub(super) async fn before_stop(&self, budget: Duration) {
+    pub(super) async fn before_stop(&self, budget: Duration, hurry: &CancellationToken) -> bool {
         let requested_at = Instant::now();
         let requested = {
             let mut wait = lock(&self.stop_wait);
@@ -173,7 +173,9 @@ impl Shared {
         };
         self.capture_notify.notify_one();
         let deadline = requested_at + budget;
-        while self.capture_completed.load(Ordering::SeqCst) < requested && Instant::now() < deadline
+        while self.capture_completed.load(Ordering::SeqCst) < requested
+            && Instant::now() < deadline
+            && !hurry.is_cancelled()
         {
             tokio::time::sleep(PRE_STOP_POLL_INTERVAL).await;
         }
@@ -183,13 +185,18 @@ impl Shared {
                 .is_some_and(|at| at <= deadline);
         if !acknowledged {
             self.budget_exceeded.fetch_add(1, Ordering::SeqCst);
-            self.pre_signal_listing_missed.store(true, Ordering::SeqCst);
             self.warn(format!(
                 "The process listing before the first signal did not complete within {} ms; \
                  newly detached children may be unobserved",
                 budget.as_millis()
             ));
         }
+        acknowledged
+    }
+
+    /// Record that the first signal goes out without the listing it needed.
+    pub(super) fn note_listing_missed(&self) {
+        self.pre_signal_listing_missed.store(true, Ordering::SeqCst);
     }
 
     /// The polite stop: TERM to the group, then CONT so a stopped process
@@ -424,9 +431,12 @@ impl OwnedProcess {
         if hard_stop {
             // The deadline is already fixed, so the wait leaves it half.
             let left = deadline.saturating_duration_since(Instant::now());
-            shared
-                .before_stop(PRE_STOP_CAPTURE_BUDGET.min(left / 2))
-                .await;
+            if !shared
+                .before_stop(STOP_LISTING_BUDGET.min(left / 2), &CancellationToken::new())
+                .await
+            {
+                shared.note_listing_missed();
+            }
         }
         let first_term = term_at.unwrap_or_else(Instant::now);
         if term_at.is_none() && !hard_stop {
