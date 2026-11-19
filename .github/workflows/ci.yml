@@ -63,7 +63,7 @@ jobs:
       # on timing), so a fixed gap is noticed by running the timing-dependent
       # gap rows three times: a row that shows no gap in all three is gap_closed.
       - name: Timing-dependent known-gap rows, three repeats
-        run: cargo run --release --locked -p delega-acceptance -- --filter relay --filter orphan --filter bare --repeat 3 --out acceptance-gaps.jsonl
+        run: cargo run --release --locked -p delega-acceptance -- --timing-gaps --repeat 3 --out acceptance-gaps.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
