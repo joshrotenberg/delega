@@ -93,6 +93,8 @@ impl Log {
             ProgressEvent::Dropped { chunks } => {
                 log.0.tap_dropped.fetch_add(chunks, Ordering::Relaxed);
             }
+            // Never requested by `delega run`, which leaves `progress_text` off.
+            ProgressEvent::Message { .. } => {}
             other => log.line(progress_line(&other)),
         })
     }
@@ -182,7 +184,7 @@ fn progress_line(event: &ProgressEvent) -> String {
         }
         ProgressEvent::Provider { kind, summary } => format!("progress: {kind}: {summary}"),
         ProgressEvent::Denied { request } => format!("progress: denied: {request}"),
-        ProgressEvent::Dropped { .. } => String::new(),
+        ProgressEvent::Dropped { .. } | ProgressEvent::Message { .. } => String::new(),
         ProgressEvent::Finished { outcome } => {
             format!("progress: finished: {}", outcome_name(*outcome))
         }

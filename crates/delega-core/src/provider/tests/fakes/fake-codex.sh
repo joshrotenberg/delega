@@ -65,7 +65,7 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
-sid="${resume:-fake-codex-thread-1}"
+sid="${resume:-${FAKE_SESSION_ID:-fake-codex-thread-1}}"
 
 IFS= read -r mode || true
 rest=$(cat)
@@ -106,9 +106,47 @@ case "$mode" in
     final '"fake final answer"'
     done_ok
     ;;
+  echo:*)
+    init
+    final "\"answered $mode sid=$sid\""
+    done_ok
+    ;;
+  trace:*)
+    init
+    trace_rest=${mode#trace:}
+    trace_dir=${trace_rest%%#*}
+    : > "$trace_dir/run.$$"
+    printf '%s\n' "$(ls "$trace_dir" | grep -c '^run\.')" > "$trace_dir/peak.$$"
+    sleep 0.3
+    rm -f "$trace_dir/run.$$"
+    final "\"answered $mode sid=$sid\""
+    done_ok
+    ;;
+  secret-message)
+    init
+    big=$(head -c 5000 /dev/zero | tr '\0' 'x')
+    emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"s1\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"token=$MY_SERVICE_API_TOKEN key sk-ant-abcdefghijklmnopqrstuvwx\"}}"
+    emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"s2\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"$big\"}}"
+    final '"done"'
+    done_ok
+    ;;
+  gate:*)
+    init
+    gate=${mode#gate:}
+    : > "$gate.started"
+    while [ ! -e "$gate" ]; do sleep 0.05; done
+    final "\"answered $mode sid=$sid\""
+    done_ok
+    ;;
   structured)
     init
     final '"{\"answer\":42}"'
+    done_ok
+    ;;
+  structured-large)
+    init
+    big=$(head -c 20000 /dev/zero | tr '\0' 'x')
+    final "\"{\\\"answer\\\":\\\"$big\\\"}\""
     done_ok
     ;;
   structured-fenced)
