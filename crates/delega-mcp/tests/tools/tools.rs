@@ -704,6 +704,7 @@ async fn a_waiting_call_with_an_unreachable_cursor_is_released_by_shutdown() {
     assert!(!result.is_error, "{}", result.all_text());
     let released = super::agree(&result);
     assert_eq!(released["timed_out"], false, "{released}");
+    assert_eq!(released["released_by_shutdown"], true, "{released}");
     // Released when the shutdown began, so the run may still be stopping.
     assert_eq!(released["runs"][0]["run"], started["run"], "{released}");
 
@@ -722,5 +723,72 @@ async fn a_waiting_call_with_an_unreachable_cursor_is_released_by_shutdown() {
         )
         .await;
     assert_eq!(late["timed_out"], false, "{late}");
+    assert_eq!(late["released_by_shutdown"], true, "{late}");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_cursorless_wait_released_by_shutdown_says_so_and_one_a_finish_released_does_not() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let gate = rig.gate("shutdown-cursorless");
+    let started = rig
+        .call("start", rig.start_args(CODEX, &gate.prompt()))
+        .await;
+    gate.started().await;
+    let run = started["run"].clone();
+
+    // A wait that times out is not a release.
+    let timed_out = rig
+        .call("wait", json!({"runs": [run.clone()], "timeout_secs": 1}))
+        .await;
+    assert_eq!(timed_out["timed_out"], true, "{timed_out}");
+    assert!(
+        timed_out.get("released_by_shutdown").is_none(),
+        "{timed_out}"
+    );
+
+    let router = delega_mcp::router(rig.supervisor.clone(), &delega_mcp::BuildInfo::default())
+        .expect("router");
+    let mut other = tower_mcp::TestClient::from_router(router);
+    other.initialize().await;
+    let waiting = tokio::spawn({
+        let run = run.clone();
+        async move {
+            let result = other
+                .call_tool("wait", json!({"runs": [run], "timeout_secs": 300}))
+                .await;
+            (other, result)
+        }
+    });
+    for _ in 0..20 {
+        rig.call("list", json!({})).await;
+        assert!(!waiting.is_finished(), "the wait returned before shutdown");
+    }
+    let report = rig.supervisor.shutdown().await;
+    assert_eq!(report.runs_stopped, 1);
+    let (_, result) = tokio::time::timeout(Duration::from_secs(120), waiting)
+        .await
+        .expect("shutdown released the waiting call")
+        .expect("the task");
+    assert!(!result.is_error, "{}", result.all_text());
+    let released = super::agree(&result);
+    assert_eq!(released["timed_out"], false, "{released}");
+    assert_eq!(released["released_by_shutdown"], true, "{released}");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_wait_released_by_a_run_finishing_does_not_claim_shutdown() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let started = rig.call("start", rig.start_args(CODEX, "success")).await;
+    let waited = rig
+        .call(
+            "wait",
+            json!({"runs": [started["run"].clone()], "timeout_secs": 60}),
+        )
+        .await;
+    assert_eq!(waited["timed_out"], false, "{waited}");
+    assert_eq!(waited["runs"][0]["state"], "finished", "{waited}");
+    assert!(waited.get("released_by_shutdown").is_none(), "{waited}");
     rig.finish().await;
 }

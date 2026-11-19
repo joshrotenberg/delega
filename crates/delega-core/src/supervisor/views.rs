@@ -140,7 +140,8 @@ pub struct WorkerBrief {
 }
 
 /// The answer to `wait`. A timeout is not an error: `timed_out` is true and
-/// the states are current.
+/// the states are current. A wait that shutdown released says
+/// `released_by_shutdown`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WaitResponse {
     /// Pass this as `after_cursor` on the next call to see only what finishes
@@ -148,6 +149,11 @@ pub struct WaitResponse {
     pub cursor: u64,
     /// True when the time passed and nothing named had finished.
     pub timed_out: bool,
+    /// True when shutdown released the wait. Nothing named need have finished:
+    /// a run can still be `running` while it is stopped, so `timed_out: false`
+    /// does not mean something finished. Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub released_by_shutdown: bool,
     /// The wait that applied, in seconds, after the ceiling.
     pub timeout_secs: u64,
     /// The runs named, in the order given, minus the unknown ones.

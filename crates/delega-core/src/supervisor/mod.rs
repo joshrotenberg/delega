@@ -84,7 +84,7 @@ pub use views::{
     StartResponse, Target, TextWindow, WaitResponse, WaitTargets, WorkerBrief, WorkerView,
 };
 
-use command::{Closing, Command, Stopping, WaitStart};
+use command::{Closing, Command, Stopping, WaitStart, Wake};
 
 /// What every clone of a [`Supervisor`] shares. Dropping the last clone stops
 /// the supervisor.
@@ -353,11 +353,12 @@ impl Supervisor {
                 reply,
             })
             .await??;
-        let (waiter, timed_out) = match start {
-            WaitStart::Ready => (None, false),
+        let (waiter, timed_out, released) = match start {
+            WaitStart::Ready => (None, false, false),
+            WaitStart::Released => (None, false, true),
             WaitStart::Pending { id, rx } => match tokio::time::timeout(applied, rx).await {
-                Ok(_) => (None, false),
-                Err(_) => (Some(id), true),
+                Ok(woke) => (None, false, matches!(woke, Ok(Wake::Shutdown))),
+                Err(_) => (Some(id), true, false),
             },
         };
         self.call(|reply| Command::WaitView {
@@ -365,6 +366,7 @@ impl Supervisor {
             after: after_cursor,
             waiter,
             timed_out,
+            released,
             timeout_secs: applied.as_secs(),
             reply,
         })

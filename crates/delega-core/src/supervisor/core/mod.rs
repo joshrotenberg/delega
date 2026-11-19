@@ -151,6 +151,7 @@ impl Core {
                 after,
                 waiter,
                 timed_out,
+                released,
                 timeout_secs,
                 reply,
             } => {
@@ -159,6 +160,7 @@ impl Core {
                     after,
                     waiter,
                     timed_out,
+                    released,
                     timeout_secs,
                 )));
             }

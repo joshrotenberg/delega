@@ -872,7 +872,7 @@ eighth, `respond`, when live asking is added.
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
-| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. |
+| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
 | `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`) and in use; a `cursor`. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
@@ -1048,7 +1048,7 @@ once, and one input message may be at most 32 MiB.
   supervisor's own shutdown bound (30 s). Shutdown wakes every `wait` that is
   blocked, whatever its cursor, and answers each with the current states, so no
   waiting call is held to the transport's drain limit: a `wait` with a cursor that
-  arrives after shutdown began answers at once. The server then waits for the transport at
+  arrives after shutdown began answers at once. Each of those answers carries `released_by_shutdown: true` (an additive field; `schema_version` is unchanged), except one that a finished run released on its own account, which does not carry it. The server then waits for the transport at
   most 15 s (a 10 s drain and 5 s grace) and gives up on it, because a client
   that stopped reading standard output blocks the write inside the transport's
   read loop. Only then does the runtime drop and the process exit. The workers
