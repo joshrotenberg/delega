@@ -8,7 +8,12 @@
 //! the fakes write is read instead: it counts when its recorded pid is alive
 //! and its command is exactly the one the fake starts, `sleep 300` (which rules out a reused pid). The
 //! ledger also maps a pid to a role; a marked process it does not know is
-//! reported as `unrecorded`.
+//! reported as `unrecorded`, with one exception: a copy of a live recorded
+//! provider script that the script forked and that has not yet called `exec`
+//! (same command line, parent the recorded provider) is a transient of the
+//! provider and is not counted (`is_forked_copy_of_a_provider`). A copy whose
+//! parent is gone, a zombie or init, a recorded process, and a process with a
+//! different command line are all counted.
 
 use std::path::Path;
 use std::process::Command;
@@ -226,5 +231,83 @@ mod tests {
         assert!(carries(ten, "accmk-777-10/"));
         assert!(!carries(one_cmd, "accmk-77-1/"));
         assert!(!carries("sh /tmp/accmk-1777-1/x", one));
+    }
+}
+
+#[cfg(test)]
+mod forked_copy_tests {
+    use super::*;
+
+    const SCRIPT: &str = "sh /case/7/fake-claude.sh --print";
+
+    fn proc(pid: i32, ppid: i32, stat: &str, command: &str) -> Proc {
+        Proc {
+            pid,
+            ppid,
+            stat: stat.to_owned(),
+            command: command.to_owned(),
+        }
+    }
+
+    fn ledger() -> Vec<(String, i32)> {
+        vec![("provider".to_owned(), 100), ("child".to_owned(), 300)]
+    }
+
+    fn table() -> Vec<Proc> {
+        vec![
+            proc(100, 1, "S", SCRIPT),
+            proc(300, 100, "S", "sh /case/7/acc-child.sh plain"),
+        ]
+    }
+
+    fn dropped(p: &Proc, table: &[Proc]) -> bool {
+        is_forked_copy_of_a_provider(p, table, &ledger())
+    }
+
+    #[test]
+    fn a_copy_of_a_live_recorded_provider_is_dropped() {
+        let copy = proc(101, 100, "S", SCRIPT);
+        assert!(dropped(&copy, &table()));
+    }
+
+    #[test]
+    fn a_copy_whose_parent_is_dead_or_a_zombie_is_counted() {
+        let copy = proc(101, 100, "S", SCRIPT);
+        // The provider is not in the table at all.
+        assert!(!dropped(&copy, &[]));
+        // The provider is a zombie.
+        let table = vec![proc(100, 1, "Z", SCRIPT)];
+        assert!(!dropped(&copy, &table));
+    }
+
+    #[test]
+    fn an_orphaned_copy_is_counted() {
+        let orphan = proc(101, 1, "S", SCRIPT);
+        assert!(!dropped(&orphan, &table()));
+    }
+
+    #[test]
+    fn a_recorded_pid_is_never_dropped() {
+        // A recorded child whose parent is the provider and whose command line
+        // is the provider's.
+        let table = vec![proc(100, 1, "S", SCRIPT), proc(300, 100, "S", SCRIPT)];
+        let recorded = proc(300, 100, "S", SCRIPT);
+        assert!(!dropped(&recorded, &table));
+        // The provider itself.
+        assert!(!dropped(&table[0], &table));
+    }
+
+    #[test]
+    fn a_process_with_another_command_line_is_counted() {
+        let other = proc(101, 100, "S", "sh /case/7/acc-child.sh plain");
+        assert!(!dropped(&other, &table()));
+    }
+
+    #[test]
+    fn a_copy_of_a_recorded_process_that_is_not_the_provider_is_counted() {
+        // Only the provider script's own forks are transients; a fork of the
+        // recorded child is not excused.
+        let copy = proc(301, 300, "S", "sh /case/7/acc-child.sh plain");
+        assert!(!dropped(&copy, &table()));
     }
 }

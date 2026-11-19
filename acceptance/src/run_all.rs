@@ -51,34 +51,100 @@ pub fn run_all(
     list.into_iter().map(|(_, _, m)| m).collect()
 }
 
-/// Attempts at one row whose only fault is a late process listing.
+/// Runs of one row, at most, when the only fault is a late process listing.
 const LISTING_ATTEMPTS: u32 = 5;
+
+/// What `judge` says when the only difference from the expectation is that
+/// cleanup was `Unconfirmed` where `Confirmed` was expected.
+const CONFIRMED_MISMATCH: &str = "cleanup.confirmed is Some(false) where Some(true) was expected";
 
 /// Run one case. When it fails because `delega` could not take the process
 /// listing that precedes its first signal in time (its budget is 500 ms for a
 /// requested stop and 3.1 s after a natural exit, and `ps` takes longer on a
 /// machine under heavy load), run it again, up to [`LISTING_ATTEMPTS`] times in
-/// all. That verdict is the documented honest answer to a slow machine, not a
-/// property of the row, so the row is judged on a run in which the listing was
-/// on time. Nothing else is retried: a row that fails any other way, or that
-/// meets its expectation, is reported as measured, and a row whose listing is
-/// late every time still fails with that reason.
+/// all. A run is discarded only when [`only_a_late_listing`] holds: the one
+/// problem is the cleanup mismatch, the verdict is exactly the late-listing
+/// verdict, and the exit status, outcome and survivors were as expected. Any
+/// other failure, or a pass, is reported as measured. The result carries the
+/// number of runs and the reasons of the discarded ones.
 fn run_until_timely(ctx: &Context, row: &Row, repeat: u32) -> Measured {
+    let mut discarded = Vec::new();
     let mut measured = run_case(ctx, row, repeat);
-    for _ in 1..LISTING_ATTEMPTS {
-        if !failed_on_a_late_listing(&measured) {
-            break;
-        }
+    while measured.attempts < LISTING_ATTEMPTS && only_a_late_listing(&measured) {
+        discarded.push(measured.cleanup_reason.clone().unwrap_or_default());
+        let attempts = measured.attempts + 1;
         measured = run_case(ctx, row, repeat);
+        measured.attempts = attempts;
     }
+    measured.discarded = discarded;
     measured
 }
 
-fn failed_on_a_late_listing(m: &Measured) -> bool {
+/// Whether a failed measurement failed on the late listing and on nothing
+/// else. `judge` adds a survivors problem whenever the survivors differ from
+/// the expectation, and a problem for any exit status or outcome that differs,
+/// so the problem list being exactly the cleanup mismatch covers all three.
+pub fn only_a_late_listing(m: &Measured) -> bool {
     m.verdict == "fail"
-        && m.cleanup_confirmed == Some(false)
+        && m.cleanup_late_listing_only
         && m.expected_confirmed == Some(true)
-        && m.cleanup_reason
-            .as_deref()
-            .is_some_and(|r| r.contains("before the first signal did not complete"))
+        && m.problems == [CONFIRMED_MISMATCH]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failing() -> Measured {
+        serde_json::from_str(
+            r#"{"id":"x","repeat":1,"provider":"claude","case":"d","variant":"plain",
+            "behaviour":"busy","action":"","timeout_secs":null,"exit_code":130,
+            "exit_signal":null,"hang":false,"stdout_docs":1,"result_valid":true,
+            "outcome":"interrupted","error_kind":null,"cleanup_confirmed":false,
+            "cleanup_reason":"late","cleanup_pids":[],"cleanup_groups":[],
+            "cleanup_late_listing_only":true,"provider_pid":null,
+            "survivors_at_exit":[],"survivors":[],"honest":true,"latency_ms":null,
+            "latency_kind":"","elapsed_ms":null,"expected_outcome":"interrupted",
+            "expected_exit":{"Code":130},"expected_confirmed":true,
+            "expected_survivors":[],"expected_leak":"none","expected_reason":null,
+            "verdict":"fail",
+            "problems":["cleanup.confirmed is Some(false) where Some(true) was expected"],
+            "stderr_first":null}"#,
+        )
+        .expect("a measurement")
+    }
+
+    #[test]
+    fn a_failure_that_is_only_the_late_listing_is_retried() {
+        assert!(only_a_late_listing(&failing()));
+    }
+
+    #[test]
+    fn a_failure_with_any_other_problem_is_not_retried() {
+        let mut m = failing();
+        m.problems
+            .push("exit status 1 where 130 was expected".into());
+        assert!(!only_a_late_listing(&m));
+        let mut m = failing();
+        m.problems
+            .push("survivors provider where none was expected".into());
+        assert!(!only_a_late_listing(&m));
+        let mut m = failing();
+        m.problems = vec!["outcome failed where interrupted was expected".into()];
+        assert!(!only_a_late_listing(&m));
+    }
+
+    #[test]
+    fn an_unconfirmed_verdict_for_another_reason_is_not_retried() {
+        let mut m = failing();
+        m.cleanup_late_listing_only = false;
+        assert!(!only_a_late_listing(&m));
+    }
+
+    #[test]
+    fn a_pass_or_an_expected_failure_is_not_retried() {
+        let mut m = failing();
+        m.verdict = "pass".into();
+        assert!(!only_a_late_listing(&m));
+    }
 }
