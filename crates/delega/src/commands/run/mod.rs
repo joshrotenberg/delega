@@ -74,6 +74,10 @@ pub struct Args {
     /// No restriction from delega
     #[arg(long)]
     full: bool,
+    /// Refuse the run when the provider cannot enforce the permissions as
+    /// stated, instead of running with a note
+    #[arg(long)]
+    strict: bool,
     /// A shell command the worker may run, matched exactly (repeatable)
     #[arg(long, value_name = "CMD")]
     allow_command: Vec<String>,

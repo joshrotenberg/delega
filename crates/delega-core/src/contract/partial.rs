@@ -34,6 +34,9 @@ pub struct PartialPermissions {
     /// See [`Permissions::on_request`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_request: Option<OnRequest>,
+    /// See [`Permissions::strict`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 /// The session part of a [`PartialRequest`].
@@ -130,6 +133,7 @@ impl PartialRequest {
                     commands: pick(b.commands, a.commands),
                     directories: pick(b.directories, a.directories),
                     on_request: pick(b.on_request, a.on_request),
+                    strict: pick(b.strict, a.strict),
                 })
             }
         };
@@ -232,6 +236,7 @@ impl PartialRequest {
                 commands: p.commands.unwrap_or(defaults.commands),
                 directories: p.directories.unwrap_or(defaults.directories),
                 on_request: p.on_request.unwrap_or(defaults.on_request),
+                strict: p.strict.unwrap_or(defaults.strict),
             };
         }
         request.answer_schema = self.answer_schema;

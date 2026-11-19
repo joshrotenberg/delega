@@ -1385,3 +1385,100 @@ fn the_dry_run_json_document_has_alphabetical_keys_in_every_build_configuration(
         );
     }
 }
+
+#[test]
+fn strict_refuses_codex_before_start_and_names_what_it_cannot_enforce() {
+    let rig = Rig::new();
+    let out = rig.run(
+        "codex",
+        "success",
+        &["--strict", "--allow-command", "ls", "--output", "json"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let result = result_of(&out);
+    assert_eq!(result.outcome, Outcome::Refused);
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "permissions_not_enforceable");
+    for needle in [
+        "reads are not confined",
+        "commands that need no write access",
+        "permissions.commands has no effect",
+    ] {
+        assert!(error.message.contains(needle), "{}", error.message);
+    }
+    assert!(!rig.record.join("argv").exists(), "codex was started");
+    assert!(!rig.record.join("pid").exists());
+    rig.assert_nothing_left();
+
+    // Text output: the refusal is one line on standard error.
+    let out = rig.run("codex", "success", &["--strict", "--write"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert!(
+        text(&out.stderr).contains("refused: permissions_not_enforceable: "),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn strict_dry_run_shows_the_same_refusal_and_starts_nothing() {
+    let rig = Rig::new();
+    let out = rig.run(
+        "codex",
+        "success",
+        &["--strict", "--dry-run", "--output", "json"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let result = result_of(&out);
+    assert_eq!(result.outcome, Outcome::Refused);
+    assert_eq!(
+        result.error.expect("error").kind,
+        "permissions_not_enforceable"
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn strict_lets_full_runs_and_runs_that_name_no_unenforceable_part_go_ahead() {
+    let rig = Rig::new();
+    for provider in PROVIDERS {
+        let out = rig.run(provider, "success", &["--strict", "--full"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: {}",
+            text(&out.stderr)
+        );
+    }
+    // Claude with no commands asks for nothing it cannot enforce.
+    let out = rig.run("claude", "success", &["--strict"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    rig.assert_nothing_left();
+}
+
+#[test]
+fn a_profile_with_strict_merges_and_refuses() {
+    let rig = Rig::new();
+    let file = profile(
+        &rig,
+        r#"{"schema_version":1,"provider":"codex","prompt":"success",
+            "permissions":{"mode":"write","strict":true}}"#,
+    );
+    let out = rig
+        .command()
+        .args(["run", "--request", &file, "-C"])
+        .arg(&rig.work)
+        .args(["--output", "json"])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let result = result_of(&out);
+    assert_eq!(result.outcome, Outcome::Refused);
+    assert_eq!(
+        result.error.expect("error").kind,
+        "permissions_not_enforceable"
+    );
+    assert!(!rig.record.join("argv").exists());
+}

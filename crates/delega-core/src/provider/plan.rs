@@ -129,6 +129,20 @@ fn build_with(
         Provider::Claude => claude::build(&inputs)?,
         Provider::Codex => codex::build(&inputs)?,
     };
+    if request.permissions.strict && !built.unenforceable.is_empty() {
+        return Err(Refusal::new(
+            "permissions_not_enforceable",
+            format!(
+                "permissions.strict is set and {} cannot enforce these permissions as stated: \
+                 {}",
+                match request.provider {
+                    Provider::Claude => "Claude Code",
+                    Provider::Codex => "Codex",
+                },
+                built.unenforceable.join("; ")
+            ),
+        ));
+    }
     env::check_names(&options.env_pass, &options.env_set, &built.env)?;
     let env = env::resolve(&EnvInputs {
         provider: request.provider,
