@@ -5,8 +5,9 @@ Run Claude Code and Codex agents from a program, for any purpose, reliably.
 `delega` starts a provider CLI as a worker, gives it an assignment, and returns a
 definite result. It is reached from a command line, from Rust, and over MCP.
 
-This repository is new. The request and result contract, the process layer and
-the provider layer exist so far. `delega run`, `delega schema request|result`,
+This repository is new. The request and result contract, the process layer, the
+provider layer and the supervisor (several workers at once, as a library) exist
+so far. `delega run`, `delega schema request|result`,
 `delega skill list|show NAME` and `delega version` work, and `mcp`, `init` and
 `doctor` print "not implemented yet". `delega run` runs one assignment on a
 Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
@@ -59,12 +60,13 @@ Out of scope:
 
 | Path | Holds |
 | --- | --- |
-| `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and, later, the rest of the engine. |
+| `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and the supervisor (`supervisor`: several workers at once, with follow-ups, a queue, limits, wait, read, interrupt and close). |
 | `schemas` | JSON Schemas for the request and result, generated from the core types. |
 | `crates/delega-mcp` | The MCP adapter over the core. |
 | `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
 | `acceptance` | `delega-acceptance`, the acceptance test for criteria 1 and 2: it drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. Results are in `acceptance/RESULTS.md`. |
 | `docs/api.md` | The agreed design for the CLI and MCP surface. |
+| `docs/supervisor.md` | The supervisor API, the worker and run states with their transition tables, limits and defaults, retention, and what is not built. |
 | `docs/providers.md` | How each provider is started: command shape, permission mapping, `native_args` allowlist, environment policy, and what is unverified against the real CLIs. |
 
 Run Cargo from the repository root:
@@ -89,8 +91,8 @@ to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
 ## The API
 
 [docs/api.md](docs/api.md) is the agreed design for the CLI and MCP surface,
-with what is deferred listed at the end. The request and result contract and
-the `run` command are built; the MCP server and the library `Engine` are not.
+with what is deferred listed at the end. The request and result contract, the
+`run` command and the library `Supervisor` are built; the MCP server is not.
 
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.

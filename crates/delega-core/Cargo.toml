@@ -26,6 +26,7 @@ rustix = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

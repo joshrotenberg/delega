@@ -18,7 +18,7 @@ describes behaviour in its own terms, and states where it differs on purpose.
 `ProviderOptions` carries what is not part of the request: `executable` (an
 absolute path), `hook` (see [Claude commands](#commands-and-directories)),
 `env_pass`, `env_set`, `parent_env`, `run_id`, `worker`, `max_output_bytes`,
-`stop_grace` and `progress`. Its `Debug` output lists environment variable names only.
+`stop_grace`, `progress` and `progress_text`. Its `Debug` output lists environment variable names only.
 
 Numeric limits are in `provider/limits.rs`.
 
@@ -70,7 +70,12 @@ no command; for an error event, at most 80 characters of its text with
 credentials removed (free text the provider chose to write). A `Denied` request
 is the text `permissions.denied` lists, so it can name a command or a path. The
 probes (`--version`, `mcp list`) report
-nothing. The process layer's `ProcessSpec::stdout_tap` delivers the output chunks
+nothing. With `ProviderOptions::progress_text` set, which is off by default, each
+agent message is also sent as `Message { text }` right after the `Provider` event
+that gives its length: the text blocks of a Claude Code assistant event and the
+completed Codex agent message items. The text has credentials removed and is cut
+to 4000 characters (`PROGRESS_TEXT_CHARS`). `delega run` leaves the option off;
+the supervisor sets it to show a run's partial answer. The process layer's `ProcessSpec::stdout_tap` delivers the output chunks
 through a bounded queue to a thread of its own: a slow tap loses chunks (counted
 in the report's warnings) and a tap that panics gets no more, and neither delays
 the run, its time limit or its capture. After the run the owner waits at most
