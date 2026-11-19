@@ -41,6 +41,7 @@
 mod claude;
 mod codex;
 mod deny;
+pub mod doctor;
 mod dry_run;
 pub mod env;
 mod facts;

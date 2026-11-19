@@ -324,6 +324,22 @@ pub(crate) fn assert_honest_cleanup(cleanup: &delega_core::contract::result::Cle
     }
 }
 
+/// Assert the cleanup verdict of a run that ended on its own. It is
+/// `Confirmed`, or exactly the late-listing verdict: after a natural exit the
+/// process layer waits a bounded time for the listing that precedes its first
+/// signal, and on a slow machine or a shared CI runner that listing can miss
+/// the budget, which the layer reports instead of confirming. No pids, no
+/// process groups and no other reason are accepted. Whether anything is really
+/// left is measured separately with [`Rig::assert_nothing_left`].
+pub(crate) fn assert_exit_cleanup(cleanup: &delega_core::contract::result::Cleanup) {
+    use delega_core::contract::result::Cleanup;
+    assert!(
+        matches!(cleanup, Cleanup::Confirmed)
+            || delega_core::process::is_late_listing_only(cleanup),
+        "a run that ended on its own must be confirmed or late-listing only, got: {cleanup:?}"
+    );
+}
+
 /// Assert the state the supervisor reports for a run. A run that has to wait is
 /// proved to wait by this, not by waiting out a clock.
 pub(crate) async fn assert_state(supervisor: &Supervisor, run: &str, state: RunState) {

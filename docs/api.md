@@ -1,9 +1,9 @@
 # The delega API: a proposal
 
 Status: agreed design. The request and result contract, the CLI commands
-`run`, `mcp`, `init`, `uninstall`, `schema`, `skill` and `version`, the provider
-layer behind `run`, the library `Supervisor` ([supervisor.md](supervisor.md)) and
-the MCP server over it are built; `doctor` is not. Josh settled
+`run`, `mcp`, `init`, `uninstall`, `doctor`, `schema`, `skill` and `version`,
+the provider layer behind `run`, the library `Supervisor`
+([supervisor.md](supervisor.md)) and the MCP server over it are built. Josh settled
 the open questions on 2026-11-18; the decisions and what was deferred are listed
 at the end. Parts marked **Later** are not in the first version.
 
@@ -167,7 +167,7 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 | `delega uninstall` | Remove what `init` installed, from the hosts and from disk. |
 | `delega schema request\|result` | Print the contracts built into this executable. |
 | `delega skill list\|show NAME` | List the skills built into this executable, or print one. See [Skills](#skills). |
-| `delega doctor` | Report providers found, their versions, limits in force and anything that would stop a run. |
+| `delega doctor` | Report providers found, their versions, limits in force and anything that would stop a run; `--output text\|json`. See [Doctor](#doctor). |
 | `delega version` | Version, source revision and features; `--output json`. |
 
 `delega run` options: `--request FILE`, `--provider`, `-p/--prompt`, `--stdin`,
@@ -349,6 +349,78 @@ Behavior:
 - **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface.
 - **Scope.** The CLI runs in the foreground only. It does not list or stop runs
   started by another process; supervising several workers is done over MCP.
+
+### Doctor
+
+`delega doctor` reports what a run would meet, without starting a worker and
+without writing anything. It has no `--cwd` or `--env`: the checks are those of a run in the current
+directory with no `--env`. It checks both providers,
+with the lookup, the version probe, the environment allowlist and the deny-rule
+reader that `run` uses, so the answer is the one a run would get. The only
+provider process it starts is the `--version` probe, with `run`'s five-second
+limit and the environment a worker would get. It never prints an environment
+value, a deny rule or the content of a file.
+
+It reports, for `claude` and `codex` each:
+
+- the executable a run would use and where it came from (`DELEGA_CLAUDE_BIN` or
+  `DELEGA_CODEX_BIN`, or `PATH`; a library caller that sets
+  `ProviderOptions::executable` gets `option`);
+- the version from the probe, and for Claude Code whether the command hook
+  interface is available (2.1.325 or later, which `--allow-command` needs); Codex
+  has no minimum;
+- how many environment variables a worker would receive, by reason (base, network,
+  provider, set by delega) and how many of the caller's would be withheld, as
+  counts only;
+- for Claude Code, the deny rules a run would apply: the settings files read with
+  their rule counts, the local files ignored and why, and the number applied.
+
+It also reports the limits in force, read from the constants the code uses: for a
+run, the default and the range of the time limit, the output bounds and the
+version probe limit; for the supervisor (see
+[supervisor.md](supervisor.md#limits-and-defaults)), the worker, run and queue
+limits, retention by count, size and time, the default wait and its ceiling, and
+the cap on outstanding request checks; the skills built into this
+executable with their digests, as `delega version --output json` lists them; and
+whether process inspection works, by running one `ps` listing as cleanup does.
+
+**Problems.** Each problem has a stable `kind`, a message, the provider it is
+about (null when it is about the whole system) and what it `blocks`: `run`,
+`command_grants`, `cleanup`, or `nothing` (a warning: no run is refused). Doctor's
+verdicts always match what `run` does, including runs that would fail to start,
+not only its refusals: a problem blocks `run` only where a run is refused or
+fails for it.
+
+| Kind | Blocks | Meaning |
+| --- | --- | --- |
+| `provider_not_startable` | `run` | The executable passed the lookup but cannot be started, such as a script whose interpreter is missing. A run fails to start with it (`spawn_failed` for Claude, `provider_preparation_failed` for Codex). |
+| `provider_not_found` | `run` | No executable by the lookup, or the override names none. |
+| `version_probe_failed` | `command_grants` for Claude, `nothing` for Codex | `--version` exited with an error, or was ended by a signal. A run records no version and goes on; only a Claude run that grants exact commands is refused. |
+| `version_probe_timed_out` | `command_grants` for Claude, `nothing` for Codex | `--version` did not answer in five seconds. Same effect as a failed probe. |
+| `unsupported_provider_version` | `command_grants` | Claude Code is older than 2.1.325 or its version could not be read, so a run with `--allow-command` is refused. Other runs go ahead. |
+| `settings_unreadable` | `run` | A Claude Code settings file in the user's or the current directory's places exists and cannot be used, so every Claude run here is refused. The message names the file. |
+| `deny_rules_over_limit` | `run` | The deny rules are over a bound, so every Claude run here is refused. |
+| `process_inspection_unavailable` | `cleanup` | The process listing failed, so every cleanup would be reported as not confirmed. Runs still start. |
+
+Another refusal a run would give while it is built, such as a settings argument
+over its bound, is reported under its own kind and blocks `run`. A provider is
+`ready` when no problem blocks `run` for it.
+
+**Output.** Text is the default; control characters anywhere in the text report (a provider's version line, paths, messages) are shown as `?`. `--output json` prints one versioned object
+(`schema_version` 1) with `ready`, `version`, `cwd`, `providers`,
+`process_inspection`, `limits`, `problems` and `skills`; its JSON Schema is
+`schemas/doctor.schema.json`, generated from the types, checked by a test and
+updated like the other schemas with `DELEGA_UPDATE_SCHEMAS=1`. Keys are in
+alphabetical order. `env` and `deny_rules` are null when the launch could not be
+built, and `deny_rules` and `command_hook` are null for Codex.
+
+**Exit status.** 0 when a run can go ahead: at least one provider is ready and
+process inspection works. 1 when no provider is ready, or when process
+inspection is unavailable (runs still start, but no cleanup can be confirmed). 2 when doctor itself cannot run,
+such as an unusable current directory. A provider that is not installed is a
+problem for that provider and does not by itself make the exit 1 when the other
+provider is ready; read `problems` for it. A problem that blocks only
+`command_grants` does not change the exit status either.
 
 ### Install and uninstall
 

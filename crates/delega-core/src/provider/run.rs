@@ -198,7 +198,7 @@ async fn drive(spec: ProcessSpec, cancel: &CancellationToken) -> ProcessReport {
     }
 }
 
-async fn probe(
+pub(super) async fn probe(
     plan: &Plan,
     args: Vec<String>,
     limit: Duration,

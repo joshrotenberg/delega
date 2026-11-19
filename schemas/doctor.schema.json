@@ -1,0 +1,534 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Report",
+  "description": "The whole report.",
+  "type": "object",
+  "properties": {
+    "cwd": {
+      "description": "The working directory the checks used.",
+      "type": "string"
+    },
+    "limits": {
+      "description": "The limits in force.",
+      "$ref": "#/$defs/Limits"
+    },
+    "problems": {
+      "description": "Everything that would stop a run, per provider where it is about one.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedProblem"
+      }
+    },
+    "process_inspection": {
+      "description": "Whether cleanup can be confirmed.",
+      "$ref": "#/$defs/ProcessInspection"
+    },
+    "providers": {
+      "description": "One entry per provider, `claude` then `codex`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProviderCheck"
+      }
+    },
+    "ready": {
+      "description": "Whether a run can go ahead: at least one provider is ready and no\nproblem is about the whole system. The exit status is 0 when it is true\nand 1 when it is false.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "description": "The version of this document: 1.",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "skills": {
+      "description": "The skills built into this executable.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkillDigest"
+      }
+    },
+    "version": {
+      "description": "The delega version.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "ready",
+    "version",
+    "cwd",
+    "providers",
+    "process_inspection",
+    "limits",
+    "problems",
+    "skills"
+  ],
+  "$defs": {
+    "Blocks": {
+      "description": "What a problem stops.",
+      "oneOf": [
+        {
+          "description": "Every run with this provider.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "Only runs that grant exact commands (`permissions.commands`).",
+          "type": "string",
+          "const": "command_grants"
+        },
+        {
+          "description": "Runs still start, but each would report its cleanup as not confirmed.",
+          "type": "string",
+          "const": "cleanup"
+        },
+        {
+          "description": "No run is refused or changed. It is a warning: the provider did not\nanswer `--version`, which a run records only as an absent version.",
+          "type": "string",
+          "const": "nothing"
+        }
+      ]
+    },
+    "CommandHook": {
+      "description": "Whether the Claude Code version has the blocking hook interface that exact\ncommand grants need.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Whether the installed version is that release or later, as a run\ndecides it.",
+          "type": "boolean"
+        },
+        "required_version": {
+          "description": "The oldest release that has it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "required_version",
+        "available"
+      ]
+    },
+    "DenyFile": {
+      "description": "A settings file that was read, and how many deny rules it held.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "The file's path.",
+          "type": "string"
+        },
+        "rules": {
+          "description": "The rules in the file, before deduplication.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "rules"
+      ]
+    },
+    "DenyInfo": {
+      "description": "The deny rules a Claude run would apply, as a run's notes give them: files\nand counts, never a rule.",
+      "type": "object",
+      "properties": {
+        "applied": {
+          "description": "Rules a worker would receive, after deduplication.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "files": {
+          "description": "The settings files that exist and were read, with their rule counts.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DenyFile"
+          }
+        },
+        "skipped": {
+          "description": "Existing local settings files that would be ignored, with the reason.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SkippedFile"
+          }
+        }
+      },
+      "required": [
+        "files",
+        "skipped",
+        "applied"
+      ]
+    },
+    "EnvCounts": {
+      "description": "How many environment variables a worker would receive, by reason. No names\nand no values.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "Of the caller's: base variables (user, shell, locale and the like).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "network": {
+          "description": "Of the caller's: proxy and certificate settings.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "passed": {
+          "description": "Variables the worker would receive in all.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "provider": {
+          "description": "Of the caller's: variables that belong to the provider.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "set_by_delega": {
+          "description": "Variables delega sets itself for this provider.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "withheld": {
+          "description": "Variables of the caller's environment that would not be passed.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "passed",
+        "base",
+        "network",
+        "provider",
+        "set_by_delega",
+        "withheld"
+      ]
+    },
+    "Limits": {
+      "description": "The limits in force, from the constants the code uses.",
+      "type": "object",
+      "properties": {
+        "run": {
+          "description": "For one run.",
+          "$ref": "#/$defs/RunLimits"
+        },
+        "supervisor": {
+          "description": "For the supervisor.",
+          "$ref": "#/$defs/SupervisorLimits"
+        }
+      },
+      "required": [
+        "run",
+        "supervisor"
+      ]
+    },
+    "ProcessInspection": {
+      "description": "Whether the process listing that confirms cleanup works.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Whether one listing, run now as cleanup runs it, gave a usable table.",
+          "type": "boolean"
+        },
+        "detail": {
+          "description": "Why not, when it is not available. Free text; it names no process.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ]
+    },
+    "Provider": {
+      "description": "The provider CLI that runs the assignment.",
+      "oneOf": [
+        {
+          "description": "Claude Code.",
+          "type": "string",
+          "const": "claude"
+        },
+        {
+          "description": "Codex CLI.",
+          "type": "string",
+          "const": "codex"
+        }
+      ]
+    },
+    "ProviderCheck": {
+      "description": "What was found for one provider.",
+      "type": "object",
+      "properties": {
+        "command_hook": {
+          "description": "For Claude Code, whether the command hook interface is available. Null\nfor Codex, which has no minimum version.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommandHook"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deny_rules": {
+          "description": "The deny rules a Claude run would apply. Null for Codex, which reads\nnone, and when the launch could not be built.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DenyInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "env": {
+          "description": "The environment a worker would get, or null when the launch could not be\nbuilt.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvCounts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executable": {
+          "description": "The executable a run would use, or null when none was found.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executable_source": {
+          "description": "Where the lookup found it: the override variable's name, `PATH`, or\n`option` when a library caller set `ProviderOptions::executable`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "The provider.",
+          "$ref": "#/$defs/Provider"
+        },
+        "ready": {
+          "description": "Whether no problem stops every run with this provider.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "The first line of `--version` output, or null when there was none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "ready"
+      ]
+    },
+    "ReportedProblem": {
+      "description": "A problem, with the provider it is about.",
+      "type": "object",
+      "properties": {
+        "blocks": {
+          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands) or `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
+          "$ref": "#/$defs/Blocks"
+        },
+        "kind": {
+          "description": "A stable label. See [`Problem::kind`] and\n[`PROCESS_INSPECTION_UNAVAILABLE`].",
+          "type": "string"
+        },
+        "message": {
+          "description": "A description.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The provider it is about, or null when it is about the whole system.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "blocks"
+      ]
+    },
+    "RunLimits": {
+      "description": "The defaults and bounds a single run has.",
+      "type": "object",
+      "properties": {
+        "default_timeout_secs": {
+          "description": "The time limit when a request sets none, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_output_bytes": {
+          "description": "Most bytes of provider standard output kept.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_stderr_bytes": {
+          "description": "Most bytes of provider standard error kept.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_timeout_secs": {
+          "description": "The longest time limit a request may set, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_timeout_secs": {
+          "description": "The shortest time limit a request may set, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "version_probe_timeout_secs": {
+          "description": "How long the `--version` probe may take, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "default_timeout_secs",
+        "min_timeout_secs",
+        "max_timeout_secs",
+        "max_output_bytes",
+        "max_stderr_bytes",
+        "version_probe_timeout_secs"
+      ]
+    },
+    "SkillDigest": {
+      "description": "A packaged skill and its digest, as `delega version --output json` lists it.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "description": "The SHA-256 digest of its text.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The skill's name.",
+          "type": "string"
+        },
+        "uri": {
+          "description": "Where an MCP client reads it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "uri",
+        "digest"
+      ]
+    },
+    "SkippedFile": {
+      "description": "A local settings file that was not read, and why.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "The file's path.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why it was ignored.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ]
+    },
+    "SupervisorLimits": {
+      "description": "The limits of the supervisor that serves the MCP tools.",
+      "type": "object",
+      "properties": {
+        "default_wait_secs": {
+          "description": "The timeout `wait` uses when it gets none, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_live_workers": {
+          "description": "Live workers at once.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_outstanding_request_checks": {
+          "description": "Request checks that may be outstanding at once.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_queued_per_worker": {
+          "description": "Runs waiting behind one worker's running run.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_running_runs": {
+          "description": "Runs running at once.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "retained_bytes": {
+          "description": "Estimated bytes of finished results kept readable.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "retained_results": {
+          "description": "Finished results kept readable.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "retention_secs": {
+          "description": "How long a finished result stays readable, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wait_ceiling_secs": {
+          "description": "The longest one `wait` blocks, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_live_workers",
+        "max_running_runs",
+        "max_queued_per_worker",
+        "retained_results",
+        "retained_bytes",
+        "retention_secs",
+        "default_wait_secs",
+        "wait_ceiling_secs",
+        "max_outstanding_request_checks"
+      ]
+    }
+  }
+}

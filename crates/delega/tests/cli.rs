@@ -131,14 +131,6 @@ fn version_json_carries_a_digest_of_each_skill_that_matches_skill_list_and_show(
 }
 
 #[test]
-fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
-    let out = delega(&["doctor"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(text(&out.stderr).contains("not implemented yet"));
-    assert!(out.stdout.is_empty(), "doctor wrote to stdout");
-}
-
-#[test]
 fn skill_list_shows_both_embedded_skills_one_per_line() {
     let out = delega(&["skill", "list"]);
     assert_eq!(out.status.code(), Some(0));
