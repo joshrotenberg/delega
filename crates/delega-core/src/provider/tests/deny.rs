@@ -1759,19 +1759,77 @@ fn a_link_to_a_pipe_or_a_device_does_not_hang_and_is_handled_like_the_plain_file
     let error = rig.run().unwrap_err();
     assert_eq!(error.kind, "settings_unreadable");
     assert!(error.message.contains("not a regular file"), "{error}");
-    // A device: refused the same way when the user owns it, and skipped as
-    // owned by another user otherwise. Neither reads from it.
+    // A device owned by someone else is skipped as a foreign target and never
+    // opened; run as the device's owner (root) it is refused as not a regular
+    // file, like the pipe.
     if Path::new("/dev/zero").exists() {
         let rig = LinkRig::new();
         rig.link_file(Path::new("/dev/zero"));
-        match rig.run() {
-            Ok(plan) => {
-                assert_eq!(plan.deny_rules.applied, 0);
-                assert_eq!(plan.deny_rules.skipped.len(), 1, "{:?}", plan.notes);
-            }
-            Err(error) => assert_eq!(error.kind, "settings_unreadable"),
+        if me() == 0 {
+            assert_eq!(rig.run().unwrap_err().kind, "settings_unreadable");
+        } else {
+            rig.assert_skipped("a symbolic link whose target is not owned by the current user");
         }
     }
+}
+
+#[test]
+fn what_someone_else_owns_is_skipped_whatever_its_kind_or_mode() {
+    // A pipe as the settings file, owned by someone else: skipped, not refused,
+    // and not opened for reading.
+    let rig = LinkRig::new();
+    std::fs::create_dir_all(rig.rig.work.join(".claude")).unwrap();
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(rig.file())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        rig.skipped_for_foreign(&[rig.file()]),
+        ["the settings file is not owned by the current user"]
+    );
+    // The same pipe owned by the user is refused.
+    assert_eq!(rig.run().unwrap_err().kind, "settings_unreadable");
+    // A `.claude` directory with mode 000 owned by someone else.
+    let rig = LinkRig::new();
+    put(&rig.file(), &deny_file(&["Bash(root)"]));
+    let dir = rig.rig.work.join(".claude");
+    rig.chmod(&dir, 0o000);
+    let skipped = rig.skipped_for_foreign(std::slice::from_ref(&dir));
+    rig.chmod(&dir, 0o755);
+    assert_eq!(
+        skipped,
+        ["the .claude directory is not owned by the current user"]
+    );
+    // A settings file with mode 000 owned by someone else.
+    rig.chmod(&rig.file(), 0o000);
+    let skipped = rig.skipped_for_foreign(&[rig.file()]);
+    rig.chmod(&rig.file(), 0o600);
+    assert_eq!(
+        skipped,
+        ["the settings file is not owned by the current user"]
+    );
+}
+
+#[test]
+fn a_claude_directory_that_cannot_be_searched_in_a_repository_root_refuses() {
+    let rig = LinkRig::new();
+    put(&rig.file(), &deny_file(&["Bash(root)"]));
+    let dir = rig.rig.work.join(".claude");
+    rig.chmod(&dir, 0o600);
+    // A process that may search it anyway (root) cannot show the refusal.
+    if std::fs::metadata(rig.file()).is_ok() {
+        rig.chmod(&dir, 0o755);
+        return;
+    }
+    let result = rig.run();
+    rig.chmod(&dir, 0o755);
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains("cannot be opened"), "{error}");
+    assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(root)"]);
 }
 
 #[test]

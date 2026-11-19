@@ -322,10 +322,16 @@ variables), not from the calling process.
    group-writable or world-writable tree (or one under `/tmp`) may be planted to
    make the user's own files read as that project's rules. Ownership is judged
    on the open handles, each directory opened from the one above, so nothing
-   swapped in after a check is read. A link to a pipe is refused as not a regular
-   file, as a pipe named as the file is; a link to a device owned by another user
-   is skipped as a foreign target, and nothing is read from either. A file or
-   directory that exists but cannot be opened (mode 000, an I/O error) refuses the
+   swapped in after a check is read. Ownership is judged before kind and before
+   readability: an entry or link target that the current user does not own is
+   always skipped with the ownership note, whatever it is (a pipe, a device, a
+   directory with mode 000) and is never read (a link target is not opened). Kind and
+   readability errors refuse only for what the user owns: a link to a pipe the
+   user owns, like a pipe named as the file, is refused as not a regular file; a
+   link to `/dev/zero` is skipped as a foreign target (when run as its owner,
+   root, it is refused as not a regular file). A file or directory the user owns
+   that exists but cannot be opened or searched (mode 000 or 600, an I/O error)
+   refuses the
    run with `settings_unreadable`, as it does for the start directory; only a
    file that does not exist contributes nothing. The user's own settings file
    (item 1) and the working directory's files (items 2 and 3) may be symbolic

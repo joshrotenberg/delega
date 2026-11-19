@@ -477,6 +477,9 @@ fn descend(
         Err(e) => return Step::Refuse(cannot_open(what, e)),
     };
     let link = FileType::from_raw_mode(st.st_mode) == FileType::Symlink;
+    let not_owned_plain = format!("{what} is not owned by the current user");
+    let not_owned_target =
+        format!("{what} is a symbolic link whose target is not owned by the current user");
     let file = if link {
         if !owner.owns(&here, st.st_uid) {
             return Step::Skip(format!(
@@ -497,6 +500,21 @@ fn descend(
                 "{what} is a symbolic link in a directory that group or others can write"
             ));
         }
+        // The target's owner is judged before it is opened, so a pipe or device
+        // that belongs to someone else is skipped, never opened.
+        match rustix::fs::statat(parent, name, AtFlags::empty()) {
+            Ok(target) if !owner.owns_resolved(&here, target.st_uid) => {
+                return Step::Skip(not_owned_target);
+            }
+            Ok(_) => {}
+            Err(Errno::NOENT) => {
+                return Step::Skip(format!("{what} is a symbolic link to nothing"));
+            }
+            Err(Errno::LOOP) => {
+                return Step::Skip(format!("{what} is a symbolic link that does not resolve"));
+            }
+            Err(e) => return Step::Refuse(cannot_open(what, e)),
+        }
         match rustix::fs::openat(parent, name, flags, Mode::empty()) {
             Ok(fd) => std::fs::File::from(fd),
             Err(Errno::NOENT) => {
@@ -511,9 +529,13 @@ fn descend(
             Err(e) => return Step::Refuse(cannot_open(what, e)),
         }
     } else {
+        // An entry that belongs to someone else is skipped whatever it is and
+        // whatever its mode, so a failure to open it is not a refusal.
+        let foreign = !owner.owns(&here, st.st_uid);
         match rustix::fs::openat(parent, name, flags | OFlags::NOFOLLOW, Mode::empty()) {
             Ok(fd) => std::fs::File::from(fd),
             Err(Errno::NOENT | Errno::NOTDIR) => return Step::Missing,
+            Err(_) if foreign => return Step::Skip(not_owned_plain),
             Err(Errno::LOOP) => {
                 return Step::Skip(format!(
                     "{what} was replaced by a symbolic link: {SYMLINK_REASON}"
@@ -526,27 +548,23 @@ fn descend(
         Ok(m) => m,
         Err(e) => return Step::Refuse(format!("{what} cannot be checked ({})", e.kind())),
     };
-    if !want_dir && !meta.is_file() {
-        return Step::Refuse(format!("{what} is not a regular file"));
-    }
+    // Owner before kind: what belongs to someone else is skipped, not refused.
     let owned = if link {
         owner.owns_resolved(&here, meta.uid())
     } else {
         owner.owns(&here, meta.uid())
     };
-    if owned {
-        return Step::Open(file, None);
+    if !owned {
+        return if link {
+            Step::Skip(not_owned_target)
+        } else {
+            Step::Open(file, Some(not_owned_plain))
+        };
     }
-    let reason = if link {
-        format!("{what} is a symbolic link whose target is not owned by the current user")
-    } else {
-        format!("{what} is not owned by the current user")
-    };
-    if link {
-        Step::Skip(reason)
-    } else {
-        Step::Open(file, Some(reason))
+    if !want_dir && !meta.is_file() {
+        return Step::Refuse(format!("{what} is not a regular file"));
     }
+    Step::Open(file, None)
 }
 
 /// Read the settings file `file` (`<root>/.claude/<name>`) of a repository
