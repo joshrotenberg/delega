@@ -21,9 +21,6 @@ tokio-util.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
-[target.'cfg(unix)'.dev-dependencies]
-rustix = { workspace = true, features = ["time"] }
-
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

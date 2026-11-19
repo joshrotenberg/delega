@@ -44,8 +44,10 @@ A run is `queued`, `running` or `finished`. A finished run has exactly one
 layer returns and every one the supervisor builds itself: refused (at admission
 and for an invalid request), discarded, interrupted while queued, a task that
 failed, and the replacement for a result that failed the check. None is skipped. A result that fails the check is
-a bug: a debug build fails loudly, and a release build replaces it with a
-`failed` result of kind `internal_error` that says so.
+a bug: in every build, debug included, it is replaced by a `failed` result of
+kind `internal_error` whose error and `provider_notes` name the validation
+problems (fixed text about fields, never the user's text), and the supervisor
+goes on.
 
 | Run from | to | When |
 | --- | --- | --- |
@@ -89,6 +91,7 @@ All defaults are named constants in `supervisor/limits.rs`.
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | default wait | 30 s | Used when `wait` gets no `timeout_secs`. The ceiling is kept high for library callers; the MCP layer should keep each wait short, well inside what a tool-calling client allows for one call, and rely on the cursor to continue. |
 | preflight bound | 10 s | The longest `start` spends checking paths, the executable and the schema before it is admitted. |
+| outstanding request checks | 16 | Request checks that have started and not ended, each on an OS thread of its own. A check that timed out still counts until its thread ends. A start that finds all 16 busy waits for a slot without holding a thread, and the wait counts against the preflight bound measured from when the start began. If no slot frees in time it is refused, kind `preflight_timeout`. A burst of concurrent starts is served in turn, not refused. The value is `MAX_LIVE_WORKERS`; a hung filesystem costs at most 16 threads. `list` does not report it. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer; `text_offset` pages through the rest. |
 | compact structured answer | 16 KiB | A compact read leaves out a structured answer whose JSON is larger than this and gives its size. |
 | `shutdown_bound` | 30 s | The longest `shutdown` waits for runs to settle. |
@@ -112,7 +115,12 @@ the result to the supervisor, so a hung filesystem can delay only that `start`,
 never `wait` or `interrupt`. If the bound passes the start is refused (kind
 `preflight_timeout`). The thread is detached and cannot be cancelled: nothing
 waits for it, so a hung filesystem cannot hold up `shutdown` or a runtime drop,
-and its late result is discarded when the filesystem answers. If any step fails the
+and its late result is discarded when the filesystem answers. Because a hung
+check keeps its thread, the number of outstanding checks is capped (16, see
+[Limits and defaults](#limits-and-defaults)); a `start` beyond the cap
+waits for a slot within the same preflight bound and is refused `preflight_timeout`
+if none frees; `shutdown` or a drop releases a waiting start with `Error::ShutDown`.
+If any step fails the
 request is still a run: the response is `finished`, the outcome is `refused`, the
 error says why, and `read` returns the result. **A refused start creates no
 worker**, so the result has no `worker`, as the contract says. Names are unique
@@ -190,7 +198,14 @@ result's text is then the window of up to 20000 characters starting there, in
 either detail (a full read without an offset returns everything), and
 `text_window` gives `offset`, `length`, the `total` characters in the answer and
 `more`. Read again with `offset + length` while `more` is true. An offset past the
-end gives an empty window with the total. For the MCP layer, `text_offset` is a
+end gives an empty window with the total.
+
+A long answer is paged by run id. A `read` that names a worker returns the
+worker's latest run, and a follow-up can finish between two pages, so the second
+page would come from the new run: an empty or unrelated window that reads as
+"done". The response always names the run it came from. Read the first page by
+worker if convenient, then page by the `run` it names, and treat a different
+`run` on a later page as a new answer, not a continuation. For the MCP layer, `text_offset` is a
 plain argument of `read`; a client reads a long answer one window per call. An unfinished run
 returns its state and progress: time queued and running, the time limit, the
 partial text, and recent activity.

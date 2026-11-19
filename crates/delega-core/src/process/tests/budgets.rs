@@ -101,11 +101,33 @@ fn the_late_listing_verdict_has_the_reason_the_library_produces() {
         vec![],
         format!("{}; stopping was not confirmed within 10 s: x", late())
     )));
-    assert!(!is_late_listing_only(&unconfirmed(
+    // Codex with MCP discovery merges three reports.
+    assert!(is_late_listing_only(&unconfirmed(
         vec![],
         vec![],
         format!("{}; {}; {}", late(), late(), late())
     )));
+    assert!(is_late_listing_only(&unconfirmed(
+        vec![],
+        vec![],
+        vec![late(); 5].join("; ")
+    )));
+    // A repeat must be the whole reason, joined by the separator, with nothing
+    // before, between or after.
+    for reason in [
+        String::new(),
+        format!("{}; ", late()),
+        format!("{};{}", late(), late()),
+        format!("{} {}", late(), late()),
+        format!("x; {}", late()),
+        format!("{}; {}; other", late(), late()),
+        format!("{}; {}x", late(), late()),
+    ] {
+        assert!(
+            !is_late_listing_only(&unconfirmed(vec![], vec![], reason.clone())),
+            "{reason:?}"
+        );
+    }
     assert!(!is_late_listing_only(&unconfirmed(
         vec![],
         vec![],
@@ -131,6 +153,26 @@ fn first_signal_at(report: &ProcessReport) -> SystemTime {
         .first()
         .expect("a signal was recorded")
         .at
+}
+
+/// The owner's warning names the budget it waited, in milliseconds. This is
+/// load-free: a use site that waited a different budget than the one its
+/// field says, or a swapped pair of budgets, names the wrong number.
+fn assert_warns_of_budget(report: &ProcessReport, budget: Duration) {
+    let expected = format!(
+        "The process listing before the first signal did not complete within {} ms",
+        budget.as_millis()
+    );
+    let warnings = &report.diagnostics.warnings;
+    assert!(
+        warnings.iter().any(|w| w.contains(&expected)),
+        "no warning contains {expected:?}: {warnings:#?}"
+    );
+    let others = warnings
+        .iter()
+        .filter(|w| w.contains("did not complete within"))
+        .count();
+    assert_eq!(others, 1, "{warnings:#?}");
 }
 
 #[tokio::test]
@@ -162,6 +204,7 @@ async fn a_requested_stop_signals_after_the_real_stop_budget_and_is_unconfirmed(
     assert!(first_signal_at(&report) >= asked_at + STOP_LISTING_BUDGET);
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert!(is_late_listing_only(&report.cleanup), "{report:#?}");
+    assert_warns_of_budget(&report, STOP_LISTING_BUDGET);
 }
 
 #[tokio::test]
@@ -200,4 +243,5 @@ async fn a_natural_exit_with_a_held_listing_signals_after_the_real_exit_budget_a
     assert!(first_signal_at(&report) >= before_start_at + EXIT_LISTING_BUDGET);
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert!(is_late_listing_only(&report.cleanup), "{report:#?}");
+    assert_warns_of_budget(&report, EXIT_LISTING_BUDGET);
 }

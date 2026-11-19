@@ -1868,3 +1868,122 @@ fn a_file_that_cannot_be_opened_in_a_repository_root_refuses_and_is_not_skipped(
     rig.chmod(&dir, 0o755);
     assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(root)"]);
 }
+
+#[test]
+fn a_link_to_a_target_the_user_owns_but_cannot_open_refuses_and_is_not_skipped() {
+    // The settings file as a link to the user's own file with mode 000. The
+    // owner is the user, so ownership does not skip it; opening it fails, and the
+    // run is refused as it is for the same file named directly. A process that
+    // may read it anyway (root) cannot show the refusal.
+    let rig = LinkRig::new();
+    rig.link_file(&rig.target_file());
+    rig.chmod(&rig.target_file(), 0o000);
+    if std::fs::File::open(rig.target_file()).is_err() {
+        let result = rig.run();
+        rig.chmod(&rig.target_file(), 0o600);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, "settings_unreadable");
+        assert!(
+            error
+                .message
+                .contains("the settings file cannot be opened (permission denied)"),
+            "{error}"
+        );
+        assert!(error.message.contains("settings.local.json"), "{error}");
+        assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(linked)"]);
+    } else {
+        rig.chmod(&rig.target_file(), 0o600);
+    }
+    // `.claude` as a link to the user's own directory with mode 000.
+    let rig = LinkRig::new();
+    rig.link_dir();
+    rig.chmod(&rig.target_dir(), 0o000);
+    if std::fs::read_dir(rig.target_dir()).is_err() {
+        let result = rig.run();
+        rig.chmod(&rig.target_dir(), 0o755);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, "settings_unreadable");
+        assert!(
+            error
+                .message
+                .contains("the .claude directory cannot be opened (permission denied)"),
+            "{error}"
+        );
+        assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(linked)"]);
+    } else {
+        rig.chmod(&rig.target_dir(), 0o755);
+    }
+}
+
+#[test]
+fn a_link_whose_target_cannot_be_examined_refuses_and_is_not_skipped() {
+    // The owner of such a target cannot be known, so the rule about what someone
+    // else owns does not apply. The link is the user's own, in a directory only
+    // the user can write, so the broken target is the user's to fix.
+    //
+    // A link into a directory the user cannot search.
+    let rig = LinkRig::new();
+    let blocked = rig.rig.home.join("blocked");
+    put(
+        &blocked.join("settings.local.json"),
+        &deny_file(&["Bash(blocked)"]),
+    );
+    put(
+        &blocked.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(blocked)"]),
+    );
+    rig.link_file(&blocked.join("settings.local.json"));
+    rig.chmod(&blocked, 0o000);
+    if std::fs::metadata(blocked.join("settings.local.json")).is_err() {
+        let result = rig.run();
+        rig.chmod(&blocked, 0o755);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, "settings_unreadable");
+        assert!(
+            error
+                .message
+                .contains("the settings file cannot be opened (permission denied)"),
+            "{error}"
+        );
+        assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(blocked)"]);
+        // The same for `.claude` as the link.
+        let rig = LinkRig::new();
+        std::os::unix::fs::symlink(blocked.join(".claude"), rig.rig.work.join(".claude")).unwrap();
+        rig.chmod(&blocked, 0o000);
+        let result = rig.run();
+        rig.chmod(&blocked, 0o755);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, "settings_unreadable");
+        assert!(
+            error
+                .message
+                .contains("the .claude directory cannot be opened (permission denied)"),
+            "{error}"
+        );
+    } else {
+        rig.chmod(&blocked, 0o755);
+    }
+    // A link whose path runs through a regular file.
+    let rig = LinkRig::new();
+    let plain = rig.rig.home.join("plain");
+    std::fs::write(&plain, "not a directory").unwrap();
+    rig.link_file(&plain.join("x.json"));
+    let error = rig.run().unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(
+        error
+            .message
+            .contains("the settings file cannot be opened (not a directory)"),
+        "{error}"
+    );
+    let rig = LinkRig::new();
+    std::os::unix::fs::symlink(plain.join("x"), rig.rig.work.join(".claude")).unwrap();
+    let error = rig.run().unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(
+        error
+            .message
+            .contains("the .claude directory cannot be opened (not a directory)"),
+        "{error}"
+    );
+}

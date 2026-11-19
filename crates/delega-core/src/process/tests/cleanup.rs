@@ -8,6 +8,7 @@ use super::fixtures::{
     await_event, is_running, run_guarded, sh, wait_own_group, wait_tracked,
 };
 use crate::contract::result::Cleanup;
+use crate::process::sys::{self, Signal};
 use crate::process::tree::{InspectError, Lister, lister_for};
 use crate::process::{Ending, PIPE_WARNING, ProcessHandle, run};
 
@@ -207,15 +208,29 @@ async fn a_leader_that_keeps_forking_own_group_children_leaves_none_behind() {
     assert_gone("children forked until the stop", &kids).await;
 }
 
+/// `OWN_GROUP` with its output and input detached. A child that held the pipes
+/// the owner reads would keep the run from ending until the grace, a minute
+/// here, whenever the leader was still alive at the sweep's snapshot, so the run
+/// would take 0.1 s or the grace by timing alone.
+fn detached_own_group() -> String {
+    format!("{OWN_GROUP} >/dev/null 2>&1 </dev/null")
+}
+
 #[tokio::test]
 async fn a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_behind() {
     require_perl!();
     let s = Scratch::new();
-    // The handler starts the child and then ends the leader, so no KILL is
-    // involved: the grace is a minute and the leader is gone as soon as the
-    // handler has run, however slow the machine is.
+    // The handler starts the child and then ends the leader. The leader is gone
+    // as soon as the handler has run, so the stop does not wait for the grace (a
+    // minute here). The child does not hold the output pipes, so the run ends
+    // when the leader does, whether the sweep saw the leader alive or not. When
+    // the leader is gone before the sweep takes its snapshot the child is born
+    // after it; when it is alive the sweep sends the child a TERM. A KILL pass
+    // after the grace is not involved in either order, but the cleanup pass
+    // that follows the exit finds a child born after the snapshot.
+    let child = detached_own_group();
     let script = format!(
-        "trap \"{OWN_GROUP} & echo \\$! > gc; exit 0\" TERM; echo $$ > leader; \
+        "trap \"{child} & echo \\$! > gc; exit 0\" TERM; echo $$ > leader; \
          while :; do sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
@@ -223,8 +238,10 @@ async fn a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_be
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
     let _reaper = Reaper(vec![leader]);
+    let asked = Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
+    assert!(asked.elapsed() < BOUND, "took {:?}", asked.elapsed());
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     let gc = s.pid_now("gc");
     let _reaper_gc = Reaper(vec![gc]);
@@ -238,12 +255,18 @@ async fn a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each
     require_perl!();
     let s = Scratch::new();
     // The scenario of the test above with a leader that keeps running after its
-    // handler, so the handler runs again for every TERM the stop sends and each
-    // run starts another child in a group of its own. The leader ends when the
-    // test says so, once the first child exists (a file the test writes), not
-    // after a grace that load could make too short: the grace is a minute.
+    // handler, so the handler runs again for every TERM it receives and each run
+    // starts another child in a group of its own and records it. The stop sends
+    // one TERM. The test sends the leader another, and again until two children
+    // are recorded, so at least two children exist by construction whatever the
+    // order of the sweep and the leader. A TERM that arrives while the handler
+    // runs is merged with it, which is why the test repeats rather than counts
+    // on one. The leader ends when the test says so (a file it writes), not
+    // after a grace that load could make too short: the grace is a minute. The
+    // children do not hold the output pipes.
+    let child = detached_own_group();
     let script = format!(
-        "trap \"{OWN_GROUP} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
+        "trap \"{child} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
          while [ ! -e quit ]; do sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
@@ -252,17 +275,43 @@ async fn a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each
     let leader = s.pid("leader").await;
     let _reaper = Reaper(vec![leader]);
     handle.interrupt();
+    let recorded = || {
+        std::fs::read_to_string(s.path("gcs")).map_or(0, |text| {
+            text.lines()
+                .filter(|l| l.trim().parse::<i32>().is_ok())
+                .count()
+        })
+    };
     s.exists("gcs").await;
+    let mut sent_at = Instant::now();
+    await_event("a second child started by a second TERM", || {
+        if recorded() >= 2 {
+            return true;
+        }
+        if sent_at.elapsed() >= Duration::from_millis(300) {
+            let _ = sys::signal_process(leader, Signal::TERM);
+            sent_at = Instant::now();
+        }
+        false
+    })
+    .await;
     std::fs::write(s.path("quit"), "quit").expect("write the quit file");
+    let quit_at = Instant::now();
     let report = handle.wait().await;
+    // Nothing waits for the grace once the leader has ended.
+    assert!(quit_at.elapsed() < BOUND, "took {:?}", quit_at.elapsed());
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     let children: Vec<i32> = std::fs::read_to_string(s.path("gcs"))
         .expect("the children file")
         .lines()
         .filter_map(|l| l.trim().parse().ok())
         .collect();
-    assert!(!children.is_empty());
     let _reaper_children = Reaper(children.clone());
+    assert!(
+        children.len() >= 2,
+        "{} children were started",
+        children.len()
+    );
     assert_confirmed(&report);
     assert_gone("children started by the handler", &children).await;
 }
@@ -511,8 +560,15 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     // The sweep that follows each signal waits for the hung listing only this
     // long (the production value), so the owner is not held for minutes.
     spec.timings.descendant_signal = crate::process::limits::DESCENDANT_SIGNAL_BUDGET;
-    // The final pass is the real one: one second is enough for the repeated KILL
-    // to reach the child, which is what this test is about.
+    // The final pass is the real one, one second. This test keeps a wall-clock
+    // margin and has no event to wait on instead: the repeated KILL is a timer
+    // (every 100 ms) and the pass ends at a deadline, and both are measured by
+    // the same clock. Of the second, 250 ms goes to the sweep in `kill_all` (a
+    // hung listing, held to the production signal budget) before the repeat
+    // timer starts, which leaves about 650 ms of margin for the repeated KILLs
+    // to land after the swallowed ones. Load that delays the runtime thread by
+    // more than that can end the pass first; the leader is then not killed and
+    // the signal assertion below fails.
     spec.timings.final_cleanup_pass = crate::process::limits::FINAL_CLEANUP_PASS;
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;

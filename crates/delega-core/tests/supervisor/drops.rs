@@ -95,6 +95,20 @@ async fn while_unwinding_from_a_panic() {
     rig.assert_nothing_left().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inside_spawn_blocking() {
+    let rig = Rig::new();
+    let supervisor = ten(&rig);
+    start_ten(&rig, &supervisor).await;
+    assert!(!rig.survivors().is_empty());
+    // The last handle is dropped on a blocking-pool thread of the runtime.
+    let took = tokio::task::spawn_blocking(move || timed_drop(supervisor))
+        .await
+        .expect("the blocking task that drops the supervisor did not panic");
+    assert!(took < Duration::from_secs(60), "the drop took {took:?}");
+    rig.assert_nothing_left().await;
+}
+
 #[tokio::test]
 async fn on_a_current_thread_runtime() {
     let rig = Rig::new();

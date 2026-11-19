@@ -287,7 +287,7 @@ Behavior:
   prints the same groups. It lists environment variable names, never values,
   never the names of withheld variables, and not the assignment, instructions or settings text, which are replaced by their
   size. For Claude it adds `deny_rules`: the settings files read with their rule
-  counts, any local settings files ignored with the reason (`skipped`: a root that is the home directory, an entry that is not owned by the current user, or, in a repository root, a `.git` link or a `.claude` or settings-file link that is not the user's own in a directory only the user can write, with a target the user owns; anything the user does not own is skipped whatever its kind or mode), `applied`, and the user's own deny rules under `user_deny_rules`
+  counts, any local settings files ignored with the reason (`skipped`: a root that is the home directory, an entry that is not owned by the current user, or, in a repository root, a `.git` link or a `.claude` or settings-file link that is not the user's own in a directory only the user can write, with a target the user owns; anything the user does not own is skipped whatever its kind or mode; a link the user owns whose target cannot be opened or examined, such as one into a directory the user cannot search or through a regular file, is not skipped but refuses the run with `settings_unreadable`, because the owner cannot be known and a broken target of the user's own link is theirs to fix), `applied`, and the user's own deny rules under `user_deny_rules`
   (bounded, with `omitted`); a main checkout that could not be identified is a note, not a `skipped` entry; the launch arguments show a count in their place.
   A request that would be refused prints the refusal as for a run (a
   `refused` result in JSON, a line on standard error in text) and exits 2.
@@ -356,7 +356,11 @@ Rules that hold for every tool:
   restart. The supervisor applies them so: a `start` beyond the live-worker limit
   is refused (`limit_reached`); a `follow_up` beyond the per-worker queue limit
   is refused (`queue_full`); a run beyond the running-runs limit is not refused,
-  it stays `queued` until a slot frees. Defaults are in
+  it stays `queued` until a slot frees. At most 16 request
+  checks run at once; a `start` that finds them all busy waits for one, within the
+  same 10 s bound that covers its check, and is refused `preflight_timeout` only
+  if none frees in time, which happens when the filesystem is not answering.
+  Defaults are in
   [supervisor.md](supervisor.md#limits-and-defaults).
 - **Refusals are runs.** A `start` or `follow_up` that cannot go ahead returns a
   run id whose result is `refused`, and `read` returns it. A refused `start`
@@ -371,7 +375,11 @@ Rules that hold for every tool:
 - **Long answers.** A compact `read` returns the first 20000 characters of the
   answer and says so, with the full length; `text_offset` reads the window that
   starts at that character, with the total and whether more follows. `detail:
-  full` returns everything.
+  full` returns everything. Page a long answer by run id. A `read` by worker
+  returns the worker's latest run, and a follow-up that finishes between two
+  pages makes the next page come from the new run; the response names the run, so
+  take the run id from the first page and pass it on the later ones, and treat a
+  different run id as a different answer.
 - **Retention.** Finished results stay readable for a bounded count (256) and
   time (1 hour), after which their ids are unknown. Closing a worker discards its
   queued runs, each finished `interrupted` with the message `discarded by close`.

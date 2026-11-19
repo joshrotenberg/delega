@@ -539,6 +539,14 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
     }
 }
 
+/// The problem `judge` records when the cleanup verdict differs from the
+/// expectation. [`crate::run_all`] builds the same text with this function to
+/// recognise a run whose only fault is a late listing, so the wording is in
+/// one place.
+pub fn cleanup_mismatch(actual: Option<bool>, expected: Option<bool>) -> String {
+    format!("cleanup.confirmed is {actual:?} where {expected:?} was expected")
+}
+
 /// Compare the measurement with the expectation and set the verdict.
 ///
 /// Anything but criterion 2 that differs from the expectation is a `fail`: the
@@ -585,10 +593,7 @@ fn judge(m: &mut Measured, case: &Case) {
                     ));
                 }
                 if m.cleanup_confirmed != expect.confirmed {
-                    problems.push(format!(
-                        "cleanup.confirmed is {:?} where {:?} was expected",
-                        m.cleanup_confirmed, expect.confirmed
-                    ));
+                    problems.push(cleanup_mismatch(m.cleanup_confirmed, expect.confirmed));
                 }
                 if expect.confirmed == Some(false) {
                     check_unconfirmed(m, expect.reason, &mut problems);

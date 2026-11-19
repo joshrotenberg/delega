@@ -33,6 +33,15 @@ pub const INTERRUPT_BOUND: Duration = Duration::from_secs(30);
 /// The longest `start` spends checking the request's paths, executable and
 /// schema before it is admitted.
 pub const PREFLIGHT_BOUND: Duration = Duration::from_secs(10);
+/// Most request checks that may be outstanding at once. Each `start` checks its
+/// paths on an OS thread of its own, and a check on a filesystem that does not
+/// answer keeps its thread until it does, even after `start` gave up waiting. A
+/// `start` that finds every slot taken waits for one, without a thread, within
+/// [`PREFLIGHT_BOUND`] counted from when it began; a burst of concurrent starts
+/// is served in turn. One that gets no slot in time is refused
+/// `preflight_timeout`. The value equals [`MAX_LIVE_WORKERS`]; it bounds the
+/// threads a hung filesystem can cost.
+pub const MAX_PENDING_PREFLIGHTS: usize = MAX_LIVE_WORKERS;
 
 /// Most activity entries kept per run. Older ones are counted and dropped.
 pub const MAX_ACTIVITY: usize = 200;
