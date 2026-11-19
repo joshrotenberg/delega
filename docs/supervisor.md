@@ -37,8 +37,9 @@ relative `cwd` is refused, kind `cwd_required`, as a finished run with no worker
 `delega mcp` uses it. `follow_up` takes no `cwd`; it runs in the first
 request's.
 
-Every response is compact by default. `Detail::Full` adds every field of the
-result, the whole activity history and the supervisor's own diagnostics. An
+`read` is compact by default, and `interrupt` and `close` always return compact
+results. `Detail::Full` adds every field of the result, the whole activity
+history and the supervisor's own diagnostics. An
 operation that cannot be answered at all returns an `Error`: an unknown run or
 worker, arguments that do not fit together, a supervisor that was shut down. A
 run that cannot go ahead is never an error: it is a run that ends `refused`.

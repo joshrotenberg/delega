@@ -94,9 +94,9 @@ to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
 
 ## The API
 
-[docs/api.md](docs/api.md) is the agreed design for the CLI and MCP surface,
-with what is deferred listed at the end. The request and result contract, the
-`run` command and the library `Supervisor` are built; the MCP server is not.
+[docs/api.md](docs/api.md) describes the contract, the CLI, the MCP server and
+the skills. Everything in it is built except the parts marked **Later** and the
+items listed under Deferred at the end.
 
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.

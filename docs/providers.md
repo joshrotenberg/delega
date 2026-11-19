@@ -57,7 +57,8 @@ prints a value or a rule.
 2. Run `<executable> --version` (5 s). The first line is
    `provenance.provider_version`. For Claude Code with `permissions.commands`
    granted, a version below 2.1.325 or an unreadable one is `refused` with kind
-   `unsupported_provider_version`.
+   `unsupported_provider_version`, or `failed` with that kind when the probe's
+   processes could not be confirmed stopped.
 3. Codex only: run `<executable> --disable ... mcp list --json` (10 s) and build
    an override that disables every server it lists. A failure, invalid JSON or a
    transport that cannot be disabled is `failed` with kind

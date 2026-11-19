@@ -312,7 +312,7 @@
         "type": "object",
         "properties": {
           "kind": {
-            "description": "A short machine-readable label for the kind of error. Free text, so a\nreader must tolerate values it does not know. The values used so far:\n`invalid_request` (a refused run whose request failed validation),\n`timed_out` and `interrupted` (set by the matching constructors).",
+            "description": "A short machine-readable label for the kind of error. Free text, so a\nreader must tolerate values it does not know. The kinds in use are\nlisted in `docs/providers.md` (Error kinds) and `docs/api.md`\n(Outcomes): `invalid_request` for a request that failed validation,\nother refusal kinds such as `cwd_unusable` or `limit_reached`, failure\nkinds such as `provider_exit`, and `timed_out` and `interrupted`.",
             "type": "string"
           },
           "message": {
