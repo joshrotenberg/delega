@@ -445,10 +445,9 @@ ownership.
 The manifests set no `cwd`. A host decides the server's working directory: the
 Agent Plugins specification makes it the plugin root when `cwd` is omitted, so on
 Codex the server starts in the plugin's directory, and Claude Code does not
-document it for plugin MCP servers. A `start` without `cwd` runs the worker in
-the server's working directory, which is whatever directory the host gave the
-server, so here it could be the plugin's directory. A caller should pass `cwd`
-explicitly, always for a `write` worker.
+document it for plugin MCP servers. That is why `delega mcp` refuses a `start`
+without an absolute `cwd` (`cwd_required`): the server's own directory is never
+used as a worker's default.
 
 Claude Code puts an enabled plugin's `bin/` directory on the Bash tool's `PATH`,
 so `delega` becomes a bare command in Claude Code sessions. Claude.ai and Cowork
@@ -598,10 +597,9 @@ Rules that hold for every tool:
   `profile`, the path of a profile file. The profile is read first and every
   other argument replaces the matching field, with the same code `delega run`
   uses (`delega_core::profile`): lists replace, `resume` and `ephemeral`
-  exclude each other, a relative path resolves against the server's working
-  directory. A `start` without `cwd` runs the worker in the server's working
-  directory, which is whatever directory the host gave the server, so a caller
-  should pass `cwd` explicitly, always for a `write` worker. A request that has a provider and a prompt but fails the contract
+  exclude each other, and a relative `profile` path resolves against the server's
+  working directory. The merged request must have an absolute `cwd`, or the start
+  is refused `cwd_required`. A request that has a provider and a prompt but fails the contract
   (a blank prompt, for example) is a refused run, not a tool error. The input
   schema states the request schema's ranges and lengths (`timeout_secs`
   between 1 and 86400, the list limits) from the same refinements, so a value
