@@ -402,6 +402,10 @@ async fn execute_steps(
     if let Some(grace) = plan.stop_grace {
         spec.stop_grace = grace;
     }
+    #[cfg(test)]
+    if let Some(chunks) = plan.tap_queue_chunks {
+        spec.timings.tap_queue_chunks = chunks;
+    }
     spec.stdout_tap = progress.tap(plan.provider, plan.redactor.clone());
     spec.stdout_tap_dropped = Some(progress.drop_counter());
     progress.emit(ProgressEvent::Started {

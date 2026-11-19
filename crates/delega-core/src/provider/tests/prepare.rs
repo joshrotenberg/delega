@@ -1,7 +1,6 @@
 //! Refusals before start, executable lookup, version gate and MCP discovery.
 
 use std::os::unix::fs::symlink;
-use std::time::Duration;
 
 use serde_json::json;
 
@@ -301,7 +300,9 @@ async fn an_interrupt_during_preparation_stops_the_probe_and_ends_interrupted() 
     let mut options = rig.options(Provider::Codex);
     options.env_set.push(("FAKE_MCP".into(), "hang".into()));
     let handle = start(rig.request(Provider::Codex, "success"), options);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The probe is running once it has recorded its arguments, which it does
+    // before it hangs.
+    rig.wait_record("mcp-argv").await;
     handle.interrupt();
     let result = handle.wait().await;
     assert_eq!(result.validate(), Ok(()), "{result:#?}");

@@ -230,6 +230,7 @@ mod tests;
 
 pub use capture::Captured;
 pub use handle::{Interrupter, ProcessHandle, run};
+pub use owner::{LATE_LISTING_REASON, is_late_listing_only};
 pub use report::{
     Diagnostics, Ending, LeaderExit, ProcessReport, ProcessTiming, SignalRecord, SignalTarget,
 };

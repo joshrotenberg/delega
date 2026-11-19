@@ -233,6 +233,12 @@ fn summarize(
         count("fail"),
         count("skipped"),
     );
+    let retried = measured.iter().filter(|m| m.attempts > 1).count();
+    let attempts: u32 = measured.iter().map(|m| m.attempts).sum();
+    println!(
+        "{retried} rows needed a retry after a late process listing; {attempts} runs in total for {} rows",
+        measured.len()
+    );
     for m in measured
         .iter()
         .filter(|m| matches!(m.verdict.as_str(), "fail" | "unexpected_pass" | "skipped"))

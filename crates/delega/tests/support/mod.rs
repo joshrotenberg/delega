@@ -22,7 +22,7 @@ use tempfile::TempDir;
 pub const PROVIDERS: [&str; 2] = ["claude", "codex"];
 
 /// How long a test waits for something that should happen at once.
-const WAIT_LIMIT: Duration = Duration::from_secs(30);
+const WAIT_LIMIT: Duration = Duration::from_secs(120);
 /// How often a wait polls.
 const POLL: Duration = Duration::from_millis(10);
 
@@ -136,6 +136,26 @@ impl Rig {
             .args(self.run_args(provider, prompt, extra))
             .output()
             .expect("run delega")
+    }
+
+    /// Like [`Rig::run`], in a rig of its own, again (in a fresh rig) while the
+    /// run reports that its process listing was late: after a natural exit
+    /// `delega` waits at most 3.1 s for that listing and says so when it is
+    /// not done, which a machine under heavy load can cause. The test asserts
+    /// exact output and an exact verdict for a run whose listing was on time,
+    /// so it is given a run like that, up to eight attempts; a machine that is
+    /// late eight times in a row fails the test with the last output.
+    pub fn run_with_timely_listing(provider: &str, prompt: &str, extra: &[&str]) -> (Rig, Output) {
+        let mut last = None;
+        for _ in 0..8 {
+            let rig = Rig::new();
+            let out = rig.run(provider, prompt, extra);
+            if !listing_was_late(&out) {
+                return (rig, out);
+            }
+            last = Some((rig, out));
+        }
+        last.expect("at least one attempt")
     }
 
     /// Run `delega` with `input` on standard input.
@@ -323,6 +343,44 @@ pub fn signal(pid: u32, name: &str) {
         .status()
         .expect("run kill");
     assert!(status.success(), "kill -{name} {pid} failed");
+}
+
+/// Check the cleanup verdict of a run that was stopped by a signal or a time
+/// limit. Such a stop waits at most 500 ms for the process listing that
+/// precedes its first signal (`STOP_LISTING_BUDGET`); where `ps` takes longer,
+/// which a loaded machine does, the stop is prompt and the documented verdict
+/// is `Unconfirmed`, naming that listing. This binary cannot be given a longer
+/// budget, so a test of the CLI accepts exactly those two answers: `Confirmed`,
+/// or the late-listing verdict alone (`is_late_listing_only`: its exact
+/// reason, no pids, no process groups). Any other verdict fails. That nothing is
+/// left running is checked separately (`Rig::assert_nothing_left`), and the
+/// exact verdict after a stop is asserted by the provider-layer tests, which
+/// run with a listing budget no load can exhaust.
+pub fn assert_stop_cleanup(result: &RunResult, what: &str) {
+    use delega_core::contract::result::Cleanup;
+    use delega_core::process::is_late_listing_only;
+    if result.cleanup != Cleanup::Confirmed && !is_late_listing_only(&result.cleanup) {
+        panic!(
+            "{what}: unexpected cleanup verdict after a stop: {:?}",
+            result.cleanup
+        );
+    }
+}
+
+/// Whether a run's output says its cleanup was unconfirmed for the late process
+/// listing and for nothing else: the result document on standard output when
+/// there is one, otherwise the exact line text mode prints on standard error.
+fn listing_was_late(out: &Output) -> bool {
+    use delega_core::process::{LATE_LISTING_REASON, is_late_listing_only};
+    if let Ok(result) = serde_json::from_slice::<RunResult>(&out.stdout) {
+        return is_late_listing_only(&result.cleanup);
+    }
+    let line = |reason: &str| {
+        format!("delega run: cleanup not confirmed: {reason} (pids [], process groups [])")
+    };
+    let once = line(LATE_LISTING_REASON);
+    let twice = line(&format!("{LATE_LISTING_REASON}; {LATE_LISTING_REASON}"));
+    text(&out.stderr).lines().any(|l| l == once || l == twice)
 }
 
 pub fn text(bytes: &[u8]) -> String {

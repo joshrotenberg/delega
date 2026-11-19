@@ -55,6 +55,10 @@ pub struct ProviderOptions {
     /// [`ProgressEvent::Message`](super::ProgressEvent::Message). Off by
     /// default, so a sink sees message lengths only. Needs `progress`.
     pub progress_text: bool,
+    /// Test seam: chunks queued for the progress tap, in place of the process
+    /// layer's, so a test decides how many chunks are dropped.
+    #[cfg(test)]
+    pub(crate) tap_queue_chunks: Option<usize>,
 }
 
 impl ProviderOptions {

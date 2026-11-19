@@ -64,6 +64,23 @@ cargo run -p delega-acceptance -- --report
 `spike-numbers.jsonl` holds the numbers copied from the spike's committed
 results; `scripts/extract-spike-numbers.py` produced it.
 
+## Retries after a late process listing
+
+`delega` waits at most 500 ms (a requested stop) or 3.1 s (after the worker
+exits) for the process listing it takes before its first signal. On a machine
+where `ps` is slower than that, it reports cleanup as `Unconfirmed` with the
+reason `delega_core::process::LATE_LISTING_REASON`. A row that expects a
+confirmed cleanup is then run again, up to five runs in all, but only when that
+is the whole failure: the cleanup verdict is exactly the late-listing verdict
+(`delega_core::process::is_late_listing_only`: that reason alone, or repeated
+for the version probe and the run, with no pids and no process groups), and the
+only problem `judge` found is the confirmed mismatch, so the exit status, the
+outcome and the survivors were as expected. Any other failure is reported as
+measured. Each result records `attempts` and the `discarded` reasons in the
+JSONL output, and the summary line says how many rows needed a retry and how
+many runs the matrix took in total. A row whose listing is late in all five runs
+fails.
+
 ## Safety
 
 Everything runs against fake provider scripts. Each case gets a temporary
