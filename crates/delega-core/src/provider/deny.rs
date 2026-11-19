@@ -457,6 +457,14 @@ fn cannot_open(what: &str, e: Errno) -> String {
 /// A link that fails a condition, or points at nothing, is skipped with the
 /// condition named. Every other failure to open is a refusal, and only "does not
 /// exist" means no rules.
+///
+/// Two refusals concern a link. A link to something the user owns but cannot
+/// open (mode 000) refuses, as the same entry named directly does. A link whose
+/// target cannot be examined, because it runs into a directory the user cannot
+/// search or through a regular file, refuses too, although the owner is unknown
+/// there and "what someone else owns is skipped" does not cover it: the link is
+/// the user's own, in a directory only the user can write, so a broken target is
+/// the user's to fix, and skipping it would drop their rules without a word.
 fn descend(
     parent: &std::fs::File,
     parent_path: &Path,
@@ -500,8 +508,11 @@ fn descend(
                 "{what} is a symbolic link in a directory that group or others can write"
             ));
         }
-        // The target's owner is judged before it is opened, so a pipe or device
-        // that belongs to someone else is skipped, never opened.
+        // The target's owner is judged before it is opened. This check does not
+        // decide: the check on the open handle below does, and it cannot be raced.
+        // This one avoids opening something that belongs to someone else at all,
+        // such as a pipe or a device. A target that cannot be examined here
+        // (permission denied, a path through a regular file) refuses, see above.
         match rustix::fs::statat(parent, name, AtFlags::empty()) {
             Ok(target) if !owner.owns_resolved(&here, target.st_uid) => {
                 return Step::Skip(not_owned_target);
@@ -526,6 +537,8 @@ fn descend(
             Err(Errno::NOTDIR) => {
                 return Step::Skip(format!("{what} is a symbolic link to something else"));
             }
+            // The target is the user's own (judged above) but cannot be opened, for
+            // example mode 000: refused, not skipped.
             Err(e) => return Step::Refuse(cannot_open(what, e)),
         }
     } else {
@@ -549,6 +562,9 @@ fn descend(
         Err(e) => return Step::Refuse(format!("{what} cannot be checked ({})", e.kind())),
     };
     // Owner before kind: what belongs to someone else is skipped, not refused.
+    // For a link this is the check that decides, on the open handle, which a
+    // swap after the earlier `statat` cannot get around; that one only avoids
+    // opening something foreign.
     let owned = if link {
         owner.owns_resolved(&here, meta.uid())
     } else {
