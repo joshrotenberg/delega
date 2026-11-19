@@ -224,7 +224,6 @@ fn a_file_that_exists_and_cannot_be_used_refuses_naming_the_file_and_not_its_con
     let rig = Rig::new();
     let bad: Vec<(String, &str)> = vec![
         (format!("{{ {CANARY}"), "not valid JSON"),
-        (String::new(), "not valid JSON"),
         (format!("[\"{CANARY}\"]"), "top level"),
         (
             format!(r#"{{"permissions":"{CANARY}"}}"#),
@@ -345,38 +344,43 @@ async fn a_malformed_settings_file_refuses_the_run_before_the_provider_starts() 
 // ---- anchoring, deduplication, limits ----
 
 #[test]
-fn a_user_rule_is_anchored_to_home_and_a_project_rule_to_the_working_directory() {
+fn every_rule_is_passed_as_written_from_each_file_and_a_one_slash_rule_gains_an_absolute_one() {
     let rig = Rig::new();
     let sub = rig.work.join("sub");
     std::fs::create_dir(&sub).unwrap();
-    put(
-        &user_file(&rig),
-        &deny_file(&["Read(private/**)", "Edit(~/x)", "Bash(rm -rf private)"]),
-    );
-    put(
-        &sub.join(".claude/settings.json"),
-        &deny_file(&["Read(./secret.txt)", "Edit(/rooted/file)", "Read(//abs/**)"]),
-    );
+    let same = [
+        "Read(private/**)",
+        "Read(./a/b)",
+        "Read(**/x)",
+        "Edit(~/x)",
+        "Read(//abs/**)",
+        "Bash(rm -rf private)",
+        "Bash(/usr/bin/x)",
+    ];
+    let mut user = same.to_vec();
+    user.push("Edit(/out/u)");
+    let mut project = same.to_vec();
+    project.push("Edit(/out/p)");
+    let mut local = same.to_vec();
+    local.push("Read(/out/l)");
+    put(&user_file(&rig), &deny_file(&user));
+    put(&sub.join(".claude/settings.json"), &deny_file(&project));
+    put(&sub.join(".claude/settings.local.json"), &deny_file(&local));
     let mut request = rig.request(Provider::Claude, "p");
     request.cwd = Some(sub.clone());
     let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
-    let home = rig.home.display();
-    let sub = sub.display();
-    // The user file here is under the config dir, whose relative rules mean the
-    // home directory the worker gets.
-    assert_eq!(
-        plan.deny_rules.user_deny_rules,
-        [
-            format!("Read(/{home}/**/private/**)"),
-            "Edit(~/x)".to_string(),
-            "Bash(rm -rf private)".to_string(),
-            format!("Read(/{sub}/**/secret.txt)"),
-            format!("Edit(/{sub}/rooted/file)"),
-            "Read(//abs/**)".to_string(),
-        ]
-    );
-    // `/{home}` starts with a slash, so the rule path starts with two.
-    assert!(plan.deny_rules.user_deny_rules[0].starts_with("Read(//"));
+    // The user file is in the config dir, which is where a one-slash rule in it
+    // points; a project file's rules point at the directory holding `.claude`.
+    let config = std::fs::canonicalize(&rig.config).unwrap();
+    let mut want: Vec<String> = same.iter().map(ToString::to_string).collect();
+    want.push("Edit(/out/u)".into());
+    want.push(format!("Edit(/{}/out/u)", config.display()));
+    want.push("Edit(/out/p)".into());
+    want.push(format!("Edit(/{}/out/p)", sub.display()));
+    want.push("Read(/out/l)".into());
+    want.push(format!("Read(/{}/out/l)", sub.display()));
+    assert_eq!(plan.deny_rules.user_deny_rules, want);
+    assert!(plan.deny_rules.user_deny_rules[8].starts_with("Edit(//"));
 }
 
 #[test]
@@ -899,35 +903,30 @@ async fn a_relative_rule_keeps_its_meaning_when_the_working_directory_is_a_subdi
     .await;
     assert!(denied(&result).is_empty());
 
-    // A user rule is anchored to home and not to the working directory.
+    // A relative rule in the user file resolves against the working directory,
+    // like one in a project file, so it applies under it with the working
+    // directory outside home.
     std::fs::remove_file(sub.join(".claude/settings.json")).unwrap();
     put(&user_file(&rig), &deny_file(&["Read(private/**)"]));
-    let in_home = rig.home.join("private/x");
-    let in_work = sub.join("private/x");
-    let result = claude(
-        &rig,
-        Mode::Full,
-        format!("tool-read:{}", in_home.display()),
-        |r| {
-            r.cwd = Some(sub.clone());
-        },
-    )
-    .await;
-    assert_eq!(denied(&result).len(), 1, "home path must be denied");
-    let result = claude(
-        &rig,
-        Mode::Full,
-        format!("tool-read:{}", in_work.display()),
-        |r| {
-            r.cwd = Some(sub.clone());
-        },
-    )
-    .await;
-    assert!(
-        denied(&result).is_empty(),
-        "a user rule must not apply under the working directory: {:?}",
-        denied(&result)
-    );
+    for (path, want_denied) in [
+        (sub.join("private/x"), true),
+        (sub.join("deeper/private/x"), true),
+        (sub.join("public/x"), false),
+    ] {
+        let result = claude(
+            &rig,
+            Mode::Full,
+            format!("tool-read:{}", path.display()),
+            |r| r.cwd = Some(sub.clone()),
+        )
+        .await;
+        assert_eq!(
+            !denied(&result).is_empty(),
+            want_denied,
+            "{}",
+            path.display()
+        );
+    }
     rig.assert_nothing_left().await;
 }
 
@@ -950,4 +949,193 @@ async fn deny_rules_with_commas_brackets_quotes_and_spaces_reach_the_provider_in
     assert!(!argv[at + 1].contains("deny me"));
     assert!(!argv[at + 1].contains("x],[y"));
     assert!(denied(&result).is_empty());
+}
+
+// ---- repository roots ----
+
+fn git_dir(path: &Path) {
+    std::fs::create_dir_all(path.join(".git")).unwrap();
+}
+
+#[test]
+fn local_settings_are_also_read_from_the_repository_root_and_shared_settings_are_not() {
+    let rig = Rig::new();
+    git_dir(&rig.work);
+    let sub = rig.work.join("a/b");
+    std::fs::create_dir_all(&sub).unwrap();
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Bash(root-local)"]),
+    );
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Bash(root-shared)"]),
+    );
+    put(
+        &sub.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(sub-local)"]),
+    );
+    put(
+        &sub.join(".claude/settings.json"),
+        &deny_file(&["Bash(sub-shared)"]),
+    );
+    let mut request = rig.request(Provider::Claude, "p");
+    request.cwd = Some(sub.clone());
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        ["Bash(sub-shared)", "Bash(sub-local)", "Bash(root-local)"]
+    );
+    // Started at the root, the root's local file is read once.
+    let plan = dry(&rig);
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        ["Bash(root-shared)", "Bash(root-local)"]
+    );
+}
+
+#[test]
+fn without_a_git_repository_only_the_start_directory_is_read() {
+    let rig = Rig::new();
+    let sub = rig.work.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Bash(parent)"]),
+    );
+    let mut request = rig.request(Provider::Claude, "p");
+    request.cwd = Some(sub);
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    assert_eq!(plan.deny_rules.applied, 0);
+}
+
+#[test]
+fn a_linked_worktree_also_reads_the_main_checkouts_local_settings() {
+    let rig = Rig::new();
+    let main = rig.home.join("main");
+    git_dir(&main);
+    std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
+    put(
+        &main.join(".claude/settings.local.json"),
+        &deny_file(&["Bash(main-local)"]),
+    );
+    let linked = rig.work.clone();
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}/.git/worktrees/w\n", main.display()),
+    )
+    .unwrap();
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Bash(linked-local)"]),
+    );
+    let sub = linked.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.cwd = Some(sub);
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        ["Bash(linked-local)", "Bash(main-local)"]
+    );
+
+    // A `.git` file that points nowhere useful leaves the nearest root only.
+    std::fs::write(linked.join(".git"), "gitdir: /nonexistent/x\n").unwrap();
+    let plan = dry(&rig);
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(linked-local)"]);
+}
+
+// ---- file handling ----
+
+#[test]
+fn an_empty_file_is_no_rules_and_a_byte_order_mark_is_stripped() {
+    let rig = Rig::new();
+    put(&user_file(&rig), "  \n");
+    let plan = dry(&rig);
+    assert_eq!(plan.deny_rules.applied, 0);
+    assert_eq!(plan.deny_rules.files.len(), 1);
+    put(&user_file(&rig), "");
+    assert_eq!(dry(&rig).deny_rules.files.len(), 1);
+    put(
+        &user_file(&rig),
+        &format!("\u{feff}{}", deny_file(&["Bash(bom)"])),
+    );
+    assert_eq!(dry(&rig).deny_rules.user_deny_rules, ["Bash(bom)"]);
+}
+
+#[test]
+fn a_named_pipe_is_refused_without_blocking() {
+    let rig = Rig::new();
+    let fifo = user_file(&rig);
+    let status = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success());
+    let error = dry_run(
+        &rig.request(Provider::Claude, "p"),
+        &rig.options(Provider::Claude),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains("not a regular file"), "{error}");
+}
+
+#[test]
+fn a_file_that_cannot_be_read_refuses_naming_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new();
+    let path = user_file(&rig);
+    put(&path, &deny_file(&["Bash(x)"]));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A process that may read it anyway (root) cannot show the refusal.
+    if std::fs::File::open(&path).is_ok() {
+        return;
+    }
+    let error = dry_run(
+        &rig.request(Provider::Claude, "p"),
+        &rig.options(Provider::Claude),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains(path.to_str().unwrap()), "{error}");
+    assert!(error.message.contains("cannot be opened"), "{error}");
+}
+
+#[test]
+fn a_home_reached_through_a_link_is_shown_by_its_real_path() {
+    let rig = Rig::new();
+    let real = rig.work.join("real-home");
+    put(
+        &real.join(".claude/settings.json"),
+        &deny_file(&["Bash(x)"]),
+    );
+    let link = rig.work.join("link-home");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut options = rig.options(Provider::Claude);
+    options.env_set.retain(|(n, _)| n != "CLAUDE_CONFIG_DIR");
+    let env = options.parent_env.as_mut().unwrap();
+    env.retain(|(n, _)| n != "HOME");
+    env.push((OsString::from("HOME"), link.into_os_string()));
+    let plan = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap();
+    assert_eq!(
+        plan.deny_rules.files[0].path,
+        real.join(".claude/settings.json").display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn what_a_dry_run_reports_is_what_a_run_passes() {
+    let rig = Rig::new();
+    put(
+        &user_file(&rig),
+        &deny_file(&["Bash(a)", "Read(/b)", "Read(c)"]),
+    );
+    let request = rig.request(Provider::Claude, "success");
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    let passed = settings_arg(&rig.argv())["permissions"]["deny"].clone();
+    assert_eq!(passed, json!(plan.deny_rules.user_deny_rules));
+    assert_eq!(plan.deny_rules.applied, passed.as_array().unwrap().len());
 }

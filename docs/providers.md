@@ -280,8 +280,9 @@ same text is accepted for Codex, which has no rule text.
 A Claude worker starts with `--setting-sources ""`, so Claude Code loads none of
 the user's or the project's settings. One part of them is carried over: the
 `permissions.deny` rules. A rule the user wrote can only narrow a run, so delega
-reads those rules itself at launch and adds them to the worker. This follows the
-earlier project's merge (its commit `8fa4645`).
+reads those rules itself at launch and adds them to the worker. The earlier
+project (commit `8fa4645`) did the same for its reviewer workers; this layer
+applies it to every Claude worker and passes rules as written (see Anchoring).
 
 **Files, in order.** The directories come from the environment the worker will
 receive (`ProviderOptions::parent_env`, `env_pass`, `env_set` and the base
@@ -291,12 +292,21 @@ variables), not from the calling process.
    environment has it, otherwise `.claude/settings.json` under the worker's
    `HOME`. When the worker has neither, no user file is looked for and a note
    says so.
-2. `.claude/settings.json` under the working directory.
-3. `.claude/settings.local.json` under the working directory.
+2. `.claude/settings.json` under the working directory, and only there, as
+   Claude Code reads it.
+3. `.claude/settings.local.json` under the working directory, then under the root
+   of the git repository the working directory is inside (Claude Code reads it
+   from the repository root as well as the start directory), then under the main
+   checkout when that root is a linked worktree. The root is the nearest ancestor
+   holding `.git`. For a worktree, the `.git` file's `gitdir:` line is followed to
+   the main checkout's `.git/worktrees/<name>`; if that cannot be followed only
+   the nearest root is read. `git` is not run.
 
-Managed (enterprise) settings are not read, and nothing is looked for in the
-parent directories of the working directory. A symbolic link to a regular file is
-followed. A missing file contributes nothing.
+Home and configuration directories are resolved to their real paths, so paths in
+notes are real paths. Managed (enterprise) settings are not read. A symbolic link
+to a regular file is followed. A missing file contributes nothing, and an empty
+file (or one with only whitespace) is a file with no rules. A UTF-8 byte order
+mark is ignored.
 
 **What is taken.** Only `permissions.deny`, a list of strings. Everything else in
 a file is dropped when it is parsed and is in no argument, note, result or dry
@@ -306,32 +316,37 @@ instructions and the `allow` and `ask` lists.
 **Refused before start.** A file that exists and cannot be used refuses the run,
 with kind `settings_unreadable`, naming the file and the reason and never its
 content: it cannot be inspected or read, it is not a regular file (a directory,
-device or pipe is refused before it is opened), it is larger than
+device or pipe is refused before it is opened, and the file is opened without
+blocking and checked again), it is larger than
 `SETTINGS_FILE_BYTES` (1 MiB), it is not a JSON object, `permissions` is not an
 object, `permissions.deny` is not a list, an entry is not a string, is empty or
 holds a control character. A rule over a bound refuses with kind
 `deny_rules_over_limit`: more than `MAX_DENY_RULES_PER_FILE` (256) in a file,
-more than `MAX_DENY_RULES` (512) after anchoring and removing duplicates, or a
+more than `MAX_DENY_RULES` (512) after removing duplicates and adding the
+absolute form of one-slash rules, or a
 rule longer than `MAX_DENY_RULE_CHARS` (512). Nothing is truncated; a rule the
 user set is never dropped to make the run fit. The generated settings argument
 is also held to `SETTINGS_ARGUMENT_LIMIT`.
 
-**Anchoring.** A `Read` or `Edit` rule with a relative path is rewritten to an
-absolute path so it keeps its meaning wherever the worker runs. A rule in the
-user file is anchored to the worker's home directory and a rule in a project file
-to the working directory: `Read(secrets/**)` and `Read(./secrets/**)` become
-`Read(//BASE/**/secrets/**)`, and a rule with one leading slash
-(`Edit(/build/out)`, a path from the root of its settings) becomes
-`Edit(//BASE/build/out)`. Rules for other tools and rules whose path starts with
-`//` or `~/` or contains `:` are passed unchanged. A base containing glob
-characters is escaped, and the original rule is passed as well when escaping or a
-parenthesis was needed. Duplicates are removed, keeping the first.
+**Anchoring.** Every rule is passed as written. Claude Code resolves `path` and
+`./path` against the working directory in every settings source (a live probe of
+inline `--settings` showed `Read(./secret.txt)`, `Read(secret.txt)` and
+`Read(**/secret.txt)` each deny `secret.txt` and `sub/secret.txt` under the
+working directory), so those need no help. The one form that loses its meaning
+inline is a `Read` or `Edit` rule with exactly one leading slash, which Claude
+Code defines as relative to the settings file's location: for it the original
+rule is passed and an absolute rule `//BASE/path` is added beside it, where BASE
+is the directory holding the user's `settings.json` (the configuration
+directory, also when `CLAUDE_CONFIG_DIR` is set) or the directory holding the
+project's `.claude`. Adding a rule can only narrow a run. Rules for other tools
+and rules starting `//` or `~/` are unchanged. Glob characters in BASE are
+escaped. Duplicates are removed, keeping the first.
 
 **How they are passed.** The rules are the `permissions.deny` array of the JSON
 given to `--settings`, in all three modes (deny narrows `full` too):
 
 ```json
-{"disableAllHooks":true,"permissions":{"deny":["Read(//base/**/secret.txt)"]}}
+{"disableAllHooks":true,"permissions":{"deny":["Read(./secret.txt)","Edit(/out/x)","Edit(//base/out/x)"]}}
 ```
 
 A rule is the user's own text, so a comma, bracket, quote or space in it is not
@@ -637,6 +652,12 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
 - The Codex `workspace-write` sandbox blocks writes outside the working
   directory.
 - Session resume works on both.
+- Deny rules passed as `permissions.deny` in the `--settings` JSON with empty
+  settings sources are applied, on 2026-11-18 with Claude Code 2.1.328: a project
+  deny rule blocks `Read`, hides the file from `Grep`, and overrides an allowed
+  command. Relative rules in inline settings (`./x`, `x`, `**/x`) resolve against
+  the working directory and match at any depth. Not run: the added absolute form
+  of one-slash rules.
 
 ## Unverified against the real CLI
 
@@ -657,7 +678,6 @@ each.
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
-| Claude Code accepts `permissions.deny` in the `--settings` JSON when `--setting-sources` is empty, and a deny rule wins over an allow rule, an allowed tool and any mode, including for `Grep` and `Glob` under a `Read` rule and `Write` under an `Edit` rule | Assumed from the earlier project, which passed deny rules this way. The fake Claude models it. Not run against the real CLI. |
 | With empty settings sources Claude Code still reads the working directory's own `CLAUDE.md` | Not controlled. A note on every run says what delega does and does not load. |
 | A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
 | Codex words a usage or rate limit failure with "usage limit", "rate limit", "quota" or "context window", and Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |

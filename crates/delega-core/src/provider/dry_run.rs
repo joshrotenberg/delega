@@ -19,7 +19,7 @@ use super::refusal::{Refusal, clip};
 pub struct DenyReport {
     /// The settings files that exist and were read, with their rule counts.
     pub files: Vec<DenyFile>,
-    /// How many rules would be passed after anchoring and deduplication.
+    /// How many rules would be passed after deduplication and adding absolute forms.
     pub applied: usize,
     /// The rules themselves: the user's own permission patterns, as they would
     /// be passed, at most [`DRY_RUN_DENY_RULES_SHOWN`] of them and each at most
@@ -81,25 +81,19 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
     if let Some(index) = plan.mcp_index {
         args[index] = MCP_PLACEHOLDER.to_string();
     }
+    // What is reported is read back from the argument that would be passed, so
+    // the report cannot differ from the launch.
+    let passed = take_deny_rules(&mut args);
     let deny_rules = DenyReport {
         files: plan.deny.files.clone(),
-        applied: plan.deny.rules.len(),
-        user_deny_rules: plan
-            .deny
-            .rules
+        applied: passed.len(),
+        user_deny_rules: passed
             .iter()
             .take(DRY_RUN_DENY_RULES_SHOWN)
             .map(|rule| clip(rule, DRY_RUN_DENY_RULE_CHARS))
             .collect(),
-        omitted: plan
-            .deny
-            .rules
-            .len()
-            .saturating_sub(DRY_RUN_DENY_RULES_SHOWN),
+        omitted: passed.len().saturating_sub(DRY_RUN_DENY_RULES_SHOWN),
     };
-    if !plan.deny.rules.is_empty() {
-        hide_deny_rules(&mut args, plan.deny.rules.len());
-    }
     let program = plan.program.display().to_string();
     let mut before_start = vec![format!(
         "{program} --version, to record the provider version"
@@ -132,19 +126,32 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
     })
 }
 
-/// Replace the deny rules in the `--settings` argument by their count, so the
-/// rules appear in a dry run only under their own heading.
-fn hide_deny_rules(args: &mut [String], count: usize) {
+/// Take the deny rules out of the `--settings` argument and leave their count in
+/// their place, so the rules appear in a dry run only under their own heading.
+fn take_deny_rules(args: &mut [String]) -> Vec<String> {
     let Some(at) = args.iter().position(|a| a == "--settings") else {
-        return;
+        return Vec::new();
     };
     let Some(arg) = args.get_mut(at + 1) else {
-        return;
+        return Vec::new();
     };
     let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(arg) else {
-        return;
+        return Vec::new();
     };
-    settings["permissions"] =
-        serde_json::json!({ "deny": [format!("<{count} deny rules, listed under deny_rules>")] });
-    *arg = settings.to_string();
+    let rules: Vec<String> = settings
+        .pointer("/permissions/deny")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !rules.is_empty() {
+        settings["permissions"] = serde_json::json!({
+            "deny": [format!("<{} deny rules, listed under deny_rules>", rules.len())]
+        });
+        *arg = settings.to_string();
+    }
+    rules
 }

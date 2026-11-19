@@ -16,7 +16,7 @@ pub const SETTINGS_ARGUMENT_LIMIT: usize = 120 * 1024;
 pub const SETTINGS_FILE_BYTES: usize = 1024 * 1024;
 /// Most deny rules accepted from one settings file.
 pub const MAX_DENY_RULES_PER_FILE: usize = 256;
-/// Most deny rules passed to a worker after anchoring and deduplication.
+/// Most deny rules passed to a worker after deduplication and adding absolute forms.
 pub const MAX_DENY_RULES: usize = 512;
 /// The longest single deny rule, in characters.
 pub const MAX_DENY_RULE_CHARS: usize = 512;

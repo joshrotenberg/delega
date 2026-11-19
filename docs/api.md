@@ -150,7 +150,8 @@ Behavior:
   it inherits no hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers or
   instructions from the user's or the project's Claude Code settings. It does get
   their `permissions.deny` rules: delega reads the user's settings file and the
-  working directory's `.claude/settings.json` and `settings.local.json`, takes
+  working directory's `.claude/settings.json` and `settings.local.json` (the
+  latter also from the git repository root), takes
   only that list, and adds the rules to the worker, where they can only narrow
   the run (also in `full`). A settings file that exists and cannot be used
   (unreadable, not JSON, a wrong type, over a limit) refuses the run with kind

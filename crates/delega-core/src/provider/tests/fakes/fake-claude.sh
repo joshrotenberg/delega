@@ -16,7 +16,7 @@
 # cover Edit, Write and NotebookEdit, a bare tool name denies every call, a
 # `Bash(cmd)` rule matches the exact command and `Bash(prefix:*)` a prefix, and a
 # path rule matches as a glob (`//abs/**`, `//abs/**/name`) or, when relative,
-# from the working directory. Nothing else is evaluated.
+# from the working directory at any depth. Nothing else is evaluated.
 #
 # FAKE_SPLIT=naive makes it read the rule list the way a CLI that splits on
 # commas and all whitespace, ignoring parentheses, would.
@@ -132,8 +132,13 @@ denied() {
       "//"*) path="/${spec#//}" ;;
       "~/"*) continue ;;
       "/"*) path="$here/${spec#/}" ;;
-      "./"*) path="$here/${spec#./}" ;;
-      *) path="$here/$spec" ;;
+      # A relative rule resolves against the working directory and matches at
+      # any depth, as a live probe of the real CLI showed.
+      *)
+        spec=${spec#./}
+        spec=${spec#"**/"}
+        path="$here/**/$spec"
+        ;;
     esac
     zero=$(printf '%s' "$path" | sed 's|\*\*/||g')
     some=$(printf '%s' "$path" | sed 's|\*\*|*|g')
