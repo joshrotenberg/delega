@@ -65,11 +65,11 @@ Out of scope:
 | Path | Holds |
 | --- | --- |
 | `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and the supervisor (`supervisor`: several workers at once, with follow-ups, a queue, limits, wait, read, interrupt and close). |
-| `schemas` | JSON Schemas for the request and result, generated from the core types, and under `schemas/mcp` the input and output schemas of each MCP tool. |
+| `schemas` | JSON Schemas for the request and result, generated from the core types, the doctor report, the optional user-level configuration file (`config.schema.json`, described in `docs/api.md`), and under `schemas/mcp` the input and output schemas of each MCP tool. |
 | `crates/delega-mcp` | The MCP server over the supervisor: the seven tools, the skills and the identity as resources, and serving on standard input and output with an orderly stop. Its tests run the router in process against the fake providers. |
 | `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
 | `acceptance` | `delega-acceptance`, the acceptance test for criteria 1 and 2: it drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. Results are in `acceptance/RESULTS.md`. |
-| `docs/api.md` | The agreed design for the CLI and MCP surface. |
+| `docs/api.md` | The agreed design for the CLI and MCP surface, including the optional user-level configuration file (`~/.config/delega/config.toml`). |
 | `docs/supervisor.md` | The supervisor API, the worker and run states with their transition tables, limits and defaults, retention, and what is not built. |
 | `docs/providers.md` | How each provider is started: command shape, permission mapping, `native_args` allowlist, environment policy, and what is unverified against the real CLIs. |
 

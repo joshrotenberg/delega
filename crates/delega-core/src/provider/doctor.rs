@@ -128,8 +128,9 @@ pub struct ProviderCheck {
     pub provider: Provider,
     /// The executable a run would use, or null when none was found.
     pub executable: Option<String>,
-    /// Where the lookup found it: the override variable's name, `PATH`, or
-    /// `option` when a library caller set `ProviderOptions::executable`.
+    /// Where the lookup found it: the override variable's name, `config` (the
+    /// configuration file), `PATH`, or `option` when a library caller set
+    /// `ProviderOptions::executable`.
     pub executable_source: Option<String>,
     /// The first line of `--version` output, or null when there was none.
     pub version: Option<String>,
@@ -157,7 +158,14 @@ fn source(provider: Provider, options: &ProviderOptions) -> String {
         .rev()
         .find(|(n, _)| n.to_str() == Some(variable))
         .is_some_and(|(_, v)| !v.is_empty());
-    if set { variable } else { "PATH" }.to_string()
+    if set {
+        variable
+    } else if options.configured_executable(provider).is_some() {
+        "config"
+    } else {
+        "PATH"
+    }
+    .to_string()
 }
 
 /// Check one provider in the current directory. Returns what was found and the

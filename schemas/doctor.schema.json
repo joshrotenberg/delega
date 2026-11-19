@@ -4,6 +4,10 @@
   "description": "The whole report.",
   "type": "object",
   "properties": {
+    "config": {
+      "description": "The configuration file, and whether it was read.",
+      "$ref": "#/$defs/ConfigReport"
+    },
     "cwd": {
       "description": "The working directory the checks used.",
       "type": "string"
@@ -60,6 +64,7 @@
     "cwd",
     "providers",
     "process_inspection",
+    "config",
     "limits",
     "problems",
     "skills"
@@ -106,6 +111,60 @@
       "required": [
         "required_version",
         "available"
+      ]
+    },
+    "ConfigReport": {
+      "description": "The user-level configuration file: where it is looked for and what came of\nit. No value from the file is in the report, only the names of the keys it\nsets and counts.",
+      "type": "object",
+      "properties": {
+        "env_pass": {
+          "description": "How many names `[env] pass` lists.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "env_set": {
+          "description": "How many variables `[env.set]` sets.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "found": {
+          "description": "Whether something exists at the path, usable or not.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The path the file is looked for at, or null when there is no place to\nlook (no `DELEGA_CONFIG`, no absolute `XDG_CONFIG_HOME` or `HOME`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read": {
+          "description": "Whether the file was read and is in effect. A file that is found and\nrefused is a problem, and nothing from it is applied.",
+          "type": "boolean"
+        },
+        "settings": {
+          "description": "The keys the file sets, as dotted names such as `defaults.model`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "description": "What chose the path: `DELEGA_CONFIG`, `XDG_CONFIG_HOME` or `HOME`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "found",
+        "read",
+        "settings",
+        "env_pass",
+        "env_set"
       ]
     },
     "DenyFile": {
@@ -307,7 +366,7 @@
           ]
         },
         "executable_source": {
-          "description": "Where the lookup found it: the override variable's name, `PATH`, or\n`option` when a library caller set `ProviderOptions::executable`.",
+          "description": "Where the lookup found it: the override variable's name, `config` (the\nconfiguration file), `PATH`, or `option` when a library caller set\n`ProviderOptions::executable`.",
           "type": [
             "string",
             "null"

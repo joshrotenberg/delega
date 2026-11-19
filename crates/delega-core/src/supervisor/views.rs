@@ -446,6 +446,8 @@ pub struct LimitsView {
     pub retention_secs: u64,
     /// The longest one wait blocks, in seconds.
     pub wait_ceiling_secs: u64,
+    /// The timeout a wait uses when it is given none, in seconds.
+    pub default_wait_secs: u64,
 }
 
 /// One worker in `list`.

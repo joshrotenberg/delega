@@ -144,7 +144,9 @@ pub fn refuse(format: OutputFormat, failure: &Failure, log: &Log) -> ExitCode {
     }
 }
 
-/// Print the refusal of a dry run.
+/// Print a refusal that is not a list of request problems: a dry run refused, or
+/// the configuration file that could not be used. In JSON mode the refused result
+/// is the document.
 pub fn refuse_dry_run(
     format: OutputFormat,
     facts: &Facts,

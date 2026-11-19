@@ -57,6 +57,23 @@ and the message names each part. `--full` is never refused for this.
 A permission the worker asks for and was not granted is answered no at once. It
 is listed in `permissions.denied` in the result.
 
+## Defaults from the user's configuration file
+
+The user may keep defaults in `~/.config/delega/config.toml` (under
+`XDG_CONFIG_HOME` when that is set): a provider, model, effort, time limit and
+permission mode, names and values to give every worker, and provider
+executables. They sit under a profile, and a profile sits under a flag, so a
+flag you pass always wins. Names in the file's environment section are added to
+those you pass with `--env`. No file in the repository or the working directory
+is ever read. You cannot see the file's content from a run, so use `--dry-run` to
+see the merged request, and `delega doctor` to see whether the file was read and
+which keys it sets, never their values. A file that cannot be used is never
+ignored: the run is `refused` before anything else, with `config_unreadable` for
+a file that is unsafe or unreadable (group or others can write to it, another
+user owns it) and `config_invalid` for one with an unknown key or a bad value.
+The message names the file and the key. Tell the user; do not try to work around
+it.
+
 ## Preview first
 
 `--dry-run` validates the merged request and prints the provider executable,

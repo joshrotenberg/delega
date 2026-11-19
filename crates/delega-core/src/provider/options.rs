@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::contract::request::Provider;
 use crate::contract::result::WorkerRef;
 
 use super::hook::HookCommand;
@@ -20,6 +21,13 @@ pub struct ProviderOptions {
     /// `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` from the parent environment,
     /// then the provider's name on the absolute entries of `PATH`.
     pub executable: Option<PathBuf>,
+    /// The Claude Code executable from a configuration file, an absolute path.
+    /// Used when `executable` is absent and `DELEGA_CLAUDE_BIN` is unset or
+    /// empty; it comes before the search of `PATH`.
+    pub claude_executable: Option<PathBuf>,
+    /// The Codex executable from a configuration file; as `claude_executable`,
+    /// with `DELEGA_CODEX_BIN`.
+    pub codex_executable: Option<PathBuf>,
     /// The command that runs the exact command guard for Claude Code. Without
     /// it, `permissions.commands` is not granted to a Claude worker and the
     /// result says so. See [`super::hook`].
@@ -62,6 +70,14 @@ pub struct ProviderOptions {
 }
 
 impl ProviderOptions {
+    /// The executable a configuration file names for `provider`.
+    pub(super) fn configured_executable(&self, provider: Provider) -> Option<&PathBuf> {
+        match provider {
+            Provider::Claude => self.claude_executable.as_ref(),
+            Provider::Codex => self.codex_executable.as_ref(),
+        }
+    }
+
     /// The environment to inherit from.
     pub(super) fn parent_env(&self) -> Vec<(OsString, OsString)> {
         match &self.parent_env {
@@ -81,6 +97,8 @@ impl fmt::Debug for ProviderOptions {
         });
         f.debug_struct("ProviderOptions")
             .field("executable", &self.executable)
+            .field("claude_executable", &self.claude_executable)
+            .field("codex_executable", &self.codex_executable)
             .field("hook", &self.hook)
             .field("env_pass", &self.env_pass)
             .field("env_set_names", &set_names)

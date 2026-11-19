@@ -3,8 +3,10 @@
 use std::io::Read;
 use std::path::Path;
 
+use delega_core::config::Config;
 use delega_core::contract::limits::{
-    DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_PROMPT_BYTES,
+    DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_PROMPT_BYTES, MAX_TIMEOUT_SECS,
+    MIN_TIMEOUT_SECS,
 };
 use delega_core::contract::partial::{PartialPermissions, PartialRequest, PartialSession};
 use delega_core::contract::permissions::Mode;
@@ -48,13 +50,30 @@ pub struct Failure {
     pub facts: Facts,
 }
 
-/// Build the request: the profile first, explicit flags over it, then the
-/// contract's own validation. Problems in reading the inputs are reported
+/// What a refusal before any request exists still reports: the provider and the
+/// mode the flags name, and the time limit they give or the default. The
+/// configuration file is not consulted, because the refusal may be about it.
+pub fn flag_facts(args: &Args) -> Facts {
+    Facts {
+        provider: provider(args),
+        mode: mode(args).unwrap_or_default(),
+        // A raw `--timeout` outside the contract's range is not carried into a
+        // result: it would state a limit that no run could have had.
+        timeout_secs: args
+            .timeout
+            .filter(|t| (MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(t))
+            .unwrap_or(DEFAULT_TIMEOUT_SECS),
+    }
+}
+
+/// Build the request: the configuration file's defaults first, then the
+/// profile, then explicit flags over both, then the contract's own validation. Problems in reading the inputs are reported
 /// together and stop before validation, which would only repeat them as a
 /// missing field.
-pub fn build(args: &Args) -> Result<Request, Failure> {
+pub fn build(args: &Args, config: &Config) -> Result<Request, Failure> {
     let mut problems = Vec::new();
-    let merged = profile::merge(
+    let merged = profile::merge_over(
+        config.request_defaults(),
         args.request.as_deref(),
         ErrorDetail::Full,
         &mut problems,
@@ -81,10 +100,7 @@ pub fn build(args: &Args) -> Result<Request, Failure> {
 /// nothing, so it never overrides the profile.
 fn flags(args: &Args, problems: &mut Vec<Problem>) -> PartialRequest {
     PartialRequest {
-        provider: args.provider.map(|p| match p {
-            ProviderArg::Claude => Provider::Claude,
-            ProviderArg::Codex => Provider::Codex,
-        }),
+        provider: provider(args),
         prompt: prompt(args, problems),
         cwd: args.cwd.clone(),
         name: args.name.clone(),
@@ -104,6 +120,13 @@ fn flags(args: &Args, problems: &mut Vec<Problem>) -> PartialRequest {
         native_args: (!args.native_args.is_empty()).then(|| args.native_args.clone()),
         ..PartialRequest::default()
     }
+}
+
+fn provider(args: &Args) -> Option<Provider> {
+    args.provider.map(|p| match p {
+        ProviderArg::Claude => Provider::Claude,
+        ProviderArg::Codex => Provider::Codex,
+    })
 }
 
 fn prompt(args: &Args, problems: &mut Vec<Problem>) -> Option<String> {
@@ -166,8 +189,9 @@ fn read_schema(path: &Path, problems: &mut Vec<Problem>) -> Option<Value> {
     }
 }
 
-fn permissions(args: &Args) -> Option<PartialPermissions> {
-    let mode = if args.full {
+/// The permission mode the flags name, if any.
+fn mode(args: &Args) -> Option<Mode> {
+    if args.full {
         Some(Mode::Full)
     } else if args.write {
         Some(Mode::Write)
@@ -175,7 +199,11 @@ fn permissions(args: &Args) -> Option<PartialPermissions> {
         Some(Mode::Read)
     } else {
         None
-    };
+    }
+}
+
+fn permissions(args: &Args) -> Option<PartialPermissions> {
+    let mode = mode(args);
     let commands = (!args.allow_command.is_empty()).then(|| args.allow_command.clone());
     let directories = (!args.add_dir.is_empty()).then(|| args.add_dir.clone());
     let strict = args.strict.then_some(true);

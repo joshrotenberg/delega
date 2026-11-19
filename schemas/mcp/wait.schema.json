@@ -23,7 +23,7 @@
         "default": []
       },
       "timeout_secs": {
-        "description": "How long to wait, in seconds. Default 30, capped by the server's wait\nceiling. A timeout is not an error.",
+        "description": "How long to wait, in seconds. Default 30 unless the server's configuration file sets another, capped by the server's wait\nceiling. A timeout is not an error.",
         "type": [
           "integer",
           "null"

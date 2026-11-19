@@ -44,7 +44,7 @@ pub struct WaitArgs {
     /// Worker ids. The wait ends when the worker's current run finishes.
     #[serde(default)]
     pub workers: Vec<String>,
-    /// How long to wait, in seconds. Default 30, capped by the server's wait
+    /// How long to wait, in seconds. Default 30 unless the server's configuration file sets another, capped by the server's wait
     /// ceiling. A timeout is not an error.
     #[serde(default)]
     pub timeout_secs: Option<u64>,

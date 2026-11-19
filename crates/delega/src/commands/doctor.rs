@@ -32,11 +32,19 @@ pub fn run(args: Args) -> ExitCode {
         Ok(runtime) => runtime,
         Err(err) => return unable(&format!("cannot start the async runtime: {err}")),
     };
-    let options = ProviderOptions {
+    let mut options = ProviderOptions {
         hook: super::guard_command(),
         ..ProviderOptions::default()
     };
-    let report = runtime.block_on(delega_core::doctor::diagnose(&options));
+    // A configuration file that is in effect shapes what a run would meet, so
+    // its environment and executables are applied here too. One that is refused
+    // is reported as a problem and nothing from it is applied: the rest of the
+    // report is what a run would meet without it.
+    let status = super::config::read();
+    if let Some(config) = status.config() {
+        config.apply_to_options(&mut options);
+    }
+    let report = runtime.block_on(delega_core::doctor::diagnose_with(&options, &status));
     // The version probe has ended; a stuck helper thread must not hold the exit.
     runtime.shutdown_timeout(std::time::Duration::from_secs(5));
     let report = match report {

@@ -4,7 +4,8 @@ This document describes the surface: the contract, the command line, the MCP
 server and the skills. The request and result contract, the CLI commands `run`,
 `mcp`, `init`, `uninstall`, `doctor`, `schema`, `skill` and `version`, the
 provider layer behind `run`, the library `Supervisor`
-([supervisor.md](supervisor.md)) and the MCP server over it are built. Josh
+([supervisor.md](supervisor.md)), the MCP server over it and the user-level
+[configuration file](#configuration-file) are built. Josh
 settled the open questions on 2026-11-18; the decisions and what was deferred are
 listed at the end. Parts marked **Later** are not built.
 [Where each part comes from](#where-each-part-comes-from) maps each part to its
@@ -51,7 +52,9 @@ Error kinds are listed in [providers.md](providers.md#error-kinds). The
 supervisor adds the refusals `name_in_use`, `limit_reached`, `queue_full`,
 `worker_closed`, `no_session` and `preflight_timeout`, and `delega mcp` adds
 `cwd_required` (see [MCP](#mcp)). `delega run` adds `runtime_unavailable` and
-`signals_unavailable` (see [Command line](#command-line)).
+`signals_unavailable` (see [Command line](#command-line)). `delega run` and
+`delega mcp` add `config_unreadable` and `config_invalid`, for a configuration
+file they cannot use (see [Configuration file](#configuration-file)).
 
 ## The request
 
@@ -110,7 +113,10 @@ neither reads nor commands. With Claude Code it refuses only
 `permissions.strict: false` to override a profile.
 
 Refusals before start come in a fixed order, and the first one found is
-reported: `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
+reported. For `delega run` the first of all is the configuration file
+(`config_unreadable`, `config_invalid`, or `invalid_env_name` or
+`forbidden_env_name` for a name in its `[env]`), because the request is built
+from it; see [Configuration file](#configuration-file). Then `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
 `cwd_unusable` or `directory_unusable`, `provider_not_found`, Claude Code's
 `settings_unreadable` and `deny_rules_over_limit` from reading the settings
 files, then the provider's own mapping of the request (for Claude Code:
@@ -254,6 +260,10 @@ Behavior:
   and the status is 2. A name that only one provider's adapter owns (such as
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) is not known to be a problem until a
   worker for that provider starts, and is refused then, as a refused run.
+  The [configuration file](#configuration-file)'s `[env]` section adds names
+  and values the same way, with the same rules and refusals, and both apply: the
+  file's `pass` names and `set` variables come first and the flags' after them,
+  so a flag that sets the same variable wins.
 - **Building the request.** The profile named by `--request` is read first and
   every flag that was given replaces the matching field; a flag that was not
   given leaves the profile's value. Lists (`--allow-command`, `--add-dir`,
@@ -289,7 +299,15 @@ Behavior:
   does not change the status; any other failure to write the result, such as a
   standard output that is not open for writing, is reported on standard error
   and makes a completed run exit 1.
-- **Refusal before a run exists.** An unreadable or invalid profile, a missing
+- **Refusal before a run exists.** A [configuration file](#configuration-file)
+  that cannot be used comes first: it is read before the profile and the flags,
+  and a refusal for it is printed as a `refused` result with its own kind
+  (`config_unreadable`, `config_invalid`, or an environment kind), the status 2,
+  and, with `--progress`, the `finished: refused` line, whatever else is wrong
+  with the request. The result then carries the provider and the mode the flags named,
+  and the time limit of `--timeout` when it is within 1 to 86400 seconds and the
+  default (600) otherwise, because the file is what could not be
+  read. An unreadable or invalid profile, a missing
   prompt or provider, `--prompt` together with `--stdin`, an unreadable or
   malformed schema file, and any other validation problem are printed as a
   `refused` result, not as a usage error: with `--output json` the result has
@@ -382,8 +400,9 @@ Behavior:
   summaries.
 - **Provider executable.** The CLI honours `DELEGA_CLAUDE_BIN` and
   `DELEGA_CODEX_BIN` in its own environment, as the provider layer does
-  ([providers.md](providers.md#finding-the-executable)). There is no flag for
-  it. `--allow-command` for Claude Code is enforced by this executable's own
+  ([providers.md](providers.md#finding-the-executable)), and the executables
+  the [configuration file](#configuration-file) names, which the variables
+  override. There is no flag for it. `--allow-command` for Claude Code is enforced by this executable's own
   hidden `command-guard` subcommand, which Claude Code starts before a `Bash`
   call; it is not part of the public surface.
 - **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface.
@@ -394,7 +413,9 @@ Behavior:
 
 `delega doctor` reports what a run would meet, without starting a worker and
 without writing anything. It has no `--cwd` or `--env`: the checks are those of a run in the current
-directory with no `--env`. It checks both providers,
+directory with no `--env`, with what the [configuration file](#configuration-file)
+adds (its environment names and values and its executables), because a run
+would have them. It checks both providers,
 with the lookup, the version probe, the environment allowlist and the deny-rule
 reader that `run` uses, so the answer is the one a run would get. The only
 provider process it starts is the `--version` probe, with `run`'s five-second
@@ -404,8 +425,8 @@ value, a deny rule or the content of a file.
 It reports, for `claude` and `codex` each:
 
 - the executable a run would use and where it came from (`DELEGA_CLAUDE_BIN` or
-  `DELEGA_CODEX_BIN`, or `PATH`; a library caller that sets
-  `ProviderOptions::executable` gets `option`);
+  `DELEGA_CODEX_BIN`, `config` for the configuration file, or `PATH`; a library
+  caller that sets `ProviderOptions::executable` gets `option`);
 - the version from the probe, and for Claude Code whether the command hook
   interface is available (2.1.325 or later, which `--allow-command` needs); Codex
   has no minimum;
@@ -415,7 +436,15 @@ It reports, for `claude` and `codex` each:
 - for Claude Code, the deny rules a run would apply: the settings files read with
   their rule counts, the local files ignored and why, and the number applied.
 
-It also reports the limits in force, read from the constants the code uses: for a
+It also reports the configuration file: the path it looked at and what chose it
+(`DELEGA_CONFIG`, `XDG_CONFIG_HOME` or `HOME`; null when there is nowhere to
+look), whether something is there (`found`), whether it was read and is in
+effect (`read`), the dotted names of the keys it sets (`settings`, such as
+`defaults.model`) and how many names `[env] pass` lists and variables `[env.set]`
+sets, never a value.
+
+It also reports the limits in force, read from the constants the code uses and,
+for the supervisor, with the `[mcp]` limits of the configuration file applied: for a
 run, the default and the range of the time limit, the output bounds and the
 version probe limit; for the supervisor (see
 [supervisor.md](supervisor.md#limits-and-defaults)), the worker, run and queue
@@ -440,6 +469,9 @@ fails for it.
 | `unsupported_provider_version` | `command_grants` | Claude Code is older than 2.1.325 or its version could not be read, so a run with `--allow-command` is refused. Other runs go ahead. |
 | `settings_unreadable` | `run` | A Claude Code settings file in the user's or the current directory's places exists and cannot be used, so every Claude run here is refused. The message names the file. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound, so every Claude run here is refused. |
+| `config_unreadable` | `run` | The configuration file exists and cannot be used as a file (unreadable, not a regular file, owned by another user, writable by group or others, a link that is not trusted, over 1 MiB), or `DELEGA_CONFIG` names a file that does not exist or a path that is not absolute. About the whole system, so every run is stopped. Nothing from the file is applied to the rest of the report. |
+| `config_invalid` | `run` | The file is not UTF-8 or TOML, has an unknown key, a value of the wrong type or outside its bound, or a path that is not absolute. The message names the key or the line. |
+| `invalid_env_name`, `forbidden_env_name` | `run` | A name in the file's `[env]` that `--env` would refuse for the same reason. |
 | `process_inspection_unavailable` | `cleanup` | The process listing failed, so every cleanup would be reported as not confirmed. Runs still start. |
 
 Another refusal a run would give while it is built, such as a settings argument
@@ -448,14 +480,17 @@ over its bound, is reported under its own kind and blocks `run`. A provider is
 
 **Output.** Text is the default; control characters anywhere in the text report (a provider's version line, paths, messages) are shown as `?`. `--output json` prints one versioned object
 (`schema_version` 1) with `ready`, `version`, `cwd`, `providers`,
-`process_inspection`, `limits`, `problems` and `skills`; its JSON Schema is
+`process_inspection`, `config`, `limits`, `problems` and `skills`; its JSON Schema is
 `schemas/doctor.schema.json`, generated from the types, checked by a test and
 updated like the other schemas with `DELEGA_UPDATE_SCHEMAS=1`. Keys are in
 alphabetical order. `env` and `deny_rules` are null when the launch could not be
 built, and `deny_rules` and `command_hook` are null for Codex.
 
-**Exit status.** 0 when a run can go ahead: at least one provider is ready and
-process inspection works. 1 when no provider is ready, or when process
+**Exit status.** 0 when a run can go ahead: at least one provider is ready,
+process inspection works and the configuration file, if there is one, can be
+used. 1 when no provider is ready, when the configuration file is refused (a
+problem about the whole system, kind `config_*`, that blocks `run`; the rest of
+the report is still printed, as if there were no file), or when process
 inspection is unavailable (runs still start, but no cleanup can be confirmed). 2 when doctor itself cannot run,
 such as an unusable current directory. A provider that is not installed is a
 problem for that provider and does not by itself make the exit 1 when the other
@@ -607,6 +642,135 @@ a foreign registration); 2 for a usage error, including a relative directory and
 no `HOME` without `--install-dir` or `DELEGA_INSTALL_HOME`. Standard error says
 what was refused.
 
+## Configuration file
+
+One optional TOML file holds what a person wants every `delega run`, `delega
+mcp` and `delega doctor` to start from. With no file, behaviour is exactly what
+it is without this section. Its schema is `schemas/config.schema.json`,
+generated from the Rust types, checked by a test and updated like the other
+schemas with `DELEGA_UPDATE_SCHEMAS=1`.
+
+```toml
+schema_version = 1
+
+[defaults]
+provider = "claude"
+model = "sonnet"
+effort = "medium"
+timeout_secs = 1200
+
+[defaults.permissions]
+mode = "read"
+strict = false
+
+[env]
+pass = ["AWS_SESSION_TOKEN", "TOOLCHAIN_HOME"]
+
+[env.set]
+AWS_REGION = "eu-west-1"
+
+[providers.claude]
+executable = "/opt/claude/bin/claude"
+
+[providers.codex]
+executable = "/opt/codex/bin/codex"
+
+[mcp]
+max_live_workers = 8
+max_running_runs = 2
+max_queued_per_worker = 4
+wait_default_secs = 20
+wait_ceiling_secs = 120
+```
+
+**Location.** `DELEGA_CONFIG`, when set and not empty, names the file and must be
+an absolute path. Otherwise `$XDG_CONFIG_HOME/delega/config.toml` when
+`XDG_CONFIG_HOME` is set and absolute (a relative value is ignored, as the XDG
+specification says), otherwise `$HOME/.config/delega/config.toml`; with no
+absolute `HOME` either there is nowhere to look and nothing is configured. No
+file in a repository or in the working directory is ever read. A missing file at
+either default place is no configuration. A missing file that `DELEGA_CONFIG`
+names is refused, because the variable was set on purpose. The file is read when
+a command starts; `delega mcp` reads it once, so a change reaches a server on
+its next start.
+
+**Format.** `schema_version` is required and must be 1. Every key is optional
+otherwise, and an unknown key is refused at any level, naming it (such as
+`mcp.max_workers`). The sections:
+
+| Key | Value |
+| --- | --- |
+| `[defaults]` `provider`, `model`, `effort`, `timeout_secs` | As the request fields of the same name ([The request](#the-request)), with the same bounds: `timeout_secs` 1 to 86400, `model` not empty and not starting with `-`. `prompt` and `cwd` are refused with a message that says why: they belong to one request, not to a default. |
+| `[defaults.permissions]` `mode`, `strict` | As `permissions.mode` and `permissions.strict`. |
+| `[env]` `pass` | A list of names, as `--env NAME`. |
+| `[env.set]` | Names set to string values, as `--env NAME=VALUE`. A value is never printed, in a result, a report, a message or a debug text. |
+| `[providers.claude]`, `[providers.codex]` `executable` | An absolute path. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` overrides it; it comes before `PATH` ([providers.md](providers.md#finding-the-executable)). |
+| `[mcp]` | The supervisor's limits, each bounded by the constant that is its default today, so the file can lower a limit and cannot raise one: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300 and `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300). A file that lowers only the ceiling lowers the default with it, so `list` and `doctor` report what a wait applies. Only `delega mcp` uses them; `delega doctor` shows them. |
+
+The names in `[env]` follow the rules and have the refusals of `--env` ([Command
+line](#command-line)): an invalid name is `invalid_env_name`, a calling-session,
+`DELEGA_*` or adapter-owned name is `forbidden_env_name`, a secret-looking name
+is allowed and noted in `provider_notes` when a run passes it. The position in
+the message counts the entries of `pass` in the file's order and the keys of
+`set` in alphabetical order, and an invalid name is not repeated.
+
+**Precedence.** Built-in defaults, then the file, then a profile (`--request
+FILE`, or `profile` on MCP `start`), then explicit flags or tool arguments, each
+replacing the fields the one before set; a list, such as `permissions.commands`,
+replaces and is not added to. A flag turns `--strict` on only, so a file's
+`strict = true` stays on for `delega run` unless a profile sets `strict = false`;
+over MCP a call can pass `permissions.strict: false`. For `[env]` the file's
+names and values are added to the `--env` names of the run or the server: both
+apply, the file's first, so a flag that sets the same variable wins. `DELEGA_*`
+variables override only executables (`DELEGA_CLAUDE_BIN`, `DELEGA_CODEX_BIN`) and
+the location (`DELEGA_CONFIG`); no other setting has a variable.
+
+**Safety.** The file is used only when it is a regular file owned by the current
+user and not writable by group or others, and at most 1 MiB, and the directory
+that holds it is owned by the user and not writable by group or others (link or
+not, because whoever can write the directory can swap the file or plant a link
+or a hard link). The entry is looked at without following a link first: a
+device, a pipe, a directory or a socket is refused from that result, before it is
+opened, because opening some of them has effects. A regular file is then opened
+without following a link and without blocking, and the owner, the type and the
+mode are checked again on the open handle, so a swap between the look and the
+open is caught; a link swapped in is refused. A symbolic link at the file, as a dotfiles manager makes, is followed only when the user owns the link
+and the directory that holds it, that directory is not writable by group or
+others, and the target passes the same checks; a link to nothing is refused. This
+is the rule `delega` applies to a link in a repository root when it reads Claude
+Code settings, except that a failing link is refused and not skipped, because a
+skipped file would silently drop what the user set.
+
+**Refusals.** A file that cannot be used is never ignored. Every command that
+reads it refuses, with a kind that names the problem, the path, and the key or the
+line, and never a value from the file:
+
+| Kind | When |
+| --- | --- |
+| `config_unreadable` | It cannot be used as a file: it cannot be opened or read, is not a regular file, is owned by another user, is writable by group or others (the message gives the mode), is in a directory that is not the user's or that group or others can write, is a link that fails the rule above, is over 1 MiB, or `DELEGA_CONFIG` names a file that does not exist or a path that is not absolute. |
+| `config_invalid` | It is not UTF-8 or TOML (the message gives the line and column, not the parser's text, which can quote the file), has an unknown key, a value of the wrong type or outside its bound (the message names the key and the bound, or the accepted names for an enumeration), a path that is not absolute, or `mcp.wait_default_secs` above the ceiling. At most ten problems are listed. |
+| `invalid_env_name`, `forbidden_env_name` | A name in `[env]` that `--env` would refuse for the same reason. |
+
+For `delega run` the file is read first, before the profile and the flags, because
+the request is built from it, so it is the first refusal there is: a request with
+no prompt and a file that cannot be used is refused for the file. It is printed
+as a `refused` result like any refusal before a run exists (JSON with `--output
+json`, a line `delega run: refused: <kind>: <message>` in text, status 2), also
+under `--dry-run`. `delega mcp` refuses to start: nothing is served, the line on
+standard error is `delega mcp: refused: <kind>: <message>` and the status is 2.
+`delega doctor` reports it as a problem of the whole system that blocks `run`,
+keeps reporting everything else as if there were no file, and exits 1
+([Doctor](#doctor)).
+
+**Where it is applied.** `delega run`: the request defaults, the environment and
+the executables. `delega mcp`: the `[mcp]` limits (they become the supervisor's
+limits), the `[defaults]` under every `start`, and the environment and
+executables of every worker. `delega doctor`: the same environment and
+executables, so its answer matches a run, the limits in force, and a report of
+the file. The supervisor library's own API is unchanged except that its limits
+have a default wait (`Limits::wait_default`); the command line layers read the
+file and pass the values in.
+
 ## MCP
 
 The MCP server is for a caller that supervises several workers at once: start
@@ -619,7 +783,7 @@ eighth, `respond`, when live asking is added.
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
 | `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
-| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force and in use; a `cursor`. |
+| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`) and in use; a `cursor`. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
 | `close` | `worker` | Stops the worker's running run (at most 30 s), discards queued runs and frees its slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. Results already produced stay readable for the retention time. Closing again answers the same way. |
@@ -659,7 +823,10 @@ Rules that hold for every tool:
   `interrupt` and `close` return compact results.
 - **Limits** are admission limits: 16 live workers, 4 running runs and 16 runs
   queued behind one worker by default, reported by `list` with what is in use,
-  and by `delega doctor` as configured. A closed worker frees its slot. Reaching a limit
+  and by `delega doctor` as configured. The `[mcp]` section of the
+  [configuration file](#configuration-file) can lower each of them, and the
+  default and the ceiling of `wait`; `list` reports the values in force, with
+  `default_wait_secs` beside `wait_ceiling_secs`. A closed worker frees its slot. Reaching a limit
   is a `refused` outcome with the limit named, not a dead end that needs a
   restart. The supervisor applies them so: a `start` beyond the live-worker limit
   is refused (`limit_reached`); a `follow_up` beyond the per-worker queue limit
@@ -742,6 +909,10 @@ Rules that hold for every tool:
   them is rejected as an invalid argument before the request is built. String
   lengths are not in the schema; an over-long value is a refused run
   (`invalid_request`).
+  The merged request starts from the `[defaults]` of the configuration file
+  (see [Configuration file](#configuration-file)): the order is the file, then
+  `profile`, then the arguments of the call, so a `start` that gives no
+  `provider` uses the file's, and one that gives `timeout_secs` replaces it.
   There is no per-call environment argument. `follow_up.timeout_secs` has the
   same range in its schema. `profile` lets the client make the server read a
   path it can read, which is no more than `cwd` with `permissions.mode: full`
@@ -750,7 +921,8 @@ Rules that hold for every tool:
   kind of error and the line and column, and none of the file's text, field
   names or values (`delega run` prints the parser's full message, because the
   file is the caller's own).
-- **Wait.** `timeout_secs` defaults to 30 and is capped by the wait ceiling.
+- **Wait.** `timeout_secs` defaults to 30 (`mcp.wait_default_secs`) and is
+  capped by the wait ceiling (300, `mcp.wait_ceiling_secs`).
   `read` takes `text_offset`, a number of characters, to page a long answer;
   page by run id, because a worker's latest run can change between pages.
 
@@ -764,6 +936,13 @@ never waits on standard error and takes its lock for one line at a time. The
 ready line reads `delega mcp: <version> ready`. At most 128 calls are handled at
 once, and one input message may be at most 32 MiB.
 
+- **Configuration file.** The user-level [configuration file](#configuration-file)
+  is read once, when the server starts. Its `[mcp]` limits become the
+  supervisor's, its `[defaults]` are the lowest layer under every `start`, and
+  its `[env]` and `[providers]` apply to every worker, as for `run`. A file that
+  cannot be used refuses to start the server: nothing is served, the line on
+  standard error is `delega mcp: refused: <kind>: <message>` and the status is 2.
+  A change to the file takes effect when the server is restarted.
 - **Provider executables and environment.** `DELEGA_CLAUDE_BIN` and
   `DELEGA_CODEX_BIN` are honoured as for `run`, and so is the rest that `run`
   reads for provider options: the command guard is this executable's own
@@ -794,8 +973,8 @@ once, and one input message may be at most 32 MiB.
   settled) or the supervisor had failed, which wins over 0 and 130, or the
   transport failed after end of input; each is described on standard error. A
   transport that had to be given up on after a signal does not change 130. 2
-  when the server could not start (a refused `--env`, no async runtime, no
-  signal handlers). A signal during start-up, before the
+  when the server could not start (a refused `--env`, a configuration file that
+  cannot be used, no async runtime, no signal handlers). A signal during start-up, before the
   handlers are installed, takes its default action, and so does SIGKILL, which
   cannot be handled: the workers of a server killed that way keep running.
 - **Second signal.** As in `run`, a signal that arrives while the workers are
@@ -915,6 +1094,13 @@ Settled by Josh on 2026-11-18.
 | Tracing | Stderr progress only in the first version. |
 | Exit status | 0 `completed`, 1 `failed`, 2 `refused`, 124 `timed_out`, 130 `interrupted`. |
 | Onboard skills | Yes: one embedded catalog, reached by `delega skill`, by MCP resources through the Skills extension, and by the installed plugin. |
+
+Settled by Josh on 2026-11-19 (issue 25, built under issue 84):
+
+| Question | Decision |
+| --- | --- |
+| Where configuration lives | One optional user-level file, `~/.config/delega/config.toml` (under `XDG_CONFIG_HOME` when set), read by `run`, `mcp` and `doctor`. No project-level file: a cloned repository cannot change what a worker may do; profiles cover per-project setups. |
+| Precedence | Built-in defaults, then the user file, then a profile, then explicit flags or tool arguments. `DELEGA_*` variables override only executables and paths. |
 
 ## Deferred
 

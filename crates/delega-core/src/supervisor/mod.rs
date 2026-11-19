@@ -304,8 +304,9 @@ impl Supervisor {
     /// finishes, or the time passes. A timeout is a response with `timed_out`,
     /// not an error.
     ///
-    /// `timeout_secs` defaults to [`limits::DEFAULT_WAIT`] and is capped at the
-    /// wait ceiling. With `after_cursor`, returns at once if anything named
+    /// `timeout_secs` defaults to the configured wait default
+    /// ([`limits::DEFAULT_WAIT`] unless changed) and is capped at the wait
+    /// ceiling. With `after_cursor`, returns at once if anything named
     /// finished after it. Pass the response's `cursor` back as `after_cursor`.
     /// Unknown ids are listed in `unknown`; the rest are still waited for.
     pub async fn wait(
@@ -315,7 +316,8 @@ impl Supervisor {
         after_cursor: Option<u64>,
     ) -> Result<WaitResponse, Error> {
         let ceiling = self.shared.config.limits.wait_ceiling;
-        let asked = timeout_secs.map_or(limits::DEFAULT_WAIT, Duration::from_secs);
+        let asked =
+            timeout_secs.map_or(self.shared.config.limits.wait_default, Duration::from_secs);
         let applied = asked.min(ceiling);
         let start = self
             .call(|reply| Command::Wait {

@@ -1,6 +1,8 @@
 //! Refusals before start, executable lookup, version gate and MCP discovery.
 
+use std::ffi::OsString;
 use std::os::unix::fs::symlink;
+use std::path::PathBuf;
 
 use serde_json::json;
 
@@ -8,7 +10,7 @@ use super::{Rig, both, run_checked};
 use crate::contract::outcome::Outcome;
 use crate::contract::request::{Provider, Request};
 use crate::contract::result::Cleanup;
-use crate::provider::{HookCommand, start};
+use crate::provider::{HookCommand, ProviderOptions, start};
 
 fn hook() -> HookCommand {
     HookCommand::new("/opt/delega/hook", ["permission-hook"])
@@ -370,5 +372,59 @@ fn provider_versions_parse_from_the_start_of_the_output() {
     assert_eq!(parse_version("  10.20.30\n"), Some((10, 20, 30)));
     for bad in ["", "2.1", "v2.1.3", "codex-cli 0.9.1", "2.1.x"] {
         assert_eq!(parse_version(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_configured_executable_comes_after_the_override_variable_and_before_path() {
+    use crate::provider::program::{override_variable, resolve};
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fake = Rig::fake(provider);
+        let other = PathBuf::from("/bin/sh");
+        let variable = override_variable(provider);
+        let parent = |value: Option<&str>| {
+            let mut env = vec![(OsString::from("PATH"), OsString::from("/nonexistent"))];
+            if let Some(value) = value {
+                env.push((OsString::from(variable), OsString::from(value)));
+            }
+            env
+        };
+        let mut options = ProviderOptions::default();
+        match provider {
+            Provider::Claude => options.claude_executable = Some(fake.clone()),
+            Provider::Codex => options.codex_executable = Some(fake.clone()),
+        }
+
+        // Alone, it is used; PATH holds nothing.
+        assert_eq!(resolve(provider, &options, &parent(None)).unwrap(), fake);
+        // An empty override variable counts as unset.
+        assert_eq!(
+            resolve(provider, &options, &parent(Some(""))).unwrap(),
+            fake
+        );
+        // The override variable wins over the file.
+        assert_eq!(
+            resolve(provider, &options, &parent(Some("/bin/sh"))).unwrap(),
+            other
+        );
+        // The executable option wins over both.
+        options.executable = Some(PathBuf::from("/bin/ls"));
+        assert_eq!(
+            resolve(provider, &options, &parent(Some("/bin/sh"))).unwrap(),
+            PathBuf::from("/bin/ls")
+        );
+        // A configured path that is not an executable is refused and says where
+        // it came from, without falling back to PATH.
+        options.executable = None;
+        match provider {
+            Provider::Claude => options.claude_executable = Some("/nonexistent/claude".into()),
+            Provider::Codex => options.codex_executable = Some("/nonexistent/codex".into()),
+        }
+        let refusal = resolve(provider, &options, &parent(None)).unwrap_err();
+        assert_eq!(refusal.kind, "provider_not_found");
+        assert!(
+            refusal.message.contains("the configuration file"),
+            "{refusal}"
+        );
     }
 }

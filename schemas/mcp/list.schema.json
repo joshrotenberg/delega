@@ -106,6 +106,12 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0
+          },
+          "default_wait_secs": {
+            "description": "The timeout a wait uses when it is given none, in seconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
           }
         },
         "required": [
@@ -119,7 +125,8 @@
           "retained_bytes",
           "retained_bytes_now",
           "retention_secs",
-          "wait_ceiling_secs"
+          "wait_ceiling_secs",
+          "default_wait_secs"
         ]
       },
       "WorkerView": {

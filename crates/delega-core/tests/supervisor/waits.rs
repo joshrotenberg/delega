@@ -131,6 +131,57 @@ async fn the_wait_ceiling_caps_the_timeout_asked_for() {
 }
 
 #[tokio::test]
+async fn a_wait_with_no_timeout_uses_the_configured_default_and_the_ceiling_still_caps_it() {
+    let rig = Rig::new();
+    let limits = Limits {
+        wait_default: Duration::from_secs(1),
+        wait_ceiling: Duration::from_secs(2),
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let gate = rig.gate("default-wait");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    let response = supervisor
+        .wait(runs(&[&started.run]), None, None)
+        .await
+        .expect("wait");
+    assert!(response.timed_out);
+    assert_eq!(response.timeout_secs, 1);
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.default_wait_secs, 1);
+    assert_eq!(listed.limits.wait_ceiling_secs, 2);
+    // A default above the ceiling is capped like any other timeout.
+    let capped = Limits {
+        wait_default: Duration::from_secs(50),
+        wait_ceiling: Duration::from_secs(1),
+        ..Limits::default()
+    };
+    let second = Supervisor::new(rig.config_with(Provider::Claude, capped));
+    let gate2 = rig.gate("default-capped");
+    let started2 = second
+        .start(rig.request(Provider::Claude, &gate2.prompt()))
+        .await
+        .expect("start");
+    gate2.started().await;
+    let response = second
+        .wait(runs(&[&started2.run]), None, None)
+        .await
+        .expect("wait");
+    assert_eq!(response.timeout_secs, 1);
+    gate.open();
+    gate2.open();
+    result_of(&supervisor, &started.run).await;
+    result_of(&second, &started2.run).await;
+    supervisor.shutdown().await;
+    second.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
 async fn a_cursor_returns_at_once_for_a_finish_after_it_and_not_for_one_before_it() {
     let rig = Rig::new();
     let supervisor = rig.supervisor(Provider::Claude);

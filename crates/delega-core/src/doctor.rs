@@ -99,8 +99,14 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The limits this build applies.
+    /// The limits this build applies when no configuration file changes them.
     pub fn current() -> Self {
+        Self::with_supervisor(&crate::supervisor::Limits::default())
+    }
+
+    /// The limits in force when the supervisor runs with `limits`, which a
+    /// configuration file may have lowered.
+    pub fn with_supervisor(limits: &crate::supervisor::Limits) -> Self {
         Self {
             run: RunLimits {
                 default_timeout_secs: DEFAULT_TIMEOUT_SECS,
@@ -111,16 +117,76 @@ impl Limits {
                 version_probe_timeout_secs: VERSION_PROBE_TIMEOUT.as_secs(),
             },
             supervisor: SupervisorLimits {
-                max_live_workers: supervisor::MAX_LIVE_WORKERS,
-                max_running_runs: supervisor::MAX_RUNNING_RUNS,
-                max_queued_per_worker: supervisor::MAX_QUEUED_PER_WORKER,
-                retained_results: supervisor::RETAINED_RESULTS,
-                retained_bytes: supervisor::RETAINED_BYTES,
-                retention_secs: supervisor::RETENTION.as_secs(),
-                default_wait_secs: supervisor::DEFAULT_WAIT.as_secs(),
-                wait_ceiling_secs: supervisor::WAIT_CEILING.as_secs(),
+                max_live_workers: limits.max_live_workers,
+                max_running_runs: limits.max_running_runs,
+                max_queued_per_worker: limits.max_queued_per_worker,
+                retained_results: limits.retained_results,
+                retained_bytes: limits.retained_bytes,
+                retention_secs: limits.retention.as_secs(),
+                default_wait_secs: limits.wait_default.as_secs(),
+                wait_ceiling_secs: limits.wait_ceiling.as_secs(),
                 max_outstanding_request_checks: supervisor::MAX_PENDING_PREFLIGHTS,
             },
+        }
+    }
+}
+
+/// The user-level configuration file: where it is looked for and what came of
+/// it. No value from the file is in the report, only the names of the keys it
+/// sets and counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConfigReport {
+    /// The path the file is looked for at, or null when there is no place to
+    /// look (no `DELEGA_CONFIG`, no absolute `XDG_CONFIG_HOME` or `HOME`).
+    pub path: Option<String>,
+    /// What chose the path: `DELEGA_CONFIG`, `XDG_CONFIG_HOME` or `HOME`.
+    pub source: Option<String>,
+    /// Whether something exists at the path, usable or not.
+    pub found: bool,
+    /// Whether the file was read and is in effect. A file that is found and
+    /// refused is a problem, and nothing from it is applied.
+    pub read: bool,
+    /// The keys the file sets, as dotted names such as `defaults.model`.
+    pub settings: Vec<String>,
+    /// How many names `[env] pass` lists.
+    pub env_pass: usize,
+    /// How many variables `[env.set]` sets.
+    pub env_set: usize,
+}
+
+impl ConfigReport {
+    /// The report for no configuration: nothing looked for, nothing found.
+    pub fn none() -> Self {
+        Self {
+            path: None,
+            source: None,
+            found: false,
+            read: false,
+            settings: Vec::new(),
+            env_pass: 0,
+            env_set: 0,
+        }
+    }
+
+    /// The report for what reading the configuration gave.
+    pub fn of(status: &crate::config::Status) -> Self {
+        let config = status.config();
+        Self {
+            path: status
+                .location
+                .as_ref()
+                .map(|l| crate::config::display_path(&l.path)),
+            source: status
+                .location
+                .as_ref()
+                .map(|l| l.source.as_str().to_string()),
+            found: status.found,
+            read: config.is_some(),
+            settings: config
+                .map(crate::config::Config::settings)
+                .unwrap_or_default(),
+            env_pass: config.map_or(0, |c| c.env.pass.len()),
+            env_set: config.map_or(0, |c| c.env.set.len()),
         }
     }
 }
@@ -170,6 +236,8 @@ pub struct Report {
     pub providers: Vec<ProviderCheck>,
     /// Whether cleanup can be confirmed.
     pub process_inspection: ProcessInspection,
+    /// The configuration file, and whether it was read.
+    pub config: ConfigReport,
     /// The limits in force.
     pub limits: Limits,
     /// Everything that would stop a run, per provider where it is about one.
@@ -184,6 +252,28 @@ pub struct Report {
 /// as a run starts it. An error means `doctor` itself could not run: the
 /// current directory is unusable.
 pub async fn diagnose(options: &ProviderOptions) -> Result<Report, Refusal> {
+    diagnose_with(
+        options,
+        &crate::config::Status {
+            location: None,
+            found: false,
+            result: Ok(None),
+        },
+    )
+    .await
+}
+
+/// [`diagnose`] for options that already carry what the configuration file
+/// `status` says (its environment and executables, see
+/// [`Config::apply_to_options`](crate::config::Config::apply_to_options)). The
+/// report names the file, applies its `[mcp]` limits to the limits it shows and
+/// lists a refused file as a problem about the whole system that stops every
+/// run. When the file is refused `options` should not carry anything from it:
+/// the rest is still reported, as if there were no file.
+pub async fn diagnose_with(
+    options: &ProviderOptions,
+    status: &crate::config::Status,
+) -> Result<Report, Refusal> {
     let (claude, codex) = tokio::join!(
         doctor::check(Provider::Claude, options),
         doctor::check(Provider::Codex, options)
@@ -227,7 +317,19 @@ pub async fn diagnose(options: &ProviderOptions) -> Result<Report, Refusal> {
             blocks: Blocks::Cleanup,
         });
     }
-    let ready = providers.iter().any(|p| p.ready) && inspection.is_ok();
+    if let Some(refusal) = status.refusal() {
+        problems.push(ReportedProblem {
+            provider: None,
+            kind: refusal.kind.clone(),
+            message: refusal.message.clone(),
+            blocks: Blocks::Run,
+        });
+    }
+    let ready = providers.iter().any(|p| p.ready)
+        && inspection.is_ok()
+        && !problems
+            .iter()
+            .any(|p| p.provider.is_none() && p.blocks == Blocks::Run);
     Ok(Report {
         schema_version: SCHEMA_VERSION,
         ready,
@@ -237,7 +339,12 @@ pub async fn diagnose(options: &ProviderOptions) -> Result<Report, Refusal> {
             .unwrap_or_default(),
         providers,
         process_inspection,
-        limits: Limits::current(),
+        config: ConfigReport::of(status),
+        limits: Limits::with_supervisor(
+            &status
+                .config()
+                .map_or_else(crate::supervisor::Limits::default, |c| c.limits()),
+        ),
         problems,
         skills: crate::skills::catalog()
             .iter()
@@ -290,6 +397,8 @@ impl Report {
                 let _ = writeln!(out, "process inspection: unavailable ({detail})");
             }
         }
+        out.push('\n');
+        config_text(&mut out, &self.config);
         out.push('\n');
         limits_text(&mut out, &self.limits);
         out.push('\n');
@@ -385,6 +494,36 @@ fn provider_text(out: &mut String, found: &ProviderCheck) {
         for file in &deny.skipped {
             let _ = writeln!(out, "    {} ignored: {}", file.path, file.reason);
         }
+    }
+}
+
+fn config_text(out: &mut String, config: &ConfigReport) {
+    out.push_str("configuration file:\n");
+    match (&config.path, &config.source) {
+        (Some(path), Some(source)) => {
+            let _ = writeln!(out, "  path: {path} (from {source})");
+        }
+        _ => {
+            out.push_str("  path: none (no DELEGA_CONFIG, XDG_CONFIG_HOME or HOME to look under)\n")
+        }
+    }
+    let state = match (config.found, config.read) {
+        (_, true) => "found and read",
+        (true, false) => "found but refused, so nothing from it is applied (see problems)",
+        (false, false) => "not found; nothing is configured",
+    };
+    let _ = writeln!(out, "  state: {state}");
+    if config.read {
+        if config.settings.is_empty() {
+            out.push_str("  sets: nothing\n");
+        } else {
+            let _ = writeln!(out, "  sets: {}", config.settings.join(", "));
+        }
+        let _ = writeln!(
+            out,
+            "  environment: {} names passed, {} variables set (values are never shown)",
+            config.env_pass, config.env_set
+        );
     }
 }
 

@@ -26,6 +26,15 @@ fn committed_schemas_doctor_matches_the_generated_schema() {
 
 fn full_report() -> Report {
     Report {
+        config: ConfigReport {
+            path: Some("/h/.config/delega/config.toml".to_string()),
+            source: Some("HOME".to_string()),
+            found: true,
+            read: true,
+            settings: vec!["defaults.model".to_string(), "env.set".to_string()],
+            env_pass: 0,
+            env_set: 1,
+        },
         schema_version: SCHEMA_VERSION,
         ready: false,
         version: "0.1.0".to_string(),
@@ -144,4 +153,81 @@ fn the_exit_status_follows_ready() {
     assert_eq!(report.exit_status(), 1);
     report.ready = true;
     assert_eq!(report.exit_status(), 0);
+}
+
+#[test]
+fn the_text_names_the_file_its_state_and_its_keys() {
+    let report = full_report().to_text();
+    for expected in [
+        "configuration file:",
+        "path: /h/.config/delega/config.toml (from HOME)",
+        "state: found and read",
+        "sets: defaults.model, env.set",
+        "environment: 0 names passed, 1 variables set (values are never shown)",
+    ] {
+        assert!(report.contains(expected), "{expected}\n{report}");
+    }
+    let mut report = full_report();
+    report.config = ConfigReport::none();
+    let text = report.to_text();
+    assert!(text.contains("path: none"), "{text}");
+    assert!(
+        text.contains("state: not found; nothing is configured"),
+        "{text}"
+    );
+    report.config = ConfigReport {
+        path: Some("/c.toml".to_string()),
+        source: Some("DELEGA_CONFIG".to_string()),
+        found: true,
+        read: false,
+        ..ConfigReport::none()
+    };
+    let text = report.to_text();
+    assert!(
+        text.contains("state: found but refused, so nothing from it is applied"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_refused_file_is_reported_as_found_and_not_read() {
+    use crate::config::{Location, Source, Status};
+    let status = Status {
+        location: Some(Location {
+            path: std::path::PathBuf::from("/c.toml"),
+            source: Source::DelegaConfig,
+        }),
+        found: true,
+        result: Err(Refusal {
+            kind: "config_invalid".to_string(),
+            message: "the configuration file /c.toml is not valid: x is not a known key"
+                .to_string(),
+        }),
+    };
+    let report = ConfigReport::of(&status);
+    assert!(report.found && !report.read);
+    assert!(report.settings.is_empty());
+    assert_eq!(report.source.as_deref(), Some("DELEGA_CONFIG"));
+}
+
+#[test]
+fn the_limits_follow_the_supervisor_limits_given() {
+    let lowered = crate::supervisor::Limits {
+        max_live_workers: 3,
+        wait_default: std::time::Duration::from_secs(7),
+        wait_ceiling: std::time::Duration::from_secs(9),
+        ..crate::supervisor::Limits::default()
+    };
+    let limits = Limits::with_supervisor(&lowered);
+    assert_eq!(limits.supervisor.max_live_workers, 3);
+    assert_eq!(limits.supervisor.default_wait_secs, 7);
+    assert_eq!(limits.supervisor.wait_ceiling_secs, 9);
+    assert_eq!(
+        limits.supervisor.max_running_runs,
+        supervisor::MAX_RUNNING_RUNS
+    );
+    assert_eq!(
+        Limits::with_supervisor(&crate::supervisor::Limits::default()),
+        Limits::current()
+    );
 }

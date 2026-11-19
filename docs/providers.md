@@ -27,11 +27,16 @@ Numeric limits are in `provider/limits.rs`.
 In order:
 
 1. `ProviderOptions::executable`.
-2. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` in the parent environment.
-3. `claude` or `codex` on the absolute entries of `PATH`. Relative and empty
+2. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` in the parent environment (empty
+   counts as unset).
+3. `ProviderOptions::claude_executable` or `codex_executable`, which `delega`
+   fills from `[providers.claude] executable` or `[providers.codex] executable`
+   in the user-level [configuration file](api.md#configuration-file). Doctor
+   reports it as `config`.
+4. `claude` or `codex` on the absolute entries of `PATH`. Relative and empty
    entries are skipped, so a program in the working directory is never picked up.
 
-A path from 1 or 2 must be absolute and an executable file. Otherwise the run is
+A path from 1, 2 or 3 must be absolute and an executable file. Otherwise the run is
 `refused` with kind `provider_not_found`, and the message names the variable to
 set. The path used is `provenance.provider_executable`.
 
@@ -658,7 +663,9 @@ adapter's own variables. Everything else is withheld, whatever its name.
    provider's variables are not passed, so a Claude Code worker does not see
    Codex credentials and the reverse.
 4. **Named by the caller.** `ProviderOptions::env_pass`, which the CLI fills
-   from `--env NAME` (repeatable, short `-e`). A name that is not set in the parent
+   from `--env NAME` (repeatable, short `-e`) and from `[env] pass` in the
+   user-level [configuration file](api.md#configuration-file), the file's names
+   first; the rules and refusals below are the same for both. A name that is not set in the parent
    environment is ignored in a run and listed as "named but not set" by a dry
    run. A name that is not a valid variable name (letters, digits and
    underscore, not starting with a digit), a calling-session variable or a
@@ -673,7 +680,8 @@ adapter's own variables. Everything else is withheld, whatever its name.
    as set. A name delega itself sets for the provider (group 5) is `refused`
    with kind `forbidden_env_name`, in either form, instead of being dropped.
 5. **Set by the caller or the adapter.** `env_set`, which the CLI fills from
-   `--env NAME=VALUE`, sets variables after the rules above, whatever the parent
+   `--env NAME=VALUE` and from `[env.set]` in the configuration file (the file's
+   entries first, so a flag for the same name wins), sets variables after the rules above, whatever the parent
    environment holds. The names are checked as in group 4: an invalid,
    calling-session or `DELEGA_*` name is `refused`, and a secret-looking name
    gets a note. Prefer `NAME` (group 4) for secrets on the command line, since a
