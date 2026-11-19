@@ -25,8 +25,8 @@ use super::run::probe;
 /// Doctor's verdicts follow the refusals a run gives: a problem blocks `run`
 /// only where a run is refused for it.
 ///
-/// Problem kind: the version probe exited with an error, was ended by a signal
-/// or could not be started.
+/// Problem kind: the version probe exited with an error or was ended by a
+/// signal. A probe that could not be started is [`PROVIDER_NOT_STARTABLE`].
 pub const VERSION_PROBE_FAILED: &str = "version_probe_failed";
 /// Problem kind: the executable was found but cannot be started, so every run
 /// with it would fail to start (`doctor` uses its own kind here; a run reports
@@ -53,8 +53,9 @@ pub enum Blocks {
 /// Something that would stop a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Problem {
-    /// A stable label: `provider_not_found`, `version_probe_failed`,
-    /// `version_probe_timed_out`, `unsupported_provider_version`,
+    /// A stable label: `provider_not_found`, `provider_not_startable`,
+    /// `version_probe_failed`, `version_probe_timed_out`,
+    /// `unsupported_provider_version`,
     /// `settings_unreadable`, `deny_rules_over_limit`, or the kind of another
     /// refusal a run would give.
     pub kind: String,
