@@ -20,13 +20,17 @@
 //!    walking up to the nearest `.git` directory or file; `git` is not run. As
 //!    Claude Code does, a root that is the home directory is not used. A root is
 //!    also not used when the root, its `.git` entry, its `.claude` directory or
-//!    the settings file is not owned by the current user, or when `.git`,
-//!    `.claude` or the file is a symbolic link: links are never followed in a
-//!    repository root, because another user can plant them in a tree the user
-//!    owns but others can write. The file is then not read and is reported as
-//!    ignored. The owner of the file is judged on the handle that is read, and
-//!    the file is reached by opening each directory from the one above without
-//!    following links, so it cannot be swapped after the check. A `gitdir:` line
+//!    the settings file is not owned by the current user, or when `.git` is a
+//!    symbolic link. A link at `.claude` or at the settings file is followed only
+//!    when the link is the user's, the directory holding it is the user's and not
+//!    writable by group or others, and the target is the user's (see
+//!    [`descend`]): another user can plant a link only in a directory they can
+//!    write, so such a link was put there by the user, as a dotfiles manager
+//!    does. Any other link is skipped with the failed condition named. The file
+//!    is then not read and is reported as ignored. A file that exists and cannot
+//!    be opened refuses the run, and only a missing file means no rules. Owners
+//!    are judged on the open handles, each directory opened from the one above,
+//!    so nothing can be swapped in after the check. A `gitdir:` line
 //!    is followed only to a `.git/worktrees/<name>` directory of a `.git`
 //!    directory whose `gitdir` file names this worktree's `.git` file; when it is
 //!    not followed, a note says the main checkout could not be identified.
@@ -170,14 +174,26 @@ pub(super) struct Owner<'a> {
 }
 
 impl Owner<'_> {
-    /// Whether the current user owns `path`, whose owner is `uid`.
+    /// Whether the current user owns `path`, whose owner is `uid`. A link at
+    /// the end of `path` is not resolved: it stands for the link itself.
     fn owns(&self, path: &Path, uid: u32) -> bool {
-        if uid != self.euid {
-            return false;
-        }
-        let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let here = real(path);
-        !self.foreign.iter().any(|f| real(f) == here)
+        self.judge(path, uid, |p| match (p.parent(), p.file_name()) {
+            (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+                .map(|d| d.join(name))
+                .unwrap_or_else(|_| p.to_path_buf()),
+            _ => p.to_path_buf(),
+        })
+    }
+
+    /// [`owns`](Self::owns) for what `path` resolves to, the target of a link.
+    fn owns_resolved(&self, path: &Path, uid: u32) -> bool {
+        self.judge(path, uid, |p| {
+            std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+        })
+    }
+
+    fn judge(&self, path: &Path, uid: u32, norm: impl Fn(&Path) -> PathBuf) -> bool {
+        uid == self.euid && !self.foreign.iter().any(|f| norm(f) == norm(path))
     }
 }
 
@@ -406,52 +422,144 @@ fn read_limited(file: std::fs::File) -> Result<Vec<u8>, String> {
 
 const SYMLINK_REASON: &str = "a symbolic link is not followed in a repository root";
 
-/// Open `name` in the directory `dir` (a handle) without following a link.
-/// `Ok(None)` when it does not exist or is not a directory; `Err` with the reason
-/// when it is a symbolic link.
-fn open_below(
-    dir: &std::fs::File,
+/// What opening one entry below a directory handle gave.
+enum Step {
+    /// The entry does not exist.
+    Missing,
+    /// It is open, with the reason it must not be used if the current user does
+    /// not own it. Reading stops at that reason only once the file is known to
+    /// exist, so a root without a settings file gets no note.
+    Open(std::fs::File, Option<String>),
+    /// It must not be used, whether or not anything is behind it.
+    Skip(String),
+    /// It cannot be opened for a reason that is not about trust.
+    Refuse(String),
+}
+
+fn cannot_open(what: &str, e: Errno) -> String {
+    format!(
+        "{what} cannot be opened ({})",
+        std::io::Error::from(e).kind()
+    )
+}
+
+/// Open the entry `name` of the directory `parent` (a handle, at `parent_path`),
+/// as a directory when `want_dir` and otherwise as a regular file, never
+/// following a link except as the rule below allows.
+///
+/// A plain entry is opened without following a link and must be owned by the
+/// current user, judged on the open handle. A symbolic link is followed only when
+/// all of these hold: the link is owned by the current user; the directory that
+/// holds it is owned by the current user and not writable by group or others; and
+/// the target, once open, is owned by the current user. Another user can plant a
+/// link only in a directory they can write, so a link the user owns in a directory
+/// only the user can write was put there by the user, as a dotfiles manager does.
+/// A link that fails a condition, or points at nothing, is skipped with the
+/// condition named. Every other failure to open is a refusal, and only "does not
+/// exist" means no rules.
+fn descend(
+    parent: &std::fs::File,
+    parent_path: &Path,
     name: &str,
-    flags: OFlags,
-) -> Result<Option<std::fs::File>, String> {
-    match rustix::fs::openat(
-        dir,
-        name,
-        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => Ok(Some(std::fs::File::from(fd))),
-        Err(Errno::NOENT) => Ok(None),
-        Err(e @ (Errno::LOOP | Errno::NOTDIR)) => {
-            // A link, or a plain file where a directory was wanted.
-            match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Symlink => {
-                    Err(format!("`{name}` is a symbolic link: {SYMLINK_REASON}"))
-                }
-                Ok(_) if e == Errno::NOTDIR => Ok(None),
-                _ => Err(format!(
-                    "`{name}` cannot be opened ({})",
-                    std::io::Error::from(e).kind()
-                )),
-            }
+    what: &str,
+    want_dir: bool,
+    owner: Owner<'_>,
+) -> Step {
+    let flags = if want_dir {
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC
+    } else {
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC
+    };
+    let here = parent_path.join(name);
+    let st = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => st,
+        Err(Errno::NOENT | Errno::NOTDIR) => return Step::Missing,
+        Err(e) => return Step::Refuse(cannot_open(what, e)),
+    };
+    let link = FileType::from_raw_mode(st.st_mode) == FileType::Symlink;
+    let file = if link {
+        if !owner.owns(&here, st.st_uid) {
+            return Step::Skip(format!(
+                "{what} is a symbolic link that the current user does not own"
+            ));
         }
-        Err(e) => Err(format!(
-            "`{name}` cannot be opened ({})",
-            std::io::Error::from(e).kind()
-        )),
+        let held = match parent.metadata() {
+            Ok(m) => m,
+            Err(e) => return Step::Refuse(format!("{what} cannot be checked ({})", e.kind())),
+        };
+        if !owner.owns(parent_path, held.uid()) {
+            return Step::Skip(format!(
+                "{what} is a symbolic link in a directory the current user does not own"
+            ));
+        }
+        if held.mode() & 0o022 != 0 {
+            return Step::Skip(format!(
+                "{what} is a symbolic link in a directory that group or others can write"
+            ));
+        }
+        match rustix::fs::openat(parent, name, flags, Mode::empty()) {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(Errno::NOENT) => {
+                return Step::Skip(format!("{what} is a symbolic link to nothing"));
+            }
+            Err(Errno::LOOP) => {
+                return Step::Skip(format!("{what} is a symbolic link that does not resolve"));
+            }
+            Err(Errno::NOTDIR) => {
+                return Step::Skip(format!("{what} is a symbolic link to something else"));
+            }
+            Err(e) => return Step::Refuse(cannot_open(what, e)),
+        }
+    } else {
+        match rustix::fs::openat(parent, name, flags | OFlags::NOFOLLOW, Mode::empty()) {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(Errno::NOENT | Errno::NOTDIR) => return Step::Missing,
+            Err(Errno::LOOP) => {
+                return Step::Skip(format!(
+                    "{what} was replaced by a symbolic link: {SYMLINK_REASON}"
+                ));
+            }
+            Err(e) => return Step::Refuse(cannot_open(what, e)),
+        }
+    };
+    let meta = match file.metadata() {
+        Ok(m) => m,
+        Err(e) => return Step::Refuse(format!("{what} cannot be checked ({})", e.kind())),
+    };
+    if !want_dir && !meta.is_file() {
+        return Step::Refuse(format!("{what} is not a regular file"));
+    }
+    let owned = if link {
+        owner.owns_resolved(&here, meta.uid())
+    } else {
+        owner.owns(&here, meta.uid())
+    };
+    if owned {
+        return Step::Open(file, None);
+    }
+    let reason = if link {
+        format!("{what} is a symbolic link whose target is not owned by the current user")
+    } else {
+        format!("{what} is not owned by the current user")
+    };
+    if link {
+        Step::Skip(reason)
+    } else {
+        Step::Open(file, Some(reason))
     }
 }
 
 /// Read the settings file `file` (`<root>/.claude/<name>`) of a repository
-/// `root` (a real path) without following a link and only when the current user
-/// owns the root, `.claude` and the file, judged on the open handles: each
-/// directory is opened from the one above, so nothing swapped in after a check
-/// can be read. A missing file is [`Got::Missing`] whoever owns the directories.
+/// `root` (a real path), reaching it by opening each directory from the one above
+/// (see [`descend`] for when a link is followed) and only when the current user
+/// owns the root, `.claude` and the file, judged on the open handles, so nothing
+/// swapped in after a check can be read. A missing file is [`Got::Missing`] whoever
+/// owns the directories; an unreadable one refuses unless an ownership problem
+/// already means it would be skipped.
 fn read_guarded(root: &Path, file: &Path, owner: Owner<'_>) -> Result<Got, String> {
     let Some(name) = file.file_name().and_then(OsStr::to_str) else {
         return Ok(Got::Missing);
     };
-    let skipped = |why: String| Ok(Got::Skipped(why));
     let root_dir = match rustix::fs::open(
         root,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -459,43 +567,48 @@ fn read_guarded(root: &Path, file: &Path, owner: Owner<'_>) -> Result<Got, Strin
     ) {
         Ok(fd) => std::fs::File::from(fd),
         Err(Errno::NOENT | Errno::NOTDIR) => return Ok(Got::Missing),
-        Err(e) => {
-            return Err(format!(
-                "its repository root cannot be opened ({})",
-                std::io::Error::from(e).kind()
-            ));
-        }
+        Err(e) => return Err(cannot_open("its repository root", e)),
     };
-    let claude = match open_below(&root_dir, ".claude", OFlags::RDONLY | OFlags::DIRECTORY) {
-        Ok(Some(dir)) => dir,
-        Ok(None) => return Ok(Got::Missing),
-        Err(why) => return skipped(why),
-    };
-    let handle = match open_below(&claude, name, OFlags::RDONLY | OFlags::NONBLOCK) {
-        Ok(Some(handle)) => handle,
-        Ok(None) => return Ok(Got::Missing),
-        Err(why) => return skipped(why),
-    };
-    let uid_of = |f: &std::fs::File| {
-        f.metadata()
-            .map(|m| m.uid())
-            .map_err(|e| format!("it cannot be inspected ({})", e.kind()))
-    };
-    let dot_claude = root.join(".claude");
-    if !owner.owns(root, uid_of(&root_dir)?) {
-        return skipped("the repository root is not owned by the current user".to_string());
-    }
-    if !owner.owns(&dot_claude, uid_of(&claude)?) {
-        return skipped("the .claude directory is not owned by the current user".to_string());
-    }
-    let meta = handle
+    let root_meta = root_dir
         .metadata()
         .map_err(|e| format!("it cannot be inspected ({})", e.kind()))?;
-    if !meta.is_file() {
-        return Err("it is not a regular file".to_string());
-    }
-    if !owner.owns(&dot_claude.join(name), meta.uid()) {
-        return skipped("the settings file is not owned by the current user".to_string());
+    // Ownership problems wait until the file is known to exist.
+    let mut deferred = (!owner.owns(root, root_meta.uid()))
+        .then(|| "the repository root is not owned by the current user".to_string());
+    let finish = |deferred: Option<String>, why: String| match deferred {
+        Some(reason) => Ok(Got::Skipped(reason)),
+        None => Err(why),
+    };
+    let (claude, claude_reason) = match descend(
+        &root_dir,
+        root,
+        ".claude",
+        "the .claude directory",
+        true,
+        owner,
+    ) {
+        Step::Missing => return Ok(Got::Missing),
+        Step::Skip(why) => return Ok(Got::Skipped(why)),
+        Step::Refuse(why) => return finish(deferred, why),
+        Step::Open(dir, reason) => (dir, reason),
+    };
+    deferred = deferred.or(claude_reason);
+    let dot_claude = root.join(".claude");
+    let (handle, file_reason) = match descend(
+        &claude,
+        &dot_claude,
+        name,
+        "the settings file",
+        false,
+        owner,
+    ) {
+        Step::Missing => return Ok(Got::Missing),
+        Step::Skip(why) => return Ok(Got::Skipped(why)),
+        Step::Refuse(why) => return finish(deferred, why),
+        Step::Open(handle, reason) => (handle, reason),
+    };
+    if let Some(reason) = deferred.or(file_reason) {
+        return Ok(Got::Skipped(reason));
     }
     read_limited(handle).map(Got::Content)
 }

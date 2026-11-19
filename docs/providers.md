@@ -307,17 +307,29 @@ variables), not from the calling process.
    applies to the main checkout as to any other root. The file is not read, and a
    note and the dry run's `deny_rules.skipped` name its path and the reason.
 
-   *Links.* A symbolic link is never followed in a repository root: if `.git`,
-   `.claude` or the settings file there is a symbolic link, the root's file is
-   skipped for that reason, whoever owns the target. The reason is that another
-   user can plant links in a tree the user owns but others can write (a
-   group-writable directory, or one under `/tmp`) so that the user's own files
-   are read as that project's rules. The file is opened through each directory
-   from the one above without following links, and its owner is judged on the
-   open file, so it cannot be swapped between the check and the read. The user's
-   own settings file (item 1) and the working directory's files (items 2 and 3)
-   may be symbolic links, as a dotfiles setup makes them; a link to a regular
-   file is followed.
+   *Links.* In a repository root other than the start directory, the root's
+   `.git` entry is never followed if it is a symbolic link: the root's file is
+   skipped for that reason. A symbolic link at `.claude` or at the settings
+   file is followed only when all three hold: the link is owned by the current
+   user; the directory that holds it (the root for `.claude`, the `.claude`
+   directory for the file) is owned by the current user and not writable by group
+   or others; and the target, once opened, is owned by the current user (a
+   directory for `.claude`, a regular file for the file). Otherwise the file is
+   skipped and the note says which condition failed, and a link to nothing is
+   skipped as such. The reason: another user can plant a link only in a directory
+   they can write, so a link the user owns in a directory only the user can write
+   was put there by the user, as a dotfiles manager does, while a link in a
+   group-writable or world-writable tree (or one under `/tmp`) may be planted to
+   make the user's own files read as that project's rules. Ownership is judged
+   on the open handles, each directory opened from the one above, so nothing
+   swapped in after a check is read. A link to a pipe is refused as not a regular
+   file, as a pipe named as the file is; a link to a device owned by another user
+   is skipped as a foreign target, and nothing is read from either. A file or
+   directory that exists but cannot be opened (mode 000, an I/O error) refuses the
+   run with `settings_unreadable`, as it does for the start directory; only a
+   file that does not exist contributes nothing. The user's own settings file
+   (item 1) and the working directory's files (items 2 and 3) may be symbolic
+   links, as a dotfiles setup makes them; a link to a regular file is followed.
 
    *The main checkout.* For a worktree, the `.git` file's `gitdir:` line is
    followed only to a directory directly under a `worktrees` directory inside a

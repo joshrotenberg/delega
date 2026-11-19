@@ -1553,57 +1553,260 @@ fn a_main_checkout_that_cannot_be_identified_is_named_in_a_note() {
     assert!(note(&plan_in_work()).is_some());
 }
 
-#[test]
-fn a_link_is_never_followed_in_a_repository_root() {
-    let rig = Rig::new();
-    git_dir(&rig.work);
-    let sub = rig.work.join("sub");
-    std::fs::create_dir_all(&sub).unwrap();
-    let elsewhere = rig.home.join("elsewhere");
-    put(
-        &elsewhere.join(".claude/settings.local.json"),
-        &deny_file(&["Bash(other-project)"]),
-    );
-    let file = project_file(&rig, "settings.local.json");
-    let plan_in_sub = || {
-        let mut request = rig.request(Provider::Claude, "p");
-        request.cwd = Some(sub.clone());
-        dry_run(&request, &rig.options(Provider::Claude)).unwrap()
-    };
-    let assert_skipped = |plan: &DryRun, why: &str| {
+/// A repository root `rig.work` (with a `.git` directory, mode 0755) and a
+/// subdirectory to start in, so the root is not the start directory.
+struct LinkRig {
+    rig: Rig,
+    sub: std::path::PathBuf,
+    /// A directory holding the targets of links.
+    elsewhere: std::path::PathBuf,
+}
+
+impl LinkRig {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let rig = Rig::new();
+        git_dir(&rig.work);
+        std::fs::set_permissions(&rig.work, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sub = rig.work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let elsewhere = rig.home.join("elsewhere");
+        put(
+            &elsewhere.join(".claude/settings.local.json"),
+            &deny_file(&["Bash(linked)"]),
+        );
+        Self {
+            rig,
+            sub,
+            elsewhere,
+        }
+    }
+
+    fn file(&self) -> std::path::PathBuf {
+        self.rig.work.join(".claude/settings.local.json")
+    }
+
+    fn target_dir(&self) -> std::path::PathBuf {
+        self.elsewhere.join(".claude")
+    }
+
+    fn target_file(&self) -> std::path::PathBuf {
+        self.target_dir().join("settings.local.json")
+    }
+
+    /// `.claude` in the root is a link to the target directory.
+    fn link_dir(&self) {
+        std::os::unix::fs::symlink(self.target_dir(), self.rig.work.join(".claude")).unwrap();
+    }
+
+    /// `.claude` is a real directory and the settings file a link to `target`.
+    fn link_file(&self, target: &Path) {
+        std::fs::create_dir_all(self.rig.work.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(target, self.file()).unwrap();
+    }
+
+    fn chmod(&self, path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn run(&self) -> Result<DryRun, crate::provider::Refusal> {
+        let mut request = self.rig.request(Provider::Claude, "p");
+        request.cwd = Some(self.sub.clone());
+        dry_run(&request, &self.rig.options(Provider::Claude))
+    }
+
+    fn plan(&self) -> DryRun {
+        self.run().expect("dry run")
+    }
+
+    /// The one skipped file is the root's settings file, for `why`, with a note.
+    fn assert_skipped(&self, why: &str) {
+        let plan = self.plan();
         assert_eq!(plan.deny_rules.applied, 0, "{:?}", plan.notes);
         assert_eq!(plan.deny_rules.skipped.len(), 1, "{:?}", plan.notes);
-        assert_eq!(plan.deny_rules.skipped[0].path, file.display().to_string());
+        assert_eq!(
+            plan.deny_rules.skipped[0].path,
+            self.file().display().to_string()
+        );
         assert!(
             plan.deny_rules.skipped[0].reason.contains(why),
             "{:?}",
             plan.deny_rules.skipped
         );
-        assert!(plan.notes.iter().any(|n| n.contains("was ignored")));
-    };
-    // `.claude` is a link to a directory.
-    std::os::unix::fs::symlink(elsewhere.join(".claude"), rig.work.join(".claude")).unwrap();
-    assert_skipped(&plan_in_sub(), "`.claude` is a symbolic link");
-    std::fs::remove_file(rig.work.join(".claude")).unwrap();
-    // The settings file is a link to a file, then to nothing.
-    std::fs::create_dir_all(rig.work.join(".claude")).unwrap();
-    std::os::unix::fs::symlink(elsewhere.join(".claude/settings.local.json"), &file).unwrap();
-    assert_skipped(&plan_in_sub(), "is a symbolic link");
-    std::fs::remove_file(&file).unwrap();
-    std::os::unix::fs::symlink(elsewhere.join("missing"), &file).unwrap();
-    assert_skipped(&plan_in_sub(), "is a symbolic link");
-    std::fs::remove_file(&file).unwrap();
-    std::fs::remove_dir(rig.work.join(".claude")).unwrap();
-    // `.git` is a link to a git directory.
-    std::fs::remove_dir(rig.work.join(".git")).unwrap();
-    std::os::unix::fs::symlink(elsewhere.join(".claude"), rig.work.join(".git")).unwrap();
-    put(&file, &deny_file(&["Bash(root)"]));
-    assert_skipped(
-        &plan_in_sub(),
-        ".git entry of the repository root is a symbolic link",
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n.contains("was ignored") && n.contains(why))
+        );
+    }
+
+    /// Run through `collect_as` with `foreign` standing in for other users' files.
+    fn skipped_for_foreign(&self, foreign: &[std::path::PathBuf]) -> Vec<String> {
+        let home = self.rig.home.clone().into_os_string();
+        let config = self.rig.config.clone().into_os_string();
+        let got = crate::provider::deny::collect_as(
+            Some(&home),
+            Some(&config),
+            &self.sub,
+            owner(me(), foreign),
+        )
+        .unwrap();
+        assert!(got.rules.is_empty(), "{:?}", got.rules);
+        got.skipped.into_iter().map(|f| f.reason).collect()
+    }
+}
+
+#[test]
+fn a_link_the_user_owns_in_a_directory_only_the_user_can_write_is_followed_in_a_repository_root() {
+    // `.claude` as a link to a directory the user owns.
+    let rig = LinkRig::new();
+    rig.link_dir();
+    let plan = rig.plan();
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(linked)"]);
+    assert!(plan.deny_rules.skipped.is_empty());
+    // The settings file as a link to a file the user owns.
+    let rig = LinkRig::new();
+    rig.link_file(&rig.target_file());
+    assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(linked)"]);
+}
+
+#[test]
+fn a_link_in_a_directory_others_can_write_is_skipped_in_a_repository_root() {
+    for mode in [0o775, 0o757, 0o777, 0o770 | 0o002] {
+        // The link is `.claude`, in the root.
+        let rig = LinkRig::new();
+        rig.link_dir();
+        rig.chmod(&rig.rig.work, mode);
+        rig.assert_skipped("a directory that group or others can write");
+        // The link is the file, in `.claude`.
+        let rig = LinkRig::new();
+        rig.link_file(&rig.target_file());
+        rig.chmod(&rig.rig.work.join(".claude"), mode);
+        rig.assert_skipped("a directory that group or others can write");
+    }
+    // Group write alone, and world write alone, are each enough.
+    for mode in [0o720, 0o702] {
+        let rig = LinkRig::new();
+        rig.link_dir();
+        rig.chmod(&rig.rig.work, mode);
+        rig.assert_skipped("a directory that group or others can write");
+    }
+}
+
+#[test]
+fn a_link_is_skipped_unless_the_link_its_directory_and_its_target_are_the_users() {
+    let rig = LinkRig::new();
+    rig.link_dir();
+    let link = rig.rig.work.join(".claude");
+    // The link belongs to someone else.
+    assert_eq!(
+        rig.skipped_for_foreign(std::slice::from_ref(&link)),
+        ["the .claude directory is a symbolic link that the current user does not own"]
     );
-    // Without links the same file is read.
-    std::fs::remove_file(rig.work.join(".git")).unwrap();
-    git_dir(&rig.work);
-    assert_eq!(plan_in_sub().deny_rules.user_deny_rules, ["Bash(root)"]);
+    // The directory holding the link belongs to someone else.
+    assert_eq!(
+        rig.skipped_for_foreign(std::slice::from_ref(&rig.rig.work)),
+        ["the .claude directory is a symbolic link in a directory the current user does not own"]
+    );
+    // The target belongs to someone else.
+    assert_eq!(
+        rig.skipped_for_foreign(&[rig.target_dir()]),
+        ["the .claude directory is a symbolic link whose target is not owned by the current user"]
+    );
+    // The same for the settings file.
+    let rig = LinkRig::new();
+    rig.link_file(&rig.target_file());
+    assert_eq!(
+        rig.skipped_for_foreign(&[rig.file()]),
+        ["the settings file is a symbolic link that the current user does not own"]
+    );
+    assert_eq!(
+        rig.skipped_for_foreign(&[rig.rig.work.join(".claude")]),
+        ["the settings file is a symbolic link in a directory the current user does not own"]
+    );
+    assert_eq!(
+        rig.skipped_for_foreign(&[rig.target_file()]),
+        ["the settings file is a symbolic link whose target is not owned by the current user"]
+    );
+}
+
+#[test]
+fn a_dangling_link_in_a_repository_root_is_skipped_with_a_note() {
+    let rig = LinkRig::new();
+    std::os::unix::fs::symlink(rig.elsewhere.join("missing"), rig.rig.work.join(".claude"))
+        .unwrap();
+    rig.assert_skipped("a symbolic link to nothing");
+    let rig = LinkRig::new();
+    rig.link_file(&rig.elsewhere.join("missing"));
+    rig.assert_skipped("a symbolic link to nothing");
+}
+
+#[test]
+fn a_link_to_a_pipe_or_a_device_does_not_hang_and_is_handled_like_the_plain_file() {
+    // A pipe the user owns is refused as not a regular file, as a pipe named
+    // as the settings file itself is (a_named_pipe_is_refused_without_blocking).
+    let rig = LinkRig::new();
+    let fifo = rig.rig.home.join("fifo");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    rig.link_file(&fifo);
+    let error = rig.run().unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains("not a regular file"), "{error}");
+    // A device: refused the same way when the user owns it, and skipped as
+    // owned by another user otherwise. Neither reads from it.
+    if Path::new("/dev/zero").exists() {
+        let rig = LinkRig::new();
+        rig.link_file(Path::new("/dev/zero"));
+        match rig.run() {
+            Ok(plan) => {
+                assert_eq!(plan.deny_rules.applied, 0);
+                assert_eq!(plan.deny_rules.skipped.len(), 1, "{:?}", plan.notes);
+            }
+            Err(error) => assert_eq!(error.kind, "settings_unreadable"),
+        }
+    }
+}
+
+#[test]
+fn a_link_in_a_repository_root_never_reaches_the_root_itself_or_its_git_entry() {
+    // `.git` as a link is skipped whoever owns it.
+    let rig = LinkRig::new();
+    put(&rig.file(), &deny_file(&["Bash(root)"]));
+    std::fs::remove_dir(rig.rig.work.join(".git")).unwrap();
+    std::os::unix::fs::symlink(&rig.elsewhere, rig.rig.work.join(".git")).unwrap();
+    rig.assert_skipped(".git entry of the repository root is a symbolic link");
+    std::fs::remove_file(rig.rig.work.join(".git")).unwrap();
+    git_dir(&rig.rig.work);
+    assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(root)"]);
+}
+
+#[test]
+fn a_file_that_cannot_be_opened_in_a_repository_root_refuses_and_is_not_skipped() {
+    // Mode 000 does not deny a process that may read anyway (root).
+    let rig = LinkRig::new();
+    put(&rig.file(), &deny_file(&["Bash(root)"]));
+    rig.chmod(&rig.file(), 0o000);
+    if std::fs::File::open(rig.file()).is_ok() {
+        return;
+    }
+    let error = rig.run().unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains("cannot be opened"), "{error}");
+    assert!(error.message.contains("settings.local.json"), "{error}");
+    rig.chmod(&rig.file(), 0o600);
+    // The same for the directory that holds it.
+    let dir = rig.rig.work.join(".claude");
+    rig.chmod(&dir, 0o000);
+    let error = rig.run().unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains("cannot be opened"), "{error}");
+    rig.chmod(&dir, 0o755);
+    assert_eq!(rig.plan().deny_rules.user_deny_rules, ["Bash(root)"]);
 }
