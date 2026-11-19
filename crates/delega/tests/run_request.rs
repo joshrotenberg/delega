@@ -474,9 +474,9 @@ fn the_command_guard_is_hidden_from_help() {
 #[test]
 fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
     for provider in PROVIDERS {
-        let rig = Rig::new();
-        let quiet = rig.run(provider, "success", &[]);
-        let out = rig.run(provider, "success", &["--progress"]);
+        let (rig, quiet) = Rig::run_with_timely_listing(provider, "success", &[]);
+        let (progress_rig, out) =
+            Rig::run_with_timely_listing(provider, "success", &["--progress"]);
         assert_eq!(out.status.code(), Some(0), "{provider}");
         assert_eq!(out.stdout, quiet.stdout, "{provider}");
         let err = text(&out.stderr);
@@ -500,6 +500,7 @@ fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
         assert!(lines.contains(&last_event), "{err}");
         assert_eq!(text(&quiet.stderr), "");
         rig.assert_nothing_left();
+        progress_rig.assert_nothing_left();
     }
 }
 

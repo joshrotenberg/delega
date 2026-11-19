@@ -146,13 +146,11 @@ impl Rig {
     /// so it is given a run like that, up to eight attempts; a machine that is
     /// late eight times in a row fails the test with the last output.
     pub fn run_with_timely_listing(provider: &str, prompt: &str, extra: &[&str]) -> (Rig, Output) {
-        const LATE: &str = "before the first signal did not complete";
         let mut last = None;
         for _ in 0..8 {
             let rig = Rig::new();
             let out = rig.run(provider, prompt, extra);
-            let late = text(&out.stdout).contains(LATE) || text(&out.stderr).contains(LATE);
-            if !late {
+            if !listing_was_late(&out) {
                 return (rig, out);
             }
             last = Some((rig, out));
@@ -353,18 +351,36 @@ pub fn signal(pid: u32, name: &str) {
 /// which a loaded machine does, the stop is prompt and the documented verdict
 /// is `Unconfirmed`, naming that listing. This binary cannot be given a longer
 /// budget, so a test of the CLI accepts exactly those two answers: `Confirmed`,
-/// or `Unconfirmed` for that reason. Any other verdict fails. That nothing is
+/// or the late-listing verdict alone (`is_late_listing_only`: its exact
+/// reason, no pids, no process groups). Any other verdict fails. That nothing is
 /// left running is checked separately (`Rig::assert_nothing_left`), and the
 /// exact verdict after a stop is asserted by the provider-layer tests, which
 /// run with a listing budget no load can exhaust.
 pub fn assert_stop_cleanup(result: &RunResult, what: &str) {
     use delega_core::contract::result::Cleanup;
-    match &result.cleanup {
-        Cleanup::Confirmed => {}
-        Cleanup::Unconfirmed { reason, .. }
-            if reason.contains("before the first signal did not complete") => {}
-        other => panic!("{what}: unexpected cleanup verdict after a stop: {other:?}"),
+    use delega_core::process::is_late_listing_only;
+    if result.cleanup != Cleanup::Confirmed && !is_late_listing_only(&result.cleanup) {
+        panic!(
+            "{what}: unexpected cleanup verdict after a stop: {:?}",
+            result.cleanup
+        );
     }
+}
+
+/// Whether a run's output says its cleanup was unconfirmed for the late process
+/// listing and for nothing else: the result document on standard output when
+/// there is one, otherwise the exact line text mode prints on standard error.
+fn listing_was_late(out: &Output) -> bool {
+    use delega_core::process::{LATE_LISTING_REASON, is_late_listing_only};
+    if let Ok(result) = serde_json::from_slice::<RunResult>(&out.stdout) {
+        return is_late_listing_only(&result.cleanup);
+    }
+    let line = |reason: &str| {
+        format!("delega run: cleanup not confirmed: {reason} (pids [], process groups [])")
+    };
+    let once = line(LATE_LISTING_REASON);
+    let twice = line(&format!("{LATE_LISTING_REASON}; {LATE_LISTING_REASON}"));
+    text(&out.stderr).lines().any(|l| l == once || l == twice)
 }
 
 pub fn text(bytes: &[u8]) -> String {

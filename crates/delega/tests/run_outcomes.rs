@@ -525,8 +525,8 @@ fn every_terminal_signal_ends_a_delega_blocked_writing_its_result() {
 #[test]
 fn dropped_progress_is_counted_in_a_final_line_and_in_the_result_notes() {
     for provider in PROVIDERS {
-        let rig = Rig::new();
-        let out = rig.run(provider, "chatty", &["--progress", "--output", "json"]);
+        let (rig, out) =
+            Rig::run_with_timely_listing(provider, "chatty", &["--progress", "--output", "json"]);
         assert_eq!(out.status.code(), Some(0), "{provider}");
         let result = result_of(&out);
         let err = text(&out.stderr);
