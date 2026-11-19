@@ -94,11 +94,16 @@ fn parse_problem(path: &Path, err: &serde_json::Error, detail: ErrorDetail) -> S
                     "has a field or value that a profile does not accept"
                 }
             };
+            // serde gives no position for some errors, such as a missing field,
+            // and reports line 0 then.
+            let position = if err.line() == 0 {
+                String::new()
+            } else {
+                format!(" (line {}, column {})", err.line(), err.column())
+            };
             format!(
-                "{} is not a valid profile: it {kind} (line {}, column {})",
-                path.display(),
-                err.line(),
-                err.column()
+                "{} is not a valid profile: it {kind}{position}",
+                path.display()
             )
         }
     }
@@ -293,6 +298,24 @@ mod tests {
 
     fn source<'a>(merged: &'a Merged, key: &str) -> Option<&'a Layer> {
         merged.sources.get(key)
+    }
+
+    #[test]
+    fn a_profile_error_without_a_position_does_not_report_line_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = profile_file(&dir, r#"{"model": "m"}"#);
+        let mut problems = Vec::new();
+        assert!(read_profile(&path, &mut problems, ErrorDetail::Position).is_none());
+        let message = &problems[0].message;
+        assert!(!message.contains("line 0"), "{message}");
+        assert!(!message.contains("column"), "{message}");
+        assert!(message.contains("a profile does not accept"), "{message}");
+
+        let path = profile_file(&dir, "{ not json");
+        let mut problems = Vec::new();
+        assert!(read_profile(&path, &mut problems, ErrorDetail::Position).is_none());
+        let message = &problems[0].message;
+        assert!(message.contains("(line 1, column"), "{message}");
     }
 
     #[test]
