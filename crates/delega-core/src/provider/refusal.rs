@@ -7,9 +7,9 @@ use std::fmt;
 ///
 /// Kinds used by this layer: `invalid_request`, `invalid_answer_schema`,
 /// `native_arg_rejected`, `cwd_unusable`, `directory_unusable`,
-/// `unsupported_command`, `provider_not_found`, `unsupported_provider_version`,
-/// `invalid_env_name`, `forbidden_env_name`, `settings_unreadable` and
-/// `deny_rules_over_limit`.
+/// `unsupported_command`, `permissions_not_enforceable`, `provider_not_found`,
+/// `unsupported_provider_version`, `invalid_env_name`, `forbidden_env_name`,
+/// `settings_unreadable` and `deny_rules_over_limit`.
 ///
 /// Error kinds of started runs, besides `timed_out` and `interrupted`:
 /// `provider_error` (the provider reported failure), `provider_turn_limit` and
