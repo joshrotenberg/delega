@@ -4,7 +4,9 @@ use std::ffi::OsString;
 
 use super::{Rig, both, run_checked};
 use crate::contract::request::Provider;
-use crate::provider::env::{EnvInputs, is_other_providers, is_secret_name, owned_by, resolve};
+use crate::provider::env::{
+    EnvInputs, is_calling_session, is_other_providers, is_secret_name, owned_by, resolve,
+};
 
 const CANARY: &str = "canary-value-must-not-appear";
 
@@ -77,7 +79,6 @@ fn each_provider_keeps_its_own_variables_and_loses_the_other_providers() {
         names_for(Provider::Claude, &env, &[]),
         [
             "ANTHROPIC_API_KEY",
-            "CLAUDECODE",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "HOME",
             "PATH",
@@ -139,15 +140,95 @@ fn ownership_and_stripping_rules_do_not_overlap_by_accident() {
     assert!(owned_by(Provider::Claude, "ANTHROPIC_API_KEY"));
     assert!(!owned_by(Provider::Claude, "OPENAI_API_KEY"));
     assert!(is_other_providers(Provider::Codex, "ANTHROPIC_API_KEY"));
-    assert!(is_other_providers(
-        Provider::Claude,
-        "CLAUDE_CODE_MESSAGING_SOCKET"
-    ));
+    assert!(is_other_providers(Provider::Claude, "CODEX_HOME"));
     assert!(!is_other_providers(
         Provider::Claude,
         "CLAUDE_CODE_OAUTH_TOKEN"
     ));
+    assert!(is_calling_session("CLAUDE_CODE_MESSAGING_SOCKET"));
+    assert!(is_calling_session("CLAUDE_CODE_MESSAGING_TOKEN"));
+    assert!(is_calling_session("CLAUDE_CODE_BRIDGE_SESSION_ID"));
+    assert!(!is_calling_session("CLAUDE_CODE_OAUTH_TOKEN"));
 }
+
+const SESSION: [&str; 9] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "AI_AGENT",
+];
+const CONFIG: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+];
+
+#[test]
+fn session_variables_are_withheld_from_both_providers_and_configuration_passes() {
+    let mut names: Vec<&str> = SESSION.to_vec();
+    names.extend(CONFIG);
+    names.push("PATH");
+    let env = parent(&names);
+    let claude = names_for(Provider::Claude, &env, &[]);
+    for name in SESSION {
+        assert!(!claude.contains(&name.to_string()), "claude {name}");
+    }
+    assert_eq!(
+        claude,
+        [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CONFIG_DIR",
+            "PATH"
+        ]
+    );
+    let codex = names_for(Provider::Codex, &env, &[]);
+    for name in SESSION {
+        assert!(!codex.contains(&name.to_string()), "codex {name}");
+    }
+    assert_eq!(codex, ["OPENAI_API_KEY", "PATH"]);
+}
+
+#[test]
+fn an_explicit_pass_overrides_the_session_variable_rule() {
+    let env = parent(&["PATH", "CLAUDE_CODE_SESSION_ID", "AI_AGENT"]);
+    assert_eq!(
+        names_for(Provider::Claude, &env, &["AI_AGENT"]),
+        ["AI_AGENT", "PATH"]
+    );
+}
+
+async fn session_variables_do_not_reach_the_child(provider: Provider) {
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    let mut env = options.parent_env.take().unwrap();
+    for name in SESSION
+        .iter()
+        .chain(&["CLAUDE_CONFIG_DIR_EXTRA_NOT_SESSION"])
+    {
+        env.push((OsString::from(name), OsString::from(CANARY)));
+    }
+    options.parent_env = Some(env);
+    run_checked(rig.request(provider, "success"), options).await;
+    let seen = rig.env_names();
+    for name in SESSION {
+        assert!(!seen.contains(&name.to_string()), "{name}: {seen:?}");
+    }
+    assert!(seen.contains(&"HOME".to_string()), "{seen:?}");
+    rig.assert_nothing_left().await;
+}
+both!(
+    withholds_the_calling_sessions_variables_from_the_child,
+    session_variables_do_not_reach_the_child
+);
 
 async fn secret_is_not_passed_unless_allowed(provider: Provider) {
     let canary_name = "MY_SERVICE_API_TOKEN";

@@ -210,9 +210,14 @@ granted is denied at once. Denials come back in the result event's
 
 | Mode | `--tools` | `--allowedTools` | Settings |
 | --- | --- | --- | --- |
-| `read` | `Read,Glob,Grep` | `Read(//CWD/**)`, one `Read(//DIR/**)` per directory, `Glob`, `Grep` | hooks off |
+| `read` | `Read,Glob,Grep` | `Read(//CWD/**)`, one `Read(//DIR/**)` per directory | hooks off |
 | `write` | `Read,Glob,Grep,Edit,Write` | the `read` rules plus `Edit(//CWD/**)`, `Write(//CWD/**)` | hooks off |
 | `full` | all nine built-in tools: `Read,Glob,Grep,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch` | the same nine, unscoped | hooks off |
+
+`Glob` and `Grep` are in `--tools` and are not allow rules. Listed bare they
+let `Grep` read outside the working directory; unlisted, Claude Code applies the
+scoped `Read` rules to them, so they search only the working directory and the
+listed directories.
 
 ### Commands and directories
 
@@ -270,9 +275,6 @@ same text is accepted for Codex, which has no rule text.
 
 ### What cannot be enforced
 
-- `Glob` and `Grep` are granted without a path scope. Whether Claude Code
-  confines them to the working directory and listed directories is the provider's
-  behaviour, not delega's. A note says so on every `read` and `write` run.
 - `--setting-sources ""` means Claude Code loads no user, project or local
   settings file. Not applied to the worker: the user's and project's
   `permissions.deny` rules, hooks, `env`, `apiKeyHelper`, plugins, skills, MCP
@@ -416,25 +418,37 @@ option before it is refused.
 
 ## Environment policy
 
-The provider gets the parent environment minus three groups of variables, then
+The provider gets the parent environment minus four groups of variables, then
 `env_set`, then the adapter's own variables.
 
-1. **The other provider's.** A Claude Code run loses `CODEX_*` and `OPENAI_*`,
-   and the host session markers `CLAUDE_CODE_MESSAGING_SOCKET`,
-   `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_BRIDGE_SESSION_ID`. A Codex run
-   loses `CLAUDECODE`, `CLAUDE_*` and `ANTHROPIC_*`. The earlier project did the
-   same.
-2. **Names that look like secrets**, unless they belong to the provider being
-   run (`ANTHROPIC_*`, `CLAUDE_*`, `CLAUDECODE` for Claude Code; `OPENAI_*`,
-   `CODEX_*` for Codex). A name matches when, in upper case, it contains
+1. **The other provider's.** A Claude Code run loses `CODEX_*` and `OPENAI_*`. A
+   Codex run loses `CLAUDECODE`, `CLAUDE_*` and `ANTHROPIC_*`. The earlier project
+   did the same.
+2. **Variables that describe the calling session**, for both providers, so a
+   worker started from inside a Claude Code session does not take that session's
+   identity. A name matches when it is one of `AI_AGENT`, `CLAUDECODE`,
+   `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_ENTRYPOINT`,
+   `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ATTENDED`,
+   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PID`,
+   `CLAUDE_CODE_MESSAGING_SOCKET`, or starts with `CLAUDE_CODE_` and contains
+   `SESSION`, `MESSAGING` or `BRIDGE` (this covers
+   `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_BRIDGE_SESSION_ID`). Other
+   `CLAUDE_*` and `ANTHROPIC_*` names are configuration and pass to a Claude Code
+   run as before: an API key or base URL, `CLAUDE_CONFIG_DIR` and
+   `CLAUDE_CODE_OAUTH_TOKEN`. No variable a calling Codex session sets is known,
+   so none is listed for Codex; a Codex worker loses the Claude names above
+   under group 1 and `AI_AGENT` under this group.
+3. **Names that look like secrets**, unless they belong to the provider being
+   run (`ANTHROPIC_*`, `CLAUDE_*` for Claude Code; `OPENAI_*`, `CODEX_*` for
+   Codex). A name matches when, in upper case, it contains
    `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY` or
    `ACCESS_KEY`, ends in `_KEY`, `_PAT` or `APIKEY`, or is `SSH_AUTH_SOCK`.
    The earlier project passed every other variable. This rule is added because a
    worker can print its environment. It is a heuristic; a secret under an
    ordinary name is passed.
-3. **delega's own settings**: `DELEGA_*`.
+4. **delega's own settings**: `DELEGA_*`.
 
-`ProviderOptions::env_pass` names variables to pass although 1 to 3 would remove
+`ProviderOptions::env_pass` names variables to pass although 1 to 4 would remove
 them. `env_set` sets variables after the policy runs. The adapter's variables
 (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, `DELEGA_EXACT_BASH_GRANTS`) cannot be overridden. A variable whose name is not valid UTF-8 is dropped.
 
@@ -445,30 +459,39 @@ text the provider wrote (an error message or the standard error excerpt), which
 is redacted as described under [Text from the provider](#text-from-the-provider),
 and the answer, which is the provider's own output.
 
+## Verified against the real CLI
+
+Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
+
+- A scoped `Read(//dir/**)` allow rule scopes reads under `dontAsk`.
+- `Grep` and `Glob` follow the scoped `Read` rules when they are not listed as
+  allow rules. Listed bare, `Grep` read a file outside the working directory.
+- `--add-dir` makes a directory readable and not writable.
+- The hook settings shape works: the guard is called and its denial is honoured.
+- The `--version` output of both CLIs is parsed.
+- `--effort low` and the Codex effort key are accepted.
+- `--no-session-persistence` and Codex `--ephemeral` are accepted.
+- Both providers exit 0 after a successful result.
+- The Codex `workspace-write` sandbox blocks writes outside the working
+  directory.
+- Session resume works on both.
+
 ## Unverified against the real CLI
 
 The fake providers in the tests copy the stream formats of the earlier
 project's fakes. The fake Claude Code also honours its tool, rule and hook
 arguments, and the fake Codex its sandbox flag, so that the tests show
 enforcement through `run`; that proves the plumbing against the behaviour
-assumed here, not the real CLIs. Nothing here was run against the real `claude` or `codex`. The choices below are not
+assumed here, not the real CLIs. Nothing in this table was run against the real `claude` or `codex`. The choices below are not
 confirmed and were made conservatively. A live run per provider should settle
 each.
 
 | Assumption | Conservative choice |
 | --- | --- |
-| Claude Code accepts `Read(//abs/dir/**)` as an allow rule and then allows reading only there under `dontAsk` | The earlier project used this rule form for deny rules. If allow rules do not work, reads fail closed. |
-| Claude Code applies Read scoping to `Glob` and `Grep` | Not relied on: both are granted unscoped and a note says so. |
-| `--add-dir` does not make an extra directory editable in `write` mode | No `Edit` or `Write` rule names it. |
-| `--no-session-persistence` exists with `-p` | Used for `session.ephemeral`. An unknown flag would fail the run. |
-| `claude --version` prints the version first, such as `2.1.400 (Claude Code)` | An unparseable version refuses exact command grants. |
-| The hook settings accept an `args` list next to `command` | Taken from the earlier project's settings, which gate on 2.1.325. |
 | `full` for Claude Code needs no `--permission-mode bypassPermissions` | The nine built-in tools are allowed under `dontAsk`, the mechanism the earlier project already used. |
 | Codex honours `sandbox_workspace_write.network_access`, `exclude_slash_tmp` and `exclude_tmpdir_env_var` given with `-c` | They only narrow the sandbox. An unknown key would fail the run. |
-| `codex exec --ephemeral` exists | Used for `session.ephemeral`. An unknown flag would fail the run. |
 | A declined command is `item.completed` with `status: "declined"` | Only those are listed in `permissions.denied`, and a note says other blocks are not. |
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
-| Both providers exit 0 after a successful result | A non-zero exit after success is `failed`. |
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
 | With empty settings sources Claude Code still reads the working directory's own `CLAUDE.md` | Not controlled. A note on every run says what delega does and does not load. |
