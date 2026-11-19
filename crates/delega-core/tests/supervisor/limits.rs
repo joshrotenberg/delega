@@ -608,3 +608,159 @@ async fn read_pages_a_long_answer_by_character_offset_with_the_total() {
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
+
+/// The answer of the fake's `large-utf8` mode: `é` (two bytes), `€` (three) and
+/// `😀` (four), 8192 times over, 24576 characters.
+fn utf8_answer() -> String {
+    "é€😀".repeat(8192)
+}
+
+#[tokio::test]
+async fn read_pages_multibyte_text_by_character_and_the_pages_add_up_exactly() {
+    use delega_core::supervisor::limits::COMPACT_RESULT_TEXT_CHARS;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "large-utf8"))
+        .await
+        .expect("start");
+    let full = result_of(&supervisor, &started.run).await;
+    let expected = utf8_answer();
+    assert_eq!(full.text, expected);
+    let total = expected.chars().count();
+    assert_eq!(total, 24576);
+    assert!(
+        expected.len() > total * 2,
+        "the answer has characters wider than two bytes"
+    );
+    let target = || Target::Run(started.run.clone());
+
+    // Every window starts at a character, whichever width the character before
+    // it has: 20000 is a multiple of three, so the first page ends after a
+    // `€` and the second begins with a `😀`; the neighbours begin at an `é` and
+    // at a `€`.
+    for offset in [0, 1, 2, 3, 19_999, 20_000, 20_001, 24_575, total] {
+        let want: String = expected
+            .chars()
+            .skip(offset)
+            .take(COMPACT_RESULT_TEXT_CHARS)
+            .collect();
+        for detail in [Detail::Compact, Detail::Full] {
+            let read = supervisor
+                .read(target(), detail, None, Some(offset))
+                .await
+                .expect("read");
+            let window = read.text_window.clone().expect("window");
+            let text = match &read.result {
+                Some(ResultView::Compact(result)) => result.text.clone(),
+                Some(ResultView::Full(result)) => result.text.clone(),
+                None => panic!("{read:#?}"),
+            };
+            assert_eq!(text, want, "offset {offset}");
+            assert_eq!(window.offset, offset);
+            assert_eq!(window.total, total);
+            assert_eq!(window.length, want.chars().count());
+            assert_eq!(window.more, offset + window.length < total);
+        }
+    }
+
+    // Following the offsets each window names reassembles the answer exactly.
+    let mut assembled = String::new();
+    let mut offset = 0;
+    let mut windows = 0;
+    loop {
+        let read = supervisor
+            .read(target(), Detail::Compact, None, Some(offset))
+            .await
+            .expect("read");
+        let window = read.text_window.clone().expect("window");
+        let Some(ResultView::Compact(result)) = &read.result else {
+            panic!("{read:#?}");
+        };
+        assembled.push_str(&result.text);
+        windows += 1;
+        if !window.more {
+            break;
+        }
+        offset = window.offset + window.length;
+    }
+    assert_eq!(windows, 2);
+    assert_eq!(assembled, expected);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn paging_by_worker_follows_the_latest_run_so_a_follow_up_changes_the_run_between_pages() {
+    use delega_core::supervisor::limits::COMPACT_RESULT_TEXT_CHARS;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "large-utf8"))
+        .await
+        .expect("start");
+    let worker = started.worker.clone().expect("worker");
+    result_of(&supervisor, &started.run).await;
+    let expected = utf8_answer();
+    let total = expected.chars().count();
+
+    // The first page, read by worker, comes from the first run.
+    let page = supervisor
+        .read(
+            Target::Worker(worker.clone()),
+            Detail::Compact,
+            None,
+            Some(0),
+        )
+        .await
+        .expect("read");
+    assert_eq!(page.run.as_deref(), Some(started.run.as_str()));
+    let window = page.text_window.clone().expect("window");
+    assert!(window.more);
+    assert_eq!(window.length, COMPACT_RESULT_TEXT_CHARS);
+    let next = window.offset + window.length;
+
+    // A follow-up finishes before the second page is asked for.
+    let follow = supervisor
+        .follow_up(&worker, "echo:second", None)
+        .await
+        .expect("follow_up");
+    let second = result_of(&supervisor, &follow.run).await;
+    assert_ne!(follow.run, started.run);
+
+    // By worker, the second page is the new run's: an empty window that reads
+    // as done, but the response names the other run and its own total.
+    let by_worker = supervisor
+        .read(Target::Worker(worker), Detail::Compact, None, Some(next))
+        .await
+        .expect("read");
+    assert_eq!(by_worker.run.as_deref(), Some(follow.run.as_str()));
+    assert_ne!(by_worker.run.as_deref(), Some(started.run.as_str()));
+    let window = by_worker.text_window.clone().expect("window");
+    assert_eq!(window.total, second.text.chars().count());
+    assert_ne!(window.total, total);
+    assert_eq!((window.length, window.more), (0, false));
+
+    // By run id, the second page is still the rest of the first answer.
+    let by_run = supervisor
+        .read(
+            Target::Run(started.run.clone()),
+            Detail::Compact,
+            None,
+            Some(next),
+        )
+        .await
+        .expect("read");
+    assert_eq!(by_run.run.as_deref(), Some(started.run.as_str()));
+    let window = by_run.text_window.clone().expect("window");
+    assert_eq!((window.total, window.more), (total, false));
+    let Some(ResultView::Compact(rest)) = &by_run.result else {
+        panic!("{by_run:#?}");
+    };
+    let want: String = expected.chars().skip(next).collect();
+    assert_eq!(rest.text, want);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}

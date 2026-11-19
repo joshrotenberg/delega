@@ -349,7 +349,9 @@ Rules that hold for every tool:
   restart. The supervisor applies them so: a `start` beyond the live-worker limit
   is refused (`limit_reached`); a `follow_up` beyond the per-worker queue limit
   is refused (`queue_full`); a run beyond the running-runs limit is not refused,
-  it stays `queued` until a slot frees. Defaults are in
+  it stays `queued` until a slot frees; a `start` is also refused
+  (`limit_reached`) while 16 request checks are outstanding, which happens only
+  when the filesystem is not answering. Defaults are in
   [supervisor.md](supervisor.md#limits-and-defaults).
 - **Refusals are runs.** A `start` or `follow_up` that cannot go ahead returns a
   run id whose result is `refused`, and `read` returns it. A refused `start`
@@ -364,7 +366,11 @@ Rules that hold for every tool:
 - **Long answers.** A compact `read` returns the first 20000 characters of the
   answer and says so, with the full length; `text_offset` reads the window that
   starts at that character, with the total and whether more follows. `detail:
-  full` returns everything.
+  full` returns everything. Page a long answer by run id. A `read` by worker
+  returns the worker's latest run, and a follow-up that finishes between two
+  pages makes the next page come from the new run; the response names the run, so
+  take the run id from the first page and pass it on the later ones, and treat a
+  different run id as a different answer.
 - **Retention.** Finished results stay readable for a bounded count (256) and
   time (1 hour), after which their ids are unknown. Closing a worker discards its
   queued runs, each finished `interrupted` with the message `discarded by close`.

@@ -53,7 +53,6 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::contract::request::Request;
-use crate::provider;
 
 mod activity;
 mod actor;
@@ -63,6 +62,7 @@ mod core;
 mod error;
 mod ids;
 pub mod limits;
+mod preflight;
 mod record;
 mod results;
 mod runner;
@@ -95,6 +95,8 @@ struct Shared {
     root: CancellationToken,
     /// Set if the supervisor's own task panicked.
     failed: Arc<Mutex<Option<String>>>,
+    /// Runs the request checks of `start`.
+    preflight: preflight::Preflight,
 }
 
 impl Shared {
@@ -146,10 +148,23 @@ impl Supervisor {
     ///
     /// Panics if called outside a Tokio runtime.
     pub fn new(config: SupervisorConfig) -> Self {
-        Self::with_launcher(config, runner::provider_launch())
+        Self::with_hooks(
+            config,
+            runner::provider_launch(),
+            preflight::Preflight::provider(),
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_launcher(config: SupervisorConfig, launch: runner::Launch) -> Self {
+        Self::with_hooks(config, launch, preflight::Preflight::provider())
+    }
+
+    fn with_hooks(
+        config: SupervisorConfig,
+        launch: runner::Launch,
+        preflight: preflight::Preflight,
+    ) -> Self {
         let (tx, rx) = unbounded_channel();
         let cursor = Arc::new(AtomicU64::new(0));
         let root = CancellationToken::new();
@@ -179,6 +194,7 @@ impl Supervisor {
                 config,
                 root,
                 failed,
+                preflight,
             }),
         }
     }
@@ -215,50 +231,13 @@ impl Supervisor {
     }
 
     /// The filesystem and schema work of admitting a request, done off the
-    /// supervisor's task on a thread of its own and bounded, so a hung
-    /// filesystem can delay only this `start`, never `wait` or `interrupt`.
-    /// Returns the refusal, if any. A request that fails validation is left for
-    /// the supervisor to refuse.
-    ///
-    /// The thread is detached: nothing waits for it. If the bound passes, or the
-    /// runtime or the supervisor goes away first, its late result is discarded
-    /// and the thread ends on its own when the filesystem answers, so a hung
-    /// filesystem cannot hold up a shutdown or a runtime drop.
+    /// supervisor's task and bounded, so a hung filesystem can delay only this
+    /// `start`, never `wait` or `interrupt`. See [`preflight`].
     async fn preflight(&self, request: &Request) -> Option<(String, String)> {
-        if request.validate().is_err() {
-            return None;
-        }
-        let (request, options) = (request.clone(), self.shared.config.provider.clone());
-        let (tx, rx) = oneshot::channel();
-        let spawned = std::thread::Builder::new()
-            .name("delega-preflight".to_string())
-            .spawn(move || {
-                let refusal = provider::dry_run(&request, &options)
-                    .err()
-                    .map(|refusal| (refusal.kind, refusal.message));
-                let _ = tx.send(refusal);
-            });
-        if spawned.is_err() {
-            return Some((
-                "internal_error".to_string(),
-                "checking the request could not be started".to_string(),
-            ));
-        }
-        match tokio::time::timeout(limits::PREFLIGHT_BOUND, rx).await {
-            Ok(Ok(refusal)) => refusal,
-            Ok(Err(_)) => Some((
-                "internal_error".to_string(),
-                "checking the request failed unexpectedly".to_string(),
-            )),
-            Err(_) => Some((
-                "preflight_timeout".to_string(),
-                format!(
-                    "checking the request did not finish within {} s; the filesystem or the \
-                     provider executable may be unreachable",
-                    limits::PREFLIGHT_BOUND.as_secs()
-                ),
-            )),
-        }
+        self.shared
+            .preflight
+            .run(request, &self.shared.config.provider)
+            .await
     }
 
     /// Queue another assignment on `worker`, to continue its provider session
