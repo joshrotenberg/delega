@@ -44,8 +44,9 @@
 //! descendant was observed or signalled during the run, so a sweep that follows
 //! a kill must be confirmed by the next): every live process in
 //! the child's group, every live process whose session id is the child's (read
-//! with `getsid` for each row of the table, because `ps` has no session keyword
-//! that works on both macOS and Linux), and every tracked descendant with a
+//! for each row of the table, because `ps` has no session keyword that works on
+//! both macOS and Linux: from `/proc/<pid>/stat` on Linux, with `getsid` on
+//! macOS), and every tracked descendant with a
 //! matching start time. The sweep signals what it finds. A descendant that
 //! keeps the output pipes open after the kill does not hold the report: the
 //! owner closes its ends after the drain bound and says so in the diagnostics.
@@ -154,7 +155,7 @@
 //!
 //! A process is signalled only if it is a live member of the child's group (the
 //! group id is the child's pid, which the unreaped child pins), a live member of
-//! its session (read with `getsid` and read again just before the signal), or a
+//! its session (read as above and read again just before the signal), or a
 //! tracked process whose pid and start time match what was recorded. A process
 //! becomes tracked only by being a member, or by having a parent that is owned
 //! at that listing: the child itself, a member, or a tracked process with a
@@ -165,7 +166,7 @@
 //! descendant of the child by construction. What remains is a pid recycled
 //! between the two rows of one listing (the child's `ppid` names the pid of a
 //! process that died and whose number a new member took within the run of one
-//! `ps`), a pid reused between the listing and the per-row `getsid` (a foreign
+//! `ps`), a pid reused between the listing and the per-row session read (a foreign
 //! row would then read as a member and be signalled, after the session member
 //! is read once more just before the signal, which narrows it to the time
 //! between those two calls), and two processes with one pid and one start time
@@ -186,7 +187,15 @@
 //!
 //! # Platform
 //!
-//! Unix only; the module is empty elsewhere. It has the workspace's one
+//! Unix only; the module is empty elsewhere. The session of a process is read
+//! from the sixth field of `/proc/<pid>/stat` on Linux, because `getsid(2)`
+//! answers 0 there for kernel threads and for processes whose session leader is
+//! outside the pid namespace, and rustix cannot represent that answer (it
+//! panics in a debug build and is undefined behaviour in a release build). A
+//! missing proc entry is a process that is gone; a session of 0 is read as an
+//! ordinary answer that is never the child's. On macOS `getsid` is called
+//! through rustix; `ps -ax` lists no pid 0 row there and no listed process
+//! answered 0 when checked. It has the workspace's one
 //! `unsafe`: a `pre_exec` hook in `sys.rs` that calls only `setsid`.
 //!
 //! Verified on macOS only. Not yet verified on Linux, for the Linux run to
@@ -199,9 +208,10 @@
 //! - `waitid` with `WNOWAIT` for a stopped leader: macOS reports a stop as a
 //!   result; the code accepts only exit, kill and core dump, which is the
 //!   Linux behaviour too, but the stopped-leader tests have not run there.
-//! - `getsid` of processes in other sessions and of other users' processes, now
-//!   read for every row of every listing.
-//! - A zombie leader keeps its session: `getsid` of the members it left behind
+//! - The `/proc/<pid>/stat` session read for processes in other sessions, for
+//!   other users' processes and for kernel threads, now read for every row of
+//!   every listing (the 0 answer is covered by unit tests).
+//! - A zombie leader keeps its session: the session of the members it left behind
 //!   answers its pid, and its children are reparented when it exits, not when it
 //!   is reaped. Both hold on macOS; the adoption of a `setsid` descendant whose
 //!   parent is a member depends on them.

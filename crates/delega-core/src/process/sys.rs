@@ -91,25 +91,59 @@ pub(super) fn wait_for_exit(child: i32) -> Result<(), String> {
 /// The session id of a process, when it can be read.
 #[cfg(test)]
 pub(super) fn session_of(target: i32) -> Option<i32> {
-    let target = Pid::from_raw(target)?;
-    rustix::process::getsid(Some(target))
-        .ok()
-        .map(|pid| pid.as_raw_nonzero().get())
+    match session_lookup(target) {
+        SessionLookup::In(session) => Some(session),
+        SessionLookup::Gone | SessionLookup::Unknown => None,
+    }
 }
 
-/// What `getsid` said about one process.
+/// What the OS said about the session of one process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionLookup {
-    /// The process is in this session.
+    /// The process is in this session. On Linux this is 0 for a kernel thread
+    /// and for a process whose session leader is outside this pid namespace;
+    /// a 0 is a real answer that never names the child's session.
     In(i32),
-    /// The process no longer exists (ESRCH).
+    /// The process no longer exists (ESRCH, or no `/proc` entry).
     Gone,
     /// The OS would not say.
     Unknown,
 }
 
 /// The session of a process, telling a vanished process from an unreadable one.
+///
+/// Linux reads `/proc/<pid>/stat`, because `getsid(2)` answers 0 there for
+/// kernel threads and for processes whose session leader is outside the pid
+/// namespace, and rustix turns the answer into a `Pid` that cannot be 0
+/// (a panic in a debug build, undefined behaviour in a release build). Other
+/// systems call `getsid` through rustix. On macOS `ps -ax` lists no pid 0 row
+/// and `getsid` of every listed process was non-zero when checked; pid 0 is
+/// refused above, so a zero answer is not expected there.
 pub(super) fn session_lookup(target: i32) -> SessionLookup {
+    if target <= 0 {
+        return SessionLookup::Unknown;
+    }
+    platform_session(target)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_session(target: i32) -> SessionLookup {
+    // ESRCH: the process exited while its proc entry was being read.
+    const ESRCH: i32 = 3;
+    match std::fs::read(format!("/proc/{target}/stat")) {
+        Ok(bytes) => parse_stat_session(&bytes).map_or(SessionLookup::Unknown, SessionLookup::In),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(ESRCH) =>
+        {
+            SessionLookup::Gone
+        }
+        Err(_) => SessionLookup::Unknown,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_session(target: i32) -> SessionLookup {
     let Some(target) = Pid::from_raw(target) else {
         return SessionLookup::Unknown;
     };
@@ -118,6 +152,18 @@ pub(super) fn session_lookup(target: i32) -> SessionLookup {
         Err(Errno::SRCH) => SessionLookup::Gone,
         Err(_) => SessionLookup::Unknown,
     }
+}
+
+/// The session field of one `/proc/<pid>/stat` line: the sixth field. The
+/// command name (field 2) is in parentheses and may hold spaces, parentheses
+/// and any bytes, so fields are counted from the last `)`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat_session(stat: &[u8]) -> Option<i32> {
+    let end = stat.iter().rposition(|&byte| byte == b')')?;
+    let rest = std::str::from_utf8(&stat[end + 1..]).ok()?;
+    // After the name: state, ppid, pgrp, session.
+    let session: i32 = rest.split_ascii_whitespace().nth(3)?.parse().ok()?;
+    (session >= 0).then_some(session)
 }
 
 /// What `kill(-pgid, 0)` says about a process group.
@@ -205,6 +251,75 @@ mod tests {
         assert_eq!(signal_name(Signal::KILL.as_raw()), "SIGKILL");
         assert_eq!(signal_name(Signal::TERM.as_raw()), "SIGTERM");
         assert_eq!(signal_name(9999), "SIG9999");
+    }
+
+    #[test]
+    fn parses_the_session_of_a_stat_line() {
+        let line = b"1234 (sleep) S 1 1234 1234 34816 1234 4194304 100 0 0 0 0 0";
+        assert_eq!(parse_stat_session(line), Some(1234));
+    }
+
+    #[test]
+    fn parses_the_session_when_the_name_has_spaces_and_parentheses() {
+        let line = b"77 (a) b (c d) ) Z 5 66 88 0 -1 0";
+        assert_eq!(parse_stat_session(line), Some(88));
+        let line = b"2 (kthreadd) S 0 0 0 0 -1 2129984 0";
+        assert_eq!(parse_stat_session(line), Some(0));
+    }
+
+    #[test]
+    fn rejects_stat_lines_that_cannot_be_read() {
+        assert_eq!(parse_stat_session(b""), None);
+        assert_eq!(parse_stat_session(b"1 (x"), None);
+        assert_eq!(parse_stat_session(b"1 (x) S 1 1"), None);
+        assert_eq!(parse_stat_session(b"1 (x) S 1 1 abc 0"), None);
+        assert_eq!(parse_stat_session(b"1 (x) S 1 1 -4 0"), None);
+        assert_eq!(parse_stat_session(b"1 (x\xff) S 1 1 7 0"), Some(7));
+    }
+
+    #[test]
+    fn pid_zero_and_negative_pids_have_no_readable_session() {
+        assert_eq!(session_lookup(0), SessionLookup::Unknown);
+        assert_eq!(session_lookup(-1), SessionLookup::Unknown);
+    }
+
+    /// Not run on macOS; runs in the Linux CI job.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_thread_session_reads_without_panicking() {
+        // Pid 2 is kthreadd; any other session-0 process found works too.
+        let candidate = std::iter::once(2).chain(
+            std::fs::read_dir("/proc")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok()),
+        );
+        let mut seen = false;
+        for pid in candidate {
+            let Ok(bytes) = std::fs::read(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            if parse_stat_session(&bytes) == Some(0) {
+                assert_eq!(session_lookup(pid), SessionLookup::In(0));
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            eprintln!("no session-0 process visible; skipped");
+        }
+    }
+
+    /// Not run on macOS; runs in the Linux CI job.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_process_is_gone_on_linux() {
+        assert_eq!(session_lookup(i32::MAX - 1), SessionLookup::Gone);
+        assert!(matches!(
+            session_lookup(std::process::id() as i32),
+            SessionLookup::In(session) if session > 0
+        ));
     }
 
     #[test]
