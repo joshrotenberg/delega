@@ -3,8 +3,10 @@
 `delega_core::supervisor` runs several workers at once. It is the library
 behind the MCP tools of [api.md](api.md#mcp): each tool is one operation of
 [`Supervisor`](../crates/delega-core/src/supervisor/mod.rs), with the same
-arguments and a serializable response. The MCP server is a later change; it maps
-tool arguments to these calls and returns the responses as they are.
+arguments and a serializable response. The MCP server (`delega-mcp`, served by
+`delega mcp`) maps tool arguments to these calls and returns the responses as
+they are; every response type also derives `JsonSchema`, which is where the
+tools' output schemas come from.
 
 A worker is one provider conversation. A run is one assignment given to it.
 `start` makes a worker and its first run; `follow_up` adds a run to the same
@@ -311,7 +313,6 @@ across ten workers.
 
 ## Not built
 
-- The MCP server and `delega mcp`.
 - Persisting workers across a restart.
 - `waiting_for_answer`, `respond` and `permissions.asked`, which depend on a
   long-lived provider session.

@@ -6,10 +6,13 @@ Run Claude Code and Codex agents from a program, for any purpose, reliably.
 definite result. It is reached from a command line, from Rust, and over MCP.
 
 This repository is new. The request and result contract, the process layer, the
-provider layer and the supervisor (several workers at once, as a library) exist
-so far. `delega run`, `delega schema request|result`,
-`delega skill list|show NAME` and `delega version` work, and `mcp`, `init` and
-`doctor` print "not implemented yet". `delega run` runs one assignment on a
+provider layer, the supervisor (several workers at once, as a library) and the
+MCP server over it exist so far. `delega run`, `delega mcp`,
+`delega schema request|result`, `delega skill list|show NAME` and
+`delega version` work, and `init` and `doctor` print "not implemented yet".
+`delega mcp` serves seven tools (`start`, `follow_up`, `wait`, `read`, `list`,
+`interrupt`, `close`) over standard input and output, and has been tested
+against fake providers only. `delega run` runs one assignment on a
 Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
 `--progress`, `--allow-command` and the exit statuses in
 [docs/api.md](docs/api.md); it has been tested against fake providers only, not
@@ -61,8 +64,8 @@ Out of scope:
 | Path | Holds |
 | --- | --- |
 | `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and the supervisor (`supervisor`: several workers at once, with follow-ups, a queue, limits, wait, read, interrupt and close). |
-| `schemas` | JSON Schemas for the request and result, generated from the core types. |
-| `crates/delega-mcp` | The MCP adapter over the core. |
+| `schemas` | JSON Schemas for the request and result, generated from the core types, and under `schemas/mcp` the input and output schemas of each MCP tool. |
+| `crates/delega-mcp` | The MCP server over the supervisor: the seven tools, the skills and the identity as resources, and serving on standard input and output with an orderly stop. Its tests run the router in process against the fake providers. |
 | `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
 | `acceptance` | `delega-acceptance`, the acceptance test for criteria 1 and 2: it drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. Results are in `acceptance/RESULTS.md`. |
 | `docs/api.md` | The agreed design for the CLI and MCP surface. |
