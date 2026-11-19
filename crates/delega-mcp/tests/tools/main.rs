@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
+use delega_core::contract::applied::AppliedConfig;
+use delega_core::contract::partial::PartialRequest;
 use delega_core::contract::request::Provider;
 use delega_core::provider::ProviderOptions;
 use delega_core::supervisor::{Limits, Supervisor, SupervisorConfig};
@@ -27,6 +29,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower_mcp::{CallToolResult, TestClient};
 
+mod applied;
 mod resources;
 mod tools;
 
@@ -104,6 +107,8 @@ pub(crate) struct Rig {
     root: PathBuf,
     pub work: PathBuf,
     record: PathBuf,
+    /// The directory the workers' `CLAUDE_CONFIG_DIR` points at.
+    pub config_dir: PathBuf,
     pub session: String,
     pub supervisor: Supervisor,
     pub client: TestClient,
@@ -115,6 +120,35 @@ impl Rig {
     }
 
     pub async fn with_limits(provider: Provider, limits: Limits) -> Self {
+        Self::build(
+            provider,
+            limits,
+            PartialRequest::default(),
+            None,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// A rig whose server was started as `delega mcp` starts with a
+    /// configuration file: `defaults` under every `start`, `config` as the
+    /// file they came from, and `env_set` as extra variables for the workers.
+    pub async fn with_config(
+        provider: Provider,
+        defaults: PartialRequest,
+        config: AppliedConfig,
+        env_set: Vec<(String, String)>,
+    ) -> Self {
+        Self::build(provider, Limits::default(), defaults, Some(config), env_set).await
+    }
+
+    async fn build(
+        provider: Provider,
+        limits: Limits,
+        defaults: PartialRequest,
+        applied_config: Option<AppliedConfig>,
+        extra_env: Vec<(String, String)>,
+    ) -> Self {
         let slot = SLOTS.take();
         let tmp = tempfile::tempdir().expect("create temporary directory");
         let root = std::fs::canonicalize(tmp.path()).expect("resolve temporary directory");
@@ -156,13 +190,16 @@ impl Rig {
                 (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
                 (OsString::from("HOME"), home.clone().into_os_string()),
             ]),
-            env_set: vec![
+            env_set: [
                 ("FAKE_RECORD_DIR".into(), text(&record)),
                 ("FAKE_SESSION_ID".into(), session.clone()),
                 ("XDG_CONFIG_HOME".into(), text(&config)),
                 ("CLAUDE_CONFIG_DIR".into(), text(&config)),
                 ("CODEX_HOME".into(), text(&config)),
-            ],
+            ]
+            .into_iter()
+            .chain(extra_env)
+            .collect(),
             stop_grace: Some(Duration::from_millis(200)),
             ..ProviderOptions::default()
         };
@@ -171,8 +208,13 @@ impl Rig {
             provider: options,
             ..SupervisorConfig::default()
         });
-        let router = delega_mcp::router(supervisor.clone(), &BuildInfo::default())
-            .expect("the router for the supervisor");
+        let router = delega_mcp::router_with_config(
+            supervisor.clone(),
+            &BuildInfo::default(),
+            defaults,
+            applied_config,
+        )
+        .expect("the router for the supervisor");
         let mut client = TestClient::from_router(router);
         client.initialize().await;
         Self {
@@ -181,6 +223,7 @@ impl Rig {
             root,
             work,
             record,
+            config_dir: config,
             session,
             supervisor,
             client,
