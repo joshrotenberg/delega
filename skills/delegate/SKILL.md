@@ -38,7 +38,10 @@ pass first, `settled` is false: `read` the run later.
 `start` takes the same request fields as a run: `provider`, `prompt`, `cwd`,
 `name`, `instructions`, `model`, `effort`, `timeout_secs`, `permissions`,
 `answer_schema`, `session` and `native_args`. `provider` and `prompt` are
-required. The worker does not see your conversation, so write each `prompt` as a
+required, and so is an absolute `cwd`, given in the call or by the profile. A
+start with no `cwd`, or a relative one, is refused as a run of kind
+`cwd_required`: the server's own working directory is chosen by the host, so it
+is never used as a default. The worker does not see your conversation, so write each `prompt` as a
 standalone assignment.
 
 `profile` is the path of a profile file, a partial request saved as JSON. Fields

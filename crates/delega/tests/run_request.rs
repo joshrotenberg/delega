@@ -652,6 +652,29 @@ fn a_relative_extra_directory_resolves_against_the_callers_directory() {
 }
 
 #[test]
+fn run_without_cwd_uses_the_callers_current_directory() {
+    let rig = Rig::new();
+    let out = rig
+        .command()
+        .current_dir(&rig.work)
+        .args([
+            "run",
+            "--dry-run",
+            "--output",
+            "json",
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+        ])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(value["dry_run"]["cwd"], rig.work.to_string_lossy().as_ref());
+}
+
+#[test]
 fn relative_paths_in_a_profile_resolve_against_the_callers_directory_too() {
     let rig = Rig::new();
     std::fs::create_dir(rig.path("shared")).expect("create shared");

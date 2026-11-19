@@ -222,7 +222,32 @@ impl Supervisor {
     /// response is `finished` with outcome `refused`, no worker is created, and
     /// [`read`](Self::read) returns the result.
     pub async fn start(&self, request: Request) -> Result<StartResponse, Error> {
-        let preflight = self.preflight(&request).await;
+        self.start_checked(request, false).await
+    }
+
+    /// [`start`](Self::start) for a caller whose own working directory says
+    /// nothing about where the worker belongs, such as an MCP server a host
+    /// launches in a directory of its own choosing.
+    ///
+    /// A request with no `cwd`, or a relative one, is refused as a finished run
+    /// with kind `cwd_required`, and no provider check runs. A request that
+    /// fails validation is still refused as `invalid_request`, and a name in use
+    /// or the worker limit is still refused first; the check falls before the
+    /// provider's own checks. [`follow_up`](Self::follow_up) needs no such
+    /// variant: it reuses the worker's first `cwd`.
+    pub async fn start_requiring_cwd(&self, request: Request) -> Result<StartResponse, Error> {
+        self.start_checked(request, true).await
+    }
+
+    async fn start_checked(
+        &self,
+        request: Request,
+        require_cwd: bool,
+    ) -> Result<StartResponse, Error> {
+        let preflight = match require_cwd.then(|| cwd_required(&request)).flatten() {
+            Some(refusal) => Some(refusal),
+            None => self.preflight(&request).await,
+        };
         // A shutdown that began while this start was being checked released it.
         // Answer here: a `Start` sent now could reach the supervisor's task
         // before the `Shutdown` that `shutdown` sends after closing the checks,
@@ -453,4 +478,26 @@ impl Supervisor {
     pub(crate) fn inject_panic(&self) {
         let _ = self.shared.tx.send(Command::PanicForTest);
     }
+}
+
+/// The refusal for a request whose `cwd` is missing or relative. A request that
+/// fails validation is left to the supervisor, which refuses it as invalid.
+fn cwd_required(request: &Request) -> Option<(String, String)> {
+    if request.validate().is_err() {
+        return None;
+    }
+    let message = match &request.cwd {
+        None => {
+            "cwd is required: give an absolute working directory. The MCP server's own \
+                 working directory is chosen by the host (on Codex it is the plugin root), \
+                 so it is not used as a default"
+        }
+        Some(cwd) if !cwd.is_absolute() => {
+            "cwd must be an absolute path. The MCP server's own working directory is chosen \
+             by the host (on Codex it is the plugin root), so a relative path has no fixed \
+             meaning"
+        }
+        Some(_) => return None,
+    };
+    Some(("cwd_required".to_string(), message.to_string()))
 }

@@ -103,6 +103,12 @@ files, then the provider's own mapping of the request (for Claude Code:
 `unsupported_command`, and `deny_rules_over_limit` for the generated settings
 argument), then `permissions_not_enforceable`, then `invalid_env_name` and
 `forbidden_env_name`.
+`delega mcp` adds one refusal, `cwd_required`, for a `start` whose merged request
+(after any `profile`) has no `cwd` or a relative one. It is found after
+`invalid_request`, a name in use and the live-worker limit, and before every
+provider check above, so no provider check or process runs. See
+[MCP](#mcp). `delega run` has no such refusal.
+
 So a strict request that Codex cannot enforce and that also has an invalid
 environment name is refused as `permissions_not_enforceable`; without strict it
 is refused as `invalid_env_name`. `unsupported_provider_version` is found later,
@@ -351,7 +357,7 @@ eighth, `respond`, when live asking is added.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `start` | The request fields, or `profile` plus overrides | At once: worker id, run id, state `queued` or `running`. |
+| `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | At once: worker id, run id, state `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. Queues behind a running run. |
 | `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state, partial text and recent activity. |
@@ -359,6 +365,17 @@ eighth, `respond`, when live asking is added.
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
 | `close` | `worker` | Stops the worker, discards queued assignments, frees its slot. Results already produced stay readable for a bounded time. |
+
+`start` requires an absolute `cwd`. The MCP server's own working directory is
+chosen by the host (Codex starts a plugin's server in the plugin root), so it is
+never a default: a merged request with no `cwd` or a relative one is refused as
+a finished run, kind `cwd_required`, readable with `read`, with no worker and no
+process. The input schema lists `cwd` as optional, because a `profile` may supply
+it and a schema that required it would reject a call with only a `profile`; the
+requirement is checked on the merged request. `follow_up` takes no `cwd`: it
+runs in the first request's, which was absolute. `delega run` keeps defaulting to
+the caller's current directory. The check is `Supervisor::start_requiring_cwd`,
+which only the MCP adapter calls.
 
 Rules that hold for every tool:
 

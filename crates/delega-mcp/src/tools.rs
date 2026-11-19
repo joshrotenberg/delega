@@ -29,8 +29,9 @@ pub const TOOL_NAMES: [&str; 7] = [
 ];
 
 const START: &str = "Start a worker on a new assignment and return at once with the worker id, \
-    the run id and the state (queued or running). Give the request fields (provider and prompt \
-    are required), or profile plus overrides. Next, call wait with the run id and a short \
+    the run id and the state (queued or running). Give the request fields (provider, prompt and an \
+    absolute cwd are required), or profile plus overrides; a profile may supply cwd. A start \
+    with no cwd, or a relative one, is refused as cwd_required. Next, call wait with the run id and a short \
     timeout, passing the cursor back, then read the finished run. A request that cannot go \
     ahead is not an error: it returns a run whose result is refused, and read gives the reason.";
 
@@ -163,7 +164,7 @@ fn start_tool(adapter: &Arc<Adapter>) -> Tool {
                 Ok(match built {
                     Ok(Ok(request)) => {
                         adapter
-                            .with(|s| async move { s.start(request).await })
+                            .with(|s| async move { s.start_requiring_cwd(request).await })
                             .await
                     }
                     Ok(Err(message)) => CallToolResult::error(message),

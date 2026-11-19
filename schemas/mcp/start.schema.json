@@ -38,7 +38,7 @@
         ]
       },
       "cwd": {
-        "description": "See [`Request::cwd`].",
+        "description": "Absolute working directory of the worker. Required: the server refuses a start whose merged request, after any profile, has no cwd or a relative one, as cwd_required. A profile may supply it.",
         "type": [
           "string",
           "null"
