@@ -50,6 +50,7 @@ impl Core {
         target: &Target,
         detail: Detail,
         after: Option<u64>,
+        text_offset: Option<usize>,
     ) -> Result<ReadResponse, Error> {
         let (run_id, worker) = match target {
             Target::Run(id) => {
@@ -83,6 +84,7 @@ impl Core {
                 outcome: None,
                 cursor,
                 result: None,
+                text_window: None,
                 progress: None,
                 note: Some("no run of this worker is kept: its results have aged out".to_string()),
             });
@@ -90,6 +92,10 @@ impl Core {
         let finished = run.state == RunState::Finished;
         let progress =
             (!finished || detail == Detail::Full).then(|| self.progress_view(run, detail, after));
+        let windowed = run
+            .result
+            .as_ref()
+            .map(|r| ResultView::windowed(r, detail, text_offset));
         Ok(ReadResponse {
             worker: worker_id.or_else(|| run.worker.clone()),
             worker_state,
@@ -97,7 +103,8 @@ impl Core {
             state: Some(run.state),
             outcome: run.result.as_ref().map(|r| r.outcome),
             cursor,
-            result: run.result.as_ref().map(|r| ResultView::of(r, detail)),
+            result: windowed.as_ref().map(|(view, _)| view.clone()),
+            text_window: windowed.and_then(|(_, window)| window),
             progress,
             note: None,
         })

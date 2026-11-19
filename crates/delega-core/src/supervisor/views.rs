@@ -14,7 +14,7 @@ use crate::contract::result::{Cleanup, DeniedRequest, ErrorDetail, RunResult, Ti
 
 use super::activity::ActivityEntry;
 use super::error::Error;
-use super::limits::COMPACT_RESULT_TEXT_CHARS;
+use super::limits::{COMPACT_RESULT_TEXT_CHARS, COMPACT_STRUCTURED_BYTES};
 use super::state::{RunState, WorkerState};
 
 /// How much a read returns.
@@ -191,9 +191,21 @@ pub struct CompactResult {
     /// The full length of the answer in characters. Present when truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_chars: Option<usize>,
-    /// The structured answer, when one was asked for.
+    /// The character offset `text` starts at, when the read gave one and the
+    /// text is a window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_offset: Option<usize>,
+    /// The structured answer, when one was asked for, unless it is larger than
+    /// [`COMPACT_STRUCTURED_BYTES`] serialized. See `structured_omitted`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured: Option<serde_json::Value>,
+    /// True when the structured answer was left out for its size. `detail:
+    /// full` returns it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub structured_omitted: bool,
+    /// Its serialized size in bytes. Present when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_bytes: Option<usize>,
     /// Whether it satisfied the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_valid: Option<bool>,
@@ -215,23 +227,85 @@ pub struct CompactResult {
     pub timing: Timing,
 }
 
+/// Where a window of the answer text sits in the whole answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TextWindow {
+    /// Characters before the window.
+    pub offset: usize,
+    /// Characters in the window.
+    pub length: usize,
+    /// Characters in the whole answer.
+    pub total: usize,
+    /// True when the answer goes on after the window. Read again with
+    /// `offset + length` as the next offset.
+    pub more: bool,
+}
+
 impl ResultView {
     /// The view of `result` at `detail`.
     pub fn of(result: &RunResult, detail: Detail) -> Self {
-        match detail {
-            Detail::Full => ResultView::Full(Box::new(result.clone())),
+        Self::windowed(result, detail, None).0
+    }
+
+    /// The view of `result` at `detail`, with the answer text read from the
+    /// character `offset`. A compact view always returns a window of at most
+    /// [`COMPACT_RESULT_TEXT_CHARS`] characters. A full view returns all of the
+    /// text unless an offset is given, and then the same window. The window is
+    /// returned when an offset was given.
+    pub fn windowed(
+        result: &RunResult,
+        detail: Detail,
+        offset: Option<usize>,
+    ) -> (Self, Option<TextWindow>) {
+        // Plain ASCII, the common case, is sliced by byte; anything else is
+        // walked by character, so a window never cuts a character in two.
+        let ascii = result.text.is_ascii();
+        let total = if ascii {
+            result.text.len()
+        } else {
+            result.text.chars().count()
+        };
+        let start = offset.unwrap_or(0).min(total);
+        let paged = offset.is_some();
+        let whole = detail == Detail::Full && !paged;
+        let text: String = if whole {
+            result.text.clone()
+        } else if ascii {
+            let end = (start + COMPACT_RESULT_TEXT_CHARS).min(total);
+            result.text[start..end].to_string()
+        } else {
+            result
+                .text
+                .chars()
+                .skip(start)
+                .take(COMPACT_RESULT_TEXT_CHARS)
+                .collect()
+        };
+        let length = if whole {
+            total
+        } else if ascii {
+            text.len()
+        } else {
+            text.chars().count()
+        };
+        let more = start + length < total;
+        let window = paged.then_some(TextWindow {
+            offset: start,
+            length,
+            total,
+            more,
+        });
+        let view = match detail {
+            Detail::Full if !paged => ResultView::Full(Box::new(result.clone())),
+            Detail::Full => {
+                let mut cut = result.clone();
+                cut.text = text;
+                ResultView::Full(Box::new(cut))
+            }
             Detail::Compact => {
-                let chars = result.text.chars().count();
-                let truncated = chars > COMPACT_RESULT_TEXT_CHARS;
-                let text: String = if truncated {
-                    result
-                        .text
-                        .chars()
-                        .take(COMPACT_RESULT_TEXT_CHARS)
-                        .collect()
-                } else {
-                    result.text.clone()
-                };
+                let truncated = start > 0 || more;
+                let structured_bytes = result.structured.as_ref().map(|v| v.to_string().len());
+                let omit = structured_bytes.is_some_and(|n| n > COMPACT_STRUCTURED_BYTES);
                 ResultView::Compact(Box::new(CompactResult {
                     run: result.run.clone(),
                     worker: result.worker.clone(),
@@ -239,8 +313,15 @@ impl ResultView {
                     outcome: result.outcome,
                     text,
                     text_truncated: truncated,
-                    text_chars: truncated.then_some(chars),
-                    structured: result.structured.clone(),
+                    text_chars: truncated.then_some(total),
+                    text_offset: (paged && truncated).then_some(start),
+                    structured: if omit {
+                        None
+                    } else {
+                        result.structured.clone()
+                    },
+                    structured_omitted: omit,
+                    structured_bytes: if omit { structured_bytes } else { None },
                     structured_valid: result.structured_valid,
                     error: result.error.clone(),
                     cleanup: result.cleanup.clone(),
@@ -250,7 +331,8 @@ impl ResultView {
                     timing: result.timing.clone(),
                 }))
             }
-        }
+        };
+        (view, window)
     }
 }
 
@@ -325,6 +407,10 @@ pub struct ReadResponse {
     /// The result, once the run has finished.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<ResultView>,
+    /// Where the answer text of `result` sits in the whole answer. Present when
+    /// the read gave a `text_offset`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_window: Option<TextWindow>,
     /// How the run is going. Present while it is queued or running, and with
     /// full detail also once it has finished.
     #[serde(skip_serializing_if = "Option::is_none")]

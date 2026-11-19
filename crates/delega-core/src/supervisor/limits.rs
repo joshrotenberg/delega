@@ -33,8 +33,6 @@ pub const INTERRUPT_BOUND: Duration = Duration::from_secs(30);
 /// The longest `start` spends checking the request's paths, executable and
 /// schema before it is admitted.
 pub const PREFLIGHT_BOUND: Duration = Duration::from_secs(10);
-/// Slack added to [`SHUTDOWN_BOUND`] for the blocking wait in `Drop`.
-pub const DROP_SLACK: Duration = Duration::from_secs(2);
 
 /// Most activity entries kept per run. Older ones are counted and dropped.
 pub const MAX_ACTIVITY: usize = 200;
@@ -48,6 +46,11 @@ pub const COMPACT_PARTIAL_TEXT_CHARS: usize = 2_000;
 /// Characters of the answer a compact read returns. A longer answer is cut and
 /// the response says so and gives the full length; `detail: full` returns all.
 pub const COMPACT_RESULT_TEXT_CHARS: usize = 20_000;
+
+/// Serialized bytes of the structured answer a compact read returns. A larger one
+/// is left out and the response says so and gives its size; `detail: full`
+/// returns it.
+pub const COMPACT_STRUCTURED_BYTES: usize = 16 * 1024;
 
 /// Most run or worker ids one `wait` may name.
 pub const MAX_WAIT_TARGETS: usize = 256;

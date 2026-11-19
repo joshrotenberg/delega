@@ -184,6 +184,12 @@ case "$mode" in
     init
     success '"{\"answer\":42}"' '[]'
     ;;
+  structured-large)
+    # A structured answer well over the compact bound.
+    init
+    big=$(head -c 20000 /dev/zero | tr '\0' 'x')
+    success "\"{\\\"answer\\\":\\\"$big\\\"}\"" '[]'
+    ;;
   structured-fenced)
     init
     success '"```json\n{\"answer\":42}\n```"' '[]'

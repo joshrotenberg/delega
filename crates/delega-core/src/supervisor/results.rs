@@ -115,8 +115,16 @@ pub(super) fn refused_invalid(
     worker: Option<WorkerRef>,
     problems: &[Problem],
 ) -> RunResult {
-    RunResult::refused_invalid(refusal_context(run, worker.clone()), problems)
-        .unwrap_or_else(|_| refused(run, worker, "invalid_request", "the request is not valid"))
+    let result = RunResult::refused_invalid(refusal_context(run, worker.clone()), problems)
+        .unwrap_or_else(|_| {
+            refused(
+                run,
+                worker.clone(),
+                "invalid_request",
+                "the request is not valid",
+            )
+        });
+    seal(run, worker, result)
 }
 
 /// The run was stopped before its provider started.
@@ -166,13 +174,14 @@ pub(super) fn invalid_result(
         .map(Problem::to_string)
         .collect::<Vec<_>>()
         .join("; ");
-    RunResult::failed(
-        context(run, worker, cleanup),
+    let result = RunResult::failed(
+        context(run, worker.clone(), cleanup),
         ErrorDetail {
             kind: "internal_error".to_string(),
             message: format!("the provider layer returned an inconsistent result: {message}"),
             provider_exit_code: None,
         },
         partial_text,
-    )
+    );
+    seal(run, worker, result)
 }

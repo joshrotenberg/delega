@@ -251,7 +251,12 @@ async fn results_are_gone_after_the_retention_time_and_a_closed_worker_goes_with
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(
         supervisor
-            .read(Target::Run(started.run.clone()), Default::default(), None)
+            .read(
+                Target::Run(started.run.clone()),
+                Default::default(),
+                None,
+                None
+            )
             .await
             .expect_err("the result has aged out"),
         Error::UnknownRun(started.run.clone())
@@ -268,7 +273,12 @@ async fn results_are_gone_after_the_retention_time_and_a_closed_worker_goes_with
     assert!(list.workers.is_empty(), "{list:#?}");
     assert_eq!(
         supervisor
-            .read(Target::Worker(worker.clone()), Default::default(), None)
+            .read(
+                Target::Worker(worker.clone()),
+                Default::default(),
+                None,
+                None
+            )
             .await
             .expect_err("the closed worker has gone"),
         Error::UnknownWorker(worker)
@@ -306,7 +316,7 @@ async fn the_byte_bound_drops_the_oldest_results_and_always_keeps_the_newest() {
     );
     assert!(matches!(
         supervisor
-            .read(Target::Run(runs[0].clone()), Default::default(), None)
+            .read(Target::Run(runs[0].clone()), Default::default(), None, None)
             .await,
         Err(Error::UnknownRun(_))
     ));
@@ -367,7 +377,7 @@ async fn a_compact_read_cuts_a_long_answer_and_says_how_long_it_was_while_full_r
     assert!(closed.result.is_none(), "nothing was running to stop");
 
     let read = supervisor
-        .read(Target::Run(started.run.clone()), Detail::Full, None)
+        .read(Target::Run(started.run.clone()), Detail::Full, None, None)
         .await
         .expect("read");
     let Some(ResultView::Full(whole)) = read.result else {
@@ -410,7 +420,12 @@ async fn only_the_newest_results_up_to_the_count_are_kept() {
     for gone in &runs[..2] {
         assert_eq!(
             supervisor
-                .read(Target::Run(gone.run.clone()), Default::default(), None)
+                .read(
+                    Target::Run(gone.run.clone()),
+                    Default::default(),
+                    None,
+                    None
+                )
                 .await
                 .expect_err("evicted"),
             Error::UnknownRun(gone.run.clone())
@@ -462,6 +477,133 @@ async fn a_queue_limit_of_zero_means_no_waiting_behind_a_running_run_not_no_foll
     assert_eq!(
         result_of(&supervisor, &accepted.run).await.outcome,
         Outcome::Completed
+    );
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_compact_read_leaves_out_a_large_structured_answer_and_says_how_big_it_was() {
+    use delega_core::supervisor::limits::COMPACT_STRUCTURED_BYTES;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let mut request = rig.request(Provider::Claude, "structured-large");
+    request.answer_schema = Some(serde_json::json!({"type": "object"}));
+    let started = supervisor.start(request).await.expect("start");
+    let full = result_of(&supervisor, &started.run).await;
+    let whole = full.structured.clone().expect("a structured answer");
+    let size = whole.to_string().len();
+    assert!(size > COMPACT_STRUCTURED_BYTES, "{size}");
+
+    let compact = read_compact(&supervisor, &started.run).await;
+    let Some(ResultView::Compact(result)) = &compact.result else {
+        panic!("{compact:#?}");
+    };
+    assert!(result.structured.is_none());
+    assert!(result.structured_omitted);
+    assert_eq!(result.structured_bytes, Some(size));
+    assert_eq!(
+        result.structured_valid,
+        Some(true),
+        "validity still reported"
+    );
+    let read = supervisor
+        .read(Target::Run(started.run.clone()), Detail::Full, None, None)
+        .await
+        .expect("read");
+    let Some(ResultView::Full(whole_result)) = read.result else {
+        panic!("full read");
+    };
+    assert_eq!(whole_result.structured, Some(whole));
+
+    // A small one is returned as it is, unmarked.
+    let mut small = rig.request(Provider::Claude, "structured");
+    small.answer_schema = Some(serde_json::json!({"type": "object"}));
+    let small = supervisor.start(small).await.expect("start");
+    result_of(&supervisor, &small.run).await;
+    let json = serde_json::to_value(read_compact(&supervisor, &small.run).await).expect("json");
+    assert_eq!(json["result"]["structured"]["answer"], 42, "{json}");
+    assert!(json["result"].get("structured_omitted").is_none(), "{json}");
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn read_pages_a_long_answer_by_character_offset_with_the_total() {
+    use delega_core::supervisor::limits::COMPACT_RESULT_TEXT_CHARS;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "large"))
+        .await
+        .expect("start");
+    let full = result_of(&supervisor, &started.run).await;
+    let total = full.text.chars().count();
+    let target = || Target::Run(started.run.clone());
+
+    // Page through the whole answer with the offsets each window names.
+    let mut assembled = String::new();
+    let mut offset = 0;
+    let mut windows = 0;
+    loop {
+        let read = supervisor
+            .read(target(), Detail::Compact, None, Some(offset))
+            .await
+            .expect("read");
+        let window = read
+            .text_window
+            .clone()
+            .expect("a paged read says where it is");
+        let Some(ResultView::Compact(result)) = &read.result else {
+            panic!("{read:#?}");
+        };
+        assert_eq!(window.offset, offset);
+        assert_eq!(window.total, total);
+        assert_eq!(window.length, result.text.chars().count());
+        assert!(window.length <= COMPACT_RESULT_TEXT_CHARS);
+        assert_eq!(result.text_chars, Some(total));
+        assembled.push_str(&result.text);
+        windows += 1;
+        if !window.more {
+            break;
+        }
+        offset = window.offset + window.length;
+    }
+    assert_eq!(assembled, full.text, "the windows add up to the answer");
+    assert_eq!(windows, total.div_ceil(COMPACT_RESULT_TEXT_CHARS));
+
+    // Full detail takes an offset too and returns the same window; without one
+    // it returns everything.
+    let read = supervisor
+        .read(target(), Detail::Full, None, Some(total - 5))
+        .await
+        .expect("read");
+    let Some(ResultView::Full(tail)) = read.result else {
+        panic!("full read");
+    };
+    assert_eq!(tail.text.chars().count(), 5);
+    assert!(!read.text_window.expect("window").more);
+    let read = supervisor
+        .read(target(), Detail::Full, None, None)
+        .await
+        .expect("read");
+    assert!(read.text_window.is_none());
+    let Some(ResultView::Full(all)) = read.result else {
+        panic!("full read");
+    };
+    assert_eq!(all.text.chars().count(), total);
+
+    // Past the end is an empty window with the total, not an error.
+    let read = supervisor
+        .read(target(), Detail::Compact, None, Some(total + 1000))
+        .await
+        .expect("read");
+    let window = read.text_window.expect("window");
+    assert_eq!(
+        (window.length, window.total, window.more),
+        (0, total, false)
     );
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;

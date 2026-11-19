@@ -439,7 +439,7 @@ async fn start_follow_up_read_and_list_return_while_a_provider_hangs() {
         .expect("follow_up");
     read_compact(&supervisor, &held.run).await;
     supervisor
-        .read(Target::Worker(worker.clone()), Detail::Full, None)
+        .read(Target::Worker(worker.clone()), Detail::Full, None, None)
         .await
         .expect("read");
     supervisor.list().await.expect("list");

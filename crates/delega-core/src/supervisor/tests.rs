@@ -126,7 +126,7 @@ async fn finished_result(supervisor: &Supervisor, run: &str) -> crate::contract:
         .expect("wait");
     assert!(!waited.timed_out, "{waited:#?}");
     let read = supervisor
-        .read(Target::Run(run.to_string()), Detail::Full, None)
+        .read(Target::Run(run.to_string()), Detail::Full, None, None)
         .await
         .expect("read");
     let Some(ResultView::Full(result)) = read.result else {
@@ -159,7 +159,12 @@ async fn a_panic_in_one_runs_task_fails_that_run_and_leaves_the_rest_working() {
 
     // The bystander runs on, and the supervisor still answers and starts runs.
     let still = supervisor
-        .read(Target::Run(bystander.run.clone()), Detail::Compact, None)
+        .read(
+            Target::Run(bystander.run.clone()),
+            Detail::Compact,
+            None,
+            None,
+        )
         .await
         .expect("read");
     assert_eq!(still.state, Some(RunState::Running));

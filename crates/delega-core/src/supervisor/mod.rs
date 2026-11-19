@@ -48,7 +48,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -80,7 +79,7 @@ pub use state::{IllegalTransition, RunState, WorkerState};
 pub use views::{
     CloseResponse, CompactResult, Detail, FollowUpResponse, InterruptResponse, LimitsView,
     ListResponse, ProgressView, ReadResponse, ResultView, RunBrief, RunDiagnostics, ShutdownReport,
-    StartResponse, Target, WaitResponse, WaitTargets, WorkerBrief, WorkerView,
+    StartResponse, Target, TextWindow, WaitResponse, WaitTargets, WorkerBrief, WorkerView,
 };
 
 use command::{Closing, Command, Stopping, WaitStart};
@@ -89,7 +88,6 @@ use command::{Closing, Command, Stopping, WaitStart};
 /// the supervisor.
 struct Shared {
     tx: UnboundedSender<Command>,
-    done: Arc<actor::Done>,
     config: SupervisorConfig,
     /// Cancelled to stop every run at once. Each run's stop token is a child
     /// of it, so `Drop` can signal every provider without the supervisor's
@@ -97,10 +95,6 @@ struct Shared {
     root: CancellationToken,
     /// Set if the supervisor's own task panicked.
     failed: Arc<Mutex<Option<String>>>,
-    /// Whether this thread may block waiting for the supervisor when it is
-    /// dropped outside any runtime context: only if the runtime that runs its
-    /// task is multi-threaded.
-    can_block: bool,
 }
 
 impl Shared {
@@ -113,51 +107,33 @@ impl Shared {
 }
 
 impl Drop for Shared {
-    /// Signals every child to stop at once, then asks the supervisor's task to
-    /// close every worker. Whether it also waits for the processes to be gone
-    /// depends on where it is called:
+    /// Signals every provider to stop, asks the supervisor's task to close
+    /// every worker, and returns. It never waits, and it needs no runtime:
+    /// cancelling a token and sending on an unbounded channel work from any
+    /// thread, inside any task, during a panic, and after the runtime is gone.
     ///
-    /// - on a thread of a multi-threaded runtime (inside a spawned task) it
-    ///   waits through `block_in_place`, which hands the thread's other work
-    ///   to another thread, up to `shutdown_bound` plus a short slack;
-    /// - on the thread that called `block_on` of a multi-threaded runtime, or
-    ///   outside any runtime when the supervisor's runtime is multi-threaded,
-    ///   it waits the same way;
-    /// - on a current-thread runtime it cannot wait, because nothing else can
-    ///   run the stop. Every child has been signalled, and the processes are
-    ///   gone as soon as that runtime is polled again. If the runtime is
-    ///   dropped first, the process layer kills each child's group when its
-    ///   owner task is dropped.
+    /// Cancelling the root token signals every run's stop token at once, without
+    /// the supervisor's task having to run. Each run's task then interrupts its
+    /// provider, and if the runtime is dropped first, the process layer's own
+    /// drop path kills each child's process group and its tracked descendants
+    /// without waiting for a process listing. The processes are therefore gone
+    /// shortly after, not by the time this returns. Only
+    /// [`Supervisor::shutdown`] waits for cleanup and reports what could not be
+    /// confirmed; call it before the last clone is dropped when that matters.
     fn drop(&mut self) {
         self.root.cancel();
-        if self.tx.send(Command::Quit).is_err() {
-            return;
-        }
-        let limit = self.config.shutdown_bound + limits::DROP_SLACK;
-        let wait = || self.done.wait(limit);
-        match Handle::try_current() {
-            Ok(handle) => {
-                if handle.runtime_flavor() == RuntimeFlavor::MultiThread {
-                    tokio::task::block_in_place(wait);
-                }
-            }
-            Err(_) => {
-                if self.can_block {
-                    wait();
-                }
-            }
-        }
+        let _ = self.tx.send(Command::Quit);
     }
 }
 
 /// A set of workers and the runs given to them. Cheap to clone; every clone is
 /// the same supervisor.
 ///
-/// Must be created inside a Tokio runtime. Call [`shutdown`](Self::shutdown)
-/// before dropping the last clone: dropping signals every child at once and asks
-/// the supervisor to close every worker, but it can wait for the processes to
-/// be gone only on a multi-threaded runtime. On a current-thread runtime the
-/// processes are gone once that runtime runs again.
+/// Must be created inside a Tokio runtime. Dropping the last clone signals every
+/// provider to stop and returns at once; it never waits and never panics. The
+/// processes are gone shortly after. Only [`shutdown`](Self::shutdown) waits for
+/// cleanup and reports what could not be confirmed, so call it before the last
+/// clone is dropped, and before the runtime is.
 #[derive(Clone)]
 pub struct Supervisor {
     shared: Arc<Shared>,
@@ -174,19 +150,16 @@ impl Supervisor {
     }
 
     pub(crate) fn with_launcher(config: SupervisorConfig, launch: runner::Launch) -> Self {
-        let handle = Handle::current();
-        let can_block = handle.runtime_flavor() == RuntimeFlavor::MultiThread;
         let (tx, rx) = unbounded_channel();
-        let done = Arc::new(actor::Done::default());
         let cursor = Arc::new(AtomicU64::new(0));
         let root = CancellationToken::new();
         let failed = Arc::new(Mutex::new(None));
         let core = core::Core::new(config.clone(), tx.clone(), launch, cursor, root.clone());
-        let task = tokio::spawn(actor::run(core, rx, done.clone(), config.shutdown_bound));
+        let task = tokio::spawn(actor::run(core, rx, config.shutdown_bound));
         // If the task panics, `Core`'s drop has already stopped every run;
         // this records that it happened so no call can mistake it for a clean
         // stop.
-        let (watch_done, watch_failed) = (done.clone(), failed.clone());
+        let watch_failed = failed.clone();
         tokio::spawn(async move {
             if let Err(error) = task.await {
                 let how = if error.is_panic() {
@@ -198,17 +171,14 @@ impl Supervisor {
                     "the supervisor's task {how}; every provider was sent a stop, and nothing \
                      confirmed that any of them ended"
                 ));
-                watch_done.set();
             }
         });
         Self {
             shared: Arc::new(Shared {
                 tx,
-                done,
                 config,
                 root,
                 failed,
-                can_block,
             }),
         }
     }
@@ -245,22 +215,36 @@ impl Supervisor {
     }
 
     /// The filesystem and schema work of admitting a request, done off the
-    /// supervisor's task on the blocking pool and bounded, so a hung filesystem
-    /// can delay only this `start`, never `wait` or `interrupt`. Returns the
-    /// refusal, if any. A request that fails validation is left for the
-    /// supervisor to refuse. If the bound passes, the blocking thread cannot be
-    /// cancelled and is left to finish, and the start is refused.
+    /// supervisor's task on a thread of its own and bounded, so a hung
+    /// filesystem can delay only this `start`, never `wait` or `interrupt`.
+    /// Returns the refusal, if any. A request that fails validation is left for
+    /// the supervisor to refuse.
+    ///
+    /// The thread is detached: nothing waits for it. If the bound passes, or the
+    /// runtime or the supervisor goes away first, its late result is discarded
+    /// and the thread ends on its own when the filesystem answers, so a hung
+    /// filesystem cannot hold up a shutdown or a runtime drop.
     async fn preflight(&self, request: &Request) -> Option<(String, String)> {
         if request.validate().is_err() {
             return None;
         }
         let (request, options) = (request.clone(), self.shared.config.provider.clone());
-        let job = tokio::task::spawn_blocking(move || {
-            provider::dry_run(&request, &options)
-                .err()
-                .map(|refusal| (refusal.kind, refusal.message))
-        });
-        match tokio::time::timeout(limits::PREFLIGHT_BOUND, job).await {
+        let (tx, rx) = oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("delega-preflight".to_string())
+            .spawn(move || {
+                let refusal = provider::dry_run(&request, &options)
+                    .err()
+                    .map(|refusal| (refusal.kind, refusal.message));
+                let _ = tx.send(refusal);
+            });
+        if spawned.is_err() {
+            return Some((
+                "internal_error".to_string(),
+                "checking the request could not be started".to_string(),
+            ));
+        }
+        match tokio::time::timeout(limits::PREFLIGHT_BOUND, rx).await {
             Ok(Ok(refusal)) => refusal,
             Ok(Err(_)) => Some((
                 "internal_error".to_string(),
@@ -347,16 +331,27 @@ impl Supervisor {
     /// diagnostics. For a worker, reads its current run, or its latest.
     ///
     /// `after_cursor` limits the activity returned to entries after it.
+    ///
+    /// A compact read returns the first [`limits::COMPACT_RESULT_TEXT_CHARS`]
+    /// characters of the answer and leaves out a structured answer larger than
+    /// [`limits::COMPACT_STRUCTURED_BYTES`], saying so. `text_offset`, a number
+    /// of characters, pages through a long answer: the result's text is the
+    /// window of that many characters starting there, and `text_window` gives
+    /// the offset, the window's length, the total, and whether more follows.
+    /// Read again with `offset + length` for the next window. It works with
+    /// either detail; a full read without an offset returns everything.
     pub async fn read(
         &self,
         target: Target,
         detail: Detail,
         after_cursor: Option<u64>,
+        text_offset: Option<usize>,
     ) -> Result<ReadResponse, Error> {
         self.call(|reply| Command::Read {
             target,
             detail,
             after: after_cursor,
+            text_offset,
             reply,
         })
         .await?

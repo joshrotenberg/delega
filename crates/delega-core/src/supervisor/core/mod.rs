@@ -151,9 +151,10 @@ impl Core {
                 target,
                 detail,
                 after,
+                text_offset,
                 reply,
             } => {
-                let _ = reply.send(self.read(&target, detail, after));
+                let _ = reply.send(self.read(&target, detail, after, text_offset));
             }
             Command::List { reply } => {
                 let _ = reply.send(Ok(self.list()));

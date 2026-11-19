@@ -52,6 +52,7 @@ async fn a_running_run_shows_partial_text_and_activity(provider: Provider) {
             Target::Worker(started.worker.clone().expect("worker")),
             Detail::Compact,
             None,
+            None,
         )
         .await
         .expect("read");
@@ -90,6 +91,7 @@ async fn a_cursor_returns_only_activity_after_it() {
             Target::Run(started.run.clone()),
             Detail::Compact,
             Some(last),
+            None,
         )
         .await
         .expect("read");
@@ -103,7 +105,12 @@ async fn a_cursor_returns_only_activity_after_it() {
     gate.open();
     result_of(&supervisor, &started.run).await;
     let full = supervisor
-        .read(Target::Run(started.run.clone()), Detail::Full, Some(last))
+        .read(
+            Target::Run(started.run.clone()),
+            Detail::Full,
+            Some(last),
+            None,
+        )
         .await
         .expect("read");
     let kinds: Vec<String> = full
@@ -258,12 +265,17 @@ async fn reading_an_unknown_run_or_worker_is_an_error_naming_the_id() {
     let rig = Rig::new();
     let supervisor = rig.supervisor(Provider::Claude);
     let error = supervisor
-        .read(Target::Run("run-x".into()), Detail::Compact, None)
+        .read(Target::Run("run-x".into()), Detail::Compact, None, None)
         .await
         .expect_err("unknown");
     assert!(error.to_string().contains("run-x"));
     let error = supervisor
-        .read(Target::Worker("worker-x".into()), Detail::Compact, None)
+        .read(
+            Target::Worker("worker-x".into()),
+            Detail::Compact,
+            None,
+            None,
+        )
         .await
         .expect_err("unknown");
     assert!(error.to_string().contains("worker-x"));

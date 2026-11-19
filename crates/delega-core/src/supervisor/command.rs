@@ -90,6 +90,7 @@ pub(super) enum Command {
         target: Target,
         detail: Detail,
         after: Option<u64>,
+        text_offset: Option<usize>,
         reply: Reply<ReadResponse>,
     },
     List {

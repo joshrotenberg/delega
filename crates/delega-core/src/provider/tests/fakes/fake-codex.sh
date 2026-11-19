@@ -143,6 +143,12 @@ case "$mode" in
     final '"{\"answer\":42}"'
     done_ok
     ;;
+  structured-large)
+    init
+    big=$(head -c 20000 /dev/zero | tr '\0' 'x')
+    final "\"{\\\"answer\\\":\\\"$big\\\"}\""
+    done_ok
+    ;;
   structured-fenced)
     init
     final '"```json\n{\"answer\":42}\n```"'

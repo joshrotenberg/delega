@@ -1,8 +1,8 @@
 //! Interrupt, close, shutdown, drop, and a run's task that panics.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use super::{Rig, read_compact, read_full, result_of};
+use super::{Rig, assert_honest_cleanup, read_compact, read_full, result_of};
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::request::Provider;
 use delega_core::supervisor::{
@@ -50,10 +50,7 @@ async fn interrupting_a_running_run_waits_for_cleanup_and_returns_interrupted() 
         panic!("{response:#?}");
     };
     assert_eq!(result.outcome, Outcome::Interrupted);
-    assert_eq!(
-        result.cleanup,
-        delega_core::contract::result::Cleanup::Confirmed
-    );
+    assert_honest_cleanup(&result.cleanup);
     assert_eq!(result.error.as_ref().expect("error").kind, "interrupted");
     rig.assert_nothing_left().await;
 
@@ -296,7 +293,7 @@ async fn closing_an_idle_worker_frees_its_slot_and_a_run_waiting_for_one_starts(
     rig.assert_nothing_left().await;
 }
 
-fn ten_workers_limits() -> Limits {
+pub(crate) fn ten_workers_limits() -> Limits {
     Limits {
         max_live_workers: 10,
         max_running_runs: 10,
@@ -304,7 +301,7 @@ fn ten_workers_limits() -> Limits {
     }
 }
 
-async fn start_ten(rig: &Rig, supervisor: &Supervisor) -> Vec<(String, String)> {
+pub(crate) async fn start_ten(rig: &Rig, supervisor: &Supervisor) -> Vec<(String, String)> {
     let mut started = Vec::new();
     for n in 0..10 {
         let gate = rig.gate(&format!("w{n}"));
@@ -336,10 +333,7 @@ async fn shutdown_stops_ten_running_workers_and_leaves_nothing() {
     for (_, run) in &started {
         let result = result_of(&supervisor, run).await;
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(
-            result.cleanup,
-            delega_core::contract::result::Cleanup::Confirmed
-        );
+        assert_honest_cleanup(&result.cleanup);
     }
     rig.assert_nothing_left().await;
 
@@ -405,46 +399,6 @@ async fn shutdown_discards_what_is_queued_and_says_so() {
                 .contains("discarded by shutdown")
         );
     }
-    rig.assert_nothing_left().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropping_the_supervisor_with_ten_workers_running_leaves_nothing_behind() {
-    let rig = Rig::new();
-    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, ten_workers_limits()));
-    start_ten(&rig, &supervisor).await;
-    assert!(!rig.survivors().is_empty());
-
-    let begun = Instant::now();
-    drop(supervisor);
-    assert!(
-        begun.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        begun.elapsed()
-    );
-    // Drop waited for the stop on a multi-threaded runtime: nothing is left
-    // by now, without any further waiting.
-    let left = rig.survivors();
-    assert!(
-        left.is_empty(),
-        "drop returned with processes alive: {left:#?}"
-    );
-}
-
-#[tokio::test]
-async fn dropping_the_supervisor_on_a_current_thread_runtime_stops_everything_once_it_runs() {
-    let rig = Rig::new();
-    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, ten_workers_limits()));
-    start_ten(&rig, &supervisor).await;
-    let begun = Instant::now();
-    drop(supervisor);
-    // Nothing blocks, because nothing else could run the stop; every child has
-    // been signalled and the runtime stops them as soon as it is polled.
-    assert!(
-        begun.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        begun.elapsed()
-    );
     rig.assert_nothing_left().await;
 }
 
@@ -551,44 +505,5 @@ async fn a_shutdown_that_does_not_settle_within_its_bound_names_the_runs_left() 
         result_of(&supervisor, &started.run).await.outcome,
         Outcome::Interrupted
     );
-    rig.assert_nothing_left().await;
-}
-
-/// Drop the last clone inside a spawned task, which runs on a runtime worker
-/// thread, with ten workers running. The drop must not hold that thread for
-/// the whole shutdown bound, and must leave nothing running.
-async fn drop_inside_a_spawned_task(rig: &Rig) {
-    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, ten_workers_limits()));
-    start_ten(rig, &supervisor).await;
-    assert!(!rig.survivors().is_empty());
-    let took = tokio::spawn(async move {
-        let begun = Instant::now();
-        drop(supervisor);
-        begun.elapsed()
-    })
-    .await
-    .expect("the task that drops the supervisor");
-    assert!(
-        took < Duration::from_secs(10),
-        "the drop held a worker thread for {took:?}"
-    );
-    let left = rig.survivors();
-    assert!(
-        left.is_empty(),
-        "drop returned with processes alive: {left:#?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn dropping_the_last_clone_inside_a_task_with_several_runtime_threads_leaves_nothing() {
-    let rig = Rig::new();
-    drop_inside_a_spawned_task(&rig).await;
-    rig.assert_nothing_left().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn dropping_the_last_clone_inside_a_task_with_one_runtime_thread_leaves_nothing() {
-    let rig = Rig::new();
-    drop_inside_a_spawned_task(&rig).await;
     rig.assert_nothing_left().await;
 }

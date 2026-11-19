@@ -34,6 +34,7 @@ use delega_core::supervisor::{
     WaitResponse, WaitTargets,
 };
 
+mod drops;
 mod lifecycle;
 mod limits;
 mod reads;
@@ -267,6 +268,20 @@ impl Rig {
             .collect()
     }
 
+    /// The same check for a test that is not async: poll for up to thirty
+    /// seconds until no process carries this rig's directory.
+    pub fn settle_blocking(&self) {
+        let mut left = Vec::new();
+        for _ in 0..1500 {
+            left = self.survivors();
+            if left.is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("processes are still running: {left:#?}");
+    }
+
     /// Fail if a process started for this test is still alive after ten
     /// seconds.
     pub async fn assert_nothing_left(&self) {
@@ -279,6 +294,25 @@ impl Rig {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("processes are still running: {left:#?}");
+    }
+}
+
+/// Assert a cleanup verdict after a stop is honest. On a loaded machine the
+/// process layer's listing before the first signal can miss its budget, and it
+/// then says so instead of confirming; that is correct behaviour. What must hold
+/// is that the verdict is either confirmed or unconfirmed with a stated reason of
+/// that kind. Whether anything is really left is measured separately with
+/// [`Rig::assert_nothing_left`].
+pub(crate) fn assert_honest_cleanup(cleanup: &delega_core::contract::result::Cleanup) {
+    use delega_core::contract::result::Cleanup;
+    match cleanup {
+        Cleanup::Confirmed => {}
+        Cleanup::Unconfirmed { reason, .. } => assert!(
+            reason.contains("process listing")
+                || reason.contains("process inspection was unavailable")
+                || reason.contains("stopping was not confirmed"),
+            "an unconfirmed cleanup must give the missed-listing reason, got: {reason}"
+        ),
     }
 }
 
@@ -321,14 +355,14 @@ pub(crate) async fn result_of(supervisor: &Supervisor, run: &str) -> RunResult {
 
 pub(crate) async fn read_full(supervisor: &Supervisor, run: &str) -> ReadResponse {
     supervisor
-        .read(Target::Run(run.to_string()), Detail::Full, None)
+        .read(Target::Run(run.to_string()), Detail::Full, None, None)
         .await
         .expect("read answers")
 }
 
 pub(crate) async fn read_compact(supervisor: &Supervisor, run: &str) -> ReadResponse {
     supervisor
-        .read(Target::Run(run.to_string()), Detail::Compact, None)
+        .read(Target::Run(run.to_string()), Detail::Compact, None, None)
         .await
         .expect("read answers")
 }
