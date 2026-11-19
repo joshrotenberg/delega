@@ -2,6 +2,7 @@
 
 use crate::contract::request::Request;
 
+use super::deny::DenyRules;
 use super::hook::HookCommand;
 use super::permissions::Scope;
 
@@ -14,6 +15,9 @@ pub(super) struct Inputs<'a> {
     pub system: &'a str,
     /// Allowlisted `native_args`, as `flag value` pairs.
     pub native: &'a [String],
+    /// The deny rules read from the user's and the project's Claude Code
+    /// settings. Empty for Codex.
+    pub deny: &'a DenyRules,
 }
 
 /// An argument whose text is long and is shown elided in a dry run.

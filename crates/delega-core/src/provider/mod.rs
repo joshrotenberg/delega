@@ -27,7 +27,8 @@
 //! - `timed_out` and `interrupted`: the process layer stopped the provider.
 //! - `refused` before start: an invalid request, an unusable working directory
 //!   or directory, a rejected native argument, a missing provider executable,
-//!   an unsupported provider version for exact command grants.
+//!   an unsupported provider version for exact command grants, and, for Claude
+//!   Code, a settings file with deny rules that cannot be used.
 //! - `refused` after start: the provider reported failure and at least one
 //!   request had been denied.
 //!
@@ -39,6 +40,7 @@
 
 mod claude;
 mod codex;
+mod deny;
 mod dry_run;
 pub mod env;
 mod facts;
@@ -62,7 +64,8 @@ mod structured;
 #[cfg(test)]
 mod tests;
 
-pub use dry_run::{DryRun, dry_run};
+pub use deny::{DenyFile, SkippedFile};
+pub use dry_run::{DenyReport, DryRun, dry_run};
 pub use hook::HookCommand;
 pub use options::ProviderOptions;
 pub use permissions::Mapping;

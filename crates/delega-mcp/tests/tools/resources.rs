@@ -90,6 +90,7 @@ async fn the_identity_carries_the_version_the_schema_version_and_each_skill_dige
     let identity: Value =
         serde_json::from_str(content.text.as_deref().expect("text")).expect("JSON");
     assert_eq!(identity, delega_mcp::identity(&build));
+    assert!(super::keys_sorted(&identity), "{identity}");
     assert_eq!(identity["name"], "delega");
     assert_eq!(identity["version"], delega_core::VERSION);
     assert_eq!(identity["schema_version"], SCHEMA_VERSION);

@@ -4,6 +4,8 @@
 //! `docs/api.md` in the repository is the agreed design this crate follows.
 //! Only the contract in [`contract`] exists so far.
 
+pub mod canonical;
+
 pub mod contract;
 
 pub mod process;

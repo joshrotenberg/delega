@@ -45,14 +45,14 @@ pub fn identity(build: &BuildInfo) -> Value {
             })
         })
         .collect();
-    json!({
+    delega_core::canonical::sorted(json!({
         "name": "delega",
         "version": delega_core::VERSION,
         "schema_version": SCHEMA_VERSION,
         "revision": build.revision,
         "features": build.features,
         "skills": catalog,
-    })
+    }))
 }
 
 /// The embedded skills for the MCP Skills extension: each skill is listed and

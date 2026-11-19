@@ -97,12 +97,16 @@ async fn an_invalid_request_is_a_refused_run_that_read_returns() {
     assert_eq!(read["result"]["outcome"], "refused");
     assert_eq!(read["result"]["error"]["kind"], "cwd_unusable");
 
-    // A value the contract rejects is a refused run too, not a tool error.
-    let mut args = rig.start_args(CODEX, "success");
-    args["timeout_secs"] = json!(0);
-    let refused = rig.call("start", args).await;
+    // A value the contract rejects and the schema does not describe is a
+    // refused run too, not a tool error.
+    let refused = rig.call("start", rig.start_args(CODEX, "   ")).await;
     assert_eq!(refused["outcome"], "refused", "{refused}");
     assert_eq!(refused["error"]["kind"], "invalid_request");
+    // A time limit out of range is stated by the input schema, which rejects it.
+    let mut args = rig.start_args(CODEX, "success");
+    args["timeout_secs"] = json!(0);
+    let error = rig.client.call_tool_expect_error("start", args).await;
+    assert!(error.to_string().contains("input schema"), "{error}");
     rig.finish().await;
 }
 

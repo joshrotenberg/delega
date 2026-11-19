@@ -147,6 +147,19 @@ Behavior:
 
 - **Timeout.** `--timeout` accepts `90s`, `20m`, `2h` or a plain number of
   seconds, and the CLI converts it to the request's `timeout_secs`.
+- **Claude Code settings.** A Claude worker starts with settings sources off, so
+  it inherits no hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers or
+  instructions from the user's or the project's Claude Code settings. It does get
+  their `permissions.deny` rules: delega reads the user's settings file and the
+  working directory's `.claude/settings.json` and `settings.local.json` (the
+  latter also from the git repository root), takes
+  only that list, and adds the rules to the worker, where they can only narrow
+  the run (also in `full`). A settings file that exists and cannot be used
+  (unreadable, not JSON, a wrong type, over a limit) refuses the run with kind
+  `settings_unreadable` or `deny_rules_over_limit`, naming the file. The result's
+  `provider_notes` say how many rules were applied and from which files, and
+  `--dry-run` lists the files and, under `user_deny_rules`, the rules. Codex
+  gets none of this. See [providers.md](providers.md#deny-rules).
 - **Environment.** A worker does not inherit the caller's environment. It
   receives a fixed base (the user, shell, locale, temporary and base directory
   variables), proxy and certificate variables, and the provider's own
@@ -168,8 +181,12 @@ Behavior:
   and passed. `--env` is caller-side: a profile file does not carry it, and an
   `env` or `pass_env` field in one is refused as an unknown field. `delega mcp`
   takes the same flag, parsed the same way and applied to every worker the
-  server starts; the refusals are the same, and come as a refused run when a
-  worker is started.
+  server starts; the refusals are the same, with the same kinds and messages.
+  `delega mcp` checks every `--env` when it starts: a bad one is written to
+  standard error as `delega mcp: refused: <kind>: <message>`, nothing is served
+  and the status is 2. A name that only one provider's adapter owns (such as
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) is not known to be a problem until a
+  worker for that provider starts, and is refused then, as a refused run.
 - **Building the request.** The profile named by `--request` is read first and
   every flag that was given replaces the matching field; a flag that was not
   given leaves the profile's value. Lists (`--allow-command`, `--add-dir`,
@@ -269,7 +286,10 @@ Behavior:
   the caller's variables that are withheld (`withheld_count`); text output
   prints the same groups. It lists environment variable names, never values,
   never the names of withheld variables, and not the assignment, instructions or settings text, which are replaced by their
-  size. A request that would be refused prints the refusal as for a run (a
+  size. For Claude it adds `deny_rules`: the settings files read with their rule
+  counts, any local settings files ignored with the reason (`skipped`: a root that is the home directory, an entry that is not owned by the current user, or, in a repository root, a `.git` link or a `.claude` or settings-file link that is not the user's own in a directory only the user can write, with a target the user owns; anything the user does not own is skipped whatever its kind or mode), `applied`, and the user's own deny rules under `user_deny_rules`
+  (bounded, with `omitted`); a main checkout that could not be identified is a note, not a `skipped` entry; the launch arguments show a count in their place.
+  A request that would be refused prints the refusal as for a run (a
   `refused` result in JSON, a line on standard error in text) and exits 2.
   A dry run exits 0 otherwise.
 - **Progress.** `--progress` writes one line per provider event to standard
@@ -375,7 +395,10 @@ Rules that hold for every tool:
   uses (`delega_core::profile`): lists replace, `resume` and `ephemeral`
   exclude each other, a relative path resolves against the server's working
   directory. A request that has a provider and a prompt but fails the contract
-  (a time limit out of range, for example) is a refused run, not a tool error.
+  (a blank prompt, for example) is a refused run, not a tool error. The input
+  schema states the request schema's ranges and lengths (`timeout_secs`
+  between 1 and 86400, the list limits) from the same refinements, so a value
+  outside them is rejected as an invalid argument before the request is built.
   There is no per-call environment argument.
 - **Wait.** `timeout_secs` defaults to 30 and is capped by the wait ceiling.
   `read` takes `text_offset`, a number of characters, to page a long answer;

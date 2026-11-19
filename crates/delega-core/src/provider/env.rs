@@ -134,6 +134,13 @@ impl ResolvedEnv {
             .collect()
     }
 
+    /// The value the worker will receive for `name`, when it gets one.
+    pub(super) fn value(&self, name: &str) -> Option<&std::ffi::OsStr> {
+        self.vars
+            .get(std::ffi::OsStr::new(name))
+            .map(OsString::as_os_str)
+    }
+
     /// The names by reason, and the count of withheld variables.
     pub fn report(&self) -> &EnvReport {
         &self.report
@@ -276,6 +283,17 @@ pub(super) fn check_names(
         }
     }
     Ok(())
+}
+
+/// Check the names a caller asked to pass or set, with the rules and the
+/// messages a run applies, for a caller that must refuse them before any run
+/// exists (a server given `--env` at start-up). The one rule left out is the
+/// provider-specific one, a name delega itself sets for that provider's worker
+/// (such as `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`): which provider a worker
+/// uses is not known yet, so a run still refuses it when it starts. A message
+/// never repeats a value.
+pub fn check_caller_names(pass: &[String], set: &[(String, String)]) -> Result<(), Refusal> {
+    check_names(pass, set, &[])
 }
 
 #[derive(Clone, Copy)]

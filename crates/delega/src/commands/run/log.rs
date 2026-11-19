@@ -45,6 +45,13 @@ pub struct Log(Arc<Inner>);
 impl Log {
     /// Start the writer thread.
     pub fn start() -> Self {
+        Self::start_with(stderr_locked)
+    }
+
+    /// Start the writer thread, writing through `with_lock`. It is called once
+    /// per write, and must take whatever lock guards the stream for the length of
+    /// the call only.
+    fn start_with(with_lock: impl Fn(&mut dyn FnMut(&mut dyn Write)) + Send + 'static) -> Self {
         let (sender, receiver) = sync_channel::<String>(QUEUE_LINES);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -53,7 +60,14 @@ impl Log {
         let counts = (dropped.clone(), tap_dropped.clone());
         let thread_stop = stop.clone();
         std::thread::spawn(move || {
-            writer(&receiver, &counts.0, &counts.1, &thread_stop);
+            writer(
+                &receiver,
+                &counts.0,
+                &counts.1,
+                &thread_stop,
+                &with_lock,
+                &|| {},
+            );
             let _ = done_tx.send(());
         });
         Self(Arc::new(Inner {
@@ -100,32 +114,60 @@ impl Log {
     }
 }
 
+/// Runs a write with the lock on its stream held for that call only.
+type WithLock = dyn Fn(&mut dyn FnMut(&mut dyn Write));
+
+/// Run `write` on standard error with its lock held for that call only.
+fn stderr_locked(write: &mut dyn FnMut(&mut dyn Write)) {
+    write(&mut std::io::stderr().lock());
+}
+
+/// Write `text` and a newline as one unit, under one lock, so the line comes out
+/// whole next to lines written elsewhere in the process. A closed standard error
+/// is not worth failing the run for.
+fn write_line(with_lock: &WithLock, mut text: String) {
+    text.push('\n');
+    with_lock(&mut |out| {
+        let _ = out.write_all(text.as_bytes());
+    });
+}
+
 fn writer(
     receiver: &Receiver<String>,
     dropped: &AtomicU64,
     tap_dropped: &AtomicU64,
     stop: &AtomicBool,
+    with_lock: &WithLock,
+    after_timeout: &dyn Fn(),
 ) {
-    // The lock of standard error is taken for one line at a time and never held
-    // between lines, so a write that blocks holds nothing else up.
-    let mut err = std::io::stderr();
     loop {
         match receiver.recv_timeout(IDLE_POLL) {
-            Ok(line) => {
-                // A closed standard error is not worth failing the run for.
-                let _ = writeln!(err, "{line}");
+            Ok(line) => write_line(with_lock, line),
+            Err(RecvTimeoutError::Timeout) => {
+                // Tests run code here, in the window between an empty queue
+                // and the check of the stop flag.
+                after_timeout();
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
             }
-            Err(RecvTimeoutError::Timeout) if !stop.load(Ordering::SeqCst) => {}
-            Err(_) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+    // A line queued after the last timeout, before the stop flag was read, is
+    // still in the queue. Write what is left.
+    while let Ok(line) = receiver.try_recv() {
+        write_line(with_lock, line);
     }
     // Said last, straight to standard error, so it cannot itself be dropped.
     let lost = dropped.load(Ordering::Relaxed) + tap_dropped.load(Ordering::Relaxed);
     if lost > 0 {
-        let _ = writeln!(
-            err,
-            "progress: {lost} events or output chunks were dropped: standard error was not read \
-             fast enough, or the provider wrote faster than progress could be reported"
+        write_line(
+            with_lock,
+            format!(
+                "progress: {lost} events or output chunks were dropped: standard error was not \
+                 read fast enough, or the provider wrote faster than progress could be reported"
+            ),
         );
     }
 }
@@ -146,5 +188,117 @@ fn progress_line(event: &ProgressEvent) -> String {
         ProgressEvent::Finished { outcome } => {
             format!("progress: finished: {}", outcome_name(*outcome))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    type Stream = Arc<Mutex<Vec<u8>>>;
+    type Locker = Box<dyn Fn(&mut dyn FnMut(&mut dyn Write)) + Send>;
+
+    /// Reports each write on a channel, so a test can wait for the write
+    /// without taking the lock.
+    struct Notifying<'a> {
+        inner: &'a mut Vec<u8>,
+        written: mpsc::Sender<Vec<u8>>,
+    }
+
+    impl Write for Notifying<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.extend_from_slice(buf);
+            let _ = self.written.send(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A stream with a lock, standing in for standard error. `written` gets a
+    /// message for each write through the log thread.
+    fn locked_through(stream: &Stream, written: mpsc::Sender<Vec<u8>>) -> Locker {
+        let handle = stream.clone();
+        let written = Mutex::new(written);
+        Box::new(move |write: &mut dyn FnMut(&mut dyn Write)| {
+            let mut guard = handle.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut stream = Notifying {
+                inner: &mut guard,
+                written: written.lock().unwrap().clone(),
+            };
+            write(&mut stream);
+        })
+    }
+
+    /// A write from another thread, while the log thread is still running, must
+    /// not wait for the run to end.
+    #[test]
+    fn a_write_elsewhere_does_not_wait_for_the_log_thread_to_end() {
+        let (written_tx, written_rx) = mpsc::channel();
+        let stream = Stream::default();
+        let log = Log::start_with(locked_through(&stream, written_tx));
+        log.line("progress: from the log");
+        // Wait for the log thread to have written, so it has taken the lock and
+        // is now idle but still running. The stream is not locked here: the
+        // thread under test may be holding its lock.
+        let first = written_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the log line was never written");
+        assert_eq!(first, b"progress: from the log\n", "one whole write");
+        let (done_tx, done_rx) = mpsc::channel();
+        let other = stream.clone();
+        std::thread::spawn(move || {
+            let mut guard = other.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.extend_from_slice(b"from elsewhere\n");
+            drop(guard);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "a write elsewhere waited for the log thread, which holds the lock"
+        );
+        log.line("progress: last");
+        // Wait for the write itself, not for `finish`, whose wait is capped.
+        let last = written_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the last line was never written");
+        assert_eq!(last, b"progress: last\n", "one whole write, in order");
+        // Ends the thread; how long it took is not what this test checks.
+        log.finish();
+        let text = String::from_utf8(stream.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.contains(&"progress: from the log"), "{text}");
+        assert!(lines.contains(&"from elsewhere"), "{text}");
+        assert!(lines.contains(&"progress: last"), "{text}");
+    }
+
+    /// A line queued, and the stop flag set, after the writer found the queue
+    /// empty and before it read the flag must still be written.
+    #[test]
+    fn a_line_queued_between_the_last_timeout_and_the_stop_check_is_written() {
+        let (sender, receiver) = sync_channel::<String>(QUEUE_LINES);
+        let stop = AtomicBool::new(false);
+        let stream = Stream::default();
+        let (written_tx, _written_rx) = mpsc::channel();
+        let with_lock = locked_through(&stream, written_tx);
+        let first = std::cell::Cell::new(true);
+        writer(
+            &receiver,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+            &stop,
+            &*with_lock,
+            &|| {
+                if first.replace(false) {
+                    sender.try_send("progress: late".into()).unwrap();
+                    stop.store(true, Ordering::SeqCst);
+                }
+            },
+        );
+        let text = String::from_utf8(stream.lock().unwrap().clone()).unwrap();
+        assert_eq!(text, "progress: late\n");
     }
 }

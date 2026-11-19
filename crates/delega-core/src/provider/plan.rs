@@ -12,6 +12,7 @@ use jsonschema::Validator;
 
 use crate::contract::request::{Provider, Request};
 
+use super::deny::{self, DenyRules};
 use super::env::{self, EnvInputs, ResolvedEnv};
 use super::launch::{Built, Elide, Inputs};
 use super::limits::{MAX_OUTPUT_BYTES, VALIDATION_MESSAGE_CHARS};
@@ -31,6 +32,7 @@ pub(super) struct Plan {
     pub stdin: Vec<u8>,
     pub mapping: Mapping,
     pub notes: Vec<String>,
+    pub deny: DenyRules,
     pub elide: Vec<Elide>,
     pub mcp_index: Option<usize>,
     pub needs_hook_version: bool,
@@ -70,6 +72,10 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
     let parent = options.parent_env();
     let program = program::resolve(request.provider, options, &parent)?;
     let assembled = prompt::assemble(request);
+    let deny = match request.provider {
+        Provider::Claude => claude_deny_rules(&scope, &parent, options)?,
+        Provider::Codex => DenyRules::default(),
+    };
 
     let inputs = Inputs {
         request,
@@ -77,6 +83,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         hook: options.hook.as_ref(),
         system: &assembled.system,
         native: &native,
+        deny: &deny,
     };
     let built: Built = match request.provider {
         Provider::Claude => claude::build(&inputs)?,
@@ -115,6 +122,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         stdin: assembled.stdin,
         mapping,
         notes,
+        deny,
         elide: built.elide,
         mcp_index: built.mcp_index,
         needs_hook_version: built.needs_hook_version,
@@ -126,6 +134,29 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         #[cfg(test)]
         tap_queue_chunks: options.tap_queue_chunks,
     })
+}
+
+/// The deny rules of the user's and the project's Claude Code settings, found
+/// from the home and configuration directory the worker will receive.
+fn claude_deny_rules(
+    scope: &Scope,
+    parent: &[(std::ffi::OsString, std::ffi::OsString)],
+    options: &ProviderOptions,
+) -> Result<DenyRules, Refusal> {
+    // The adapter's own variables never name a home or configuration directory,
+    // so resolving without them gives the same two values the worker gets.
+    let worker_env = env::resolve(&EnvInputs {
+        provider: Provider::Claude,
+        parent,
+        pass: &options.env_pass,
+        set: &options.env_set,
+        adapter: &[],
+    });
+    deny::collect(
+        worker_env.value("HOME"),
+        worker_env.value("CLAUDE_CONFIG_DIR"),
+        &scope.cwd,
+    )
 }
 
 /// A warning when the working directory is the filesystem root or the home

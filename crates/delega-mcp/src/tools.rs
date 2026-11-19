@@ -95,7 +95,7 @@ pub fn tool_schemas() -> Vec<ToolSchemas> {
 /// The text a tool returns, as structured content and as the same JSON in a
 /// text block.
 fn success<T: Serialize>(value: &T) -> CallToolResult {
-    match serde_json::to_value(value) {
+    match delega_core::canonical::to_sorted_value(value) {
         Ok(json) => {
             let mut result = CallToolResult::json(json.clone());
             result.content = vec![Content::text(json.to_string())];

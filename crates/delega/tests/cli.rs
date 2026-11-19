@@ -331,3 +331,34 @@ fn help_lists_every_planned_subcommand() {
         );
     }
 }
+
+/// Whether every object in the value, at any depth, has its keys in
+/// alphabetical order. `serde_json` is built here with `preserve_order` (the MCP
+/// server's `tower-mcp` turns it on), so the order of the parsed value is the
+/// order of the text.
+fn keys_sorted(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<&String> = map.keys().collect();
+            keys.windows(2).all(|w| w[0] < w[1]) && map.values().all(keys_sorted)
+        }
+        serde_json::Value::Array(items) => items.iter().all(keys_sorted),
+        _ => true,
+    }
+}
+
+#[test]
+fn json_documents_built_from_values_have_alphabetical_keys_in_every_build() {
+    // The same text a build without `preserve_order` writes, so a caller sees one
+    // document whichever crate was built.
+    for args in [
+        &["version", "--output", "json"][..],
+        &["skill", "list", "--output", "json"],
+        &["skill", "show", "run", "--output", "json"],
+    ] {
+        let out = delega(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        let value: serde_json::Value = serde_json::from_str(&text(&out.stdout)).expect("JSON");
+        assert!(keys_sorted(&value), "{args:?}: {value}");
+    }
+}

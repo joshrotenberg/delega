@@ -9,6 +9,15 @@
 # running the hook command from --settings with the documented hook input. This
 # proves delega's plumbing against that assumed behaviour, not the real CLI.
 #
+# Deny rules: the fake reads `permissions.deny` from the --settings JSON and
+# denies a matching tool call even when an allow rule or the mode would permit
+# it. The matching is deliberately simple and models assumed CLI behaviour, not
+# the real rule engine: `Read` rules cover Read, Grep and Glob, `Edit` rules
+# cover Edit, Write and NotebookEdit, a bare tool name denies every call, a
+# `Bash(cmd)` rule matches the exact command and `Bash(prefix:*)` a prefix, and a
+# path rule matches as a glob (`//abs/**`, `//abs/**/name`) or, when relative,
+# from the working directory at any depth. Nothing else is evaluated.
+#
 # FAKE_SPLIT=naive makes it read the rule list the way a CLI that splits on
 # commas and all whitespace, ignoring parentheses, would.
 #
@@ -49,6 +58,32 @@ for arg in "$@"; do
 done
 sid="${resume:-${FAKE_SESSION_ID:-fake-claude-session-1}}"
 
+# The strings of the `permissions.deny` array of the settings JSON, one per
+# line. The scan follows JSON strings, so a comma, bracket or escaped quote in a
+# rule does not end the list.
+deny_rules=$(printf '%s' "$settings" | awk '
+{
+  text = text $0
+}
+END {
+  at = index(text, "\"deny\":[")
+  if (at == 0) exit
+  rest = substr(text, at + 8)
+  out = ""; instr = 0; i = 1; n = length(rest)
+  while (i <= n) {
+    c = substr(rest, i, 1)
+    if (instr) {
+      if (c == "\\") { i++; out = out substr(rest, i, 1) }
+      else if (c == "\"") { instr = 0; print out; out = "" }
+      else out = out c
+    } else {
+      if (c == "\"") instr = 1
+      else if (c == "]") break
+    }
+    i++
+  }
+}')
+
 IFS= read -r mode || true
 rest=$(cat)
 
@@ -65,8 +100,59 @@ has_tool() {
   return 1
 }
 
+# deny_class TOOL: the rule tool that governs TOOL.
+deny_class() {
+  case "$1" in
+    Read|Grep|Glob) printf Read ;;
+    Edit|Write|NotebookEdit) printf Edit ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# denied TOOL TARGET: a deny rule from the settings matches the call. TARGET is
+# an absolute path, or the command for Bash.
+denied() {
+  want=$(deny_class "$1")
+  here=$(pwd -P)
+  while IFS= read -r rule; do
+    [ -n "$rule" ] || continue
+    case "$rule" in
+      *"("*) tool=${rule%%"("*}; spec=${rule#*"("}; spec=${spec%")"} ;;
+      *) tool=$rule; spec="" ;;
+    esac
+    [ "$tool" = "$want" ] || [ "$tool" = "$1" ] || continue
+    [ "$tool" = "$rule" ] && return 0
+    if [ "$want" = "Bash" ]; then
+      case "$spec" in
+        *":*") prefix=${spec%":*"}; case "$2" in "$prefix"*) return 0 ;; esac ;;
+        *) [ "$2" = "$spec" ] && return 0 ;;
+      esac
+      continue
+    fi
+    case "$spec" in
+      "//"*) path="/${spec#//}" ;;
+      "~/"*) continue ;;
+      "/"*) path="$here/${spec#/}" ;;
+      # A relative rule resolves against the working directory and matches at
+      # any depth, as a live probe of the real CLI showed.
+      *)
+        spec=${spec#./}
+        spec=${spec#"**/"}
+        path="$here/**/$spec"
+        ;;
+    esac
+    zero=$(printf '%s' "$path" | sed 's|\*\*/||g')
+    some=$(printf '%s' "$path" | sed 's|\*\*|*|g')
+    case "$2" in $zero | $some) return 0 ;; esac
+  done <<EOF
+$deny_rules
+EOF
+  return 1
+}
+
 # path_allowed TOOL PATH: an allow rule TOOL(//dir/**) covers PATH.
 path_allowed() {
+  denied "$1" "$2" && return 1
   hit=1
   old=$IFS
   IFS=$split_ifs
@@ -92,6 +178,7 @@ path_allowed() {
 # rule of their own.
 search_allowed() {
   has_tool "$1" || return 1
+  denied "$1" "$2" && return 1
   path_allowed "$1" "$2" || path_allowed Read "$2"
 }
 
@@ -99,6 +186,7 @@ search_allowed() {
 # allows it, and the hook, when settings install one, exits 0.
 bash_allowed() {
   has_tool Bash || return 1
+  denied Bash "$1" && return 1
   exact=1
   old=$IFS
   IFS=$split_ifs

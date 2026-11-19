@@ -13,7 +13,11 @@
           "null"
         ],
         "format": "uint32",
-        "minimum": 0
+        "minimum": 0,
+        "enum": [
+          1,
+          null
+        ]
       },
       "provider": {
         "description": "See [`Request::provider`].",
@@ -79,7 +83,8 @@
           "null"
         ],
         "format": "uint64",
-        "minimum": 0
+        "minimum": 1,
+        "maximum": 86400
       },
       "permissions": {
         "description": "See [`Request::permissions`].",
@@ -93,7 +98,12 @@
         ]
       },
       "answer_schema": {
-        "description": "See [`Request::answer_schema`]."
+        "description": "See [`Request::answer_schema`].",
+        "type": [
+          "object",
+          "boolean",
+          "null"
+        ]
       },
       "session": {
         "description": "See [`Request::session`].",
@@ -114,7 +124,8 @@
         ],
         "items": {
           "type": "string"
-        }
+        },
+        "maxItems": 64
       },
       "profile": {
         "type": [
@@ -184,7 +195,8 @@
             ],
             "items": {
               "type": "string"
-            }
+            },
+            "maxItems": 256
           },
           "directories": {
             "description": "See [`Permissions::directories`].",
@@ -194,7 +206,8 @@
             ],
             "items": {
               "type": "string"
-            }
+            },
+            "maxItems": 64
           },
           "on_request": {
             "description": "See [`Permissions::on_request`].",
@@ -259,7 +272,21 @@
             ]
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "not": {
+          "properties": {
+            "ephemeral": {
+              "const": true
+            },
+            "resume": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ephemeral",
+            "resume"
+          ]
+        }
       }
     }
   },

@@ -111,3 +111,34 @@ fn the_start_schema_has_the_request_fields_and_a_profile() {
         assert!(properties.contains_key(field), "{field}");
     }
 }
+
+#[test]
+fn the_start_schema_states_the_ranges_of_the_request_schema() {
+    use delega_core::contract::limits::{
+        MAX_COMMANDS, MAX_DIRECTORIES, MAX_NATIVE_ARGS, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS,
+    };
+    let schemas = delega_mcp::tool_schemas();
+    let start = schemas.iter().find(|s| s.name == "start").expect("start");
+    let properties = &start.input["properties"];
+    // The numbers are the contract's, carried over by the same refinement the
+    // request schema gets, not written again here.
+    assert_eq!(properties["timeout_secs"]["minimum"], MIN_TIMEOUT_SECS);
+    assert_eq!(properties["timeout_secs"]["maximum"], MAX_TIMEOUT_SECS);
+    assert_eq!(properties["native_args"]["maxItems"], MAX_NATIVE_ARGS);
+    let defs = &start.input["$defs"];
+    assert_eq!(
+        defs["PartialPermissions"]["properties"]["commands"]["maxItems"],
+        MAX_COMMANDS
+    );
+    assert_eq!(
+        defs["PartialPermissions"]["properties"]["directories"]["maxItems"],
+        MAX_DIRECTORIES
+    );
+    assert!(defs["PartialSession"]["not"].is_object(), "{defs}");
+    // Enums come with the types: effort and provider.
+    let text = start.input.to_string();
+    assert!(
+        text.contains("\"low\"") && text.contains("\"codex\""),
+        "{text}"
+    );
+}

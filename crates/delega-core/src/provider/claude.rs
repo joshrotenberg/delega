@@ -159,35 +159,21 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
     })
 }
 
-/// The value with every object's keys in alphabetical order. A JSON object has
-/// no order, but the settings text is compared byte for byte in tests and read by
-/// the fake Claude Code with `sed`, and another crate in the build (the MCP
-/// server's `tower-mcp`) can switch `serde_json` to insertion order for every
-/// crate in it. Sorting makes the text the same whichever way the build goes.
-fn canonical(value: Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| (k, canonical(v)))
-                    .collect(),
-            )
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
-        other => other,
-    }
+/// The `--settings` value: the command guard hook, or hooks switched off, and
+/// the user's deny rules when there are any.
+///
+/// Deny rules are written only as elements of the `permissions.deny` array of
+/// this JSON document, which `serde_json` escapes. Text in a rule cannot end its
+/// string or the array, so it cannot add a key such as `permissions.allow`, and
+/// the `--allowedTools` value is built from delega's own data alone. A string in
+/// a deny list is a deny pattern whatever it contains, so a rule that is not
+/// well formed matches less and never allows anything.
+fn settings_json(guard: Option<&HookCommand>, deny: &[String]) -> Value {
+    crate::canonical::sorted(settings_value(guard, deny))
 }
 
-/// The `--settings` value: the command guard hook, or hooks switched off.
-fn settings_json(guard: Option<&HookCommand>) -> Value {
-    canonical(settings_value(guard))
-}
-
-fn settings_value(guard: Option<&HookCommand>) -> Value {
-    match guard {
+fn settings_value(guard: Option<&HookCommand>, deny: &[String]) -> Value {
+    let mut settings = match guard {
         Some(hook) => json!({
             "disableAllHooks": false,
             "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ {
@@ -199,7 +185,11 @@ fn settings_value(guard: Option<&HookCommand>) -> Value {
             } ] } ] }
         }),
         None => json!({ "disableAllHooks": true }),
+    };
+    if !deny.is_empty() {
+        settings["permissions"] = json!({ "deny": deny });
     }
+    settings
 }
 
 /// Characters refused in a command that becomes a rule: parentheses and commas
@@ -307,10 +297,15 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let request = inputs.request;
     let scope = inputs.scope;
     let g = grants(inputs)?;
-    let settings = settings_json(g.guard.as_ref()).to_string();
+    let settings = settings_json(g.guard.as_ref(), &inputs.deny.rules).to_string();
     if settings.len() > SETTINGS_ARGUMENT_LIMIT {
+        let kind = if inputs.deny.rules.is_empty() {
+            "unsupported_command"
+        } else {
+            super::deny::OVER_LIMIT
+        };
         return Err(Refusal::new(
-            "unsupported_command",
+            kind,
             format!(
                 "the generated Claude Code settings are {} bytes, over the {SETTINGS_ARGUMENT_LIMIT} \
                  byte limit; a restriction is never dropped to make it fit",
@@ -376,11 +371,12 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
 
     let mut notes = g.notes;
     notes.push(
-        "the user's and the project's Claude Code settings, including their deny rules, were not \
-         applied: --setting-sources is empty, so those settings files are not loaded (their \
-         hooks, env, apiKeyHelper, plugins, skills, MCP servers and instructions with them)"
+        "the user's and the project's Claude Code settings other than their deny rules were not \
+         applied: --setting-sources is empty, so their hooks, env, apiKeyHelper, plugins, skills, \
+         MCP servers and instructions are not loaded"
             .to_string(),
     );
+    notes.extend(inputs.deny.notes());
     notes.push(
         "reference directories do not contribute CLAUDE.md files (the variable that would load \
          them is not set); whether Claude Code reads the working directory's own CLAUDE.md when \
@@ -392,6 +388,7 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         "permission-mode=dontAsk".to_string(),
         format!("tools={}", g.tools.join(",")),
         format!("allowedTools={}", g.allowed.join(",")),
+        format!("denyRules={}", inputs.deny.rules.len()),
         format!(
             "hooks={}",
             if g.guard.is_some() {

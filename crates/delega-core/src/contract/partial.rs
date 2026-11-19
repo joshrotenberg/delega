@@ -20,6 +20,7 @@ use super::validate::Problem;
 /// The permissions part of a [`PartialRequest`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_permissions)]
 pub struct PartialPermissions {
     /// See [`Permissions::mode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +39,7 @@ pub struct PartialPermissions {
 /// The session part of a [`PartialRequest`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_session)]
 pub struct PartialSession {
     /// See [`Session::ephemeral`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +57,7 @@ pub struct PartialSession {
 /// file, which requires it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = super::schema::refine_partial_request)]
 pub struct PartialRequest {
     /// See [`Request::schema_version`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

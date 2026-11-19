@@ -478,35 +478,60 @@ fn sighup_sigint_and_sigquit_stop_the_workers_like_sigterm() {
 }
 
 #[test]
-fn an_env_name_the_policy_refuses_is_refused_when_a_worker_starts_without_echoing_values() {
-    // The flags are parsed as `delega run` parses them and refused as it refuses
-    // them: when a worker would start, with the kind of the offending name, and
-    // never with a value in the message.
+fn an_env_name_the_policy_refuses_stops_the_server_before_it_serves_without_echoing_values() {
+    // Parsed and refused as `delega run` parses and refuses them: the kind and
+    // message are the provider layer's, the status is the one `run` uses when
+    // nothing was started (2), nothing is served, and no value is written.
     for (given, kind) in [
         ("9BAD=secret-value-9d41", "invalid_env_name"),
         ("DELEGA_X=secret-value-9d41", "forbidden_env_name"),
         ("BAD-NAME", "invalid_env_name"),
+        (
+            "CLAUDE_CODE_ENTRYPOINT=secret-value-9d41",
+            "forbidden_env_name",
+        ),
     ] {
         let rig = Rig::new();
         let mut session = rig.start(&["--env", given]);
-        session.initialize();
-        let refused = session.call(
-            "start",
-            json!({"provider": "codex", "prompt": "success", "cwd": rig.work}),
-        );
-        assert_eq!(refused["outcome"], "refused", "{given}: {refused}");
-        assert_eq!(refused["error"]["kind"], kind, "{given}: {refused}");
-        assert!(
-            !refused.to_string().contains("secret-value-9d41"),
-            "{refused}"
-        );
-        assert!(refused.get("worker").is_none());
-        session.close_stdin();
         let status = session.exit();
-        assert_eq!(status.code(), Some(0));
-        assert!(!session.stderr().contains("secret-value-9d41"));
+        assert_eq!(status.code(), Some(2), "{given}: {}", session.stderr());
+        let error = session.stderr();
+        assert!(error.contains("delega mcp: refused"), "{given}: {error}");
+        assert!(error.contains(kind), "{given}: {error}");
+        assert!(!error.contains("secret-value-9d41"), "{given}: {error}");
+        // The same refusal `delega run` gives for the same flag.
+        let run = Command::new(env!("CARGO_BIN_EXE_delega"))
+            .args([
+                "run",
+                "--provider",
+                "codex",
+                "-p",
+                "x",
+                "--output",
+                "json",
+                "--env",
+                given,
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("DELEGA_CODEX_BIN", rig.fakes.join("fake-codex.sh"))
+            .output()
+            .expect("run delega");
+        let result: Value = serde_json::from_slice(&run.stdout).expect("run result");
+        assert_eq!(result["error"]["kind"], kind, "{given}");
+        assert!(
+            error.contains(result["error"]["message"].as_str().expect("message")),
+            "the message differs from run's: {error} / {result}"
+        );
+        // Nothing was served.
+        assert!(
+            session
+                .lines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
         rig.assert_nothing_left();
-        session.assert_only_json_rpc();
     }
 }
 

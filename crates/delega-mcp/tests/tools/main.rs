@@ -316,3 +316,18 @@ pub(crate) fn assert_honest_cleanup(cleanup: &Value) {
         "an unconfirmed cleanup must give the missed-listing reason: {cleanup}"
     );
 }
+
+/// Whether every object, at any depth, has its keys in alphabetical order. The
+/// order of a parsed value is the order of the text because `tower-mcp` turns on
+/// `serde_json`'s `preserve_order`; the server sorts so that the document is the
+/// one an unconfigured `serde_json` writes.
+pub(crate) fn keys_sorted(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let keys: Vec<&String> = map.keys().collect();
+            keys.windows(2).all(|w| w[0] < w[1]) && map.values().all(keys_sorted)
+        }
+        Value::Array(items) => items.iter().all(keys_sorted),
+        _ => true,
+    }
+}

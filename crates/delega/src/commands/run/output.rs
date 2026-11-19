@@ -167,10 +167,10 @@ pub fn refuse_dry_run(
 /// Print what a dry run found and exit 0.
 pub fn dry_run(format: OutputFormat, plan: &DryRun, log: &Log) -> ExitCode {
     let text = match format {
-        OutputFormat::Json => json_document(&json!({
+        OutputFormat::Json => json_document(&delega_core::canonical::sorted(json!({
             "schema_version": SCHEMA_VERSION,
             "dry_run": plan,
-        })),
+        }))),
         OutputFormat::Text => dry_run_text(plan),
     };
     if emit(log, &text) {
@@ -230,6 +230,34 @@ fn dry_run_text(plan: &DryRun) -> String {
         line(format!("  setting: {setting}"));
     }
     line(format!("  on request: {}", plan.mapping.on_request));
+    if !plan.deny_rules.files.is_empty() {
+        line("Claude Code settings files read for deny rules:".to_string());
+        for file in &plan.deny_rules.files {
+            line(format!("  {}: {} deny rules", file.path, file.rules));
+        }
+    }
+    for file in &plan.deny_rules.skipped {
+        line(format!(
+            "Claude Code settings file ignored: {}: {}",
+            file.path, file.reason
+        ));
+    }
+    if !plan.deny_rules.user_deny_rules.is_empty() {
+        line(format!(
+            "user deny rules ({} applied; permission patterns from those files, as they are \
+             passed to the worker):",
+            plan.deny_rules.applied
+        ));
+        for rule in &plan.deny_rules.user_deny_rules {
+            line(format!("  {rule:?}"));
+        }
+        if plan.deny_rules.omitted > 0 {
+            line(format!(
+                "  ... and {} more not shown",
+                plan.deny_rules.omitted
+            ));
+        }
+    }
     for step in &plan.before_start {
         line(format!("before start: {step}"));
     }

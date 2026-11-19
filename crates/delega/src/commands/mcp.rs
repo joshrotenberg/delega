@@ -15,7 +15,8 @@
 //! run` gives an interrupted run, for all four signals), 1 when the workers
 //! could not be confirmed stopped, the supervisor itself had failed or reading
 //! or writing the transport failed after end of input, and 2 when the server
-//! could not start (the status `delega run` gives when nothing was started).
+//! could not start, including when an `--env` is one `delega run` would refuse
+//! (the status `delega run` gives when nothing was started).
 //!
 //! The first signal starts the stop. A signal that arrives while it goes on is
 //! acknowledged once on standard error and otherwise ignored, as in `delega
@@ -53,7 +54,8 @@ pub struct Args {
     /// provider's own) plus what is given here. Prefer NAME for secrets: a
     /// value on the command line shows in the process table and shell history.
     /// A name that is not valid, that describes the calling session or that
-    /// delega owns is refused when a worker starts, as for `delega run`
+    /// starts with DELEGA_ is refused at start-up, as for `delega run`, and no
+    /// value is ever repeated
     #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
     env: Vec<String>,
 }
@@ -76,6 +78,16 @@ fn go(args: &Args, log: &Log) -> ExitCode {
         ..ProviderOptions::default()
     };
     apply_env(&mut options, &args.env);
+    // The names are checked now, with the rules and messages `delega run` uses,
+    // so a bad `--env` is a refusal to start and not a server whose every `start`
+    // is refused. A name only one provider's adapter owns is still refused when
+    // a worker for that provider starts. No value is ever written.
+    if let Err(refusal) =
+        delega_core::provider::env::check_caller_names(&options.env_pass, &options.env_set)
+    {
+        log.line(format!("delega mcp: refused: {refusal}"));
+        return ExitCode::from(EXIT_REFUSED);
+    }
     let config = SupervisorConfig {
         provider: options,
         ..SupervisorConfig::default()

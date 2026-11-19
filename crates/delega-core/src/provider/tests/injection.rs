@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use super::Rig;
 use crate::contract::permissions::Mode;
 use crate::contract::request::{Provider, Request};
+use crate::provider::deny::DenyRules;
 use crate::provider::launch::Inputs;
 use crate::provider::permissions::Scope;
 use crate::provider::{HookCommand, claude, dry_run};
@@ -280,6 +281,12 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
                 commands.push(command);
             }
         }
+        // Deny rules are the user's own text and are not refused for any
+        // character; the generator includes brackets, commas, quotes and tool
+        // words.
+        let deny: Vec<String> = (0..(rng.next() % 4))
+            .map(|_| rng.mixed(&alphabet, 16))
+            .collect();
         let scope = Scope {
             mode,
             cwd: PathBuf::from(&cwd),
@@ -295,6 +302,10 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
             hook: Some(&hook),
             system: "s",
             native: &[],
+            deny: &DenyRules {
+                rules: deny.clone(),
+                ..DenyRules::default()
+            },
         });
         let Ok(built) = built else {
             refused += 1;
@@ -327,6 +338,10 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
             "cwd={cwd:?} dirs={dirs:?} commands={commands:?}"
         );
 
+        // Deny rules are in the settings JSON as the elements of one list and
+        // nowhere else: no allow key, no other key, and every rule intact.
+        assert_deny_only_in_settings(&built.args, &deny);
+
         // A reader that splits on commas and every whitespace character, with
         // no regard for parentheses, must find exactly the expected rules and
         // no other bare tool name or tool rule.
@@ -355,4 +370,92 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
     }
     assert!(accepted > 50, "accepted {accepted}");
     assert!(refused > 50, "refused {refused}");
+}
+
+/// The `--settings` argument parsed.
+fn settings_of(args: &[String]) -> serde_json::Value {
+    let at = args.iter().position(|a| a == "--settings").unwrap();
+    serde_json::from_str(&args[at + 1]).expect("settings are JSON")
+}
+
+/// The deny rules are exactly the `permissions.deny` list, `permissions` has no
+/// other key, the document has no other new key, and `--allowedTools` and the
+/// other arguments carry none of the rules' text as a rule of their own.
+fn assert_deny_only_in_settings(args: &[String], deny: &[String]) {
+    let settings = settings_of(args);
+    let top = settings.as_object().unwrap();
+    for key in top.keys() {
+        assert!(
+            ["disableAllHooks", "hooks", "permissions"].contains(&key.as_str()),
+            "unexpected settings key {key}"
+        );
+    }
+    if deny.is_empty() {
+        assert!(top.get("permissions").is_none());
+        return;
+    }
+    let permissions = top["permissions"].as_object().unwrap();
+    assert_eq!(permissions.keys().collect::<Vec<_>>(), ["deny"]);
+    assert_eq!(permissions["deny"], serde_json::json!(deny));
+    // The allow list is the same with or without deny rules.
+    let at = args.iter().position(|a| a == "--allowedTools").unwrap();
+    assert!(!args[at + 1].contains("permissions"));
+}
+
+#[test]
+fn deny_rules_with_commas_brackets_quotes_spaces_and_tool_names_are_kept_and_never_allow() {
+    let rig = Rig::new();
+    let hostile = [
+        "Bash(rm -rf /),Edit,Write(//**)",
+        "Read(//a[b]/**)",
+        "Bash(echo \"hi, there\")",
+        "x\"],\"allow\":[\"Bash",
+        "\"},\"permissions\":{\"allow\":[\"Bash\"]},\"x\":{\"",
+        "Edit Read Write Bash mcp__x__y",
+        "  spaced  rule  ",
+        "WebFetch(domain:example.com)",
+        "Read(./a,b)",
+        "{\"deny\":[]}",
+    ];
+    let mut request = rig.request(Provider::Claude, "p");
+    request.permissions.commands = vec!["make".into()];
+    let mut options = rig.options(Provider::Claude);
+    options.hook = Some(hook());
+    assert!(dry_run(&request, &options).is_ok());
+    let scope = crate::provider::permissions::scope(&request).unwrap();
+    let hook = hook();
+    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+        request.permissions.mode = mode;
+        let mut scope = scope.clone();
+        scope.mode = mode;
+        let with = |deny: &[String]| {
+            claude::build(&Inputs {
+                request: &request,
+                scope: &scope,
+                hook: Some(&hook),
+                system: "s",
+                native: &[],
+                deny: &DenyRules {
+                    rules: deny.to_vec(),
+                    ..DenyRules::default()
+                },
+            })
+            .unwrap()
+        };
+        let rules: Vec<String> = hostile.iter().map(ToString::to_string).collect();
+        let (plain, hostile_built) = (with(&[]), with(&rules));
+        assert_deny_only_in_settings(&hostile_built.args, &rules);
+        // Nothing but the settings argument differs.
+        let strip = |args: &[String]| -> Vec<String> {
+            let at = args.iter().position(|a| a == "--settings").unwrap();
+            let mut out = args.to_vec();
+            out.remove(at + 1);
+            out
+        };
+        assert_eq!(strip(&plain.args), strip(&hostile_built.args), "{mode:?}");
+        // The settings differ in the added permissions key alone.
+        let (mut a, b) = (settings_of(&plain.args), settings_of(&hostile_built.args));
+        a["permissions"] = serde_json::json!({ "deny": rules });
+        assert_eq!(a, b, "{mode:?}");
+    }
 }
