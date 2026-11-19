@@ -213,10 +213,21 @@ async fn a_compact_read_of_a_chatty_unfinished_run_shows_only_the_last_few_entri
         rig.record.join("started").exists(),
         "the fake never finished its chatter"
     );
-    let compact = read_compact(&supervisor, &started.run)
-        .await
-        .progress
-        .expect("progress");
+    // The marker says the fake has written its chatter, not that the supervisor
+    // has consumed it. Poll the read until it shows the whole chatter.
+    let mut compact = None;
+    for _ in 0..6000 {
+        let progress = read_compact(&supervisor, &started.run)
+            .await
+            .progress
+            .expect("progress");
+        if progress.partial_text_truncated && progress.activity.len() == COMPACT_ACTIVITY {
+            compact = Some(progress);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let compact = compact.expect("the supervisor never showed the chatty run's output");
     assert_eq!(compact.activity.len(), COMPACT_ACTIVITY);
     assert!(compact.activity_omitted > 0);
     assert!(compact.partial_text.chars().count() <= COMPACT_PARTIAL_TEXT_CHARS);
