@@ -216,7 +216,7 @@ the text of a deny rule. Keys are in sorted order.
 
 | Part | Content | When it is absent |
 | --- | --- | --- |
-| `config` | `path` of the configuration file that was read and the `sha256` of the bytes read (64 lowercase hex digits). | No file was read: none exists at the place looked for, or none is looked for. A file that is refused is never read, and a command that refuses for it has no `applied`. `delega mcp` reads the file once at start, so every run of a server reports the file as it was then. |
+| `config` | `path` of the configuration file that was read and the `sha256` of the bytes read (64 lowercase hex digits). | No file was read: none exists at the place looked for, or none is looked for. A file that is refused is not reported, and a command that refuses for it has no `applied`. `delega mcp` reads the file once at start, so every run of a server reports the file as it was then. |
 | `sources` | For each request field that ended up set, the layer that set it: `default`, `config` (the file's `[defaults]`), `profile`, `flag` (`delega run`) or `argument` (an MCP tool argument). | The caller did not say, as when a library caller starts a run without `ProviderOptions::origin`. It is present, with the fields known so far, on a refusal that happens after the request was merged. |
 | `env` | `passed` counts the variables the worker received, in total and by reason; `withheld` counts the caller's variables that were not passed, in total, those that can never be passed (calling-session variables and every `DELEGA_*`) and the rest; `named` lists the names given with `--env` or in the file's `[env]`, whether or not the variable was set. | The run was refused before it was prepared (see below). |
 | `deny_rules` | The settings files read with their rule counts (`files`), the ones ignored with the reason (`skipped`), and the number of rules passed (`applied`). | Codex runs, which read none, and a refusal before the settings files were read. |
@@ -233,8 +233,10 @@ supervisor, such as a name in use or the worker limit, and a run stopped in the
 queue before it started. A run that was prepared and then ended without finishing
 (a failure, a time limit, an interrupt, or a refusal at start such as an
 unsupported provider version) has every part that applies. A refusal for a
-configuration file that cannot be used has no `applied`, because no file was read
-and no request was built. `applied` is absent altogether when nothing is known.
+configuration file that cannot be used has no `applied`, because no usable file was read
+and no request was built. Two internal-error endings carry `config` and `sources` only,
+even for a run that was prepared: a run whose task in the supervisor panicked, and a
+result the supervisor replaced because it failed validation. `applied` is absent altogether when nothing is known.
 
 `sources` keys are the request fields (`provider`, `prompt`, `cwd`, `name`,
 `instructions`, `model`, `effort`, `timeout_secs`, `answer_schema`,
@@ -247,9 +249,10 @@ always present: `timeout_secs`, `permissions.mode`, `permissions.on_request`,
 them. The other fields appear only when a layer set them, so an absent `model`
 means none was set. The layers are recorded where they are merged (the profile
 merge in `delega_core::profile`, called by `delega run` and by MCP `start`), not
-worked out afterwards from the values. A field a merge clears is not listed: an
-explicit `resume` removes an `ephemeral` that a lower layer set, and the other way
-round. For a follow-up, `sources` are those of the worker's `start`, with `prompt`
+worked out afterwards from the values. A field a merge clears loses the layer that set
+it: an explicit `ephemeral` removes a `resume` that a lower layer set, and
+`session.resume` is then absent; an explicit `resume` removes an `ephemeral` that a
+lower layer set, and `session.ephemeral` is then `default`, its built-in value. For a follow-up, `sources` are those of the worker's `start`, with `prompt`
 (and `timeout_secs` when the call gave one) as `argument`.
 
 A dry run carries the same object, as `dry_run.applied`. MCP `read` returns it in

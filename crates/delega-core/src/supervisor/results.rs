@@ -78,7 +78,8 @@ fn context(run: &Run, worker: Option<WorkerRef>, cleanup: Cleanup) -> RunContext
 fn seal(run: &Run, worker: Option<WorkerRef>, mut result: RunResult) -> RunResult {
     // The supervisor knows only what the caller said: the configuration file and
     // the layer of each field. The rest of `applied` is decided when a run is
-    // prepared, which these runs never were.
+    // prepared, which most of these runs never were; a panicked task and a result
+    // replaced for failing validation drop it too (docs/api.md, "`applied`").
     result.applied = run.origin.clone().or_absent();
     #[cfg(test)]
     let result = corrupt_for_test(result);

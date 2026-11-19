@@ -792,3 +792,43 @@ async fn a_run_started_without_an_origin_has_no_sources_even_when_refused() {
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
+
+#[tokio::test]
+async fn a_follow_up_reports_its_prompt_as_an_argument_whatever_layer_set_the_starts() {
+    use crate::contract::applied::Layer;
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    // The start's prompt came from a profile, so only the follow-up's own
+    // `prompt` entry can make it `argument`.
+    let mut start_origin = origin();
+    start_origin
+        .sources
+        .insert("prompt".to_string(), Layer::Profile);
+    let started = supervisor
+        .start_with_origin(dir.request("echo:one"), start_origin.clone())
+        .await
+        .expect("start");
+    let first = finished_result(&supervisor, &started.run).await;
+    assert_eq!(first.outcome, Outcome::Completed, "{first:#?}");
+    let worker = started.worker.expect("worker");
+
+    let followed = supervisor
+        .follow_up(&worker, "echo:two", None)
+        .await
+        .expect("follow up");
+    let result = finished_result(&supervisor, &followed.run).await;
+    let applied = result.applied.as_ref().expect("applied");
+    assert_eq!(
+        applied.sources.get("prompt"),
+        Some(&Layer::Argument),
+        "{result:#?}"
+    );
+    assert_eq!(
+        applied.sources.get("timeout_secs"),
+        Some(&Layer::Config),
+        "{result:#?}"
+    );
+    assert_eq!(applied.config, start_origin.config, "{result:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
