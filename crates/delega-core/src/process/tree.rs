@@ -182,6 +182,17 @@ pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
     list_processes_from(&system_programs()).await
 }
 
+/// Run one process listing the way cleanup does and say whether it gave a usable
+/// table. This is the check `delega doctor` makes: when it fails, every cleanup
+/// would be reported as not confirmed. The error is text and names no process.
+/// It honours the same test-only variable as cleanup.
+pub async fn check_inspection() -> Result<(), String> {
+    list_processes_from(&system_programs())
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Test-only seam for `acceptance/`: when this variable is set in the
 /// environment of the process, whatever its value, no program is used to list
 /// processes, so inspection is unavailable and cleanup is reported as not

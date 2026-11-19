@@ -266,4 +266,4 @@ pub use report::{
 pub use run::PIPE_WARNING;
 pub use spec::{CaptureSpec, EnvPolicy, Keep, OutputTap, ProcessSpec};
 pub use timestamp::rfc3339_utc;
-pub use tree::InspectionStats;
+pub use tree::{InspectionStats, check_inspection};

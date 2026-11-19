@@ -132,15 +132,14 @@ fn version_json_carries_a_digest_of_each_skill_that_matches_skill_list_and_show(
 
 #[test]
 fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
-    for args in [&["init", "--dry-run"][..], &["doctor"]] {
-        let out = delega(args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}");
-        assert!(
-            text(&out.stderr).contains("not implemented yet"),
-            "{args:?}"
-        );
-        assert!(out.stdout.is_empty(), "{args:?} wrote to stdout");
-    }
+    let args = ["init", "--dry-run"];
+    let out = delega(&args);
+    assert_eq!(out.status.code(), Some(2), "{args:?}");
+    assert!(
+        text(&out.stderr).contains("not implemented yet"),
+        "{args:?}"
+    );
+    assert!(out.stdout.is_empty(), "{args:?} wrote to stdout");
 }
 
 #[test]
