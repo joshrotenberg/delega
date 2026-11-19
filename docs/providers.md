@@ -338,7 +338,14 @@ variables), not from the calling process.
    that exists but cannot be opened or searched (mode 000 or 600, an I/O error)
    refuses the
    run with `settings_unreadable`, as it does for the start directory; only a
-   file that does not exist contributes nothing. The user's own settings file
+   file that does not exist contributes nothing. This holds for a link to a
+   file or directory the user owns but cannot open (a target with mode 000), and
+   also for a link whose target cannot be examined at all: one into a directory
+   the user cannot search, or one whose path runs through a regular file. The
+   owner of such a target cannot be known, so the rule that what someone else
+   owns is skipped does not cover it. The run is refused because the link is the
+   user's own, in a directory only the user can write, so a broken target is the
+   user's to fix, and skipping it would drop their rules without a word. The user's own settings file
    (item 1) and the working directory's files (items 2 and 3) may be symbolic
    links, as a dotfiles setup makes them; a link to a regular file is followed.
 
