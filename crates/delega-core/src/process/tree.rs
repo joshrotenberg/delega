@@ -7,7 +7,8 @@
 //!
 //! What is owned. In every listing the owned set starts from the child and
 //! from every live process that is in the child's process group or session (the
-//! session is read with `getsid`, which the kernel answers exactly), and from
+//! session is read per pid, from `/proc/<pid>/stat` on Linux and with `getsid`
+//! elsewhere, which the kernel answers exactly), and from
 //! every process already tracked with a matching start time. Every process
 //! whose parent is in the owned set is then owned, repeatedly, and is tracked
 //! from then on. So a descendant that calls `setsid` is kept as long as one
@@ -520,8 +521,9 @@ impl ProcessTree {
     /// Classify the live processes in one table. The child is the session
     /// leader, so its pid is the session id; a process outside its group that
     /// still reports that session id was started by the child and never left.
-    /// The session id is read per pid with `getsid`, because `ps` keywords for
-    /// it differ between systems (macOS reports 0 for every process).
+    /// The session id is read per pid (`/proc` on Linux, `getsid` elsewhere),
+    /// because `ps` keywords for it differ between systems (macOS reports 0 for
+    /// every process). A session of 0 is a real answer that is never the child's.
     fn view(&self, snapshot: &Snapshot) -> SweepView {
         let mut view = SweepView::default();
         for row in snapshot.rows.iter().filter(|r| !r.zombie) {
@@ -661,6 +663,27 @@ mod tests {
 
     fn row(pid: u32) -> String {
         ROW.replace("{pid}", &pid.to_string())
+    }
+
+    #[test]
+    fn a_row_whose_session_reads_as_zero_is_not_owned() {
+        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let mut tree = ProcessTree::new(10, lister, true);
+        let rows = parse_rows(
+            "10 1 10 S Mon Nov 18 10:00:00 2026\n\
+             2 0 0 S Mon Nov 18 10:00:00 2026\n\
+             40 1 40 S Mon Nov 18 10:00:00 2026\n",
+        );
+        let sessions = HashMap::from([
+            (2, sys::SessionLookup::In(0)),
+            (40, sys::SessionLookup::In(0)),
+        ]);
+        tree.adopt(&rows, &sessions);
+        assert!(!tree.known.contains_key(&2));
+        assert!(!tree.known.contains_key(&40));
+        let view = tree.view(&Snapshot { rows, sessions });
+        assert!(view.session.is_empty() && view.tracked.is_empty());
+        assert!(view.group.contains(&10));
     }
 
     #[test]
