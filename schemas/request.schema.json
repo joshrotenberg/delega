@@ -181,6 +181,10 @@
           "description": "What happens to a request that was not granted. Defaults to `deny`.",
           "$ref": "#/$defs/OnRequest",
           "default": "deny"
+        },
+        "strict": {
+          "description": "Refuse the run before it starts when the provider cannot enforce part\nof these permissions as stated. Defaults to `false`, where the run goes\nahead and a provider note says what is wider than requested.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

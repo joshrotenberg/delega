@@ -178,7 +178,8 @@ fn permissions(args: &Args) -> Option<PartialPermissions> {
     };
     let commands = (!args.allow_command.is_empty()).then(|| args.allow_command.clone());
     let directories = (!args.add_dir.is_empty()).then(|| args.add_dir.clone());
-    if mode.is_none() && commands.is_none() && directories.is_none() {
+    let strict = args.strict.then_some(true);
+    if mode.is_none() && commands.is_none() && directories.is_none() && strict.is_none() {
         return None;
     }
     Some(PartialPermissions {
@@ -186,6 +187,7 @@ fn permissions(args: &Args) -> Option<PartialPermissions> {
         commands,
         directories,
         on_request: None,
+        strict,
     })
 }
 

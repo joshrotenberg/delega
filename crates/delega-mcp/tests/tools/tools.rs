@@ -111,6 +111,33 @@ async fn an_invalid_request_is_a_refused_run_that_read_returns() {
 }
 
 #[tokio::test]
+async fn start_with_strict_permissions_refuses_codex_read_and_read_returns_it() {
+    let mut rig = Rig::new(Provider::Codex).await;
+    let mut args = rig.start_args(CODEX, "success");
+    args["permissions"] = json!({"strict": true});
+    let refused = rig.call("start", args).await;
+    assert_eq!(refused["state"], "finished", "{refused}");
+    assert_eq!(refused["outcome"], "refused");
+    assert!(refused.get("worker").is_none(), "a refusal makes no worker");
+    assert_eq!(refused["error"]["kind"], "permissions_not_enforceable");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("reads are not confined")),
+        "{refused}"
+    );
+    assert!(rig.argv().is_empty(), "no provider process started");
+
+    let read = rig.call("read", json!({"run": refused["run"]})).await;
+    assert_eq!(read["result"]["outcome"], "refused");
+    assert_eq!(
+        read["result"]["error"]["kind"],
+        "permissions_not_enforceable"
+    );
+    rig.finish().await;
+}
+
+#[tokio::test]
 async fn reaching_the_worker_limit_is_a_refused_run_and_a_closed_worker_refuses_a_follow_up() {
     let limits = Limits {
         max_live_workers: 1,

@@ -29,6 +29,7 @@ mod prepare;
 mod progress;
 mod rules;
 mod streams;
+mod strict;
 
 /// A private working area per test: working directory, record directory, home
 /// and configuration directory.

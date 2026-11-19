@@ -219,6 +219,13 @@
                 "type": "null"
               }
             ]
+          },
+          "strict": {
+            "description": "See [`Permissions::strict`].",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

@@ -38,6 +38,11 @@ pub(super) struct Built {
     pub env: Vec<(String, String)>,
     /// Notes for the result: where the provider cannot do what was asked.
     pub notes: Vec<String>,
+    /// Parts of the requested permissions this provider cannot enforce as
+    /// stated, each a short phrase. They are the same cases that produce a
+    /// "wider than requested" or "not granted" note. With `permissions.strict`
+    /// a non-empty list refuses the run.
+    pub unenforceable: Vec<String>,
     /// Provider settings carrying the permission mapping.
     pub settings: Vec<String>,
     /// The commands the provider is set up to allow.

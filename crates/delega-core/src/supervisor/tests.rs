@@ -38,7 +38,11 @@ impl Dir {
         }
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/provider/tests/fakes/fake-claude.sh");
-        std::fs::copy(source, root.join("fakes/fake-claude.sh")).expect("copy the fake");
+        // A link, not a copy: on Linux, executing a file that any process
+        // holds open for writing fails with ETXTBSY, and a fork on another
+        // test thread can inherit the descriptor of a copy being written.
+        std::os::unix::fs::symlink(source, root.join("fakes/fake-claude.sh"))
+            .expect("link the fake");
         Self { tmp }
     }
 

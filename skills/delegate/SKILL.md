@@ -56,7 +56,11 @@ Set `permissions.mode` to the narrowest value that works: `read` (default),
 `write` or `full`. Add `permissions.commands` for exact commands the worker may
 run and `permissions.directories` for extra directories it may read. A request
 the worker makes that was not granted is answered no and listed in
-`permissions.denied` in the result.
+`permissions.denied` in the result. Turn on `permissions.strict` to refuse
+the run before it starts when the provider cannot enforce the permissions as
+stated (Codex `read` and `write` cannot confine reads or commands); the run is
+`refused` with `permissions_not_enforceable`, naming each part. Without it, the
+run goes ahead and `provider_notes` says what is wider than requested.
 
 The environment a worker receives is fixed by whoever started the server. There
 is no argument for it.

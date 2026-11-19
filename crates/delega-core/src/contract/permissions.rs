@@ -45,4 +45,9 @@ pub struct Permissions {
     /// What happens to a request that was not granted. Defaults to `deny`.
     #[serde(default)]
     pub on_request: OnRequest,
+    /// Refuse the run before it starts when the provider cannot enforce part
+    /// of these permissions as stated. Defaults to `false`, where the run goes
+    /// ahead and a provider note says what is wider than requested.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
 }

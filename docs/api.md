@@ -80,11 +80,37 @@ result reports what happened.
 | `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly. They add to `read` and `write`; `full` already allows every command. |
 | `permissions.directories` | list of paths | Extra directories the worker may read. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
+| `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: the run goes ahead and a `provider_notes` entry says what is wider than requested. `full` asks for nothing confined, so it is never refused for this. |
 
 Each mode maps to concrete provider settings (Claude tool lists, hooks and
 permission mode; Codex sandbox and approval policy). The mapping is documented
 per provider, and where a provider cannot enforce part of it the result says so
-in `provider_notes`.
+in `provider_notes`, or, with `permissions.strict`, the run is refused before it
+starts. The refusal kind is `permissions_not_enforceable`; the message reads
+`permissions.strict is set and <provider> cannot enforce these permissions as
+stated: <part>; <part>`. A dry run reports the same refusal.
+
+`--strict` only turns the field on: a profile's `strict: true` stays on for
+`delega run`, because there is no flag to turn it off. MCP `start` can pass
+`permissions.strict: false` to override a profile.
+
+Refusals before start come in a fixed order, and the first one found is
+reported: `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
+`cwd_unusable` or `directory_unusable`, `provider_not_found`, Claude Code's
+`settings_unreadable` and `deny_rules_over_limit` from reading the settings
+files, then the provider's own mapping of the request (for Claude Code:
+`cwd_unusable` or `directory_unusable` for a path it cannot write as a rule,
+`unsupported_command`, and `deny_rules_over_limit` for the generated settings
+argument), then `permissions_not_enforceable`, then `invalid_env_name` and
+`forbidden_env_name`.
+So a strict request that Codex cannot enforce and that also has an invalid
+environment name is refused as `permissions_not_enforceable`; without strict it
+is refused as `invalid_env_name`. `unsupported_provider_version` is found later,
+after the provider's version is read.
+
+`permissions.strict` is an optional field with a default, so a request without it
+means what it meant before and `schema_version` stays 1. The result does not
+echo it.
 
 The first version only denies. Asking needs a long-lived provider session,
 which is due's resident engine and the subject of issue 1; `deny` works with
@@ -140,7 +166,7 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 
 `delega run` options: `--request FILE`, `--provider`, `-p/--prompt`, `--stdin`,
 `-C/--cwd`, `--name`, `--model`, `--effort`, `--timeout`, `--read`, `--write`,
-`--full`, `--allow-command CMD` (repeatable), `--add-dir DIR` (repeatable),
+`--full`, `--strict`, `--allow-command CMD` (repeatable), `--add-dir DIR` (repeatable),
 `-e/--env NAME[=VALUE]` (repeatable), `--schema FILE`, `--resume ID`, `--ephemeral`,
 `--output text|json`, `--dry-run`, and provider options after `--`.
 

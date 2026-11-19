@@ -8,7 +8,6 @@
 //! provider state, credential or configuration is read.
 
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -103,6 +102,9 @@ pub struct Measured {
     pub result_valid: Option<bool>,
     pub outcome: Option<String>,
     pub error_kind: Option<String>,
+    /// The message of the result's error, clipped, so a failed row says why.
+    #[serde(default)]
+    pub error_message: Option<String>,
     pub cleanup_confirmed: Option<bool>,
     pub cleanup_reason: Option<String>,
     pub cleanup_pids: Vec<u32>,
@@ -188,8 +190,14 @@ impl Fixture {
             "acc-child.sh",
         ] {
             let target = dir.join(name);
-            std::fs::copy(ctx.fakes.join(name), &target)?;
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+            // A link, not a copy. A file this process writes cannot be executed
+            // on Linux while any process holds it open for writing, and a
+            // `fork` on another harness thread inherits the descriptor of a
+            // copy being written (`ETXTBSY`, "text file busy"). A link is
+            // never written: the target is the checked-in script. `$0` is the
+            // link, so the case directory is still what the scripts and the
+            // process table see.
+            std::os::unix::fs::symlink(ctx.fakes.join(name), &target)?;
         }
         Ok(Self {
             _root: root,
@@ -310,6 +318,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         result_valid: None,
         outcome: None,
         error_kind: None,
+        error_message: None,
         cleanup_confirmed: None,
         cleanup_reason: None,
         cleanup_pids: Vec::new(),
@@ -529,6 +538,10 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
                     .unwrap_or_default(),
             );
             m.error_kind = result.error.as_ref().map(|e| e.kind.clone());
+            m.error_message = result
+                .error
+                .as_ref()
+                .map(|e| e.message.chars().take(500).collect());
             match &result.cleanup {
                 Cleanup::Confirmed => m.cleanup_confirmed = Some(true),
                 Cleanup::Unconfirmed {
@@ -546,6 +559,15 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
             }
         }
         None => m.result_valid = Some(false),
+    }
+}
+
+/// ` (error_kind: message)` for a result that carries an error, else nothing.
+fn error_suffix(m: &Measured) -> String {
+    match (&m.error_kind, &m.error_message) {
+        (Some(kind), Some(message)) => format!(" (error {kind}: {message})"),
+        (Some(kind), None) => format!(" (error {kind})"),
+        _ => String::new(),
     }
 }
 
@@ -604,9 +626,10 @@ fn judge(m: &mut Measured, case: &Case) {
             } else {
                 if m.outcome.as_deref() != Some(expect.outcome) {
                     problems.push(format!(
-                        "outcome {} where {} was expected",
+                        "outcome {} where {} was expected{}",
                         m.outcome.as_deref().unwrap_or("none"),
-                        expect.outcome
+                        expect.outcome,
+                        error_suffix(m)
                     ));
                 }
                 if m.cleanup_confirmed != expect.confirmed {

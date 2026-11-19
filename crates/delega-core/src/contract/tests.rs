@@ -27,6 +27,7 @@ fn full_request() -> Request {
             commands: vec!["cargo test".into()],
             directories: vec![PathBuf::from("/work/other")],
             on_request: OnRequest::Deny,
+            strict: true,
         },
         answer_schema: Some(json!({"type": "object"})),
         session: Session {

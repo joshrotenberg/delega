@@ -438,6 +438,11 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
 fn fake_ps(s: &Scratch, output: &str) -> Lister {
     use std::os::unix::fs::PermissionsExt;
     let path = s.path("fake-ps");
+    // This script is written and then executed, so on Linux its first exec can
+    // fail with ETXTBSY while a fork on another test thread still holds the
+    // write descriptor (renaming would not help: the check is on the inode).
+    // Every caller expects an unconfirmed cleanup, which a failed listing also
+    // gives, so that race cannot fail these tests.
     std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{output}'\n")).expect("write fake ps");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     lister_for(vec![path])
