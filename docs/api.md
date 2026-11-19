@@ -346,7 +346,8 @@ Behavior:
 ### Doctor
 
 `delega doctor` reports what a run would meet, without starting a worker and
-without writing anything. It checks both providers in the current directory,
+without writing anything. It has no `--cwd` or `--env`: the checks are those of a run in the current
+directory with no `--env`. It checks both providers,
 with the lookup, the version probe, the environment allowlist and the deny-rule
 reader that `run` uses, so the answer is the one a run would get. The only
 provider process it starts is the `--version` probe, with `run`'s five-second
@@ -369,8 +370,10 @@ It reports, for `claude` and `codex` each:
 
 It also reports the limits in force, read from the constants the code uses: for a
 run, the default and the range of the time limit, the output bounds and the
-version probe limit; for the supervisor, every limit in
-[supervisor.md](supervisor.md#limits-and-defaults); the skills built into this
+version probe limit; for the supervisor (see
+[supervisor.md](supervisor.md#limits-and-defaults)), the worker, run and queue
+limits, retention by count, size and time, the default wait and its ceiling, and
+the cap on outstanding request checks; the skills built into this
 executable with their digests, as `delega version --output json` lists them; and
 whether process inspection works, by running one `ps` listing as cleanup does.
 
@@ -385,7 +388,7 @@ fails for it.
 | --- | --- | --- |
 | `provider_not_startable` | `run` | The executable passed the lookup but cannot be started, such as a script whose interpreter is missing. A run fails to start with it (`spawn_failed` for Claude, `provider_preparation_failed` for Codex). |
 | `provider_not_found` | `run` | No executable by the lookup, or the override names none. |
-| `version_probe_failed` | `command_grants` for Claude, `nothing` for Codex | `--version` exited with an error, was ended by a signal or could not be started. A run records no version and goes on; only a Claude run that grants exact commands is refused. |
+| `version_probe_failed` | `command_grants` for Claude, `nothing` for Codex | `--version` exited with an error, or was ended by a signal. A run records no version and goes on; only a Claude run that grants exact commands is refused. |
 | `version_probe_timed_out` | `command_grants` for Claude, `nothing` for Codex | `--version` did not answer in five seconds. Same effect as a failed probe. |
 | `unsupported_provider_version` | `command_grants` | Claude Code is older than 2.1.325 or its version could not be read, so a run with `--allow-command` is refused. Other runs go ahead. |
 | `settings_unreadable` | `run` | A Claude Code settings file in the user's or the current directory's places exists and cannot be used, so every Claude run here is refused. The message names the file. |
@@ -405,8 +408,8 @@ alphabetical order. `env` and `deny_rules` are null when the launch could not be
 built, and `deny_rules` and `command_hook` are null for Codex.
 
 **Exit status.** 0 when a run can go ahead: at least one provider is ready and
-process inspection works. 1 when something would stop a run: no provider is
-ready, or process inspection is unavailable. 2 when doctor itself cannot run,
+process inspection works. 1 when no provider is ready, or when process
+inspection is unavailable (runs still start, but no cleanup can be confirmed). 2 when doctor itself cannot run,
 such as an unusable current directory. A provider that is not installed is a
 problem for that provider and does not by itself make the exit 1 when the other
 provider is ready; read `problems` for it. A problem that blocks only
