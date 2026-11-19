@@ -5,9 +5,11 @@ Run Claude Code and Codex agents from a program, for any purpose, reliably.
 `delega` starts a provider CLI as a worker, gives it an assignment, and returns a
 definite result. It is reached from a command line, from Rust, and over MCP.
 
-This repository is new. Only the request and result contract exists so far:
-`delega schema request|result`, `delega skill list|show NAME` and
-`delega version` work, and the other commands print "not implemented yet". It merges two earlier
+This repository is new. The request and result contract, the process layer and
+the provider layer exist so far. `delega schema request|result`,
+`delega skill list|show NAME` and `delega version` work, and the other commands
+print "not implemented yet": the provider layer is a library API that no command
+calls yet. It merges two earlier
 projects, [due](https://github.com/joshrotenberg/due) and
 [counterpart](https://github.com/joshrotenberg/counterpart), and the first work
 is deciding what to carry over and proving the core. The design record that led
@@ -54,11 +56,12 @@ Out of scope:
 
 | Path | Holds |
 | --- | --- |
-| `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup) and, later, the rest of the engine. |
+| `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and, later, the rest of the engine. |
 | `schemas` | JSON Schemas for the request and result, generated from the core types. |
 | `crates/delega-mcp` | The MCP adapter over the core. |
 | `crates/delega` | The `delega` binary. |
 | `docs/api.md` | The agreed design for the CLI and MCP surface. |
+| `docs/providers.md` | How each provider is started: command shape, permission mapping, `native_args` allowlist, environment policy, and what is unverified against the real CLIs. |
 
 Run Cargo from the repository root:
 
