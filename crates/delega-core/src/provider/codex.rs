@@ -124,6 +124,21 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         ),
         Mode::Full => notes.push("full runs Codex with no sandbox".to_string()),
     }
+    let mut unenforceable = Vec::new();
+    if scope.mode != Mode::Full {
+        unenforceable.push(
+            "reads are not confined to the working directory and permissions.directories"
+                .to_string(),
+        );
+        unenforceable.push(
+            "commands that need no write access and no network access can run although the \
+             request allows only the commands it lists"
+                .to_string(),
+        );
+        if !scope.commands.is_empty() {
+            unenforceable.push("permissions.commands has no effect".to_string());
+        }
+    }
     let mut mapping = settings.clone();
     mapping.push("developer_instructions=<system prompt>".to_string());
     mapping.push("features disabled=plugins,apps,hooks,multi_agent".to_string());
@@ -131,6 +146,7 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         args,
         env: Vec::new(),
         notes,
+        unenforceable,
         settings: mapping,
         commands: Vec::new(),
         elide: vec![Elide {

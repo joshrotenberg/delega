@@ -40,12 +40,19 @@ The worker starts with the narrowest permission and gets only what you grant.
 | `--full` | `permissions.mode` = `full` | No restriction from delega. |
 | `--allow-command CMD` | `permissions.commands` | One exact shell command the worker may run. Repeat the flag for more. |
 | `--add-dir DIR` | `permissions.directories` | One extra directory the worker may read. Repeat for more. |
+| `--strict` | `permissions.strict` | Refuse the run before it starts when the provider cannot enforce the permissions as stated. |
 
 Prefer `--read` for questions and reviews and `--write` for edits. Neither
 mode allows shell commands on its own. `--allow-command` adds a command the
 worker may run, matched exactly, to either mode, so pass the exact command
 string a task needs, such as the test command.
 Use `--full` only when you accept that delega adds no restriction.
+
+Without `--strict`, a provider that cannot enforce part of the request still
+runs, and `provider_notes` says what is wider than requested (Codex cannot
+confine reads or commands). Use `--strict` when the run must not go ahead
+unless the permissions hold: it is refused with `permissions_not_enforceable`
+and the message names each part. `--full` is never refused for this.
 
 A permission the worker asks for and was not granted is answered no at once. It
 is listed in `permissions.denied` in the result.

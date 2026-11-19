@@ -227,6 +227,7 @@ struct Grants {
     guard: Option<HookCommand>,
     commands: Vec<String>,
     notes: Vec<String>,
+    unenforceable: Vec<String>,
 }
 
 fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
@@ -244,6 +245,7 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
             guard: None,
             commands: Vec::new(),
             notes,
+            unenforceable: Vec::new(),
         });
     }
 
@@ -263,6 +265,7 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
 
     let mut guard = None;
     let mut commands = Vec::new();
+    let mut unenforceable = Vec::new();
     if !scope.commands.is_empty() {
         for (i, command) in scope.commands.iter().enumerate() {
             check_command(i, command)?;
@@ -276,11 +279,18 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
                 guard = Some(hook.clone());
                 commands = scope.commands.clone();
             }
-            None => notes.push(
-                "permissions.commands is not granted: no command guard is configured, and Claude \
-                 Code's own rules would match more than the exact command"
-                    .to_string(),
-            ),
+            None => {
+                notes.push(
+                    "permissions.commands is not granted: no command guard is configured, and \
+                     Claude Code's own rules would match more than the exact command"
+                        .to_string(),
+                );
+                unenforceable.push(
+                    "permissions.commands cannot be granted exactly because no command guard is \
+                     configured"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(Grants {
@@ -289,6 +299,7 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
         guard,
         commands,
         notes,
+        unenforceable,
     })
 }
 
@@ -405,6 +416,7 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         args,
         env,
         notes,
+        unenforceable: g.unenforceable,
         settings: mapping,
         commands: g.commands,
         elide: vec![Elide {

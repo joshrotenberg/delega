@@ -61,9 +61,14 @@ struct ToolInfo {
 
 /// Bare words a skill may put in code that are not schema properties, enum
 /// values, tools, arguments or command names.
-const OTHER_WORDS: [&str; 4] = [
+const OTHER_WORDS: [&str; 5] = [
     // Worker states, from the States rule in docs/api.md.
-    "queued", "running", "idle", "closed",
+    "queued",
+    "running",
+    "idle",
+    "closed",
+    // The error kind of a strict run refused before start (docs/api.md).
+    "permissions_not_enforceable",
 ];
 
 /// A flag of one command.
