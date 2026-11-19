@@ -54,6 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::contract::applied::Applied;
 use crate::contract::request::Request;
+use crate::contract::result::Cleanup;
 
 mod activity;
 mod actor;
@@ -499,6 +500,17 @@ impl Supervisor {
             unsettled,
             failed: self.shared.failure(),
         }
+    }
+
+    /// Every run on this supervisor that settled with cleanup not confirmed,
+    /// oldest first, with what the result says could not be confirmed.
+    ///
+    /// Recorded when each run settles, so a run counts after a later run on the
+    /// same worker replaced it as the latest, and after retention dropped its
+    /// result. At most the 256 most recent are kept. Still answers after a
+    /// shutdown.
+    pub async fn unconfirmed(&self) -> Result<Vec<(String, Cleanup)>, Error> {
+        self.call(|reply| Command::Unconfirmed { reply }).await
     }
 
     /// Make the supervisor's task panic. Test only.

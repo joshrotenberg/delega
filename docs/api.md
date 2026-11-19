@@ -1062,9 +1062,13 @@ once, and one input message may be at most 32 MiB.
   using the connection and should signal the server.
 - **Exit status.** 0 after end of input; 130 after a signal, the status `run`
   gives an interrupted run, for all four signals; 1 when the workers could not
-  be confirmed stopped (a run's cleanup result says so, or a run had not
+  be confirmed stopped (any run on the connection ended with its cleanup
+  unconfirmed, including one that a later run on the same worker, such as a
+  refused `follow_up`, replaced as the worker's latest, or a run had not
   settled) or the supervisor had failed, which wins over 0 and 130, or the
-  transport failed after end of input; each is described on standard error. A
+  transport failed after end of input; each is described on standard error.
+  The supervisor records an unconfirmed cleanup when the run settles, not from
+  the results retention still keeps, and remembers the 256 most recent. A
   transport that had to be given up on after a signal does not change 130. 2
   when the server could not start (a refused `--env`, a configuration file that
   cannot be used, no async runtime, no signal handlers). A signal during start-up, before the

@@ -367,6 +367,37 @@ async fn a_panic_in_the_supervisors_own_task_stops_every_child_and_shutdown_says
 }
 
 #[tokio::test]
+async fn an_unconfirmed_run_stays_recorded_after_a_refused_follow_up_replaced_it_as_the_latest() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::with_launcher(dir.config(), panicking_launcher());
+    let started = supervisor
+        .start(dir.request("panic now"))
+        .await
+        .expect("start");
+    let crashed = finished_result(&supervisor, &started.run).await;
+    assert!(matches!(crashed.cleanup, Cleanup::Unconfirmed { .. }));
+    let worker = started.worker.expect("worker");
+
+    // The crashed run left no session, so the follow-up is refused at dispatch
+    // with a confirmed cleanup and becomes the worker's latest run.
+    let followed = supervisor
+        .follow_up(&worker, "more", None)
+        .await
+        .expect("follow up");
+    let refused = finished_result(&supervisor, &followed.run).await;
+    assert_eq!(refused.cleanup, Cleanup::Confirmed, "{refused:#?}");
+    let list = supervisor.list().await.expect("list");
+    let latest = list.workers[0].brief.last_run.clone();
+    assert_eq!(latest.as_deref(), Some(followed.run.as_str()));
+
+    let unconfirmed = supervisor.unconfirmed().await.expect("unconfirmed");
+    let runs: Vec<&str> = unconfirmed.iter().map(|(run, _)| run.as_str()).collect();
+    assert_eq!(runs, [started.run.as_str()], "{unconfirmed:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
 async fn a_result_that_fails_validation_is_replaced_in_every_build_and_the_supervisor_goes_on() {
     let dir = Dir::new();
     let supervisor = Supervisor::new(dir.config());

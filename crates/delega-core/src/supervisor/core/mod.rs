@@ -14,6 +14,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::contract::result::{Cleanup, RunResult};
+
 use super::command::Command;
 use super::config::SupervisorConfig;
 use super::ids::Ids;
@@ -60,7 +62,18 @@ pub(super) struct Core {
     root: CancellationToken,
     /// Estimated bytes of the finished results kept.
     retained_bytes: usize,
+    /// Every run that ended with cleanup not confirmed, in the order they
+    /// settled. Kept apart from the retained results, which retention may drop,
+    /// so an exit status that asks "did any run leave cleanup unconfirmed" does
+    /// not depend on what is still readable. Capped at
+    /// [`MAX_UNCONFIRMED`]; the oldest are dropped past it.
+    unconfirmed: VecDeque<(String, Cleanup)>,
 }
+
+/// Most unconfirmed runs remembered. A run costs its id and a verdict, and a
+/// connection that leaves this many unconfirmed has long since answered the
+/// question the list exists for.
+const MAX_UNCONFIRMED: usize = 256;
 
 /// Stops every run still going when the task ends, whether it returns or
 /// panics: the unwinding drop of the `Core` is what makes a panic in the
@@ -99,6 +112,7 @@ impl Core {
             launch,
             root,
             retained_bytes: 0,
+            unconfirmed: VecDeque::new(),
         }
     }
 
@@ -172,6 +186,9 @@ impl Core {
             Command::Shutdown { reply } => {
                 let _ = reply.send(self.shutdown());
             }
+            Command::Unconfirmed { reply } => {
+                let _ = reply.send(self.unconfirmed());
+            }
             Command::Unsettled { reply } => {
                 let _ = reply.send(self.unsettled());
             }
@@ -203,6 +220,24 @@ impl Core {
                 abort.abort();
             }
         }
+    }
+
+    /// Remember a run whose result did not confirm cleanup. Every result is
+    /// recorded through here when its run settles.
+    fn note_cleanup(&mut self, id: &str, result: &RunResult) {
+        if result.cleanup == Cleanup::Confirmed {
+            return;
+        }
+        if self.unconfirmed.len() == MAX_UNCONFIRMED {
+            self.unconfirmed.pop_front();
+        }
+        self.unconfirmed
+            .push_back((id.to_string(), result.cleanup.clone()));
+    }
+
+    /// Every run that settled with cleanup not confirmed, oldest first.
+    pub fn unconfirmed(&self) -> Vec<(String, Cleanup)> {
+        self.unconfirmed.iter().cloned().collect()
     }
 
     fn next_cursor(&self) -> u64 {

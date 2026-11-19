@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 
 use crate::contract::applied::Applied;
 use crate::contract::request::Request;
-use crate::contract::result::RunResult;
+use crate::contract::result::{Cleanup, RunResult};
 
 use super::error::Error;
 use super::views::{
@@ -119,6 +119,10 @@ pub(super) enum Command {
     /// The runs that are still running.
     Unsettled {
         reply: oneshot::Sender<Vec<String>>,
+    },
+    /// Every run that settled with cleanup not confirmed.
+    Unconfirmed {
+        reply: oneshot::Sender<Vec<(String, Cleanup)>>,
     },
     /// A run's task reported its result.
     Finished {
