@@ -212,6 +212,11 @@ async fn drive(
     // runs beside the reads so a wait for it never stalls the output.
     let mut exit_listing: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
         None;
+    // The TERM sweep of the stop when its first attempt ran out of budget. It
+    // runs beside the reads, so a slow listing never stalls the output, and it
+    // is dropped before the KILL so it holds no lock the KILL sweep needs.
+    let mut term_retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        None;
 
     loop {
         if exited && stdout.is_none() && stderr.is_none() {
@@ -230,7 +235,7 @@ async fn drive(
                         }
                         ending = Some(Ending::Interrupted);
                         term_at = Some(Instant::now());
-                        shared.terminate().await;
+                        term_retry = term_retry_for(shared, shared.terminate().await);
                     }
                 }
             },
@@ -244,12 +249,13 @@ async fn drive(
                         }
                         ending = Some(Ending::TimedOut { limit: spec.time_limit });
                         term_at = Some(Instant::now());
-                        shared.terminate().await;
+                        term_retry = term_retry_for(shared, shared.terminate().await);
                     }
                 }
             },
             _ = tokio::time::sleep_until(term_at.map(|t| t + spec.stop_grace).unwrap_or_else(far)),
                 if term_at.is_some() && !kill_sent => {
+                term_retry = None;
                 shared.kill_all().await;
                 kill_sent = true;
                 drain_deadline = Some(Instant::now() + spec.drain_bound);
@@ -280,7 +286,11 @@ async fn drive(
                 if exit_listing.is_some() => {
                 exit_listing = None;
                 term_at = Some(Instant::now());
-                shared.terminate().await;
+                term_retry = term_retry_for(shared, shared.terminate().await);
+            },
+            _ = async { term_retry.as_mut().expect("guarded").await },
+                if term_retry.is_some() => {
+                term_retry = None;
             },
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
                 if stdout.is_some() => match n {
@@ -317,8 +327,9 @@ async fn drive(
         // The pipes closed before the listing finished; the signals still wait.
         listing.await;
         term_at = Some(Instant::now());
-        shared.terminate().await;
+        let _ = shared.terminate().await;
     }
+    drop(term_retry);
     if !exited {
         owner.exit_rx = Some(exit_rx);
     }
@@ -334,6 +345,18 @@ async fn drive(
         term_at,
         hard_stop: false,
     }
+}
+
+/// The repeat of a TERM sweep, when the stop's own sweep did not complete.
+fn term_retry_for(
+    shared: &Arc<Shared>,
+    completed: bool,
+) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    if completed {
+        return None;
+    }
+    let shared = shared.clone();
+    Some(Box::pin(async move { shared.retry_term_sweeps().await }))
 }
 
 #[allow(clippy::too_many_arguments)]

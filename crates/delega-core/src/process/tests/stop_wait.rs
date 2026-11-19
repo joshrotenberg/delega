@@ -188,3 +188,132 @@ async fn a_normal_interrupt_is_one_listing_and_confirmed() {
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
 }
+
+/// A descendant in a session of its own that holds the output pipes and ends on
+/// TERM, started by a leader that also ends on TERM.
+const SESSION_DESCENDANT: &str = "echo $$ > leader; \
+     perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)' & echo $! > gc; wait";
+
+fn term_to_descendants(report: &ProcessReport) -> usize {
+    report
+        .diagnostics
+        .signals
+        .iter()
+        .filter(|record| {
+            record.signal == "SIGTERM"
+                && matches!(
+                    record.target,
+                    crate::process::SignalTarget::Descendants { .. }
+                )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_term_sweep_that_ran_out_of_budget_is_repeated_until_a_descendant_gets_term() {
+    // Proves: when the listing is not done within the sweep budget at the
+    // stop, the descendant that left the group still receives TERM from a later
+    // sweep and the run ends long before the grace. The listing is held until
+    // the leader is gone, so the budget has certainly run out; the descendant
+    // holds the pipes, so before the repeat only the KILL after the grace (a
+    // minute) could end the run. No duration is asserted beyond the bound that
+    // only the grace reaches.
+    if !super::fixtures::perl_available() {
+        eprintln!("skipped: perl is not available");
+        return;
+    }
+    let s = Scratch::new();
+    let held = Held::new(false);
+    let mut spec = sh(&s, SESSION_DESCENDANT, LONG).with_lister(held.lister());
+    spec.capture_interval = Some(Duration::from_millis(100));
+    spec.stop_grace = LONG;
+    spec.drain_bound = LONG;
+    spec.cleanup_deadline = Duration::from_secs(180);
+    spec.timings.stop_listing = SHORT_BUDGET;
+    spec.timings.descendant_signal = Duration::from_millis(100);
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let gc = s.pid("gc").await;
+    let _reaper = Reaper(vec![leader, gc]);
+    super::fixtures::wait_own_group(gc).await;
+    super::fixtures::wait_tracked(&handle, gc).await;
+    held.armed.store(true, Ordering::SeqCst);
+    handle.interrupt();
+    await_event("the stop asking for its listing", || {
+        held.waiting.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+    // The group TERM ended the leader while the listing is still held; the
+    // descendant has not been signalled, since no listing has been seen. The
+    // window lets the sweep of the stop itself run out of its budget before
+    // the listing is released (it can only miss a defect on a slow machine,
+    // never fail a correct run).
+    assert_gone_while_held(How::Interrupt, leader).await;
+    tokio::time::sleep(HELD_WINDOW).await;
+    assert!(
+        is_running_async(gc).await,
+        "the descendant was signalled before any listing arrived"
+    );
+    held.release();
+    let began = Instant::now();
+    let report = tokio::time::timeout(DEADLINE, handle.wait())
+        .await
+        .expect("the run waited for the grace instead of repeating the TERM sweep");
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    assert!(began.elapsed() < DEADLINE);
+    assert_eq!(term_to_descendants(&report), 1, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics
+            .signals
+            .iter()
+            .any(|record| record.signal == "SIGKILL"),
+        "{report:#?}"
+    );
+    assert_missed_listing(&report);
+    super::fixtures::assert_gone("descendant", &[gc]).await;
+}
+
+#[tokio::test]
+async fn a_stop_whose_listing_never_completes_still_ends_at_the_grace_with_kill() {
+    // Proves: repeating the TERM sweep adds no wait. With every listing held
+    // for the whole run, the group is killed at the grace, the run returns at
+    // the cleanup deadline with an unconfirmed verdict, and nothing waits for
+    // the listing.
+    let s = Scratch::new();
+    let held = Held::new(true);
+    let mut spec = sh(
+        &s,
+        "trap '' TERM; echo $$ > leader; while :; do sleep 1; done",
+        LONG,
+    )
+    .with_lister(held.lister());
+    spec.stop_grace = Duration::from_secs(1);
+    spec.drain_bound = Duration::from_secs(1);
+    spec.cleanup_deadline = Duration::from_secs(3);
+    spec.timings.stop_listing = SHORT_BUDGET;
+    spec.timings.descendant_signal = Duration::from_millis(250);
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let _reaper = Reaper(vec![leader]);
+    handle.interrupt();
+    let report = tokio::time::timeout(DEADLINE, handle.wait())
+        .await
+        .expect("the stop did not end by its grace and cleanup deadline");
+    held.release();
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .signals
+            .iter()
+            .any(|record| record.signal == "SIGKILL"
+                && matches!(record.target, crate::process::SignalTarget::Group)),
+        "{report:#?}"
+    );
+    assert!(
+        matches!(report.cleanup, Cleanup::Unconfirmed { .. }),
+        "{report:#?}"
+    );
+    super::fixtures::assert_gone("leader", &[leader]).await;
+}

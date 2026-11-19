@@ -20,7 +20,7 @@ use crate::contract::result::Cleanup;
 use super::limits::{
     CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
     EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT,
-    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
+    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL, TERM_SWEEP_RETRY_PAUSE,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -200,28 +200,53 @@ impl Shared {
     }
 
     /// The polite stop: TERM to the group, then CONT so a stopped process
-    /// receives it, then TERM (and CONT) to everything a sweep finds outside
-    /// the group. The group is signalled first and without waiting.
-    pub(super) async fn terminate(&self) {
+    /// receives it, then TERM (and CONT) to everything one sweep finds outside
+    /// the group. The group is signalled first and without waiting. Returns
+    /// whether that sweep completed within its budget; when it did not, no
+    /// descendant outside the group has been signalled yet and
+    /// [`Shared::retry_term_sweeps`] must follow.
+    pub(super) async fn terminate(&self) -> bool {
         self.signal_group(Signal::TERM);
         self.signal_group(Signal::CONT);
-        self.signal_swept(Signal::TERM).await;
+        self.signal_swept(Signal::TERM).await
+    }
+
+    /// Repeat the TERM sweep that did not complete at the stop, each attempt
+    /// bounded by the descendant budget, until one completes. A sweep signals
+    /// everything it finds from one snapshot with no await between the
+    /// snapshot and the signals, so an attempt that ran out of budget signalled
+    /// nothing and one that completed signalled all it found; stopping at the
+    /// first completed sweep therefore sends each descendant one TERM from
+    /// here, and records one signal entry per completed sweep. The caller runs
+    /// this beside its reads and drops it when the grace period ends, so it
+    /// never holds the owner and never holds the tree lock into the KILL sweep.
+    pub(super) async fn retry_term_sweeps(&self) {
+        loop {
+            tokio::time::sleep(TERM_SWEEP_RETRY_PAUSE).await;
+            if self.signal_swept(Signal::TERM).await {
+                return;
+            }
+        }
     }
 
     /// The hard stop: KILL to the group, then to everything a sweep finds.
     pub(super) async fn kill_all(&self) {
         self.signal_group(Signal::KILL);
-        self.signal_swept(Signal::KILL).await;
+        let _ = self.signal_swept(Signal::KILL).await;
     }
 
     /// Signal what a fresh sweep finds, within a budget so a slow or hung
-    /// listing cannot hold the owner. A cleanup pass signals again later.
-    async fn signal_swept(&self, signal: Signal) {
-        let _ = tokio::time::timeout(self.descendant_signal_budget, async {
+    /// listing cannot hold the owner. Returns whether the sweep produced a
+    /// listing in time (and so signalled what it found).
+    async fn signal_swept(&self, signal: Signal) -> bool {
+        tokio::time::timeout(self.descendant_signal_budget, async {
             let result = self.tree.lock().await.sweep(Some(signal)).await;
+            let listed = result.is_ok();
             self.note_sweep(signal, result);
+            listed
         })
-        .await;
+        .await
+        .unwrap_or(false)
     }
 
     /// Record a sweep that signalled: the signal log, the session members
@@ -494,7 +519,7 @@ impl OwnedProcess {
         }
         let first_term = term_at.unwrap_or_else(Instant::now);
         if term_at.is_none() && !hard_stop {
-            shared.terminate().await;
+            let _ = shared.terminate().await;
         }
         let mut next_kill = if hard_stop {
             Instant::now()
