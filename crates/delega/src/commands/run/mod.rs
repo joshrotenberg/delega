@@ -126,7 +126,9 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     let format = args.output.unwrap_or(OutputFormat::Text);
     // The configuration file comes first: the request is built from it, so a
     // file that cannot be used refuses before anything else is looked at.
-    let config = match super::config::read().into_config() {
+    let status = super::config::read();
+    let file = status.applied.clone();
+    let config = match status.into_config() {
         Ok(config) => config,
         Err(refusal) => {
             if args.progress {
@@ -135,8 +137,8 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
             return output::refuse_dry_run(format, &request::flag_facts(args), &refusal, log);
         }
     };
-    let request = match request::build(args, &config) {
-        Ok(request) => request,
+    let request::Built { request, origin } = match request::build(args, &config, file) {
+        Ok(built) => built,
         Err(failure) => {
             if args.progress {
                 log.line("progress: finished: refused");
@@ -144,9 +146,10 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
             return output::refuse(format, &failure, log);
         }
     };
-    let facts = request::Facts::of(&request);
+    let facts = request::Facts::of(&request, origin.clone());
     let mut options = ProviderOptions {
         hook: super::guard_command(),
+        origin,
         ..ProviderOptions::default()
     };
     config.apply_to_options(&mut options);

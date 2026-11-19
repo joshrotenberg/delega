@@ -633,6 +633,7 @@ fn debug_output_and_the_report_name_keys_and_never_values() {
         }),
         found: true,
         result: Ok(Some(config)),
+        applied: None,
     };
     let report = crate::doctor::ConfigReport::of(&status);
     assert!(report.read && report.found);

@@ -114,7 +114,15 @@ fn an_absent_file_changes_nothing_and_a_file_with_only_its_version_is_the_same()
     assert_eq!(without.status.code(), Some(0));
     write_config(&rig, "schema_version = 1\n");
     let with_empty = dry(&rig, "claude", &["--env", "CONFIG_PASSED"]);
-    assert_eq!(text(&without.stdout), text(&with_empty.stdout));
+    // The one difference is the report that a file was read: `applied.config`.
+    let mut reported = json_of(&with_empty);
+    let config = reported["dry_run"]["applied"]
+        .as_object_mut()
+        .and_then(|applied| applied.remove("config"))
+        .expect("the empty file is reported as applied.config");
+    assert_eq!(config["path"], config_path(&rig).to_string_lossy().as_ref());
+    assert!(json_of(&without)["dry_run"]["applied"]["config"].is_null());
+    assert_eq!(json_of(&without), reported);
     assert_eq!(text(&without.stderr), text(&with_empty.stderr));
     // No file at all, and no place to look for one, behaves the same.
     let nowhere = rig

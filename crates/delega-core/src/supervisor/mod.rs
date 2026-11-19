@@ -52,6 +52,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::contract::applied::Applied;
 use crate::contract::request::Request;
 
 mod activity;
@@ -222,7 +223,20 @@ impl Supervisor {
     /// response is `finished` with outcome `refused`, no worker is created, and
     /// [`read`](Self::read) returns the result.
     pub async fn start(&self, request: Request) -> Result<StartResponse, Error> {
-        self.start_checked(request, false).await
+        self.start_checked(request, false, Applied::default()).await
+    }
+
+    /// [`start`](Self::start) for a caller that built the request from layers
+    /// and knows which one set each field. `origin` carries the parts of
+    /// `applied` only the caller knows (`config` and `sources`); the run's
+    /// results, refusals included, report them, and a follow-up on the worker
+    /// reports the same ones.
+    pub async fn start_with_origin(
+        &self,
+        request: Request,
+        origin: Applied,
+    ) -> Result<StartResponse, Error> {
+        self.start_checked(request, false, origin).await
     }
 
     /// [`start`](Self::start) for a caller whose own working directory says
@@ -236,13 +250,24 @@ impl Supervisor {
     /// provider's own checks. [`follow_up`](Self::follow_up) needs no such
     /// variant: it reuses the worker's first `cwd`.
     pub async fn start_requiring_cwd(&self, request: Request) -> Result<StartResponse, Error> {
-        self.start_checked(request, true).await
+        self.start_checked(request, true, Applied::default()).await
+    }
+
+    /// [`start_requiring_cwd`](Self::start_requiring_cwd) with the `origin` of
+    /// [`start_with_origin`](Self::start_with_origin).
+    pub async fn start_requiring_cwd_with_origin(
+        &self,
+        request: Request,
+        origin: Applied,
+    ) -> Result<StartResponse, Error> {
+        self.start_checked(request, true, origin).await
     }
 
     async fn start_checked(
         &self,
         request: Request,
         require_cwd: bool,
+        origin: Applied,
     ) -> Result<StartResponse, Error> {
         let preflight = match require_cwd.then(|| cwd_required(&request)).flatten() {
             Some(refusal) => Some(refusal),
@@ -263,6 +288,7 @@ impl Supervisor {
         self.call(|reply| Command::Start {
             request: Box::new(request),
             preflight,
+            origin: Box::new(origin),
             reply,
         })
         .await?

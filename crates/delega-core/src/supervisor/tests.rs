@@ -657,3 +657,178 @@ async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
+
+/// An origin as a caller that merged layers would build it.
+fn origin() -> crate::contract::applied::Applied {
+    use crate::contract::applied::{Applied, AppliedConfig, Layer};
+    Applied {
+        config: Some(AppliedConfig {
+            path: "/cfg/config.toml".to_string(),
+            sha256: "ab".repeat(32),
+        }),
+        sources: [
+            ("provider".to_string(), Layer::Argument),
+            ("prompt".to_string(), Layer::Argument),
+            ("timeout_secs".to_string(), Layer::Config),
+        ]
+        .into_iter()
+        .collect(),
+        ..Applied::default()
+    }
+}
+
+/// The parts of `applied` that only a prepared run has are absent.
+fn assert_origin_only(result: &crate::contract::result::RunResult) {
+    let applied = result.applied.as_ref().expect("applied");
+    assert_eq!(applied.config, origin().config, "{result:#?}");
+    assert_eq!(applied.sources, origin().sources, "{result:#?}");
+    assert!(applied.env.is_none(), "{result:#?}");
+    assert!(applied.deny_rules.is_none(), "{result:#?}");
+    assert!(applied.context.is_none(), "{result:#?}");
+}
+
+#[tokio::test]
+async fn a_run_refused_by_the_supervisor_for_a_name_in_use_reports_config_and_sources_only() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    let mut first = dir.request(&format!("gate:{}", dir.gate().display()));
+    first.name = Some("same".to_string());
+    supervisor
+        .start_with_origin(first, origin())
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let mut second = dir.request("echo:two");
+    second.name = Some("same".to_string());
+    let refused = supervisor
+        .start_with_origin(second, origin())
+        .await
+        .expect("start");
+    let result = finished_result(&supervisor, &refused.run).await;
+    assert_eq!(result.outcome, Outcome::Refused);
+    assert_eq!(result.error.as_ref().expect("error").kind, "name_in_use");
+    assert_origin_only(&result);
+    std::fs::write(dir.gate(), b"").expect("open the gate");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_run_refused_at_the_worker_limit_reports_config_and_sources_only() {
+    let dir = Dir::new();
+    let mut config = dir.config();
+    config.limits.max_live_workers = 1;
+    let supervisor = Supervisor::new(config);
+    supervisor
+        .start_with_origin(
+            dir.request(&format!("gate:{}", dir.gate().display())),
+            origin(),
+        )
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let refused = supervisor
+        .start_with_origin(dir.request("echo:two"), origin())
+        .await
+        .expect("start");
+    let result = finished_result(&supervisor, &refused.run).await;
+    assert_eq!(result.outcome, Outcome::Refused);
+    assert_origin_only(&result);
+    std::fs::write(dir.gate(), b"").expect("open the gate");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_run_stopped_in_the_queue_reports_config_and_sources_only() {
+    let dir = Dir::new();
+    let mut config = dir.config();
+    config.limits.max_running_runs = 1;
+    let supervisor = Supervisor::new(config);
+    supervisor
+        .start_with_origin(
+            dir.request(&format!("gate:{}", dir.gate().display())),
+            origin(),
+        )
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let queued = supervisor
+        .start_with_origin(dir.request("echo:queued"), origin())
+        .await
+        .expect("start");
+    let stopped = supervisor
+        .interrupt(Target::Run(queued.run.clone()))
+        .await
+        .expect("interrupt");
+    assert!(stopped.settled, "{stopped:#?}");
+    let result = finished_result(&supervisor, &queued.run).await;
+    assert_eq!(result.outcome, Outcome::Interrupted);
+    assert_origin_only(&result);
+    std::fs::write(dir.gate(), b"").expect("open the gate");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_run_started_without_an_origin_has_no_sources_even_when_refused() {
+    let dir = Dir::new();
+    let mut config = dir.config();
+    config.limits.max_live_workers = 1;
+    let supervisor = Supervisor::new(config);
+    supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let refused = supervisor
+        .start(dir.request("echo:two"))
+        .await
+        .expect("start");
+    let result = finished_result(&supervisor, &refused.run).await;
+    assert_eq!(result.outcome, Outcome::Refused);
+    assert!(result.applied.is_none(), "{result:#?}");
+    std::fs::write(dir.gate(), b"").expect("open the gate");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_follow_up_reports_its_prompt_as_an_argument_whatever_layer_set_the_starts() {
+    use crate::contract::applied::Layer;
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    // The start's prompt came from a profile, so only the follow-up's own
+    // `prompt` entry can make it `argument`.
+    let mut start_origin = origin();
+    start_origin
+        .sources
+        .insert("prompt".to_string(), Layer::Profile);
+    let started = supervisor
+        .start_with_origin(dir.request("echo:one"), start_origin.clone())
+        .await
+        .expect("start");
+    let first = finished_result(&supervisor, &started.run).await;
+    assert_eq!(first.outcome, Outcome::Completed, "{first:#?}");
+    let worker = started.worker.expect("worker");
+
+    let followed = supervisor
+        .follow_up(&worker, "echo:two", None)
+        .await
+        .expect("follow up");
+    let result = finished_result(&supervisor, &followed.run).await;
+    let applied = result.applied.as_ref().expect("applied");
+    assert_eq!(
+        applied.sources.get("prompt"),
+        Some(&Layer::Argument),
+        "{result:#?}"
+    );
+    assert_eq!(
+        applied.sources.get("timeout_secs"),
+        Some(&Layer::Config),
+        "{result:#?}"
+    );
+    assert_eq!(applied.config, start_origin.config, "{result:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}

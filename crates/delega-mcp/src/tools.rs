@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use delega_core::contract::applied::AppliedConfig;
 use delega_core::contract::partial::PartialRequest;
 use delega_core::supervisor::{
     CloseResponse, Detail, Error, FollowUpResponse, InterruptResponse, ListResponse, ReadResponse,
@@ -82,7 +83,7 @@ pub struct ToolSchemas {
 /// The schemas of the seven tools, built from the same definitions the server
 /// lists, without a supervisor or a runtime.
 pub fn tool_schemas() -> Vec<ToolSchemas> {
-    tools(None, PartialRequest::default())
+    tools(None, PartialRequest::default(), None)
         .iter()
         .map(|tool| {
             let definition = tool.definition();
@@ -124,6 +125,8 @@ struct Adapter {
     supervisor: Option<Supervisor>,
     /// The request defaults every `start` begins from.
     defaults: PartialRequest,
+    /// The configuration file those defaults came from, for `applied.config`.
+    config: Option<AppliedConfig>,
 }
 
 impl Adapter {
@@ -141,10 +144,15 @@ impl Adapter {
 }
 
 /// The tools over `supervisor`, or the tools alone, for their schemas.
-pub(crate) fn tools(supervisor: Option<Supervisor>, defaults: PartialRequest) -> Vec<Tool> {
+pub(crate) fn tools(
+    supervisor: Option<Supervisor>,
+    defaults: PartialRequest,
+    config: Option<AppliedConfig>,
+) -> Vec<Tool> {
     let adapter = Arc::new(Adapter {
         supervisor,
         defaults,
+        config,
     });
     vec![
         start_tool(&adapter),
@@ -168,12 +176,17 @@ fn start_tool(adapter: &Arc<Adapter>) -> Tool {
                 // A profile is read from disk, so the work is off the runtime's
                 // threads: a stuck filesystem must not hold up other calls.
                 let defaults = adapter.defaults.clone();
-                let built =
-                    tokio::task::spawn_blocking(move || start::build_request(defaults, args)).await;
+                let config = adapter.config.clone();
+                let built = tokio::task::spawn_blocking(move || {
+                    start::build_request(defaults, config, args)
+                })
+                .await;
                 Ok(match built {
-                    Ok(Ok(request)) => {
+                    Ok(Ok((request, origin))) => {
                         adapter
-                            .with(|s| async move { s.start_requiring_cwd(request).await })
+                            .with(|s| async move {
+                                s.start_requiring_cwd_with_origin(request, origin).await
+                            })
                             .await
                     }
                     Ok(Err(message)) => CallToolResult::error(message),

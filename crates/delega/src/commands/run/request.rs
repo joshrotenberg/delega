@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::Path;
 
 use delega_core::config::Config;
+use delega_core::contract::applied::{Applied, AppliedConfig, Layer};
 use delega_core::contract::limits::{
     DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_PROMPT_BYTES, MAX_TIMEOUT_SECS,
     MIN_TIMEOUT_SECS,
@@ -22,7 +23,7 @@ use super::{Args, Effort, Provider as ProviderArg};
 const MAX_SCHEMA_FILE_BYTES: usize = MAX_ANSWER_SCHEMA_BYTES * 4;
 
 /// What a refused result still reports about a request that never became one.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Facts {
     /// The provider, when the request named one.
     pub provider: Option<Provider>,
@@ -30,17 +31,29 @@ pub struct Facts {
     pub mode: Mode,
     /// The time limit that would have applied, in seconds.
     pub timeout_secs: u64,
+    /// What is known of `applied`: the configuration file and the layer of
+    /// each field, once the request was merged; nothing before.
+    pub origin: Box<Applied>,
 }
 
 impl Facts {
     /// The facts of a request that was built.
-    pub fn of(request: &Request) -> Self {
+    pub fn of(request: &Request, origin: Applied) -> Self {
         Self {
             provider: Some(request.provider),
             mode: request.permissions.mode,
             timeout_secs: request.timeout_secs,
+            origin: Box::new(origin),
         }
     }
+}
+
+/// A request and what is known of how it was built.
+#[derive(Debug)]
+pub struct Built {
+    pub request: Request,
+    /// The configuration file and the layer of each field, as `applied`.
+    pub origin: Applied,
 }
 
 /// Why no request could be built: every problem found, and what is known.
@@ -63,6 +76,7 @@ pub fn flag_facts(args: &Args) -> Facts {
             .timeout
             .filter(|t| (MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(t))
             .unwrap_or(DEFAULT_TIMEOUT_SECS),
+        origin: Box::default(),
     }
 }
 
@@ -70,15 +84,24 @@ pub fn flag_facts(args: &Args) -> Facts {
 /// profile, then explicit flags over both, then the contract's own validation. Problems in reading the inputs are reported
 /// together and stop before validation, which would only repeat them as a
 /// missing field.
-pub fn build(args: &Args, config: &Config) -> Result<Request, Failure> {
+pub fn build(args: &Args, config: &Config, file: Option<AppliedConfig>) -> Result<Built, Failure> {
     let mut problems = Vec::new();
-    let merged = profile::merge_over(
+    let profile::Merged {
+        request: merged,
+        sources,
+    } = profile::merge_tracked(
         config.request_defaults(),
         args.request.as_deref(),
         ErrorDetail::Full,
+        Layer::Flag,
         &mut problems,
         |problems| flags(args, problems),
     );
+    let origin = Applied {
+        config: file,
+        sources,
+        ..Applied::default()
+    };
     let facts = Facts {
         provider: merged.provider,
         mode: merged
@@ -87,13 +110,15 @@ pub fn build(args: &Args, config: &Config) -> Result<Request, Failure> {
             .and_then(|p| p.mode)
             .unwrap_or_default(),
         timeout_secs: merged.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+        origin: Box::new(origin.clone()),
     };
     if !problems.is_empty() {
         return Err(Failure { problems, facts });
     }
-    merged
-        .into_request()
-        .map_err(|problems| Failure { problems, facts })
+    match merged.into_request() {
+        Ok(request) => Ok(Built { request, origin }),
+        Err(problems) => Err(Failure { problems, facts }),
+    }
 }
 
 /// The request fields the flags set explicitly. A flag that was not given sets

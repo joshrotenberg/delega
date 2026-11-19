@@ -52,7 +52,9 @@ use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
+use crate::contract::applied::AppliedConfig;
 use crate::contract::partial::{PartialPermissions, PartialRequest};
 use crate::contract::permissions::Mode;
 use crate::contract::request::{Effort, Provider};
@@ -392,6 +394,10 @@ pub struct Status {
     pub found: bool,
     /// The configuration (`None` when there is no file) or the refusal.
     pub result: Result<Option<Config>, crate::provider::Refusal>,
+    /// The path and digest of the file when it was read and accepted: what a
+    /// result reports as `applied.config`. `None` when no file was read or it is
+    /// refused.
+    pub applied: Option<AppliedConfig>,
 }
 
 impl Status {
@@ -468,6 +474,7 @@ pub fn read_as(lookup: impl Fn(&str) -> Option<std::ffi::OsString>, euid: u32) -
                 location: None,
                 found: false,
                 result: Err(refusal),
+                applied: None,
             };
         }
     };
@@ -476,9 +483,11 @@ pub fn read_as(lookup: impl Fn(&str) -> Option<std::ffi::OsString>, euid: u32) -
             location: None,
             found: false,
             result: Ok(None),
+            applied: None,
         };
     };
     let outcome = file::read(&place.path, euid);
+    let mut applied = None;
     let (found, result) = match outcome {
         Ok(file::Read::Missing) if place.source == Source::DelegaConfig => (
             false,
@@ -491,7 +500,16 @@ pub fn read_as(lookup: impl Fn(&str) -> Option<std::ffi::OsString>, euid: u32) -
             )),
         ),
         Ok(file::Read::Missing) => (false, Ok(None)),
-        Ok(file::Read::Bytes(bytes)) => (true, check::parse(&place.path, &bytes).map(Some)),
+        Ok(file::Read::Bytes(bytes)) => {
+            let parsed = check::parse(&place.path, &bytes).map(Some);
+            if parsed.is_ok() {
+                applied = Some(AppliedConfig {
+                    path: place.path.display().to_string(),
+                    sha256: hex(&Sha256::digest(&bytes)),
+                });
+            }
+            (true, parsed)
+        }
         Err(why) => (
             true,
             Err(refusal(
@@ -507,7 +525,13 @@ pub fn read_as(lookup: impl Fn(&str) -> Option<std::ffi::OsString>, euid: u32) -
         location: Some(place),
         found,
         result,
+        applied,
     }
+}
+
+/// Lowercase hexadecimal.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The path as text for a message: control characters shown as `?`.

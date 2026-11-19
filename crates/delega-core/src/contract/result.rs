@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::SCHEMA_VERSION;
+use super::applied::Applied;
 use super::outcome::Outcome;
 use super::permissions::Mode;
 use super::request::Provider;
@@ -240,6 +241,12 @@ pub struct RunResult {
     /// differently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_notes: Vec<String>,
+    /// What delega applied to the run: the configuration file, which layer set
+    /// each request field, the environment, the deny rules and the context
+    /// mode. Absent when nothing is known. A refusal carries what was known
+    /// when it happened. See `docs/api.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Applied>,
     /// The provider's own session id, for the provider's `resume`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -329,6 +336,7 @@ impl RunResult {
             cleanup: ctx.cleanup,
             permissions: ctx.permissions,
             provider_notes: Vec::new(),
+            applied: None,
             session_id: None,
             usage: None,
             timing: ctx.timing,
@@ -400,6 +408,7 @@ impl RunResult {
             cleanup: Cleanup::Confirmed,
             permissions: ctx.permissions,
             provider_notes: Vec::new(),
+            applied: None,
             session_id: None,
             usage: None,
             timing,

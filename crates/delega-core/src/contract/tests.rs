@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use super::SCHEMA_VERSION;
+use super::applied::*;
 use super::limits::*;
 use super::outcome::Outcome;
 use super::partial::PartialRequest;
@@ -38,6 +39,53 @@ fn full_request() -> Request {
     }
 }
 
+fn full_applied() -> Applied {
+    Applied {
+        config: Some(AppliedConfig {
+            path: "/home/u/.config/delega/config.toml".into(),
+            sha256: "0".repeat(64),
+        }),
+        sources: [
+            ("provider".to_string(), Layer::Flag),
+            ("timeout_secs".to_string(), Layer::Default),
+            ("permissions.mode".to_string(), Layer::Config),
+        ]
+        .into(),
+        env: Some(AppliedEnv {
+            passed: EnvPassed {
+                total: 5,
+                base: 2,
+                network: 1,
+                provider: 1,
+                named_by_caller: 0,
+                set_by_caller: 1,
+                set_by_delega: 0,
+            },
+            withheld: EnvWithheld {
+                total: 7,
+                never_passed: 1,
+                not_allowlisted: 6,
+            },
+            named: vec!["TOOLCHAIN_HOME".into()],
+        }),
+        deny_rules: Some(AppliedDenyRules {
+            files: vec![DenyFile {
+                path: "/home/u/.claude/settings.json".into(),
+                rules: 2,
+            }],
+            skipped: vec![SkippedFile {
+                path: "/work/.claude/settings.local.json".into(),
+                reason: "not owned by the user".into(),
+            }],
+            applied: 2,
+        }),
+        context: Some(AppliedContext {
+            settings: "deny_rules".into(),
+            instructions: false,
+        }),
+    }
+}
+
 fn full_result() -> RunResult {
     RunResult {
         schema_version: SCHEMA_VERSION,
@@ -68,6 +116,7 @@ fn full_result() -> RunResult {
             }],
         },
         provider_notes: vec!["no sandbox".into()],
+        applied: Some(full_applied()),
         session_id: Some("sess-1".into()),
         usage: Some(Usage {
             input_tokens: Some(1),

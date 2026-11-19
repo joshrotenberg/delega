@@ -58,8 +58,6 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
-use schemars::JsonSchema;
-use serde::Serialize;
 use serde_json::Value;
 
 use super::limits::{
@@ -72,23 +70,7 @@ pub(super) const UNREADABLE: &str = "settings_unreadable";
 /// Refusal kind: the deny rules are over a bound.
 pub(super) const OVER_LIMIT: &str = "deny_rules_over_limit";
 
-/// A settings file that was read, and how many deny rules it held.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
-pub struct DenyFile {
-    /// The file's path.
-    pub path: String,
-    /// The rules in the file, before deduplication.
-    pub rules: usize,
-}
-
-/// A local settings file that was not read, and why.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
-pub struct SkippedFile {
-    /// The file's path.
-    pub path: String,
-    /// Why it was ignored.
-    pub reason: String,
-}
+pub use crate::contract::applied::{DenyFile, SkippedFile};
 
 /// The deny rules to pass to a worker, and where they came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

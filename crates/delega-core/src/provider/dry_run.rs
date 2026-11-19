@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 
+use crate::contract::applied::Applied;
 use crate::contract::request::{Provider, Request};
 
 use super::codex::MCP_PLACEHOLDER;
@@ -67,6 +68,8 @@ pub struct DryRun {
     pub notes: Vec<String>,
     /// What happens before the provider starts.
     pub before_start: Vec<String>,
+    /// What delega applied: the same object a result carries as `applied`.
+    pub applied: Applied,
 }
 
 /// Validate a request and report what a run would start.
@@ -126,6 +129,7 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
         deny_rules,
         notes: plan.notes,
         before_start,
+        applied: plan.applied,
     })
 }
 

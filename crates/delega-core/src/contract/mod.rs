@@ -3,6 +3,7 @@
 //! One JSON request in, one JSON result out, the same from every surface.
 //! `docs/api.md` is the design these types follow.
 
+pub mod applied;
 pub mod limits;
 pub mod outcome;
 pub mod partial;

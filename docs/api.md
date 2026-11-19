@@ -167,6 +167,7 @@ One JSON object, versioned, the same from every surface.
 | `cleanup` | `confirmed: true` when a final sweep after the provider exited found nothing left in its process group, its session or its tracked descendants; otherwise `confirmed: false` with `pids`, `process_groups` and `reason`. Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
 | `permissions` | `mode` applied, and `denied`: requests answered no. **Later:** `asked`, requests the caller answered. |
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
+| `applied` | What delega applied: the configuration file, which layer set each request field, the environment, the deny rules and the context mode, as names, counts, paths and digests. Optional; see [`applied`](#applied). |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
 | `usage` | Tokens in and out, cached, reasoning; `cost_usd` when the provider reports it. |
 | `timing` | Queued, started and finished times, duration, and the time limit applied as `timeout_secs`. |
@@ -174,6 +175,89 @@ One JSON object, versioned, the same from every surface.
 
 A caller that only needs to know what happened reads `outcome`, `text`, `error`
 and `cleanup`.
+
+### `applied`
+
+`applied` is the structured record of what delega applied to the run, for a
+caller that wants to check it without reading prose. `provider_notes` still say
+the same things in words and none of them was removed. The object is optional, so
+`schema_version` stays 1 and an older reader ignores it. Every value is a name, a
+count, a path or a digest: never the value of an environment variable and never
+the text of a deny rule. Keys are in sorted order.
+
+```json
+{
+  "config": {"path": "/home/u/.config/delega/config.toml", "sha256": "9f2c...e1"},
+  "sources": {
+    "cwd": "flag",
+    "model": "config",
+    "permissions.mode": "profile",
+    "permissions.on_request": "default",
+    "permissions.strict": "default",
+    "prompt": "flag",
+    "provider": "config",
+    "session.ephemeral": "default",
+    "timeout_secs": "default"
+  },
+  "env": {
+    "passed": {"total": 14, "base": 11, "network": 0, "provider": 0,
+               "named_by_caller": 1, "set_by_caller": 1, "set_by_delega": 1},
+    "withheld": {"total": 31, "never_passed": 2, "not_allowlisted": 29},
+    "named": ["AWS_REGION", "TOOLCHAIN_HOME"]
+  },
+  "deny_rules": {
+    "files": [{"path": "/home/u/.claude/settings.json", "rules": 3}],
+    "skipped": [],
+    "applied": 3
+  },
+  "context": {"settings": "deny_rules", "instructions": false}
+}
+```
+
+| Part | Content | When it is absent |
+| --- | --- | --- |
+| `config` | `path` of the configuration file that was read and the `sha256` of the bytes read (64 lowercase hex digits). | No file was read: none exists at the place looked for, or none is looked for. A file that is refused is not reported, and a command that refuses for it has no `applied`. `delega mcp` reads the file once at start, so every run of a server reports the file as it was then. |
+| `sources` | For each request field that ended up set, the layer that set it: `default`, `config` (the file's `[defaults]`), `profile`, `flag` (`delega run`) or `argument` (an MCP tool argument). | The caller did not say, as when a library caller starts a run without `ProviderOptions::origin`. It is present, with the fields known so far, on a refusal that happens after the request was merged. |
+| `env` | `passed` counts the variables the worker received, in total and by reason; `withheld` counts the caller's variables that were not passed, in total, those that can never be passed (calling-session variables and every `DELEGA_*`) and the rest; `named` lists the names given with `--env` or in the file's `[env]`, whether or not the variable was set. | The run was refused before it was prepared (see below). |
+| `deny_rules` | The settings files read with their rule counts (`files`), the ones ignored with the reason (`skipped`), and the number of rules passed (`applied`). | Codex runs, which read none, and a refusal before the settings files were read. |
+| `context` | `settings`: how Claude Code's settings reached the worker, `deny_rules` being the only mode today (the deny rules and nothing else); `instructions`: whether delega loaded instruction files, `false` today. Whether Claude Code itself reads the working directory's own `CLAUDE.md` is not controlled and is stated in a `provider_notes` entry. | Codex runs, which have no such mode to report, and a refusal before it was decided. |
+
+`env`, `deny_rules` and `context` are filled in together, when the run has been
+prepared: the request validated, the working directory and executable found, the
+settings files read, the permissions mapped and the environment resolved. A
+refusal before that point (an invalid request, an unusable working directory, a
+rejected native argument, a missing provider executable, unusable settings files,
+a permission that `strict` cannot enforce, an invalid or forbidden `--env` name)
+therefore has `config` and `sources` only. So does a refusal that comes from the
+supervisor, such as a name in use or the worker limit, and a run stopped in the
+queue before it started. A run that was prepared and then ended without finishing
+(a failure, a time limit, an interrupt, or a refusal at start such as an
+unsupported provider version) has every part that applies. A refusal for a
+configuration file that cannot be used has no `applied`, because no usable file was read
+and no request was built. Two internal-error endings carry `config` and `sources` only,
+even for a run that was prepared: a run whose task in the supervisor panicked, and a
+result the supervisor replaced because it failed validation. `applied` is absent altogether when nothing is known.
+
+`sources` keys are the request fields (`provider`, `prompt`, `cwd`, `name`,
+`instructions`, `model`, `effort`, `timeout_secs`, `answer_schema`,
+`native_args`) and, as dotted names, `permissions.mode`, `permissions.commands`,
+`permissions.directories`, `permissions.on_request`, `permissions.strict`,
+`session.ephemeral` and `session.resume`; `schema_version` is not a key. A key is
+present when the field has a value. Five fields have built-in defaults and are
+always present: `timeout_secs`, `permissions.mode`, `permissions.on_request`,
+`permissions.strict` and `session.ephemeral`, as `default` unless a layer set
+them. The other fields appear only when a layer set them, so an absent `model`
+means none was set. The layers are recorded where they are merged (the profile
+merge in `delega_core::profile`, called by `delega run` and by MCP `start`), not
+worked out afterwards from the values. A field a merge clears loses the layer that set
+it: an explicit `ephemeral` removes a `resume` that a lower layer set, and
+`session.resume` is then absent; an explicit `resume` removes an `ephemeral` that a
+lower layer set, and `session.ephemeral` is then `default`, its built-in value. For a follow-up, `sources` are those of the worker's `start`, with `prompt`
+(and `timeout_secs` when the call gave one) as `argument`.
+
+A dry run carries the same object, as `dry_run.applied`. MCP `read` returns it in
+both detail levels: the object is small, so a compact `read` includes it, next to
+`provider_notes`.
 
 ## Command line
 
@@ -368,8 +452,10 @@ Behavior:
   starting anything, not even a version probe. Text output is a readable list.
   JSON output is `{"schema_version": 1, "dry_run": {...}}` where the object is
   the provider layer's `DryRun`: provider, program, args, `env_names`, `env`,
-  cwd, `time_limit_secs`, `stdin_bytes`, the permission `mapping`, `notes` and
-  `before_start`. `env` groups the names that would be passed by reason
+  cwd, `time_limit_secs`, `stdin_bytes`, the permission `mapping`, `notes`,
+  `before_start` and `applied`, the same object a result carries
+  ([`applied`](#applied); the text output prints its configuration file and
+  sources). `env` groups the names that would be passed by reason
   (`base`, `network`, `provider`, `named`, `set_by_caller`, `set_by_delega`),
   lists names given as `--env NAME` that are not set (`named_not_set`) and gives only the count of
   the caller's variables that are withheld (`withheld_count`); text output
@@ -769,7 +855,12 @@ executables of every worker. `delega doctor`: the same environment and
 executables, so its answer matches a run, the limits in force, and a report of
 the file. The supervisor library's own API is unchanged except that its limits
 have a default wait (`Limits::wait_default`); the command line layers read the
-file and pass the values in.
+file and pass the values in. Every result and dry run reports the file as
+`applied.config` (path and SHA-256) and the layer of each request field as
+`applied.sources` ([`applied`](#applied)). The library gains
+`Supervisor::start_with_origin` and `ProviderOptions::origin` for a caller that
+builds a request from layers and wants them reported; without them `applied`
+carries no `config` or `sources`.
 
 ## MCP
 
@@ -820,7 +911,9 @@ Rules that hold for every tool:
   the result, the full activity history, progress for a finished run, and the
   supervisor's diagnostics for the run (provider, mode, times, why a stop was
   requested). Process diagnostics from the provider are not included.
-  `interrupt` and `close` return compact results.
+  `interrupt` and `close` return compact results. A compact result includes
+  `applied` ([`applied`](#applied)), because it is small; usage and provenance
+  stay out of it.
 - **Limits** are admission limits: 16 live workers, 4 running runs and 16 runs
   queued behind one worker by default, reported by `list` with what is in use,
   and by `delega doctor` as configured. The `[mcp]` section of the

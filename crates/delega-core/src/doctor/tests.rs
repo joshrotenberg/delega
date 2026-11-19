@@ -203,6 +203,7 @@ fn a_refused_file_is_reported_as_found_and_not_read() {
             message: "the configuration file /c.toml is not valid: x is not a known key"
                 .to_string(),
         }),
+        applied: None,
     };
     let report = ConfigReport::of(&status);
     assert!(report.found && !report.read);

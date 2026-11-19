@@ -453,7 +453,11 @@ at most `DRY_RUN_DENY_RULES_SHOWN` (100) of them and each at most
 `DRY_RUN_DENY_RULE_CHARS` (200) characters, with `omitted` counting the rest. The
 rules are permission patterns the user wrote, not secrets, and they appear only
 there; the `--settings` argument in a dry run shows their count in their place.
-Text output prints the same under "user deny rules".
+Text output prints the same under "user deny rules". The result's
+`applied.deny_rules` (see [api.md](api.md#applied)) carries the same files,
+`skipped` entries and `applied` count for a Claude run, and never a rule;
+`applied.context` says that only the deny rules reached the worker
+(`settings: "deny_rules"`) and that delega loaded no instructions. The notes stay.
 
 **Codex.** Claude deny rules do not apply to Codex. The Codex adapter reads no
 Claude Code settings and its dry run has an empty `deny_rules`.
@@ -735,7 +739,9 @@ What is visible, by names and counts only:
   number of the caller's variables that are not passed. The names of withheld
   variables are not reported anywhere.
 - Every result carries one `provider_notes` entry of the form `N environment
-  variables of the caller were withheld; M were passed`. `M` counts every
+  variables of the caller were withheld; M were passed`. The same counts, by
+  reason, and the names the caller gave (`--env`, `[env]`) are in the result's
+  `applied.env` (see [api.md](api.md#applied)); the note stays. `M` counts every
   variable the provider receives, including those set by the caller and the
   adapter.
 

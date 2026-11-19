@@ -6,6 +6,7 @@
 
 use tokio::sync::oneshot;
 
+use crate::contract::applied::Applied;
 use crate::contract::request::Request;
 use crate::contract::result::RunResult;
 
@@ -64,6 +65,9 @@ pub(super) enum Command {
         /// The refusal found by the filesystem checks done off this task, as
         /// error kind and message.
         preflight: Option<(String, String)>,
+        /// What the caller knows of `applied`: the configuration file and
+        /// which layer set each field.
+        origin: Box<Applied>,
         reply: Reply<StartResponse>,
     },
     FollowUp {

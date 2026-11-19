@@ -25,6 +25,7 @@ mod serve;
 mod start;
 mod tools;
 
+use delega_core::contract::applied::AppliedConfig;
 use delega_core::contract::partial::PartialRequest;
 use delega_core::supervisor::Supervisor;
 use tower_mcp::McpRouter;
@@ -59,13 +60,25 @@ pub fn router_with_defaults(
     build: &BuildInfo,
     defaults: PartialRequest,
 ) -> Result<McpRouter, String> {
+    router_with_config(supervisor, build, defaults, None)
+}
+
+/// [`router_with_defaults`] that also says which configuration file the
+/// defaults came from. `config` is reported as `applied.config` in the results
+/// of every run `start` begins, with the layer of each request field.
+pub fn router_with_config(
+    supervisor: Supervisor,
+    build: &BuildInfo,
+    defaults: PartialRequest,
+    config: Option<AppliedConfig>,
+) -> Result<McpRouter, String> {
     let skills = resources::skill_set().map_err(|error| error.to_string())?;
     let mut router = McpRouter::new()
         .server_info("delega", delega_core::VERSION)
         .instructions(INSTRUCTIONS)
         .skills(skills)
         .resource(resources::identity_resource(build));
-    for tool in tools::tools(Some(supervisor), defaults) {
+    for tool in tools::tools(Some(supervisor), defaults, config) {
         router = router.tool(tool);
     }
     Ok(router)

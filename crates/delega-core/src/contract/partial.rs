@@ -107,7 +107,62 @@ fn pick<T>(over: Option<T>, base: Option<T>) -> Option<T> {
     over.or(base)
 }
 
+/// The request fields that have a built-in default, by the dotted name
+/// [`PartialRequest::set_keys`] uses. A field of this list that no layer set
+/// ended up with its default.
+pub const DEFAULTED_KEYS: [&str; 5] = [
+    "timeout_secs",
+    "permissions.mode",
+    "permissions.on_request",
+    "permissions.strict",
+    "session.ephemeral",
+];
+
 impl PartialRequest {
+    /// The dotted names of the fields this request sets: the top-level fields
+    /// and `permissions.*` and `session.*`, without `schema_version`. A field
+    /// holding a list counts when the list is given, even if it is empty.
+    pub fn set_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        let mut add = |set: bool, key: &'static str| {
+            if set {
+                keys.push(key);
+            }
+        };
+        add(self.provider.is_some(), "provider");
+        add(self.prompt.is_some(), "prompt");
+        add(self.cwd.is_some(), "cwd");
+        add(self.name.is_some(), "name");
+        add(self.instructions.is_some(), "instructions");
+        add(self.model.is_some(), "model");
+        add(self.effort.is_some(), "effort");
+        add(self.timeout_secs.is_some(), "timeout_secs");
+        add(self.answer_schema.is_some(), "answer_schema");
+        add(self.native_args.is_some(), "native_args");
+        let p = self.permissions.as_ref();
+        add(p.is_some_and(|p| p.mode.is_some()), "permissions.mode");
+        add(
+            p.is_some_and(|p| p.commands.is_some()),
+            "permissions.commands",
+        );
+        add(
+            p.is_some_and(|p| p.directories.is_some()),
+            "permissions.directories",
+        );
+        add(
+            p.is_some_and(|p| p.on_request.is_some()),
+            "permissions.on_request",
+        );
+        add(p.is_some_and(|p| p.strict.is_some()), "permissions.strict");
+        let s = self.session.as_ref();
+        add(
+            s.is_some_and(|s| s.ephemeral.is_some()),
+            "session.ephemeral",
+        );
+        add(s.is_some_and(|s| s.resume.is_some()), "session.resume");
+        keys
+    }
+
     /// Read a profile file. Unknown fields are errors at every level and
     /// `schema_version` is required.
     pub fn from_profile_json(text: &str) -> Result<Self, serde_json::Error> {
