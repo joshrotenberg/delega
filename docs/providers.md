@@ -44,7 +44,10 @@ providers, and reads the Claude Code settings with the reader described under
 the version and whether the command hook interface is available, counts of the
 environment variables and deny rules a run would get, and the problems that
 would refuse a run, each with a stable kind (the kind a refused run has, where
-there is one), plus the process inspection check. It never prints a value or a rule.
+there is one), plus the process inspection check. A failed or timed-out Claude probe appears in doctor as
+`version_probe_failed` or `version_probe_timed_out`, while a run with an allowed
+command refuses the same condition as `unsupported_provider_version`. It never
+prints a value or a rule.
 
 ## Run sequence
 

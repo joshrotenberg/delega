@@ -267,6 +267,10 @@ impl Report {
 
     /// The report for people.
     pub fn to_text(&self) -> String {
+        sanitize(&self.text())
+    }
+
+    fn text(&self) -> String {
         let mut out = String::new();
         let verdict = if self.ready {
             "a run can go ahead"
@@ -312,6 +316,15 @@ impl Report {
     }
 }
 
+/// Show every control character except the line break as `?`. Paths, version
+/// lines and messages carry text from the environment and from providers, and an
+/// escape sequence must not reach a terminal.
+pub fn sanitize(text: &str) -> String {
+    text.chars()
+        .map(|c| if c != '\n' && c.is_control() { '?' } else { c })
+        .collect()
+}
+
 fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
@@ -337,16 +350,7 @@ fn provider_text(out: &mut String, found: &ProviderCheck) {
         }
         _ => out.push_str("  executable: not found\n"),
     }
-    let version = found.version.as_deref().map_or_else(
-        || "not reported".to_string(),
-        |v| {
-            // The text is the provider's own: show control characters as `?`
-            // so an escape sequence cannot reach the terminal.
-            v.chars()
-                .map(|c| if c.is_control() { '?' } else { c })
-                .collect()
-        },
-    );
+    let version = found.version.as_deref().unwrap_or("not reported");
     let _ = writeln!(out, "  version: {version}");
     if let Some(hook) = &found.command_hook {
         let _ = writeln!(

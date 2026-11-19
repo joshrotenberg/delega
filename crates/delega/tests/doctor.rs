@@ -296,6 +296,13 @@ fn a_version_with_escape_sequences_is_shown_without_them_in_text() {
         "control characters reached the output"
     );
     assert!(text(&out.stdout).contains("version: 2.1.400 ?[31mred?]0;title?"));
+    // An escape in a path is sanitized too, in the problem and the executable.
+    let escaped = rig.path("bad\u{1b}[31mname");
+    let out = doctor_with(&rig, &[], |c| {
+        c.env("DELEGA_CODEX_BIN", &escaped);
+    });
+    assert!(!out.stdout.contains(&0x1b), "{}", text(&out.stdout));
+    assert!(text(&out.stdout).contains("bad?[31mname"));
     // JSON escapes them.
     let json = doctor_with(&rig, &["--output", "json"], |c| {
         c.env("DELEGA_CLAUDE_BIN", &noisy);
@@ -492,4 +499,35 @@ fn a_version_probe_that_does_not_answer_is_reported_as_timed_out() {
     );
     assert_eq!(report["problems"][0]["blocks"], "nothing");
     assert_eq!(provider(&report, "codex")["ready"], true);
+}
+
+#[test]
+fn an_executable_that_cannot_be_started_stops_every_run_with_it() {
+    let rig = Rig::new();
+    let broken = rig.file("broken", "#!/no/such/interpreter\n");
+    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    for name in ["claude", "codex"] {
+        let variable = format!("DELEGA_{}_BIN", name.to_uppercase());
+        let out = doctor_with(&rig, &["--output", "json"], |c| {
+            c.env(&variable, &broken);
+        });
+        // The other provider is ready, so the exit is 0.
+        assert_eq!(out.status.code(), Some(0), "{name}: {}", text(&out.stdout));
+        let report = json_of(&out);
+        assert_eq!(
+            problem_kinds(&report),
+            [(name.to_string(), "provider_not_startable".to_string())],
+            "{name}"
+        );
+        assert_eq!(report["problems"][0]["blocks"], "run", "{name}");
+        assert_eq!(provider(&report, name)["ready"], false, "{name}");
+        // Run fails to start with it.
+        let ran = rig
+            .command()
+            .env(&variable, &broken)
+            .args(rig.run_args(name, "success", &[]))
+            .output()
+            .expect("run delega");
+        assert_ne!(ran.status.code(), Some(0), "{name}");
+    }
 }

@@ -377,11 +377,13 @@ whether process inspection works, by running one `ps` listing as cleanup does.
 **Problems.** Each problem has a stable `kind`, a message, the provider it is
 about (null when it is about the whole system) and what it `blocks`: `run`,
 `command_grants`, `cleanup`, or `nothing` (a warning: no run is refused). Doctor's
-verdicts always match the refusals `run` would give: a problem blocks `run` only
-where a run is refused for it.
+verdicts always match what `run` does, including runs that would fail to start,
+not only its refusals: a problem blocks `run` only where a run is refused or
+fails for it.
 
 | Kind | Blocks | Meaning |
 | --- | --- | --- |
+| `provider_not_startable` | `run` | The executable passed the lookup but cannot be started, such as a script whose interpreter is missing. A run fails to start with it (`spawn_failed` for Claude, `provider_preparation_failed` for Codex). |
 | `provider_not_found` | `run` | No executable by the lookup, or the override names none. |
 | `version_probe_failed` | `command_grants` for Claude, `nothing` for Codex | `--version` exited with an error, was ended by a signal or could not be started. A run records no version and goes on; only a Claude run that grants exact commands is refused. |
 | `version_probe_timed_out` | `command_grants` for Claude, `nothing` for Codex | `--version` did not answer in five seconds. Same effect as a failed probe. |
@@ -394,7 +396,7 @@ Another refusal a run would give while it is built, such as a settings argument
 over its bound, is reported under its own kind and blocks `run`. A provider is
 `ready` when no problem blocks `run` for it.
 
-**Output.** Text is the default; control characters in a provider's version text are shown as `?`. `--output json` prints one versioned object
+**Output.** Text is the default; control characters anywhere in the text report (a provider's version line, paths, messages) are shown as `?`. `--output json` prints one versioned object
 (`schema_version` 1) with `ready`, `version`, `cwd`, `providers`,
 `process_inspection`, `limits`, `problems` and `skills`; its JSON Schema is
 `schemas/doctor.schema.json`, generated from the types, checked by a test and

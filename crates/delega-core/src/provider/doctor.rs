@@ -28,6 +28,10 @@ use super::run::probe;
 /// Problem kind: the version probe exited with an error, was ended by a signal
 /// or could not be started.
 pub const VERSION_PROBE_FAILED: &str = "version_probe_failed";
+/// Problem kind: the executable was found but cannot be started, so every run
+/// with it would fail to start (`doctor` uses its own kind here; a run reports
+/// `spawn_failed` for Claude and `provider_preparation_failed` for Codex).
+pub const PROVIDER_NOT_STARTABLE: &str = "provider_not_startable";
 /// Problem kind: the version probe did not answer within its time limit.
 pub const VERSION_PROBE_TIMED_OUT: &str = "version_probe_timed_out";
 
@@ -251,10 +255,11 @@ async fn probe_version(plan: &Plan, found: &mut ProviderCheck, problems: &mut Ve
                 limit.as_secs().max(1)
             ),
         )),
-        Ending::FailedToStart { .. } => Some(Problem::new(
-            blocks,
-            VERSION_PROBE_FAILED,
-            "the executable could not be started",
+        // The executable passed the lookup but cannot be exec'd, such as a
+        // script whose interpreter is missing. A run fails to start it too.
+        Ending::FailedToStart { .. } => Some(Problem::run(
+            PROVIDER_NOT_STARTABLE,
+            "the executable was found but could not be started",
         )),
         _ => Some(Problem::new(
             blocks,

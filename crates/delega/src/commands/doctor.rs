@@ -55,6 +55,8 @@ pub fn run(args: Args) -> ExitCode {
 }
 
 fn unable(message: &str) -> ExitCode {
-    super::output::report(&format!("delega doctor: {message}"));
+    super::output::report(&delega_core::doctor::sanitize(&format!(
+        "delega doctor: {message}"
+    )));
     ExitCode::from(EXIT_UNABLE)
 }
