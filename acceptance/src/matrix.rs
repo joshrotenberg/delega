@@ -507,7 +507,7 @@ const GAPS: &[Gap] = &[
         reason: ORPHAN_REASON,
     },
     Gap {
-        cases: &["a", "b", "i"],
+        cases: &["a"],
         variants: &["bare"],
         class: LeakClass::DocumentedGap,
         survivors: &["bare"],

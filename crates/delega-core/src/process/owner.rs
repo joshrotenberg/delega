@@ -27,8 +27,8 @@ use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
 use super::sys::{self, Signal, SignalError};
 use super::tree::{
-    InspectError, InspectionStats, ProcessTree, SharedObservations, SweepView, Warnings,
-    push_warning, system_lister,
+    CaptureOutcome, InspectError, InspectionStats, ProcessTree, SharedObservations, SweepView,
+    Warnings, push_warning, system_lister,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -76,6 +76,10 @@ pub(super) struct Shared {
     signals_closed: AtomicBool,
     capture_requested: AtomicU64,
     capture_completed: AtomicU64,
+    /// The highest request number a successful scan has served.
+    capture_succeeded: AtomicU64,
+    /// A listing that had to precede the first signal did not complete.
+    pre_signal_listing_missed: AtomicBool,
     capture_notify: tokio::sync::Notify,
     stop_wait: Mutex<StopWait>,
     budget_exceeded: AtomicU64,
@@ -173,14 +177,16 @@ impl Shared {
         {
             tokio::time::sleep(PRE_STOP_POLL_INTERVAL).await;
         }
-        let acknowledged = self.capture_completed.load(Ordering::SeqCst) >= requested
+        let acknowledged = self.capture_succeeded.load(Ordering::SeqCst) >= requested
             && lock(&self.stop_wait)
                 .acknowledged_at
                 .is_some_and(|at| at <= deadline);
         if !acknowledged {
             self.budget_exceeded.fetch_add(1, Ordering::SeqCst);
+            self.pre_signal_listing_missed.store(true, Ordering::SeqCst);
             self.warn(format!(
-                "Pre-stop process capture exceeded {} ms; newly detached children may be unobserved",
+                "The process listing before the first signal did not complete within {} ms; \
+                 newly detached children may be unobserved",
                 budget.as_millis()
             ));
         }
@@ -336,6 +342,8 @@ impl OwnedProcess {
             signals_closed: AtomicBool::new(false),
             capture_requested: AtomicU64::new(0),
             capture_completed: AtomicU64::new(0),
+            capture_succeeded: AtomicU64::new(0),
+            pre_signal_listing_missed: AtomicBool::new(false),
             capture_notify: tokio::sync::Notify::new(),
             stop_wait: Default::default(),
             budget_exceeded: AtomicU64::new(0),
@@ -367,7 +375,17 @@ impl OwnedProcess {
         owner.capture_task = Some(tokio::spawn(async move {
             loop {
                 let requested = shared.capture_requested.load(Ordering::SeqCst);
-                shared.tree.lock().await.capture().await;
+                let outcome = shared.tree.lock().await.capture().await;
+                if requested > 0
+                    && matches!(
+                        outcome,
+                        CaptureOutcome::Success | CaptureOutcome::TrackingDisabled
+                    )
+                {
+                    shared
+                        .capture_succeeded
+                        .fetch_max(requested, Ordering::SeqCst);
+                }
                 {
                     let mut wait = lock(&shared.stop_wait);
                     if requested > 0 && wait.requests == requested && wait.acknowledged_at.is_none()
@@ -404,7 +422,11 @@ impl OwnedProcess {
     ) -> Settled {
         let shared = self.shared.clone();
         if hard_stop {
-            shared.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
+            // The deadline is already fixed, so the wait leaves it half.
+            let left = deadline.saturating_duration_since(Instant::now());
+            shared
+                .before_stop(PRE_STOP_CAPTURE_BUDGET.min(left / 2))
+                .await;
         }
         let first_term = term_at.unwrap_or_else(Instant::now);
         if term_at.is_none() && !hard_stop {
@@ -433,7 +455,6 @@ impl OwnedProcess {
             {
                 shared.warn(format!("Process capture task failed: {error}"));
             }
-            shared.tree.lock().await.capture().await;
             let mut failures = 0u32;
             let mut clean_sweeps = 0u32;
             let mut active = false;
@@ -515,14 +536,29 @@ impl OwnedProcess {
         };
         match ended {
             Ended::Clean => {
+                let missed = shared.pre_signal_listing_missed.load(Ordering::SeqCst);
                 // All signal-capable work is above. No task can signal this
                 // group after this single reap.
                 shared.signals_closed.store(true, Ordering::SeqCst);
                 let exit = self.reap().await;
-                Settled {
-                    exit,
-                    cleanup: Cleanup::Confirmed,
-                }
+                // Later sweeps found nothing, but none of them can rule out a
+                // descendant that left the session when its parent was
+                // stopped: that parent was only visible to the listing that
+                // did not complete.
+                let cleanup = if missed {
+                    Cleanup::Unconfirmed {
+                        pids: Vec::new(),
+                        process_groups: Vec::new(),
+                        reason: "the process listing taken before the first signal did not \
+                                 complete, so a descendant that left the session when its \
+                                 parent was stopped could not be ruled out; the group and \
+                                 session sweeps afterwards found nothing"
+                            .to_string(),
+                    }
+                } else {
+                    Cleanup::Confirmed
+                };
+                Settled { exit, cleanup }
             }
             Ended::DeadlinePassed => {
                 let leader_gone = shared.leader_has_exited();

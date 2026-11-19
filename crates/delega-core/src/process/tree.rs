@@ -488,8 +488,6 @@ impl ProcessTree {
         }
     }
 
-    /// Whether a pid may ever be owned: not the child (it seeds the set), not
-    /// init or the kernel, and not the process that runs this code.
     async fn snapshot(&mut self) -> Result<Snapshot, InspectError> {
         let rows = self.rows().await?;
         let sessions = self.read_sessions(&rows);

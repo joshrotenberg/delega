@@ -66,6 +66,20 @@
 //! its session, and no tracked descendant. The sweep runs once for a plain exit
 //! where nothing but the leader was ever seen, and twice in a row when any
 //! descendant was observed or signalled. It does not cover the gaps below.
+//!
+//! It also requires that the listing taken before the first signal completed
+//! (see "How a child is owned"). That listing is the only one that can see a
+//! member alive together with a descendant that left the session, because the
+//! first signal can end the member and orphan the descendant. When it was not
+//! completed (the scan timed out or failed, or did not finish within
+//! `PRE_STOP_CAPTURE_BUDGET`, before a stop or after a natural exit), the
+//! verdict is `Unconfirmed` even if every later sweep found nothing, with a reason that says the listing did not complete. A later
+//! listing does not make up for it, since it is taken after the signals. A
+//! periodic scan that failed earlier does not matter once a later one
+//! succeeded, so it does not change the verdict. The wait is up to
+//! `PRE_STOP_CAPTURE_BUDGET` (two listing timeouts); in the normal case it is
+//! one listing.
+//!
 //! Anything else is `Unconfirmed`, naming the pids and groups and saying why.
 //! Cleanup runs to `cleanup_deadline` only for processes that are seen and do
 //! not die.
@@ -112,7 +126,7 @@
 //! scan or the listing at the exit saw its parent as a member or as a tracked
 //! process.
 //!
-//! What would close the first gap is a process table cannot supply: a kernel
+//! What would close the first gap is something a process table cannot supply: a kernel
 //! facility that reparents orphans to the owner (a child subreaper on Linux,
 //! which would make the host process the reaper of every orphan and is not done
 //! here) or reports each fork as it happens (`kqueue` process events on macOS).
@@ -137,9 +151,12 @@
 //! descendant of the child by construction. What remains is a pid recycled
 //! between the two rows of one listing (the child's `ppid` names the pid of a
 //! process that died and whose number a new member took within the run of one
-//! `ps`), and two processes with one pid and one start time within the
-//! resolution of `ps` (one second on macOS); both need a pid to wrap within that
-//! time.
+//! `ps`), a pid reused between the listing and the per-row `getsid` (a foreign
+//! row would then read as a member and be signalled, after the session member
+//! is read once more just before the signal, which narrows it to the time
+//! between those two calls), and two processes with one pid and one start time
+//! within the resolution of `ps` (one second on macOS). Each needs a pid to wrap
+//! within a few milliseconds to one run of `ps`.
 //!
 //! # What no in-process code can do
 //!

@@ -22,6 +22,8 @@
 #   flood     output at full speed, never finishes
 #   slow      finish normally after 1.5 s
 #
+# Every behaviour but exit3 creates `ready` once its opening output is written.
+#
 # Variants (what it leaves running beside itself):
 #   plain        nothing
 #   child        one child in the provider's group, stdio detached
@@ -41,6 +43,11 @@
 ACC_DIR=$(dirname "$0")
 
 acc_record() { printf '%s %s\n' "$1" "$2" >> "$ACC_DIR/pids"; }
+
+# The stream's opening lines, then a `ready` file: after it the provider has
+# written to its standard output, so a caller that ends the reader (SIGKILL of
+# delega) cannot make that write fail with SIGPIPE.
+acc_init() { init; : > "$ACC_DIR/ready"; }
 
 # Run a command in the background with default handling of INT, QUIT and TERM.
 # A background job of a non-interactive shell inherits SIGINT ignored, which
@@ -97,36 +104,36 @@ acc_run() {
   acc_start_variant "$acc_variant"
   acc_wait_ready "$acc_variant"
   case "$acc_behaviour" in
-    success) init; acc_success ;;
+    success) acc_init; acc_success ;;
     exit3)
       printf 'fake provider crashed\n' >&2
       exit 3
       ;;
     busy)
-      init
+      acc_init
       while :; do acc_chatter; sleep 0.2; done
       ;;
     crash)
-      init
+      acc_init
       sleep 0.5
       kill -9 $$
       ;;
     hang)
-      init
+      acc_init
       while :; do sleep 1; done
       ;;
     closeout)
-      init
+      acc_init
       exec 1>&-
       while :; do sleep 1; done
       ;;
-    nofinal) init ;;
+    nofinal) acc_init ;;
     flood)
-      init
+      acc_init
       while :; do acc_chatter; done
       ;;
     slow)
-      init
+      acc_init
       sleep 1.5
       acc_success
       ;;

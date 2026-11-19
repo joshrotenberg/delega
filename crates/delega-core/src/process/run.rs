@@ -16,8 +16,7 @@ use crate::contract::result::Cleanup;
 
 use super::capture::{Bounded, Captured};
 use super::limits::{
-    EXIT_LISTING_BUDGET, FAR_FUTURE, FINAL_CLEANUP_PASS, PRE_STOP_CAPTURE_BUDGET,
-    STDERR_READ_CHUNK, STDOUT_READ_CHUNK,
+    FAR_FUTURE, FINAL_CLEANUP_PASS, PRE_STOP_CAPTURE_BUDGET, STDERR_READ_CHUNK, STDOUT_READ_CHUNK,
 };
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
@@ -201,6 +200,10 @@ async fn drive(
     let mut term_at: Option<Instant> = None;
     let mut drain_deadline: Option<Instant> = None;
     let mut watch_failed = false;
+    // The listing that must precede the first signal after a natural exit. It
+    // runs beside the reads so a wait for it never stalls the output.
+    let mut exit_listing: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        None;
 
     loop {
         if exited && stdout.is_none() && stderr.is_none() {
@@ -249,10 +252,17 @@ async fn drive(
                 // descendant in a session of its own, and that descendant is
                 // then orphaned and cannot be told from any other process.
                 if term_at.is_none() {
-                    shared.before_stop(EXIT_LISTING_BUDGET).await;
-                    term_at = Some(Instant::now());
-                    shared.terminate().await;
+                    let listing = shared.clone();
+                    exit_listing = Some(Box::pin(async move {
+                        listing.before_stop(PRE_STOP_CAPTURE_BUDGET).await;
+                    }));
                 }
+            },
+            _ = async { exit_listing.as_mut().expect("guarded").await },
+                if exit_listing.is_some() => {
+                exit_listing = None;
+                term_at = Some(Instant::now());
+                shared.terminate().await;
             },
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
                 if stdout.is_some() => match n {
@@ -284,6 +294,12 @@ async fn drive(
                 break;
             },
         }
+    }
+    if let Some(listing) = exit_listing.take() {
+        // The pipes closed before the listing finished; the signals still wait.
+        listing.await;
+        term_at = Some(Instant::now());
+        shared.terminate().await;
     }
     if !exited {
         owner.exit_rx = Some(exit_rx);

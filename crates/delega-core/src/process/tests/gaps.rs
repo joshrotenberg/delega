@@ -196,7 +196,7 @@ fn foreign(kind: &str) -> i32 {
 #[tokio::test]
 async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
     require_perl!();
-    // Four processes that belong to the test: a plain background process, one
+    // Five processes that belong to the test: a plain background process, one
     // in a session of its own, and an orphan of each kind (reparented to pid 1,
     // with and without its own session). The run beside them adopts a setsid
     // descendant of its own, so the adoption rule is exercised while they are
@@ -209,7 +209,22 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
     let orphan_own_session = foreign(&format!(
         "({OWN_SESSION} </dev/null >/dev/null 2>&1 & echo $!)"
     ));
-    let foreigners = vec![alive, own_session, orphan, orphan_own_session];
+    // And a process whose parent is the test process itself.
+    let mut own_child = std::process::Command::new("sleep")
+        .arg("60")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start a child of the test");
+    let child_of_test = i32::try_from(own_child.id()).expect("a pid");
+    let foreigners = vec![
+        alive,
+        own_session,
+        orphan,
+        orphan_own_session,
+        child_of_test,
+    ];
     let _foreign_reaper = Reaper(foreigners.clone());
     for pid in &foreigners {
         assert!(is_running(*pid), "foreign process {pid} did not start");
@@ -232,6 +247,8 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
     for pid in &foreigners {
         assert!(!tracked.contains(&(*pid as u32)), "{tracked:?}");
     }
+    let _ = own_child.kill();
+    let _ = own_child.wait();
 }
 
 /// A relay: each process ignores TERM, leads a group of its own, lives a few
@@ -282,4 +299,98 @@ async fn a_fork_relay_is_not_reported_as_cleaned_up_while_it_runs() {
         !(alive && report.cleanup == Cleanup::Confirmed),
         "a relay process was alive but cleanup says Confirmed"
     );
+}
+
+/// A lister that fails once, on its second call: with no periodic scan after the
+/// first, that is the listing taken when the leader exits.
+fn failing_exit_listing(marker: std::path::PathBuf) -> Lister {
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    Arc::new(move || {
+        let marker = marker.clone();
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Box::pin(async move {
+            if call == 2 {
+                return Err(crate::process::tree::InspectError::Failed(
+                    "injected failure at exit".into(),
+                ));
+            }
+            let rows = list_processes().await;
+            let _ = std::fs::write(&marker, "scanned");
+            rows
+        })
+    })
+}
+
+#[tokio::test]
+async fn a_missed_listing_at_exit_is_unconfirmed_whatever_later_sweeps_find() {
+    require_perl!();
+    let s = Scratch::new();
+    let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
+    spec = spec.with_lister(failing_exit_listing(s.path("scanned")));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    // The listing that could have seen the descendant with its parent never
+    // completed, so the descendant is orphaned and cannot be followed.
+    assert_no_false_confirmation(pids[0], &report.cleanup);
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => assert!(
+            reason.contains("before the first signal did not complete"),
+            "{reason}"
+        ),
+        other => panic!("a missed exit listing must not confirm cleanup: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
+    require_perl!();
+    let s = Scratch::new();
+    let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
+    // Every listing after the first takes 400 ms, beyond the old 150 ms and 300 ms budgets.
+    let marker = s.path("scanned");
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    spec = spec.with_lister(Arc::new(move || {
+        let marker = marker.clone();
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            if call > 0 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            let rows = list_processes().await;
+            let _ = std::fs::write(&marker, "scanned");
+            rows
+        })
+    }));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_no_false_confirmation(pids[0], &report.cleanup);
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("descendant", &pids).await;
+}
+
+/// Many runs at once, so listings are slow. A run may take long, but none may
+/// end `Confirmed` with its descendant alive. The runs are tasks of one
+/// single-thread runtime; their listings are separate `ps` processes.
+#[tokio::test]
+async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
+    require_perl!();
+    let mut tasks = Vec::new();
+    for _ in 0..50 {
+        tasks.push(tokio::spawn(async {
+            let s = Scratch::new();
+            let spec = leader_with_a_live_middle_process(&s, "exit 0");
+            let (report, pids, reaper) = run_guarded(&s, spec, &["gc"]).await;
+            // A descendant still alive after the report is checked once the
+            // process has had a moment to receive its signal.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let alive = is_running(pids[0]);
+            drop(reaper);
+            (report.cleanup, alive)
+        }));
+    }
+    for task in tasks {
+        let (cleanup, alive) = task.await.expect("the run finished");
+        assert!(
+            !(alive && cleanup == Cleanup::Confirmed),
+            "a descendant was alive but cleanup says Confirmed"
+        );
+    }
 }

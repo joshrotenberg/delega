@@ -249,10 +249,15 @@ fn signal_of(sig: Sig) -> Signal {
 }
 
 /// Whether the fake has recorded every role the variant starts.
-fn ready(dir: &Path, variant: &str) -> bool {
+/// Every behaviour but `exit3` also creates the file `ready` once its opening output is
+/// written, so a SIGKILL of `delega` cannot arrive before the provider's first
+/// write and end it with SIGPIPE.
+fn ready(dir: &Path, case: &Case) -> bool {
     let roles = procs::ledger(dir);
     let have = |r: &str| roles.iter().any(|(role, _)| role == r);
-    have("provider") && roles_of(variant).iter().all(|r| have(r))
+    have("provider")
+        && (case.case.behaviour == "exit3" || dir.join("ready").exists())
+        && roles_of(case.variant).iter().all(|r| have(r))
 }
 
 fn heartbeat_fresh(dir: &Path) -> bool {
@@ -358,7 +363,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         if acted_at.is_none()
             && let Some(at) = action.at_ms()
             && elapsed >= Duration::from_millis(at)
-            && (ready(&fixture.dir, case.variant) || elapsed >= Duration::from_secs(5))
+            && (ready(&fixture.dir, case) || elapsed >= Duration::from_secs(5))
         {
             match action {
                 Action::Signal(sig, _) => procs::signal(delega_pid, signal_of(sig)),
