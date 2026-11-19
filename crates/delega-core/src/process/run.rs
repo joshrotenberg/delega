@@ -88,7 +88,7 @@ pub(super) async fn run_owned(
         TapWorker::start(
             tap,
             spec.stdout_tap_dropped.clone(),
-            spec.tap_queue_chunks(),
+            spec.timings.tap_queue_chunks,
         )
     });
     let driven = AssertUnwindSafe(drive(
@@ -117,14 +117,15 @@ pub(super) async fn run_owned(
     let deadline = driven
         .term_at
         .map_or_else(Instant::now, |t| t + cleanup_deadline);
-    let deadline = deadline.max(Instant::now() + spec.final_cleanup_pass().min(cleanup_deadline));
+    let deadline =
+        deadline.max(Instant::now() + spec.timings.final_cleanup_pass.min(cleanup_deadline));
     let settled = owner
         .cleanup(
             spec.stop_grace,
             deadline,
             driven.hard_stop,
             driven.term_at,
-            spec.stop_listing_budget(),
+            spec.timings.stop_listing,
         )
         .await;
     if let Some(tap) = tap {
@@ -220,7 +221,7 @@ async fn drive(
             _ = stop.stop.cancelled(), if !stop_seen => {
                 stop_seen = true;
                 if !exited && term_at.is_none() && !shared.leader_has_exited() {
-                    let listed = shared.before_stop(spec.stop_listing_budget(), &stop.hurry).await;
+                    let listed = shared.before_stop(spec.timings.stop_listing, &stop.hurry).await;
                     // The child may have exited while the scan ran. Then it
                     // ended on its own and is reported as it exited.
                     if !shared.leader_has_exited() {
@@ -236,7 +237,7 @@ async fn drive(
             _ = tokio::time::sleep_until(limit_at), if !limit_seen && !exited => {
                 limit_seen = true;
                 if term_at.is_none() && !shared.leader_has_exited() {
-                    let listed = shared.before_stop(spec.stop_listing_budget(), &stop.hurry).await;
+                    let listed = shared.before_stop(spec.timings.stop_listing, &stop.hurry).await;
                     if !shared.leader_has_exited() {
                         if !listed {
                             shared.note_listing_missed();
@@ -267,7 +268,7 @@ async fn drive(
                 if term_at.is_none() {
                     let listing = shared.clone();
                     let hurry = stop.hurry.clone();
-                    let budget = spec.exit_listing_budget();
+                    let budget = spec.timings.exit_listing;
                     exit_listing = Some(Box::pin(async move {
                         if !listing.before_stop(budget, &hurry).await {
                             listing.note_listing_missed();

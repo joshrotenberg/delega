@@ -169,7 +169,7 @@ async fn a_slow_sink_loses_output_and_the_run_says_so(provider: Provider) {
         // A fake that is slow because the machine is busy is waited for; one
         // that never finishes is not waited for forever, so the run can end and
         // the test fail with what it saw instead of hanging.
-        let give_up = Duration::from_secs(600);
+        let give_up = Duration::from_secs(120);
         let began = Instant::now();
         let pid = loop {
             if let Ok(text) = std::fs::read_to_string(record.join("pid"))

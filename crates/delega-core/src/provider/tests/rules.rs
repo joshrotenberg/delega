@@ -393,12 +393,25 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
     );
 }
 
+/// CPU time used so far by the calling thread. Unlike a clock on the wall, it
+/// does not grow while the thread waits for a core, so a busy machine does not
+/// stretch one measurement against another.
+#[cfg(unix)]
+fn thread_cpu_time() -> std::time::Duration {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+    std::time::Duration::new(
+        u64::try_from(t.tv_sec).unwrap_or(0),
+        u32::try_from(t.tv_nsec).unwrap_or(0),
+    )
+}
+
 /// Proves the scan is linear without a wall-clock bound: the same input at
 /// eight times the size must cost far less than eight times eight (quadratic
-/// growth). Both sizes are measured in this test, so machine load scales both;
-/// the best of several runs per size drops a stall that hit only one run.
-/// Linear growth gives a ratio near 8 and quadratic growth near 64; the limit
-/// of 24 sits between them with margin for cache effects.
+/// growth), measured in CPU time of the thread that runs the scan, so waiting
+/// for a core under load is not counted. The best of three runs per size drops
+/// a disturbance that hit only one run. Linear growth gives a ratio near 8 and
+/// quadratic growth near 64; the limit of 24 sits between them.
+#[cfg(unix)]
 #[test]
 fn private_key_removal_is_linear_in_the_input() {
     let redactor = Redactor::default();
@@ -407,9 +420,9 @@ fn private_key_removal_is_linear_in_the_input() {
         let noise = "-----BEGIN CERTIFICATE".repeat(repeats);
         let mut best = std::time::Duration::MAX;
         for _ in 0..3 {
-            let started = std::time::Instant::now();
+            let started = thread_cpu_time();
             let out = redactor.apply(&noise);
-            best = best.min(started.elapsed());
+            best = best.min(thread_cpu_time().saturating_sub(started));
             assert_eq!(out.len(), noise.len());
         }
         best
@@ -419,7 +432,7 @@ fn private_key_removal_is_linear_in_the_input() {
     let ratio = large.as_secs_f64() / small.as_secs_f64();
     assert!(
         ratio < 24.0,
-        "8x the input took {ratio:.1}x as long ({small:?} vs {large:?}); linear is about 8, quadratic about 64"
+        "8x the input took {ratio:.1}x the CPU time ({small:?} vs {large:?}); linear is about 8, quadratic about 64"
     );
     let keys = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".repeat(50_000);
     let out = redactor.apply(&keys);

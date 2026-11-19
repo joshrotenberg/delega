@@ -342,57 +342,116 @@ async fn a_missed_listing_at_exit_is_unconfirmed_whatever_later_sweeps_find() {
     }
 }
 
-#[tokio::test]
-async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
-    require_perl!();
-    let s = Scratch::new();
-    let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
-    // Every listing after the first takes 400 ms, beyond the old 150 ms and 300 ms budgets.
-    let marker = s.path("scanned");
+/// A lister that reads the real table after `delay` on every call but the
+/// first, drops the marker file, and records the longest a call took (the delay
+/// and the real `ps` together, in milliseconds).
+fn delayed_lister(
+    marker: std::path::PathBuf,
+    delay: Duration,
+    slowest_ms: Arc<std::sync::atomic::AtomicU64>,
+) -> Lister {
     let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    spec = spec.with_lister(Arc::new(move || {
+    Arc::new(move || {
         let marker = marker.clone();
+        let slowest_ms = slowest_ms.clone();
         let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
+            let began = std::time::Instant::now();
             if call > 0 {
-                tokio::time::sleep(Duration::from_millis(400)).await;
+                tokio::time::sleep(delay).await;
             }
             let rows = list_processes().await;
             let _ = std::fs::write(&marker, "scanned");
+            let took = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+            slowest_ms.fetch_max(took, std::sync::atomic::Ordering::SeqCst);
             rows
         })
-    }));
-    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
-    assert_no_false_confirmation(pids[0], &report.cleanup);
-    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
-    assert_gone("descendant", &pids).await;
+    })
+}
+
+#[tokio::test]
+async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
+    require_perl!();
+    // The exit budget is the real one (3.1 s). Every listing after the first
+    // takes a fixed 400 ms and then the real `ps`, well inside the budget, so the
+    // exit listing must be waited for and the descendant that left the session
+    // followed. With the budget the old tests used (150 ms) this run is
+    // `Unconfirmed`. The only thing load can change is the real `ps`: when the
+    // longest listing was itself near the budget the premise is gone and the run
+    // is repeated; a listing under 2 s with any other verdict fails.
+    for attempt in 1..=5 {
+        let s = Scratch::new();
+        let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
+        spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
+        let slowest = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        spec = spec.with_lister(delayed_lister(
+            s.path("scanned"),
+            Duration::from_millis(400),
+            slowest.clone(),
+        ));
+        let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+        assert_no_false_confirmation(pids[0], &report.cleanup);
+        let slowest = slowest.load(std::sync::atomic::Ordering::SeqCst);
+        if report.cleanup == Cleanup::Confirmed {
+            assert_gone("descendant", &pids).await;
+            return;
+        }
+        assert!(
+            slowest > 2000,
+            "every listing took at most {slowest} ms, inside the exit budget, yet {report:#?}"
+        );
+        eprintln!("attempt {attempt}: a listing took {slowest} ms under load; repeating");
+    }
+    panic!(
+        "five runs in a row had a listing of more than 2 s; the machine is too loaded to test this"
+    );
 }
 
 /// Many runs at once, so listings are slow. A run may take long, but none may
 /// end `Confirmed` with its descendant alive. The runs are tasks of one
-/// single-thread runtime; their listings are separate `ps` processes.
+/// single-thread runtime; their listings are separate `ps` processes. They use
+/// the real exit budget. Every fifth run has its listings after the first held
+/// for 4 s, more than that budget, so the late-listing branch is reached every
+/// time whatever the load: those must end `Unconfirmed` for the late listing
+/// while their descendant is alive. The others may meet the late listing only
+/// when the machine makes them.
 #[tokio::test]
 async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
     require_perl!();
     let mut tasks = Vec::new();
-    for _ in 0..50 {
-        tasks.push(tokio::spawn(async {
+    for n in 0..50 {
+        let delayed = n % 5 == 0;
+        tasks.push(tokio::spawn(async move {
             let s = Scratch::new();
-            let spec = leader_with_a_live_middle_process(&s, "exit 0");
+            let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
+            spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
+            if delayed {
+                spec = spec.with_lister(delayed_lister(
+                    s.path("scanned"),
+                    Duration::from_secs(4),
+                    Arc::default(),
+                ));
+            }
             let (report, pids, reaper) = run_guarded(&s, spec, &["gc"]).await;
             // A descendant still alive after the report is checked once the
             // process has had a moment to receive its signal.
             tokio::time::sleep(Duration::from_millis(300)).await;
             let alive = is_running(pids[0]);
             drop(reaper);
-            (report.cleanup, alive)
+            (report.cleanup, alive, delayed)
         }));
     }
     for task in tasks {
-        let (cleanup, alive) = task.await.expect("the run finished");
+        let (cleanup, alive, delayed) = task.await.expect("the run finished");
         assert!(
             !(alive && cleanup == Cleanup::Confirmed),
             "a descendant was alive but cleanup says Confirmed"
         );
+        if delayed {
+            assert!(
+                crate::process::is_late_listing_only(&cleanup),
+                "a run whose exit listing took 4 s must report the late listing: {cleanup:?}"
+            );
+        }
     }
 }

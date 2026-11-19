@@ -211,11 +211,16 @@ async fn a_leader_that_keeps_forking_own_group_children_leaves_none_behind() {
 async fn a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_behind() {
     require_perl!();
     let s = Scratch::new();
+    // The handler starts the child and then ends the leader, so no KILL is
+    // involved: the grace is a minute and the leader is gone as soon as the
+    // handler has run, however slow the machine is.
     let script = format!(
         "trap \"{OWN_GROUP} & echo \\$! > gc; exit 0\" TERM; echo $$ > leader; \
          while :; do sleep 0.05; done"
     );
-    let handle = ProcessHandle::start(sh(&s, &script, LONG));
+    let mut spec = sh(&s, &script, LONG);
+    spec.stop_grace = Duration::from_secs(60);
+    let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
     let _reaper = Reaper(vec![leader]);
     handle.interrupt();
@@ -225,6 +230,41 @@ async fn a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_be
     let _reaper_gc = Reaper(vec![gc]);
     assert_confirmed(&report);
     assert_gone("child started by the handler", &[leader, gc]).await;
+}
+
+#[tokio::test]
+async fn a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind()
+ {
+    require_perl!();
+    let s = Scratch::new();
+    // The scenario of the test above with a leader that keeps running after its
+    // handler, so the handler runs again for every TERM the stop sends and each
+    // run starts another child in a group of its own. The leader ends when the
+    // test says so, once the first child exists (a file the test writes), not
+    // after a grace that load could make too short: the grace is a minute.
+    let script = format!(
+        "trap \"{OWN_GROUP} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
+         while [ ! -e quit ]; do sleep 0.05; done"
+    );
+    let mut spec = sh(&s, &script, LONG);
+    spec.stop_grace = Duration::from_secs(60);
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let _reaper = Reaper(vec![leader]);
+    handle.interrupt();
+    s.exists("gcs").await;
+    std::fs::write(s.path("quit"), "quit").expect("write the quit file");
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    let children: Vec<i32> = std::fs::read_to_string(s.path("gcs"))
+        .expect("the children file")
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    assert!(!children.is_empty());
+    let _reaper_children = Reaper(children.clone());
+    assert_confirmed(&report);
+    assert_gone("children started by the handler", &children).await;
 }
 
 #[tokio::test]
@@ -471,6 +511,9 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     // The sweep that follows each signal waits for the hung listing only this
     // long (the production value), so the owner is not held for minutes.
     spec.timings.descendant_signal = crate::process::limits::DESCENDANT_SIGNAL_BUDGET;
+    // The final pass is the real one: one second is enough for the repeated KILL
+    // to reach the child, which is what this test is about.
+    spec.timings.final_cleanup_pass = crate::process::limits::FINAL_CLEANUP_PASS;
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
     let gc = s.pid("gc").await;

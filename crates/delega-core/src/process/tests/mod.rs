@@ -17,6 +17,7 @@ macro_rules! require_perl {
     };
 }
 
+mod budgets;
 mod cleanup;
 mod endings;
 mod fixtures;
