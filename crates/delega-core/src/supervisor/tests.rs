@@ -355,3 +355,245 @@ async fn a_panic_in_the_supervisors_own_task_stops_every_child_and_shutdown_says
     let why = report.failed.expect("not a clean report");
     assert!(why.contains("nothing confirmed"), "{why}");
 }
+
+#[tokio::test]
+async fn a_result_that_fails_validation_is_replaced_in_every_build_and_the_supervisor_goes_on() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    // The supervisor's task runs on this thread, so the flag reaches the next
+    // result it seals: the refusal of the request below.
+    super::results::corrupt_next_seal_for_test();
+    let mut invalid = dir.request("hello");
+    invalid.instructions = Some("SECRET-TEXT\0".to_string());
+    let refused = supervisor.start(invalid).await.expect("start");
+
+    assert_eq!(refused.outcome, Some(Outcome::Failed), "{refused:#?}");
+    let result = finished_result(&supervisor, &refused.run).await;
+    assert_eq!(result.outcome, Outcome::Failed);
+    let error = result.error.as_ref().expect("error");
+    assert_eq!(error.kind, "internal_error");
+    assert!(
+        error.message.contains("inconsistent result"),
+        "{}",
+        error.message
+    );
+    let note = result
+        .provider_notes
+        .iter()
+        .find(|n| n.contains("failed validation"))
+        .unwrap_or_else(|| panic!("no note names the fault: {:?}", result.provider_notes));
+    assert!(
+        note.contains("error: is required when the outcome is not completed"),
+        "{note}"
+    );
+    let shown = format!("{result:?}");
+    assert!(!shown.contains("SECRET-TEXT"), "user text in {shown}");
+
+    // The supervisor still answers, and still admits and finishes work.
+    assert!(supervisor.list().await.is_ok());
+    let after = supervisor
+        .start(dir.request("echo:after"))
+        .await
+        .expect("start");
+    assert_eq!(
+        finished_result(&supervisor, &after.run).await.outcome,
+        Outcome::Completed
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// Lets go of every check a test holds open, even when the test fails first.
+struct Release(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn outstanding_request_checks_are_capped_and_a_start_beyond_the_cap_waits_then_times_out() {
+    use super::limits::MAX_PENDING_PREFLIGHTS;
+    use super::preflight::Preflight;
+    use std::sync::atomic::AtomicBool;
+
+    let dir = Dir::new();
+    let released = Arc::new(AtomicBool::new(false));
+    let _release = Release(released.clone());
+    let entered = Arc::new(AtomicUsize::new(0));
+    let check = {
+        let (released, entered) = (released.clone(), entered.clone());
+        Arc::new(move |request: &Request, _: &ProviderOptions| {
+            if request.prompt.starts_with("hold") {
+                entered.fetch_add(1, Ordering::SeqCst);
+                while !released.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            None
+        })
+    };
+    // A short bound makes each held start give up, as it does on a filesystem
+    // that does not answer, while its thread stays and keeps counting.
+    let preflight = Preflight::with(check, Duration::from_millis(100));
+    let supervisor =
+        Supervisor::with_hooks(dir.config(), super::runner::provider_launch(), preflight);
+
+    for n in 0..MAX_PENDING_PREFLIGHTS {
+        let timed_out = supervisor
+            .start(dir.request(&format!("hold {n}")))
+            .await
+            .expect("start");
+        assert_eq!(timed_out.outcome, Some(Outcome::Refused), "{timed_out:#?}");
+        let error = timed_out.error.as_ref().expect("error");
+        assert_eq!(error.kind, "preflight_timeout", "{error:?}");
+    }
+    for _ in 0..3000 {
+        if entered.load(Ordering::SeqCst) == MAX_PENDING_PREFLIGHTS {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(entered.load(Ordering::SeqCst), MAX_PENDING_PREFLIGHTS);
+
+    // Every check is outstanding: the next start waits for a slot, gets none
+    // within the bound, and is refused as a check that did not answer.
+    let over = supervisor
+        .start(dir.request("echo:over"))
+        .await
+        .expect("start");
+    assert_eq!(over.outcome, Some(Outcome::Refused), "{over:#?}");
+    assert_eq!(over.worker, None);
+    let error = over.error.as_ref().expect("error");
+    assert_eq!(error.kind, "preflight_timeout", "{error:?}");
+    assert!(
+        error.message.contains("request checks are not completing"),
+        "{error:?}"
+    );
+    let list = supervisor.list().await.expect("list");
+    assert!(list.workers.is_empty(), "a refused start made a worker");
+
+    // Once the held checks end, a later start is admitted. Until their threads
+    // have ended a start may still wait for a slot, or time out on a loaded
+    // machine, and is repeated.
+    released.store(true, Ordering::SeqCst);
+    let mut admitted = None;
+    for _ in 0..3000 {
+        let later = supervisor
+            .start(dir.request("echo:later"))
+            .await
+            .expect("start");
+        match later.error.as_ref().map(|e| e.kind.as_str()) {
+            None => {
+                admitted = Some(later);
+                break;
+            }
+            Some("preflight_timeout") => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Some(other) => panic!("unexpected refusal {other}: {later:#?}"),
+        }
+    }
+    let admitted = admitted.expect("a start is admitted once the checks have ended");
+    assert_eq!(
+        finished_result(&supervisor, &admitted.run).await.outcome,
+        Outcome::Completed
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// A supervisor whose checks block on `hold` prompts until released, with a bound
+/// of an hour so only the test decides when a waiting start ends.
+fn holding_supervisor(
+    dir: &Dir,
+    released: &Arc<std::sync::atomic::AtomicBool>,
+    bound: Duration,
+) -> Supervisor {
+    use super::preflight::Preflight;
+    let released = released.clone();
+    let check = Arc::new(move |request: &Request, _: &ProviderOptions| {
+        if request.prompt.starts_with("hold") {
+            while !released.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        None
+    });
+    let mut config = dir.config();
+    config.limits.max_live_workers = 64;
+    Supervisor::with_hooks(
+        config,
+        super::runner::provider_launch(),
+        Preflight::with(check, bound),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starts_waiting_for_a_check_slot_are_released_at_shutdown_with_shut_down() {
+    use super::limits::MAX_PENDING_PREFLIGHTS;
+    use std::sync::atomic::AtomicBool;
+
+    let dir = Dir::new();
+    let released = Arc::new(AtomicBool::new(false));
+    let _release = Release(released.clone());
+    let supervisor = holding_supervisor(&dir, &released, Duration::from_secs(3600));
+    // One start per slot, held in its check, and four more waiting for a slot.
+    let mut starts = tokio::task::JoinSet::new();
+    for n in 0..MAX_PENDING_PREFLIGHTS + 4 {
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold {n}")));
+        starts.spawn(async move { supervisor.start(request).await });
+    }
+    // Starts have no observable state until they are answered, so give the
+    // tasks time to reach their waits; shutdown must release them whichever
+    // wait each is in.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    supervisor.shutdown().await;
+    let mut answered = 0;
+    while let Some(joined) = starts.join_next().await {
+        let outcome = joined.expect("the start task did not panic");
+        assert!(matches!(outcome, Err(Error::ShutDown)), "{outcome:?}");
+        answered += 1;
+    }
+    assert_eq!(answered, MAX_PENDING_PREFLIGHTS + 4);
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
+    use super::limits::MAX_PENDING_PREFLIGHTS;
+    use std::sync::atomic::AtomicBool;
+
+    let dir = Dir::new();
+    let released = Arc::new(AtomicBool::new(false));
+    let _release = Release(released.clone());
+    let supervisor = holding_supervisor(&dir, &released, Duration::from_secs(3600));
+    let mut holders = tokio::task::JoinSet::new();
+    for n in 0..MAX_PENDING_PREFLIGHTS {
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold {n}")));
+        holders.spawn(async move { supervisor.start(request).await });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut waiters = tokio::task::JoinSet::new();
+    for n in 0..4 {
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold w{n}")));
+        waiters.spawn(async move { supervisor.start(request).await });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    waiters.abort_all();
+    while waiters.join_next().await.is_some() {}
+
+    released.store(true, Ordering::SeqCst);
+    while let Some(joined) = holders.join_next().await {
+        let started = joined.expect("task").expect("start");
+        assert_eq!(started.error, None, "{started:#?}");
+    }
+    let later = supervisor
+        .start(dir.request("echo:later"))
+        .await
+        .expect("start");
+    assert_eq!(later.error, None, "{later:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}

@@ -608,3 +608,245 @@ async fn read_pages_a_long_answer_by_character_offset_with_the_total() {
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
+
+/// The answer of the fake's `large-utf8` mode: `é` (two bytes), `€` (three) and
+/// `😀` (four), 8192 times over, 24576 characters.
+fn utf8_answer() -> String {
+    "é€😀".repeat(8192)
+}
+
+#[tokio::test]
+async fn read_pages_multibyte_text_by_character_and_the_pages_add_up_exactly() {
+    use delega_core::supervisor::limits::COMPACT_RESULT_TEXT_CHARS;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "large-utf8"))
+        .await
+        .expect("start");
+    let full = result_of(&supervisor, &started.run).await;
+    let expected = utf8_answer();
+    assert_eq!(full.text, expected);
+    let total = expected.chars().count();
+    assert_eq!(total, 24576);
+    assert!(
+        expected.len() > total * 2,
+        "the answer has characters wider than two bytes"
+    );
+    let target = || Target::Run(started.run.clone());
+
+    // Every window starts at a character, whichever width the character before
+    // it has: 20000 is a multiple of three, so the first page ends after a
+    // `€` and the second begins with a `😀`; the neighbours begin at an `é` and
+    // at a `€`.
+    for offset in [0, 1, 2, 3, 19_999, 20_000, 20_001, 24_575, total] {
+        let want: String = expected
+            .chars()
+            .skip(offset)
+            .take(COMPACT_RESULT_TEXT_CHARS)
+            .collect();
+        for detail in [Detail::Compact, Detail::Full] {
+            let read = supervisor
+                .read(target(), detail, None, Some(offset))
+                .await
+                .expect("read");
+            let window = read.text_window.clone().expect("window");
+            let text = match &read.result {
+                Some(ResultView::Compact(result)) => result.text.clone(),
+                Some(ResultView::Full(result)) => result.text.clone(),
+                None => panic!("{read:#?}"),
+            };
+            assert_eq!(text, want, "offset {offset}");
+            assert_eq!(window.offset, offset);
+            assert_eq!(window.total, total);
+            assert_eq!(window.length, want.chars().count());
+            assert_eq!(window.more, offset + window.length < total);
+        }
+    }
+
+    // Following the offsets each window names reassembles the answer exactly.
+    let mut assembled = String::new();
+    let mut offset = 0;
+    let mut windows = 0;
+    loop {
+        let read = supervisor
+            .read(target(), Detail::Compact, None, Some(offset))
+            .await
+            .expect("read");
+        let window = read.text_window.clone().expect("window");
+        let Some(ResultView::Compact(result)) = &read.result else {
+            panic!("{read:#?}");
+        };
+        assembled.push_str(&result.text);
+        windows += 1;
+        if !window.more {
+            break;
+        }
+        offset = window.offset + window.length;
+    }
+    assert_eq!(windows, 2);
+    assert_eq!(assembled, expected);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn paging_by_worker_follows_the_latest_run_so_a_follow_up_changes_the_run_between_pages() {
+    use delega_core::supervisor::limits::COMPACT_RESULT_TEXT_CHARS;
+    use delega_core::supervisor::{Detail, ResultView};
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "large-utf8"))
+        .await
+        .expect("start");
+    let worker = started.worker.clone().expect("worker");
+    result_of(&supervisor, &started.run).await;
+    let expected = utf8_answer();
+    let total = expected.chars().count();
+
+    // The first page, read by worker, comes from the first run.
+    let page = supervisor
+        .read(
+            Target::Worker(worker.clone()),
+            Detail::Compact,
+            None,
+            Some(0),
+        )
+        .await
+        .expect("read");
+    assert_eq!(page.run.as_deref(), Some(started.run.as_str()));
+    let window = page.text_window.clone().expect("window");
+    assert!(window.more);
+    assert_eq!(window.length, COMPACT_RESULT_TEXT_CHARS);
+    let next = window.offset + window.length;
+
+    // A follow-up finishes before the second page is asked for.
+    let follow = supervisor
+        .follow_up(&worker, "echo:second", None)
+        .await
+        .expect("follow_up");
+    let second = result_of(&supervisor, &follow.run).await;
+    assert_ne!(follow.run, started.run);
+
+    // By worker, the second page is the new run's: an empty window that reads
+    // as done, but the response names the other run and its own total.
+    let by_worker = supervisor
+        .read(Target::Worker(worker), Detail::Compact, None, Some(next))
+        .await
+        .expect("read");
+    assert_eq!(by_worker.run.as_deref(), Some(follow.run.as_str()));
+    assert_ne!(by_worker.run.as_deref(), Some(started.run.as_str()));
+    let window = by_worker.text_window.clone().expect("window");
+    assert_eq!(window.total, second.text.chars().count());
+    assert_ne!(window.total, total);
+    assert_eq!((window.length, window.more), (0, false));
+
+    // By run id, the second page is still the rest of the first answer.
+    let by_run = supervisor
+        .read(
+            Target::Run(started.run.clone()),
+            Detail::Compact,
+            None,
+            Some(next),
+        )
+        .await
+        .expect("read");
+    assert_eq!(by_run.run.as_deref(), Some(started.run.as_str()));
+    let window = by_run.text_window.clone().expect("window");
+    assert_eq!((window.total, window.more), (total, false));
+    let Some(ResultView::Compact(rest)) = &by_run.result else {
+        panic!("{by_run:#?}");
+    };
+    let want: String = expected.chars().skip(next).collect();
+    assert_eq!(rest.text, want);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+/// Start `count` requests at once from separate tasks and return the responses.
+async fn start_together(
+    supervisor: &Supervisor,
+    requests: Vec<delega_core::contract::request::Request>,
+) -> Vec<delega_core::supervisor::StartResponse> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for request in requests {
+        let supervisor = supervisor.clone();
+        tasks.spawn(async move { supervisor.start(request).await.expect("start") });
+    }
+    let mut responses = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        responses.push(joined.expect("the start task did not panic"));
+    }
+    responses
+}
+
+fn refusal_kind(response: &delega_core::supervisor::StartResponse) -> Option<&str> {
+    response.error.as_ref().map(|e| e.kind.as_str())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forty_concurrent_starts_are_all_admitted_when_the_filesystem_answers() {
+    let rig = Rig::new();
+    let limits = Limits {
+        max_live_workers: 64,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let requests = (0..40)
+        .map(|n| rig.request(Provider::Claude, &format!("echo:{n}")))
+        .collect();
+    let responses = start_together(&supervisor, requests).await;
+    assert_eq!(responses.len(), 40);
+    for response in &responses {
+        assert_eq!(refusal_kind(response), None, "{response:#?}");
+        assert!(response.worker.is_some(), "{response:#?}");
+    }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thirty_concurrent_starts_on_a_missing_directory_are_all_refused_for_the_directory() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let requests = (0..30)
+        .map(|n| {
+            let mut request = rig.request(Provider::Claude, &format!("echo:{n}"));
+            request.cwd = Some(rig.root().join("no-such-directory"));
+            request
+        })
+        .collect();
+    let responses = start_together(&supervisor, requests).await;
+    assert_eq!(responses.len(), 30);
+    for response in &responses {
+        assert_eq!(
+            refusal_kind(response),
+            Some("cwd_unusable"),
+            "{response:#?}"
+        );
+    }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn twenty_concurrent_starts_with_default_limits_refuse_four_for_the_live_worker_limit() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let requests = (0..20)
+        .map(|n| rig.request(Provider::Claude, &format!("echo:{n}")))
+        .collect();
+    let responses = start_together(&supervisor, requests).await;
+    let refused: Vec<_> = responses.iter().filter(|r| r.error.is_some()).collect();
+    assert_eq!(responses.len() - refused.len(), 16, "{responses:#?}");
+    assert_eq!(refused.len(), 4, "{refused:#?}");
+    for response in refused {
+        assert_eq!(refusal_kind(response), Some("limit_reached"));
+        let message = &response.error.as_ref().expect("error").message;
+        assert!(message.contains("live workers"), "{message}");
+    }
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}

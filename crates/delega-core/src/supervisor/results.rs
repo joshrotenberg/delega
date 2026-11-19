@@ -71,10 +71,13 @@ fn context(run: &Run, worker: Option<WorkerRef>, cleanup: Cleanup) -> RunContext
 }
 
 /// Check a result the supervisor built itself. One that fails
-/// `RunResult::validate` is a bug here: it fails a debug build loudly, and in a
-/// release build it is replaced by a `failed` result that says so, so a run
-/// still ends in exactly one valid result.
+/// `RunResult::validate` is a bug here. It is replaced, in every build, by a
+/// `failed` result whose error and a provider note name the validation problems
+/// (fixed text about fields, never the user's), so a run still ends in exactly
+/// one valid result and the fault is visible to whoever reads it.
 fn seal(run: &Run, worker: Option<WorkerRef>, result: RunResult) -> RunResult {
+    #[cfg(test)]
+    let result = corrupt_for_test(result);
     match result.validate() {
         Ok(()) => result,
         Err(problems) => {
@@ -83,8 +86,7 @@ fn seal(run: &Run, worker: Option<WorkerRef>, result: RunResult) -> RunResult {
                 .map(Problem::to_string)
                 .collect::<Vec<_>>()
                 .join("; ");
-            debug_assert!(false, "the supervisor built an invalid result: {message}");
-            RunResult::failed(
+            let mut fallback = RunResult::failed(
                 context(run, worker, result.cleanup.clone()),
                 ErrorDetail {
                     kind: "internal_error".to_string(),
@@ -92,9 +94,34 @@ fn seal(run: &Run, worker: Option<WorkerRef>, result: RunResult) -> RunResult {
                     provider_exit_code: None,
                 },
                 result.text,
-            )
+            );
+            fallback.provider_notes.push(format!(
+                "the supervisor replaced a result it built because it failed validation: \
+                 {message}"
+            ));
+            fallback
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CORRUPT_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make the next result sealed on this thread invalid. Test only; reaches the
+/// supervisor's task only when the test runs on a current-thread runtime.
+#[cfg(test)]
+pub(super) fn corrupt_next_seal_for_test() {
+    CORRUPT_NEXT.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn corrupt_for_test(mut result: RunResult) -> RunResult {
+    if CORRUPT_NEXT.with(std::cell::Cell::take) {
+        result.error = None;
+    }
+    result
 }
 
 /// The run did not go ahead, for a stated reason.
