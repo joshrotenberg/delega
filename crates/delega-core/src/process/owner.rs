@@ -19,9 +19,8 @@ use crate::contract::result::Cleanup;
 
 use super::limits::{
     CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
-    DESCENDANT_SIGNAL_BUDGET, EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL,
-    LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
-    STOP_LISTING_BUDGET,
+    EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT,
+    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -90,6 +89,7 @@ pub(super) struct Shared {
     tracked_mirror: Arc<Mutex<Vec<i32>>>,
     #[cfg(test)]
     swallow_kills: std::sync::atomic::AtomicU32,
+    descendant_signal_budget: Duration,
 }
 
 impl Shared {
@@ -217,7 +217,7 @@ impl Shared {
     /// Signal what a fresh sweep finds, within a budget so a slow or hung
     /// listing cannot hold the owner. A cleanup pass signals again later.
     async fn signal_swept(&self, signal: Signal) {
-        let _ = tokio::time::timeout(DESCENDANT_SIGNAL_BUDGET, async {
+        let _ = tokio::time::timeout(self.descendant_signal_budget, async {
             let result = self.tree.lock().await.sweep(Some(signal)).await;
             self.note_sweep(signal, result);
         })
@@ -269,6 +269,34 @@ impl Shared {
             session_members_swept: lock(&self.swept).clone(),
         }
     }
+}
+
+/// The reason of an `Unconfirmed` verdict whose only cause is that the listing
+/// taken before the first signal did not complete in time. Exported so that
+/// tests of the binary can recognise exactly this verdict.
+pub const LATE_LISTING_REASON: &str = "the process listing taken before the first signal did not \
+     complete, so a descendant that left the session when its parent was stopped could not be \
+     ruled out; the group and session sweeps afterwards found nothing";
+
+/// Whether a verdict is `Unconfirmed` for the late listing and for nothing
+/// else: no pids and no process groups, and a reason that is
+/// [`LATE_LISTING_REASON`] alone, or that text twice joined by `"; "` (the
+/// version probe and the run each missed their listing, which
+/// `merge_cleanup` joins that way). Any other text, such as a failed stop, or
+/// any pid, is not this verdict.
+pub fn is_late_listing_only(cleanup: &Cleanup) -> bool {
+    let Cleanup::Unconfirmed {
+        pids,
+        process_groups,
+        reason,
+    } = cleanup
+    else {
+        return false;
+    };
+    let twice = format!("{LATE_LISTING_REASON}; {LATE_LISTING_REASON}");
+    pids.is_empty()
+        && process_groups.is_empty()
+        && (reason == LATE_LISTING_REASON || *reason == twice)
 }
 
 /// What cleanup concluded.
@@ -361,6 +389,7 @@ impl OwnedProcess {
             tracked_mirror: registry.tracked.clone(),
             #[cfg(test)]
             swallow_kills: std::sync::atomic::AtomicU32::new(spec.swallow_group_kills),
+            descendant_signal_budget: spec.timings.descendant_signal,
         });
         let mut owner = OwnedProcess {
             child: Some(child),
@@ -426,13 +455,14 @@ impl OwnedProcess {
         deadline: Instant,
         hard_stop: bool,
         term_at: Option<Instant>,
+        stop_budget: Duration,
     ) -> Settled {
         let shared = self.shared.clone();
         if hard_stop {
             // The deadline is already fixed, so the wait leaves it half.
             let left = deadline.saturating_duration_since(Instant::now());
             if !shared
-                .before_stop(STOP_LISTING_BUDGET.min(left / 2), &CancellationToken::new())
+                .before_stop(stop_budget.min(left / 2), &CancellationToken::new())
                 .await
             {
                 shared.note_listing_missed();
@@ -559,11 +589,7 @@ impl OwnedProcess {
                     Cleanup::Unconfirmed {
                         pids: Vec::new(),
                         process_groups: Vec::new(),
-                        reason: "the process listing taken before the first signal did not \
-                                 complete, so a descendant that left the session when its \
-                                 parent was stopped could not be ruled out; the group and \
-                                 session sweeps afterwards found nothing"
-                            .to_string(),
+                        reason: LATE_LISTING_REASON.to_string(),
                     }
                 } else {
                     Cleanup::Confirmed

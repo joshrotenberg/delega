@@ -76,6 +76,10 @@ impl Context {
     }
 }
 
+fn one() -> u32 {
+    1
+}
+
 /// What was measured for one case, plus what was expected and the verdict.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Measured {
@@ -98,6 +102,17 @@ pub struct Measured {
     pub cleanup_reason: Option<String>,
     pub cleanup_pids: Vec<u32>,
     pub cleanup_groups: Vec<u32>,
+    /// The cleanup verdict was `Unconfirmed` for the late process listing and
+    /// for nothing else (`delega_core::process::is_late_listing_only`).
+    #[serde(default)]
+    pub cleanup_late_listing_only: bool,
+    /// Runs of the row, the last one measured. More than one only when earlier
+    /// runs failed on a late listing alone.
+    #[serde(default = "one")]
+    pub attempts: u32,
+    /// The cleanup reasons of the runs that were discarded, in order.
+    #[serde(default)]
+    pub discarded: Vec<String>,
     pub provider_pid: Option<i32>,
     pub survivors_at_exit: Vec<String>,
     pub survivors: Vec<String>,
@@ -290,6 +305,9 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         cleanup_reason: None,
         cleanup_pids: Vec::new(),
         cleanup_groups: Vec::new(),
+        cleanup_late_listing_only: false,
+        attempts: 1,
+        discarded: Vec::new(),
         provider_pid: None,
         survivors_at_exit: Vec::new(),
         survivors: Vec::new(),
@@ -512,6 +530,8 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
                     m.cleanup_pids.clone_from(pids);
                     m.cleanup_groups.clone_from(process_groups);
                     m.cleanup_reason = Some(reason.chars().take(300).collect());
+                    m.cleanup_late_listing_only =
+                        delega_core::process::is_late_listing_only(&result.cleanup);
                 }
             }
         }

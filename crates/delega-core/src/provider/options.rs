@@ -50,6 +50,10 @@ pub struct ProviderOptions {
     /// Receives [`ProgressEvent`](super::ProgressEvent)s while the run goes
     /// on. Without it nothing is reported live.
     pub progress: Option<ProgressSink>,
+    /// Test seam: chunks queued for the progress tap, in place of the process
+    /// layer's, so a test decides how many chunks are dropped.
+    #[cfg(test)]
+    pub(crate) tap_queue_chunks: Option<usize>,
 }
 
 impl ProviderOptions {
