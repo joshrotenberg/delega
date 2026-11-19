@@ -130,7 +130,16 @@ success() {
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":0.001,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},\"permission_denials\":$2}"
 }
 
+# The acceptance harness's process behaviours (`acc:<behaviour>:<variant>`, see
+# acc-lib.sh). No unit test uses them.
+acc_success() { success '"fake final answer"' '[]'; }
+acc_chatter() { emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}"; }
+
 case "$mode" in
+  acc:*)
+    . "$(dirname "$0")/acc-lib.sh"
+    acc_run "${mode#acc:}"
+    ;;
   success)
     init
     success '"fake final answer"' '[]'

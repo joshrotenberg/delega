@@ -63,6 +63,16 @@
 //! Cleanup runs to `cleanup_deadline` only for processes that are seen and do
 //! not die.
 //!
+//! A process listing that is empty, that does not contain this process, or
+//! that has a line that cannot be parsed is a failed inspection, never "nothing
+//! found", so it cannot confirm cleanup.
+//!
+//! The environment variable `DELEGA_TEST_NO_PROCESS_LISTING` is a test-only
+//! seam for `acceptance/`: when it is set, whatever its value, no program is
+//! used to list processes, so inspection is unavailable and cleanup is
+//! reported as not confirmed. It cannot substitute a program, so it can only
+//! make the verdict weaker.
+//!
 //! # What remains possible
 //!
 //! Two gaps remain, tracked as delega issue 1. Both end with `Confirmed` while

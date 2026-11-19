@@ -318,6 +318,55 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     assert_gone("same-group grandchild", &[gc]).await;
 }
 
+/// A `ps` stand-in that prints `output` and exits 0, at a path in `s`.
+fn fake_ps(s: &Scratch, output: &str) -> Lister {
+    use std::os::unix::fs::PermissionsExt;
+    let path = s.path("fake-ps");
+    std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{output}'\n")).expect("write fake ps");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    lister_for(vec![path])
+}
+
+/// A run whose listing is `ps_output` while a TERM-ignoring child is alive
+/// must not be confirmed.
+async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
+    let s = Scratch::new();
+    let lister = fake_ps(&s, ps_output);
+    let mut spec = sh(
+        &s,
+        "echo $$ > leader; sh -c 'trap \"\" TERM; echo $$ > gc; while :; do sleep 1; done' & \
+         sleep 0.3; exit 0",
+        LONG,
+    )
+    .with_lister(lister);
+    spec.cleanup_deadline = Duration::from_secs(30);
+    let handle = ProcessHandle::start(spec);
+    let gc = s.pid("gc").await;
+    let _reaper = Reaper(vec![gc]);
+    let report = handle.wait().await;
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => {
+            assert!(reason.contains("process inspection"), "{reason}");
+        }
+        Cleanup::Confirmed => panic!("a bad listing must not confirm cleanup: {report:#?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_listing_program_that_prints_nothing_does_not_confirm_cleanup() {
+    assert_bad_listing_is_unconfirmed("").await;
+}
+
+#[tokio::test]
+async fn a_listing_without_the_owning_process_does_not_confirm_cleanup() {
+    assert_bad_listing_is_unconfirmed("1 0 1 S Mon Nov 18 10:00:00 2026\n").await;
+}
+
+#[tokio::test]
+async fn a_listing_that_is_garbage_does_not_confirm_cleanup() {
+    assert_bad_listing_is_unconfirmed("this is not a process table\n").await;
+}
+
 #[tokio::test]
 async fn without_descendant_tracking_the_group_and_session_are_still_swept() {
     let s = Scratch::new();
