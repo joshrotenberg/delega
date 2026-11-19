@@ -18,9 +18,10 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::limits::{
-    CAPTURE_INTERVAL, CLEAN_SWEEPS_REQUIRED, CLEANUP_POLL_INTERVAL, DESCENDANT_SIGNAL_BUDGET,
-    EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT,
-    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_CAPTURE_BUDGET, PRE_STOP_POLL_INTERVAL,
+    CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
+    DESCENDANT_SIGNAL_BUDGET, EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL,
+    LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_CAPTURE_BUDGET,
+    PRE_STOP_POLL_INTERVAL,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -432,6 +433,7 @@ impl OwnedProcess {
             shared.tree.lock().await.capture().await;
             let mut failures = 0u32;
             let mut clean_sweeps = 0u32;
+            let mut active = false;
             loop {
                 let signal = if hard_stop || first_term.elapsed() >= grace {
                     Signal::KILL
@@ -447,12 +449,26 @@ impl OwnedProcess {
                         // row counts, and it takes several in a row: a
                         // descendant that forks successors faster than a
                         // listing is taken can slip through one.
-                        if view.is_clean() && leader_exited {
+                        if !view.is_empty() {
+                            active = true;
+                        }
+                        if view.is_empty() && leader_exited {
                             clean_sweeps += 1;
                         } else {
                             clean_sweeps = 0;
                         }
-                        let clean = clean_sweeps >= CLEAN_SWEEPS_REQUIRED;
+                        // One sweep confirms a plain exit; once anything was
+                        // observed or signalled, two in a row must agree.
+                        let tracked_ever = lock(&shared.observations)
+                            .stats
+                            .retained_descendant_identities
+                            > 0;
+                        let needed = if active || tracked_ever {
+                            CLEAN_SWEEPS_AFTER_ACTIVITY
+                        } else {
+                            CLEAN_SWEEPS_PLAIN
+                        };
+                        let clean = clean_sweeps >= needed;
                         if shared.pending_eperm.load(Ordering::SeqCst) && !view.group.is_empty() {
                             lock(&shared.signal_error).get_or_insert_with(|| "kill EPERM".into());
                             shared.warn(
@@ -651,15 +667,8 @@ impl Shared {
                     "processes in the child's session were still running".to_string()
                 } else if !view.tracked.is_empty() {
                     "tracked descendants were still running".to_string()
-                } else if !view.vanished.is_empty() {
-                    format!(
-                        "a fast-forking descendant could not be ruled out: {} process(es) \
-                         vanished between the listing and the check",
-                        view.vanished.len()
-                    )
                 } else {
-                    "the child had not exited or the sweeps were not yet clean twice in a row"
-                        .to_string()
+                    "the child had not exited or the sweeps were not yet clean".to_string()
                 }
             }
             Some(Err(error)) => {

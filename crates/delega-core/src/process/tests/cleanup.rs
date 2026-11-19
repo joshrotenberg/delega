@@ -401,56 +401,55 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     assert!(matches!(report.cleanup, Cleanup::Unconfirmed { .. }));
 }
 
-/// A relay: each process ignores TERM, leads a group of its own, lives a few
-/// milliseconds, forks a successor and exits, so no process stays alive for
-/// longer than one listing. It stops itself after a few hundred generations.
-const RELAY: &str = "exec perl -e 'use POSIX; \
-    my $p = fork(); \
-    if ($p == 0) { $SIG{TERM} = q(IGNORE); \
-      for (1..300) { setpgid(0,0); select(undef, undef, undef, 0.005); \
-        my $q = fork(); \
-        if ($q) { open F, q(>>), q(kids); print F qq($q\\n); close F; exit 0 } } \
-      exit 0 } \
-    open F, q(>>), q(kids); print F qq($p\\n); close F; sleep 60'";
-
 #[tokio::test]
-async fn a_relay_of_short_lived_processes_is_never_called_confirmed_while_one_is_alive() {
-    require_perl!();
-    let mut killed = 0;
-    const ROUNDS: usize = 4;
-    for round in 0..ROUNDS {
-        let s = Scratch::new();
-        let mut spec = sh(&s, RELAY, LONG);
-        spec.cleanup_deadline = Duration::from_secs(4);
-        spec.stop_grace = Duration::from_millis(100);
-        let handle = ProcessHandle::start(spec);
-        s.exists("kids").await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        handle.interrupt();
-        let report = handle.wait().await;
-        let kids: Vec<i32> = std::fs::read_to_string(s.path("kids"))
-            .expect("kids file")
-            .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .collect();
-        let _reaper = Reaper(kids.clone());
-        let alive = kids.iter().any(|pid| super::fixtures::is_running(*pid));
-        if alive {
-            assert!(
-                matches!(report.cleanup, Cleanup::Unconfirmed { .. }),
-                "round {round}: a relay process is alive but cleanup says Confirmed: {report:#?}"
-            );
-        } else {
-            assert_confirmed(&report);
+async fn churn_of_short_lived_orphans_does_not_keep_a_plain_run_from_being_confirmed() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    // Other things on a machine start and orphan short-lived processes all the
+    // time. Two threads do that in a loop while plain runs of `true` go on.
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawned = Arc::new(AtomicU64::new(0));
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let (stop, spawned) = (stop.clone(), spawned.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let ok = std::process::Command::new("/bin/sh")
+                        .args(["-c", "(/usr/bin/true &)"])
+                        .status()
+                        .is_ok_and(|s| s.success());
+                    if ok {
+                        spawned.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        break;
+                    }
+                }
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    if spawned.load(Ordering::SeqCst) == 0 {
+        stop.store(true, Ordering::SeqCst);
+        for t in threads {
+            let _ = t.join();
         }
-        // The relay runs 300 generations by itself; fewer means it was stopped.
-        if kids.len() < 300 {
-            killed += 1;
-        }
+        eprintln!("SKIPPED: could not create process churn with /bin/sh and /usr/bin/true");
+        return;
     }
-    // In the common case the sweep catches and kills the relay.
-    assert!(
-        killed * 2 >= ROUNDS,
-        "the relay was killed in only {killed} of {ROUNDS} rounds"
-    );
+    let mut results = Vec::new();
+    for _ in 0..5 {
+        let spec = crate::process::ProcessSpec::new("/usr/bin/true", LONG)
+            .env(crate::process::EnvPolicy::empty());
+        let started = Instant::now();
+        let report = run(spec).await;
+        results.push((report, started.elapsed()));
+    }
+    stop.store(true, Ordering::SeqCst);
+    for t in threads {
+        let _ = t.join();
+    }
+    for (report, took) in results {
+        assert_eq!(report.ending, Ending::Exited { code: 0 });
+        assert_confirmed(&report);
+        assert!(took < Duration::from_secs(1), "took {took:?}");
+    }
 }

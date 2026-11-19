@@ -79,14 +79,10 @@ pub const FAR_FUTURE: Duration = Duration::from_secs(86_400);
 pub const PS_READ_CHUNK: usize = 64 * 1024;
 /// Most session members recorded in the diagnostics.
 pub const MAX_SWEPT_RECORDS: usize = 64;
-/// Consecutive sweeps that must find nothing, each with every row checked,
-/// before cleanup is confirmed. One clean sweep can miss a descendant that
-/// forks successors faster than a listing is taken.
-pub const CLEAN_SWEEPS_REQUIRED: u32 = 2;
-/// How many pids above a vanished row the probe examines per pass. Process ids
-/// are handed out in ascending order, so the successor of a process that
-/// forked just before it was listed has a pid just above it.
-pub const PROBE_WINDOW_PIDS: i32 = 4096;
-/// Passes the probe makes back to back per sweep. A relay that forks every few
-/// milliseconds moves up the pid range while the probe runs.
-pub const PROBE_PASSES: u32 = 8;
+/// Consecutive clean sweeps required to confirm cleanup when nothing was ever
+/// observed or signalled beyond the leader: a plain exit.
+pub const CLEAN_SWEEPS_PLAIN: u32 = 1;
+/// Consecutive clean sweeps required once any descendant was observed or
+/// signalled. A sweep that follows a kill confirms it only if the next one
+/// agrees.
+pub const CLEAN_SWEEPS_AFTER_ACTIVITY: u32 = 2;

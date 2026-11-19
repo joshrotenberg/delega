@@ -33,8 +33,9 @@
 //! not exited and is stopped like any other. The leader's exit is observed
 //! without reaping it.
 //!
-//! Cleanup is a sweep, repeated until two in a row find nothing and could check
-//! every row: every live process in
+//! Cleanup is a sweep, repeated until one finds nothing (two in a row when any
+//! descendant was observed or signalled during the run, so a sweep that follows
+//! a kill must be confirmed by the next): every live process in
 //! the child's group, every live process whose session id is the child's (read
 //! with `getsid` for each row of the table, because `ps` has no session keyword
 //! that works on both macOS and Linux), and every tracked descendant with a
@@ -53,38 +54,38 @@
 //!
 //! # What `Confirmed` means
 //!
-//! `Cleanup::Confirmed` means two consecutive final sweeps, taken after the
-//! leader exited and before it was reaped, each found no live process in the
-//! child's group, none in its session, and no tracked descendant, and each
-//! could check every process it listed. It does not cover a descendant that
-//! left the session with its own `setsid` and was never seen by a scan.
+//! `Cleanup::Confirmed` means a final sweep, taken after the leader exited and
+//! before it was reaped, found no live process in the child's group, none in
+//! its session, and no tracked descendant. The sweep runs once for a plain exit
+//! where nothing but the leader was ever seen, and twice in a row when any
+//! descendant was observed or signalled. It does not cover the gaps below.
 //! Anything else is `Unconfirmed`, naming the pids and groups and saying why.
+//! Cleanup runs to `cleanup_deadline` only for processes that are seen and do
+//! not die.
 //!
 //! # What remains possible
 //!
-//! A row can be alive in the listing and gone when its session is read. If it
-//! cannot be shown to be foreign (it started before the child, is a child of
-//! this process, or has a live foreign parent), it may have been a descendant
-//! that forked a successor the listing does not hold, so that sweep is
-//! inconclusive and repeated. To catch such a relay the sweep also reads the
-//! session of the pids just above the vanished one, several times, and signals
-//! members; this assumes pids are handed out in ascending order. If the
-//! sweeps stay inconclusive until `cleanup_deadline`, the verdict is
-//! `Unconfirmed` and the reason says a fast-forking descendant could not be
-//! ruled out. On a machine with heavy process churn this can also happen when
-//! nothing of ours is left.
+//! Two gaps remain, tracked as delega issue 1. Both end with `Confirmed` while
+//! a descendant runs, and both have an ignored test in `tests/gaps.rs` that
+//! states the wanted behaviour:
 //!
-//! One gap remains, tracked as delega issue 1: a descendant that calls `setsid`
-//! and is orphaned before any scan saw it while its parent lived (a detached
-//! grandchild whose parent exits at once, or a crash before the next scan). It
-//! is in no group or session of the child and has no known ancestry, so
-//! nothing here can find it, and the report says `Confirmed`. The scan runs
-//! every 500 ms and once more, within a budget, before a stop the owner
-//! starts; it does not run for a crash. [`Diagnostics::capture_gap_observed`]
-//! says when the scan is known to have missed its budget or failed, which
-//! widens that window. The ignored tests in `tests/gaps.rs` state the wanted
-//! behaviour. A descendant that stays in the session, even in a group of its
-//! own, is not part of the gap.
+//! - A descendant that calls `setsid` and is orphaned before any scan saw it
+//!   while its parent lived (a detached grandchild whose parent exits at once,
+//!   or a crash before the next scan). It is in no group or session of the
+//!   child and has no known ancestry. The scan runs every 500 ms and once more,
+//!   within a budget, before a stop the owner starts; it does not run for a
+//!   crash. [`Diagnostics::capture_gap_observed`] says when the scan is known
+//!   to have missed its budget or failed, which widens that window.
+//! - A fast fork relay: a descendant that ignores TERM, changes process group
+//!   each generation, and forks a successor and exits within a few
+//!   milliseconds. Every listing holds a row that is gone when its session is
+//!   read, and the successor is not in the listing. Such rows are counted in
+//!   `diagnostics.inspection.vanished_rows` and are not treated as members: a
+//!   process that short-lived is far more often unrelated, and treating each as
+//!   possibly ours kept honest runs unconfirmed on a machine with churn.
+//!
+//! A descendant that stays in the session, even in a group of its own, is not
+//! part of either gap.
 //!
 //! # Platform
 //!
@@ -105,9 +106,6 @@
 //! - SIGCONT after TERM: on Linux a stopped process holds a TERM pending until
 //!   it is continued, so `a_stopped_descendant_receives_terminate_when_the_group_does`
 //!   can fail there if the SIGCONT is removed; on macOS it cannot fail.
-//! - The pid probe for vanished rows assumes ascending pid allocation, and
-//!   the rule that a live parent in another session makes a vanished row
-//!   foreign; the relay test checks both.
 //! - Fixtures use `perl` to start descendants in their own group or session and
 //!   skip with a printed message when it is missing.
 
