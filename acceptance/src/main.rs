@@ -25,6 +25,11 @@ struct Args {
     /// Run only rows whose id contains this text (repeatable; any match runs).
     #[arg(long)]
     filter: Vec<String>,
+    /// Run only the rows whose expectation is a timing-dependent known gap
+    /// (the matrix flag `timing_dependent`). Combines with `--repeat`, and
+    /// narrows `--all`, `--smoke` and `--filter`. Exits 2 if no row is selected.
+    #[arg(long)]
+    timing_gaps: bool,
     /// Print the row ids and exit.
     #[arg(long)]
     list: bool,
@@ -87,14 +92,19 @@ fn main() -> ExitCode {
         matrix::all()
     } else if args.smoke {
         matrix::smoke()
-    } else if !args.filter.is_empty() || args.list {
+    } else if !args.filter.is_empty() || args.timing_gaps || args.list {
         matrix::all()
     } else {
-        eprintln!("delega-acceptance: give --all, --smoke or --filter TEXT (see --help)");
+        eprintln!(
+            "delega-acceptance: give --all, --smoke, --filter TEXT or --timing-gaps (see --help)"
+        );
         return ExitCode::from(2);
     };
     if !args.filter.is_empty() {
         rows.retain(|r| args.filter.iter().any(|f| r.id.contains(f.as_str())));
+    }
+    if args.timing_gaps {
+        rows.retain(matrix::is_timing_gap);
     }
     if args.list {
         for row in &rows {

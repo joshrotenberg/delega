@@ -77,7 +77,7 @@ pub fn close_gaps(measured: &mut [Measured], repeat: u32) -> Vec<String> {
     let timing = |m: &Measured| m.timing_dependent && m.verdict != "skipped";
     let gap_runs: Vec<&Measured> = measured.iter().filter(|m| timing(m)).collect();
     if gap_runs.len() >= CLOSE_ALL_AFTER && gap_runs.iter().all(|m| m.verdict == GAP_NOT_SHOWN) {
-        for m in measured.iter_mut().filter(|m| m.timing_dependent) {
+        for m in measured.iter_mut().filter(|m| timing(m)) {
             m.verdict = GAP_CLOSED.to_string();
             m.problems.push(
                 "no timing-dependent known gap showed in this run; correct the table".to_string(),
@@ -292,6 +292,20 @@ mod gap_tests {
             .collect();
         list[1].verdict = "expected_failure".to_string();
         assert!(close_gaps(&mut list, 1).is_empty());
+    }
+
+    #[test]
+    fn a_skipped_timing_gap_row_stays_skipped_when_the_others_are_closed() {
+        let mut list: Vec<Measured> = (0..4)
+            .map(|i| row(&format!("r{i}"), 1, GAP_NOT_SHOWN))
+            .collect();
+        list[3].verdict = "skipped".to_string();
+        assert_eq!(close_gaps(&mut list, 1), ["r0", "r1", "r2"]);
+        assert_eq!(
+            verdicts(&list),
+            [GAP_CLOSED, GAP_CLOSED, GAP_CLOSED, "skipped"]
+        );
+        assert!(list[3].problems.is_empty());
     }
 
     #[test]
