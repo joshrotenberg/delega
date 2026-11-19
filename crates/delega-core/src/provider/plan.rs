@@ -64,7 +64,6 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         })?),
         None => None,
     };
-    env::check_names(&options.env_pass, &options.env_set)?;
     let scope = permissions::scope(request)?;
     let parent = options.parent_env();
     let program = program::resolve(request.provider, options, &parent)?;
@@ -81,6 +80,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         Provider::Claude => claude::build(&inputs)?,
         Provider::Codex => codex::build(&inputs)?,
     };
+    env::check_names(&options.env_pass, &options.env_set, &built.env)?;
     let env = env::resolve(&EnvInputs {
         provider: request.provider,
         parent: &parent,

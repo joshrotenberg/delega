@@ -156,8 +156,9 @@ Behavior:
   Prefer the `NAME` form for secrets, because a value on the command line is
   visible in the process table and in shell history. A `NAME` that is not set
   in the caller's environment is ignored. A name that is not valid (letters,
-  digits and underscore, not starting with a digit), a calling-session variable
-  and any `DELEGA_*` variable are refused before the run starts, in either form,
+  digits and underscore, not starting with a digit), a calling-session variable,
+  any `DELEGA_*` variable and a name delega itself sets for the provider (such
+  as `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) are refused before the run starts, in either form,
   with error kind `invalid_env_name` or `forbidden_env_name`; the message gives
   the position of an invalid name and never repeats it, so a value is not
   echoed. A variable whose name looks like a secret is allowed and adds a

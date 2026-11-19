@@ -1121,6 +1121,8 @@ fn the_help_documents_env_and_a_profile_does_not_carry_it() {
         .output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let message = result_of(&out).error.expect("error").message;
+    assert!(message.contains("unknown field `pass_env`"), "{message}");
     assert!(!rig.record.join("argv").exists());
 }
 
@@ -1188,4 +1190,113 @@ fn env_with_a_secret_looking_name_is_noted_in_both_forms_without_the_value() {
     assert!(notes.contains("SET_API_TOKEN was set"), "{notes}");
     assert!(!text(&out.stdout).contains(CANARY));
     assert!(!text(&out.stderr).contains(CANARY));
+}
+
+/// Names that must never reach a worker, in the caller's environment with a
+/// canary value each: session variables of both hosts, and ordinary variables
+/// a reviewer found leaking when the policy was weakened.
+const NEVER: [&str; 14] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SSE_PORT",
+    "CODEX_THREAD_ID",
+    "CODEX_SANDBOX",
+    "GIT_AUTHOR_NAME",
+    "GIT_SSH_COMMAND",
+    "SSH_AUTH_SOCK",
+    "NODE_OPTIONS",
+    "LC_SECRET_TOKEN",
+    "EDITOR",
+    "GH_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "PROMPT_COMMAND",
+];
+
+#[test]
+fn the_worker_receives_exactly_the_expected_names_and_no_others() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let mut command = rig.command();
+        for name in NEVER {
+            command.env(name, CANARY);
+        }
+        let allowed = [
+            "LANG",
+            "LANGUAGE",
+            "LC_TIME",
+            "TZ",
+            "CI",
+            "NO_COLOR",
+            "ALL_PROXY",
+        ];
+        for name in allowed {
+            command.env(name, CANARY);
+        }
+        command.env("ANTHROPIC_API_KEY", CANARY);
+        command.env("OPENAI_API_KEY", CANARY);
+        command.env("CODEX_HOME_NOT_THE_REAL_ONE", CANARY);
+        let out = command
+            .args(rig.run_args(provider, "success", &["-e", "NAMED_ONE", "-e", "SET_ONE=v"]))
+            .env("NAMED_ONE", CANARY)
+            .output()
+            .expect("run delega");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: {}",
+            text(&out.stderr)
+        );
+        // What the rig gives delega: PATH, HOME, XDG_CONFIG_HOME, the two
+        // configuration directories and the record directory, which the
+        // helper passes by name. The shell adds its own four.
+        let mut expected: Vec<&str> = vec![
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "FAKE_RECORD_DIR",
+            "NAMED_ONE",
+            "SET_ONE",
+        ];
+        expected.extend(allowed);
+        if provider == "claude" {
+            expected.extend([
+                "CLAUDE_CONFIG_DIR",
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            ]);
+        } else {
+            // Any CODEX_* name belongs to Codex; Claude Code gets none of them.
+            expected.extend([
+                "CODEX_HOME",
+                "OPENAI_API_KEY",
+                "CODEX_HOME_NOT_THE_REAL_ONE",
+            ]);
+        }
+        expected.sort_unstable();
+        let mut seen = seen_by_the_fake(&rig);
+        seen.retain(|n| !matches!(n.as_str(), "PWD" | "OLDPWD" | "SHLVL" | "_"));
+        seen.sort();
+        assert_eq!(seen, expected, "{provider}");
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn env_refuses_a_name_delega_sets_itself_instead_of_dropping_it() {
+    let rig = Rig::new();
+    for given in [
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=0",
+    ] {
+        let out = rig
+            .command()
+            .args(rig.run_args("claude", "success", &["-e", given, "--output", "json"]))
+            .output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(2), "{given}");
+        let error = result_of(&out).error.expect("error");
+        assert_eq!(error.kind, "forbidden_env_name", "{given}");
+        assert!(error.message.contains("set by delega"), "{}", error.message);
+    }
+    assert!(!rig.record.join("argv").exists());
 }

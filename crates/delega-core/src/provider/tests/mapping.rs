@@ -306,6 +306,7 @@ fn codex_head(sandbox: &str, extra: &[&str]) -> Vec<String> {
     .map(String::from)
     .to_vec();
     args.push(format!("sandbox_mode=\"{sandbox}\""));
+    args.extend(["-c".to_string(), "allow_login_shell=false".to_string()]);
     for setting in extra {
         args.extend(["-c".to_string(), (*setting).to_string()]);
     }

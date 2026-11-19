@@ -2,9 +2,8 @@
 //!
 //! The policy is an allowlist. A worker receives only:
 //!
-//! 1. The base variables ([`BASE_NAMES`] and the prefixes in
-//!    [`BASE_PREFIXES`]): the user, the shell, the locale, temporary and
-//!    base directories, and two switches.
+//! 1. The base variables ([`BASE_NAMES`]): the user, the shell, the locale,
+//!    temporary and base directories, and two switches.
 //! 2. Network plumbing ([`NETWORK_NAMES`]): proxy and certificate settings.
 //! 3. The variables that belong to the provider being run (see [`owned_by`]),
 //!    except those that describe the calling session (see
@@ -36,17 +35,32 @@ use super::refusal::Refusal;
 
 /// Base variables every worker receives, when the caller has them: who and
 /// where the user is (`HOME`, `USER`, `LOGNAME`, `SHELL`), how to find programs
-/// (`PATH`), locale and terminal (`LANG`, `TERM`, `TZ`), a temporary directory
+/// (`PATH`), locale and terminal (`LANG`, `LANGUAGE`, the `LC_*` categories
+/// listed by name, `TERM`, `TZ`), a temporary directory
 /// (`TMPDIR`), the base directories tools use to find their own configuration,
 /// data, cache and state (`XDG_*_HOME`), and two switches, `NO_COLOR` and `CI`.
 /// These are locations and switches; none carries a secret.
-pub const BASE_NAMES: [&str; 15] = [
+pub const BASE_NAMES: [&str; 29] = [
     "PATH",
     "HOME",
     "USER",
     "LOGNAME",
     "SHELL",
     "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LC_ADDRESS",
+    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT",
+    "LC_NAME",
+    "LC_PAPER",
+    "LC_TELEPHONE",
     "TERM",
     "TMPDIR",
     "TZ",
@@ -57,10 +71,6 @@ pub const BASE_NAMES: [&str; 15] = [
     "NO_COLOR",
     "CI",
 ];
-
-/// Prefixes of base variables: every locale variable, `LC_ALL` and `LC_CTYPE`
-/// among them.
-pub const BASE_PREFIXES: [&str; 1] = ["LC_"];
 
 /// Network plumbing: proxy settings in upper and lower case, and the
 /// certificate settings that let a worker behind a TLS-inspecting proxy
@@ -93,7 +103,7 @@ pub struct ResolvedEnv {
 /// values and, for what was withheld, only a count.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct EnvReport {
-    /// Passed because they are in [`BASE_NAMES`] or match [`BASE_PREFIXES`].
+    /// Passed because they are in [`BASE_NAMES`].
     pub base: Vec<String>,
     /// Passed because they are in [`NETWORK_NAMES`].
     pub network: Vec<String>,
@@ -164,9 +174,10 @@ impl ResolvedEnv {
             .iter()
             .filter_map(|(name, value)| {
                 let name = name.to_str()?;
+                // A value that is not valid UTF-8 is kept in its lossy form,
+                // which is how provider text is decoded.
                 (is_secret_name(name) || owned_by(provider, name))
-                    .then(|| value.to_str().map(str::to_string))
-                    .flatten()
+                    .then(|| value.to_string_lossy().into_owned())
             })
             .collect()
     }
@@ -216,8 +227,13 @@ pub fn is_never_passed(name: &str) -> bool {
 
 /// Refuse names the caller asked to pass or set that cannot be used. An invalid
 /// name is not echoed, because a mistaken `NAME=value` handed over as a name
-/// would put a value in the message.
-pub(super) fn check_names(pass: &[String], set: &[(String, String)]) -> Result<(), Refusal> {
+/// would put a value in the message. A name delega itself sets for the provider
+/// is refused too, instead of being dropped silently.
+pub(super) fn check_names(
+    pass: &[String],
+    set: &[(String, String)],
+    adapter: &[(String, String)],
+) -> Result<(), Refusal> {
     let passed = pass.iter().map(|n| ("to pass", n.as_str()));
     let given = set.iter().map(|(n, _)| ("to set", n.as_str()));
     let mut counts = (0usize, 0usize);
@@ -250,6 +266,14 @@ pub(super) fn check_names(pass: &[String], set: &[(String, String)]) -> Result<(
                 format!("{name} configures delega itself and cannot be given to a worker"),
             ));
         }
+        if adapter.iter().any(|(n, _)| n == name) {
+            return Err(Refusal::new(
+                "forbidden_env_name",
+                format!(
+                    "{name} is set by delega for this provider and cannot be given to a worker"
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -266,7 +290,7 @@ fn reason(provider: Provider, name: &str, pass: &BTreeSet<&str>) -> Option<Reaso
     if is_never_passed(name) {
         return None;
     }
-    if BASE_NAMES.contains(&name) || BASE_PREFIXES.iter().any(|p| name.starts_with(p)) {
+    if BASE_NAMES.contains(&name) {
         Some(Reason::Base)
     } else if NETWORK_NAMES.contains(&name) {
         Some(Reason::Network)
@@ -288,6 +312,7 @@ pub(super) fn resolve(inputs: &EnvInputs<'_>) -> ResolvedEnv {
         .chain(inputs.adapter)
         .map(|(n, _)| n.as_str())
         .collect();
+    let set_caller: BTreeSet<&str> = inputs.set.iter().map(|(n, _)| n.as_str()).collect();
     let mut vars: BTreeMap<OsString, OsString> = BTreeMap::new();
     let mut report = EnvReport::default();
     let mut parent_names: BTreeSet<&OsString> = BTreeSet::new();
@@ -305,7 +330,7 @@ pub(super) fn resolve(inputs: &EnvInputs<'_>) -> ResolvedEnv {
         passed_from_parent.insert(name);
         vars.insert(name.clone(), value.clone());
         groups.insert(text, why);
-        if pass.contains(text) {
+        if matches!(why, Reason::Named) && !set_caller.contains(text) {
             explicit_present.insert(text);
         }
     }
@@ -345,6 +370,7 @@ pub(super) fn resolve(inputs: &EnvInputs<'_>) -> ResolvedEnv {
         .iter()
         .filter(|n| {
             !is_never_passed(n)
+                && !set_caller.contains(**n)
                 && !inputs
                     .parent
                     .iter()
@@ -369,16 +395,16 @@ pub(super) fn resolve(inputs: &EnvInputs<'_>) -> ResolvedEnv {
 /// Whether a variable belongs to the provider being run.
 pub fn owned_by(provider: Provider, name: &str) -> bool {
     match provider {
-        Provider::Claude => {
-            name == "CLAUDECODE" || name.starts_with("CLAUDE_") || name.starts_with("ANTHROPIC_")
-        }
+        Provider::Claude => name.starts_with("CLAUDE_") || name.starts_with("ANTHROPIC_"),
         Provider::Codex => name.starts_with("CODEX_") || name.starts_with("OPENAI_"),
     }
 }
 
-/// Names that describe the session that called delega, not how to reach a
-/// provider account. They are withheld from both providers.
-const SESSION_NAMES: [&str; 10] = [
+/// Names that describe the session or tool call that called delega, not how to
+/// reach a provider account. They are withheld from both providers. The Codex
+/// names are the ones Codex sets in the environment of the commands it runs
+/// (observed on codex-cli 0.170.0).
+const SESSION_NAMES: [&str; 18] = [
     "AI_AGENT",
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -389,22 +415,35 @@ const SESSION_NAMES: [&str; 10] = [
     "CLAUDE_EFFORT",
     "CLAUDE_PID",
     "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_TOOL_CALL_ID",
+    "CODEX_CI",
+    "CODEX_VERSION",
+    "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
 ];
 
 /// Whether a variable describes the calling session.
 ///
 /// A name matches when it is in [`SESSION_NAMES`], or starts with
-/// `CLAUDE_CODE_` and contains `SESSION`, `MESSAGING` or `BRIDGE` (this covers
-/// `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_BRIDGE_SESSION_ID`). Other
-/// `CLAUDE_*` names are configuration (`CLAUDE_CONFIG_DIR`,
-/// `CLAUDE_CODE_OAUTH_TOKEN`) and are not matched. No variable a calling Codex
-/// session sets is known, so none is listed for Codex.
+/// `CLAUDE_CODE_` and either contains `SESSION`, `MESSAGING` or `BRIDGE`, has
+/// `SSE` as a whole word between underscores (`CLAUDE_CODE_SSE_PORT`), or ends
+/// in `_PORT`, `_SOCKET` or `_PID`. Other `CLAUDE_*` names are configuration
+/// (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`) and are not matched, and
+/// neither are Codex account and configuration names (`CODEX_HOME`,
+/// `OPENAI_API_KEY`, `OPENAI_BASE_URL`).
 pub fn is_calling_session(name: &str) -> bool {
     SESSION_NAMES.contains(&name)
         || (name.starts_with("CLAUDE_CODE_")
-            && ["SESSION", "MESSAGING", "BRIDGE"]
+            && (["SESSION", "MESSAGING", "BRIDGE"]
                 .iter()
-                .any(|part| name.contains(part)))
+                .any(|part| name.contains(part))
+                || name.split('_').any(|word| word == "SSE")
+                || ["_PORT", "_SOCKET", "_PID"]
+                    .iter()
+                    .any(|end| name.ends_with(end))))
 }
 
 /// Whether a name looks like it holds a secret or grants access to one.

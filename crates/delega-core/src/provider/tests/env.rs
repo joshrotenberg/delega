@@ -291,7 +291,7 @@ fn names_to_pass_or_set_are_validated_before_a_run_starts() {
         "A.B",
         "\u{e9}",
     ] {
-        let error = check_names(&[bad.to_string()], &[]).unwrap_err();
+        let error = check_names(&[bad.to_string()], &[], &[]).unwrap_err();
         assert_eq!(error.kind, "invalid_env_name", "{bad:?}");
         assert!(
             bad.is_empty() || !error.message.contains(bad),
@@ -299,13 +299,18 @@ fn names_to_pass_or_set_are_validated_before_a_run_starts() {
             error.message
         );
         assert!(!is_valid_name(bad), "{bad:?}");
-        let error = check_names(&[], &[(bad.to_string(), "v".into())]).unwrap_err();
+        let error = check_names(&[], &[(bad.to_string(), "v".into())], &[]).unwrap_err();
         assert_eq!(error.kind, "invalid_env_name", "set {bad:?}");
         assert!(error.message.contains("to set"), "{}", error.message);
     }
     for good in ["A", "_A", "a1_B2", "JAVA_HOME"] {
         assert!(is_valid_name(good), "{good}");
-        check_names(&[good.to_string()], &[(good.to_string(), "x=y".into())]).unwrap();
+        check_names(
+            &[good.to_string()],
+            &[(good.to_string(), "x=y".into())],
+            &[],
+        )
+        .unwrap();
     }
     for forbidden in [
         "CLAUDECODE",
@@ -314,13 +319,117 @@ fn names_to_pass_or_set_are_validated_before_a_run_starts() {
         "AI_AGENT",
         "DELEGA_CLAUDE_BIN",
         "DELEGA_ANYTHING",
+        "CLAUDE_CODE_SSE_PORT",
+        "CODEX_THREAD_ID",
+        "CODEX_SANDBOX",
     ] {
-        let error = check_names(&["PATH".to_string(), forbidden.to_string()], &[]).unwrap_err();
+        let error =
+            check_names(&["PATH".to_string(), forbidden.to_string()], &[], &[]).unwrap_err();
         assert_eq!(error.kind, "forbidden_env_name", "{forbidden}");
         assert!(error.message.contains(forbidden), "{}", error.message);
-        let error = check_names(&[], &[(forbidden.to_string(), "v".into())]).unwrap_err();
+        let error = check_names(&[], &[(forbidden.to_string(), "v".into())], &[]).unwrap_err();
         assert_eq!(error.kind, "forbidden_env_name", "set {forbidden}");
     }
+}
+
+#[test]
+fn a_name_delega_itself_sets_is_refused_in_either_form() {
+    let adapter = [(
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_string(),
+        "1".to_string(),
+    )];
+    let name = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS";
+    for (pass, set) in [
+        (vec![name.to_string()], vec![]),
+        (vec![], vec![(name.to_string(), "0".to_string())]),
+    ] {
+        let error = check_names(&pass, &set, &adapter).unwrap_err();
+        assert_eq!(error.kind, "forbidden_env_name");
+        assert!(
+            error.message.contains(name) && error.message.contains("set by delega"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn a_locale_category_passes_but_a_name_that_only_starts_with_lc_does_not() {
+    let env = parent(&[
+        "LC_ALL",
+        "LC_TIME",
+        "LANGUAGE",
+        "LC_SECRET_TOKEN",
+        "LC_ANYTHING",
+    ]);
+    for provider in [Provider::Claude, Provider::Codex] {
+        assert_eq!(
+            names_for(provider, &env, &[]),
+            ["LANGUAGE", "LC_ALL", "LC_TIME"]
+        );
+    }
+}
+
+#[test]
+fn a_name_given_in_both_forms_is_set_and_noted_only_as_set() {
+    let env = parent(&["PATH", "MY_DEPLOY_TOKEN"]);
+    let resolved = resolve(&EnvInputs {
+        provider: Provider::Claude,
+        parent: &env,
+        pass: &["MY_DEPLOY_TOKEN".to_string(), "ONLY_SET_TOKEN".to_string()],
+        set: &[
+            ("MY_DEPLOY_TOKEN".into(), "v".into()),
+            ("ONLY_SET_TOKEN".into(), "v".into()),
+        ],
+        adapter: &[],
+    });
+    let report = resolved.report();
+    assert!(report.named.is_empty(), "{report:?}");
+    assert!(report.named_not_set.is_empty(), "{report:?}");
+    assert_eq!(report.set_by_caller, ["MY_DEPLOY_TOKEN", "ONLY_SET_TOKEN"]);
+    let notes = resolved.notes();
+    assert!(notes.iter().all(|n| !n.contains("was passed")), "{notes:?}");
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| n.contains("MY_DEPLOY_TOKEN"))
+            .count(),
+        1
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("MY_DEPLOY_TOKEN was set to a value"))
+    );
+}
+
+#[test]
+fn a_provider_owned_name_given_with_env_is_described_as_the_providers() {
+    let env = parent(&["PATH", "ANTHROPIC_API_KEY", "HOME"]);
+    let resolved = resolved(Provider::Claude, &env, &["ANTHROPIC_API_KEY", "HOME"]);
+    let report = resolved.report();
+    assert_eq!(report.provider, ["ANTHROPIC_API_KEY"]);
+    assert!(report.named.is_empty(), "{report:?}");
+    assert!(
+        resolved
+            .notes()
+            .iter()
+            .all(|n| !n.contains("ANTHROPIC_API_KEY")),
+        "{:?}",
+        resolved.notes()
+    );
+}
+
+#[test]
+fn the_values_of_passed_secret_looking_variables_are_redacted_even_when_not_utf8() {
+    use std::os::unix::ffi::OsStringExt;
+    let bad = OsString::from_vec(b"tok\xffen-value-123".to_vec());
+    let env = vec![(OsString::from("MY_SERVICE_TOKEN"), bad.clone())];
+    let resolved = resolved(Provider::Claude, &env, &["MY_SERVICE_TOKEN"]);
+    assert_eq!(
+        resolved.secret_values(Provider::Claude),
+        [bad.to_string_lossy().into_owned()]
+    );
 }
 
 #[test]
@@ -335,6 +444,11 @@ fn a_refused_pass_stops_a_dry_run_with_the_refusal() {
         let error = dry_run(&rig.request(Provider::Codex, "p"), &options).unwrap_err();
         assert_eq!(error.kind, kind);
     }
+    let rig = Rig::new();
+    let mut options: ProviderOptions = rig.options(Provider::Claude);
+    options.env_set = vec![("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "0".into())];
+    let error = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap_err();
+    assert_eq!(error.kind, "forbidden_env_name");
 }
 
 #[test]
@@ -371,10 +485,18 @@ fn ownership_and_session_rules_are_stated_by_name() {
     assert!(is_calling_session("CLAUDE_CODE_MESSAGING_SOCKET"));
     assert!(is_calling_session("CLAUDE_CODE_MESSAGING_TOKEN"));
     assert!(is_calling_session("CLAUDE_CODE_BRIDGE_SESSION_ID"));
+    assert!(is_calling_session("CLAUDE_CODE_SSE_PORT"));
+    assert!(is_calling_session("CLAUDE_CODE_IDE_SOCKET"));
+    assert!(is_calling_session("CODEX_THREAD_ID"));
+    assert!(!is_calling_session(
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+    ));
+    assert!(!is_calling_session("CODEX_HOME"));
+    assert!(!is_calling_session("OPENAI_BASE_URL"));
     assert!(!is_calling_session("CLAUDE_CODE_OAUTH_TOKEN"));
 }
 
-const SESSION: [&str; 9] = [
+const SESSION: [&str; 18] = [
     "CLAUDECODE",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -384,8 +506,20 @@ const SESSION: [&str; 9] = [
     "CLAUDE_EFFORT",
     "CLAUDE_PID",
     "AI_AGENT",
+    "CLAUDE_CODE_SSE_PORT",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_TOOL_CALL_ID",
+    "CODEX_CI",
+    "CODEX_VERSION",
+    "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
 ];
-const CONFIG: [&str; 5] = [
+const CONFIG: [&str; 8] = [
+    "CODEX_HOME",
+    "OPENAI_BASE_URL",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CONFIG_DIR",
@@ -408,6 +542,7 @@ fn session_variables_are_withheld_from_both_providers_and_configuration_passes()
         [
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDE_CONFIG_DIR",
             "PATH"
@@ -417,7 +552,10 @@ fn session_variables_are_withheld_from_both_providers_and_configuration_passes()
     for name in SESSION {
         assert!(!codex.contains(&name.to_string()), "codex {name}");
     }
-    assert_eq!(codex, ["OPENAI_API_KEY", "PATH"]);
+    assert_eq!(
+        codex,
+        ["CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL", "PATH"]
+    );
 }
 
 #[test]
@@ -462,6 +600,23 @@ both!(
     session_variables_do_not_reach_the_child
 );
 
+/// The names a shell adds to its own environment before the fake records it.
+const SHELL_ADDS: [&str; 4] = ["PWD", "OLDPWD", "SHLVL", "_"];
+
+/// Names the fake received, less what the shell itself adds.
+fn child_names(rig: &Rig) -> Vec<String> {
+    let mut seen = rig.env_names();
+    seen.retain(|n| !SHELL_ADDS.contains(&n.as_str()));
+    seen.sort();
+    seen
+}
+
+fn sorted(mut names: Vec<&str>) -> Vec<String> {
+    names.sort_unstable();
+    names.dedup();
+    names.into_iter().map(String::from).collect()
+}
+
 async fn only_allowlisted_names_reach_the_child(provider: Provider) {
     let own_name = match provider {
         Provider::Claude => "ANTHROPIC_API_KEY",
@@ -479,8 +634,15 @@ async fn only_allowlisted_names_reach_the_child(provider: Provider) {
         "DATABASE_URL",
         "SSH_AUTH_SOCK",
         "GH_TOKEN",
+        "GIT_AUTHOR_NAME",
+        "NODE_OPTIONS",
+        "LC_SECRET_TOKEN",
         other_name,
         "DELEGA_CLAUDE_BIN",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SSE_PORT",
+        "CODEX_THREAD_ID",
+        "CODEX_SANDBOX",
     ];
 
     let rig = Rig::new();
@@ -491,19 +653,26 @@ async fn only_allowlisted_names_reach_the_child(provider: Provider) {
     }
     options.parent_env = Some(env.clone());
     let result = run_checked(rig.request(provider, "success"), options.clone()).await;
-    let seen = rig.env_names();
-    for name in allowed {
-        assert!(seen.contains(&name.to_string()), "{name}: {seen:?}");
+    // The exact set: the rig's own variables, what the rig sets, the adapter's
+    // and the allowed names above. Anything else is a leak.
+    let mut expected = vec![
+        "HOME",
+        "PATH",
+        "FAKE_RECORD_DIR",
+        "XDG_CONFIG_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+    ];
+    if provider == Provider::Claude {
+        expected.push("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
     }
-    for name in withheld {
-        assert!(!seen.contains(&name.to_string()), "{name}: {seen:?}");
-    }
+    expected.extend(allowed);
+    let seen = child_names(&rig);
+    assert_eq!(seen, sorted(expected));
     let note = format!(
         "{} environment variables of the caller were withheld; {} were passed",
         withheld.len(),
-        seen.iter()
-            .filter(|n| !matches!(n.as_str(), "PWD" | "OLDPWD" | "SHLVL" | "_"))
-            .count()
+        seen.len()
     );
     assert!(result.provider_notes.contains(&note), "{note}");
     let shown = format!("{result:?} {options:?}");
@@ -520,7 +689,7 @@ async fn only_allowlisted_names_reach_the_child(provider: Provider) {
     options.parent_env = Some(env);
     options.env_pass = vec!["MY_SERVICE_API_TOKEN".into(), "JAVA_HOME".into()];
     let result = run_checked(rig.request(provider, "success"), options).await;
-    let seen = rig.env_names();
+    let seen = child_names(&rig);
     assert!(seen.contains(&"MY_SERVICE_API_TOKEN".to_string()));
     assert!(seen.contains(&"JAVA_HOME".to_string()));
     assert!(!seen.contains(&"EDITOR".to_string()));

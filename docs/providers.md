@@ -331,6 +331,7 @@ Command shape, in order:
 codex --disable plugins --disable apps --disable hooks --disable multi_agent
   -c approval_policy="never"
   -c sandbox_mode="<read-only|workspace-write|danger-full-access>"
+  -c allow_login_shell=false
   [-c sandbox_workspace_write.network_access=false
    -c sandbox_workspace_write.exclude_slash_tmp=true
    -c sandbox_workspace_write.exclude_tmpdir_env_var=true]   (write only)
@@ -343,6 +344,21 @@ codex --disable plugins --disable apps --disable hooks --disable multi_agent
 ```
 
 The adapter sets no environment variables.
+
+### Login shell
+
+Every Codex launch, in all modes, passes `-c allow_login_shell=false`. Without
+it, the shell commands Codex runs for the worker start as login shells and load
+the user's shell profile, so a worker's `env` listed names that delega did not
+pass, including secret-looking ones. With it, commands see the environment
+delega passed plus what Codex adds. Verified live on codex-cli 0.170.0 on
+2026-11-18: with the setting, `env` inside a worker listed 28 names, none
+secret-looking and none from a shell profile; without it, 63 names, 10
+secret-looking, although delega passed 9.
+
+`shell_environment_policy.inherit="core"` is deliberately not used. It would
+also drop variables the caller named with `--env`, which the caller asked the
+worker to have.
 
 ### Permission mapping
 
@@ -423,8 +439,12 @@ The policy is an allowlist. The provider receives only the variables below,
 taken from the parent environment when it has them, then `env_set`, then the
 adapter's own variables. Everything else is withheld, whatever its name.
 
-1. **Base.** `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `TERM`,
-   `TMPDIR`, `TZ`, every name starting with `LC_`, the base directory variables
+1. **Base.** `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`,
+   `TERM`, `TMPDIR`, `TZ`, the locale categories `LC_ALL`, `LC_COLLATE`,
+   `LC_CTYPE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`,
+   `LC_ADDRESS`, `LC_IDENTIFICATION`, `LC_MEASUREMENT`, `LC_NAME`, `LC_PAPER` and
+   `LC_TELEPHONE` (listed by name, so another name that starts with `LC_` is
+   withheld), the base directory variables
    `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`,
    and the switches `NO_COLOR` and `CI`. The `XDG_*` variables are locations,
    so a worker finds the same configuration and cache as the caller's shell
@@ -432,7 +452,7 @@ adapter's own variables. Everything else is withheld, whatever its name.
    None of these carries a secret.
 2. **Network.** `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` in upper
    and lower case, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS`.
-3. **The provider's own.** For Claude Code, `CLAUDECODE`, `CLAUDE_*` and
+3. **The provider's own.** For Claude Code, `CLAUDE_*` and
    `ANTHROPIC_*`; for Codex, `CODEX_*` and `OPENAI_*`; in each case minus the
    variables that describe the calling session (group below). The other
    provider's variables are not passed, so a Claude Code worker does not see
@@ -447,7 +467,11 @@ adapter's own variables. Everything else is withheld, whatever its name.
    a mistaken `NAME=value` would put a value in it. A named variable may belong
    to the other provider. Naming a variable whose name looks like a secret (see
    below) is allowed, because the caller asked, and the result carries a
-   `provider_notes` entry naming each such variable.
+   `provider_notes` entry naming each such variable. A name that group 1, 2
+   or 3 already passes is described under that group, not here, and gets no
+   note. A name given in both forms is set (group 5) and listed and noted only
+   as set. A name delega itself sets for the provider (group 5) is `refused`
+   with kind `forbidden_env_name`, in either form, instead of being dropped.
 5. **Set by the caller or the adapter.** `env_set`, which the CLI fills from
    `--env NAME=VALUE`, sets variables after the rules above, whatever the parent
    environment holds. The names are checked as in group 4: an invalid,
@@ -462,11 +486,19 @@ take that session's identity. A name is a calling-session variable when it is
 one of `AI_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`,
 `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`,
 `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`,
-`CLAUDE_PID`, `CLAUDE_CODE_MESSAGING_SOCKET`, or starts with `CLAUDE_CODE_` and
-contains `SESSION`, `MESSAGING` or `BRIDGE`. Other `CLAUDE_*` and `ANTHROPIC_*`
-names are configuration and pass to a Claude Code run: an API key or base URL,
-`CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`. No variable a calling Codex
-session sets is known, so none is listed for Codex.
+`CLAUDE_PID`, `CLAUDE_CODE_MESSAGING_SOCKET`; or starts with `CLAUDE_CODE_` and
+contains `SESSION`, `MESSAGING` or `BRIDGE`, has `SSE` as a whole word between
+underscores (`CLAUDE_CODE_SSE_PORT`), or ends in `_PORT`, `_SOCKET` or `_PID`;
+or is one of the variables Codex sets for the commands it runs, which describe
+a calling Codex session or tool call: `CODEX_SANDBOX`,
+`CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`,
+`CODEX_TOOL_CALL_ID`, `CODEX_CI`, `CODEX_VERSION` and
+`CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS` (seen inside a worker's command
+environment on codex-cli 0.170.0). These are withheld from workers of both
+providers. Other `CLAUDE_*` and `ANTHROPIC_*` names are configuration and pass
+to a Claude Code run: an API key or base URL, `CLAUDE_CONFIG_DIR`,
+`CLAUDE_CODE_OAUTH_TOKEN`. `CODEX_HOME`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`
+and other account and configuration names pass to a Codex run.
 
 Consequences for a caller:
 
@@ -536,6 +568,7 @@ each.
 | Assumption | Conservative choice |
 | --- | --- |
 | `full` for Claude Code needs no `--permission-mode bypassPermissions` | The nine built-in tools are allowed under `dontAsk`, the mechanism the earlier project already used. |
+| Codex's own default exclusion of secret-looking variable names, which applies to the environment of the commands it runs, does not drop a variable the caller passed with `--env` | Not tested. If it does, a named secret-looking variable reaches Codex but not its commands. |
 | Codex honours `sandbox_workspace_write.network_access`, `exclude_slash_tmp` and `exclude_tmpdir_env_var` given with `-c` | They only narrow the sandbox. An unknown key would fail the run. |
 | A declined command is `item.completed` with `status: "declined"` | Only those are listed in `permissions.denied`, and a note says other blocks are not. |
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
