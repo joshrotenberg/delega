@@ -22,6 +22,9 @@ use super::program;
 use super::refusal::Refusal;
 use super::run::probe;
 
+/// Doctor's verdicts follow the refusals a run gives: a problem blocks `run`
+/// only where a run is refused for it.
+///
 /// Problem kind: the version probe exited with an error, was ended by a signal
 /// or could not be started.
 pub const VERSION_PROBE_FAILED: &str = "version_probe_failed";
@@ -38,6 +41,9 @@ pub enum Blocks {
     CommandGrants,
     /// Runs still start, but each would report its cleanup as not confirmed.
     Cleanup,
+    /// No run is refused or changed. It is a warning: the provider did not
+    /// answer `--version`, which a run records only as an absent version.
+    Nothing,
 }
 
 /// Something that would stop a run.
@@ -57,10 +63,14 @@ pub struct Problem {
 
 impl Problem {
     fn run(kind: &str, message: impl Into<String>) -> Self {
+        Self::new(Blocks::Run, kind, message)
+    }
+
+    fn new(blocks: Blocks, kind: &str, message: impl Into<String>) -> Self {
         Self {
             kind: kind.to_string(),
             message: message.into(),
-            blocks: Blocks::Run,
+            blocks,
         }
     }
 }
@@ -113,7 +123,8 @@ pub struct ProviderCheck {
     pub provider: Provider,
     /// The executable a run would use, or null when none was found.
     pub executable: Option<String>,
-    /// Where the lookup found it: the override variable's name, or `PATH`.
+    /// Where the lookup found it: the override variable's name, `PATH`, or
+    /// `option` when a library caller set `ProviderOptions::executable`.
     pub executable_source: Option<String>,
     /// The first line of `--version` output, or null when there was none.
     pub version: Option<String>,
@@ -218,24 +229,35 @@ async fn probe_version(plan: &Plan, found: &mut ProviderCheck, problems: &mut Ve
         &CancellationToken::new(),
     )
     .await;
+    // A run records an absent version and goes on; only a Claude run that
+    // grants exact commands is refused for it.
+    let blocks = if plan.provider == Provider::Claude {
+        Blocks::CommandGrants
+    } else {
+        Blocks::Nothing
+    };
     let failure = match &report.ending {
         Ending::Exited { code: 0 } => None,
-        Ending::Exited { code } => Some(Problem::run(
+        Ending::Exited { code } => Some(Problem::new(
+            blocks,
             VERSION_PROBE_FAILED,
             format!("`--version` exited with code {code}"),
         )),
-        Ending::TimedOut { limit } => Some(Problem::run(
+        Ending::TimedOut { limit } => Some(Problem::new(
+            blocks,
             VERSION_PROBE_TIMED_OUT,
             format!(
                 "`--version` did not answer within {} s",
                 limit.as_secs().max(1)
             ),
         )),
-        Ending::FailedToStart { .. } => Some(Problem::run(
+        Ending::FailedToStart { .. } => Some(Problem::new(
+            blocks,
             VERSION_PROBE_FAILED,
             "the executable could not be started",
         )),
-        _ => Some(Problem::run(
+        _ => Some(Problem::new(
+            blocks,
             VERSION_PROBE_FAILED,
             "`--version` ended abnormally",
         )),
@@ -259,7 +281,7 @@ async fn probe_version(plan: &Plan, found: &mut ProviderCheck, problems: &mut Ve
         required_version: format!("{a}.{b}.{c}"),
         available,
     });
-    // A failed probe is already a problem for every run; a version that
+    // A failed probe is already reported, with the same effect; a version that
     // answered but is too old or unreadable stops only exact command grants.
     if probed && !available {
         problems.push(Problem {

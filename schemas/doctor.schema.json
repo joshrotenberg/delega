@@ -82,6 +82,11 @@
           "description": "Runs still start, but each would report its cleanup as not confirmed.",
           "type": "string",
           "const": "cleanup"
+        },
+        {
+          "description": "No run is refused or changed. It is a warning: the provider did not\nanswer `--version`, which a run records only as an absent version.",
+          "type": "string",
+          "const": "nothing"
         }
       ]
     },
@@ -302,7 +307,7 @@
           ]
         },
         "executable_source": {
-          "description": "Where the lookup found it: the override variable's name, or `PATH`.",
+          "description": "Where the lookup found it: the override variable's name, `PATH`, or\n`option` when a library caller set `ProviderOptions::executable`.",
           "type": [
             "string",
             "null"
@@ -334,7 +339,7 @@
       "type": "object",
       "properties": {
         "blocks": {
-          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands) or `cleanup`\n(runs start, but cleanup cannot be confirmed).",
+          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands) or `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
           "$ref": "#/$defs/Blocks"
         },
         "kind": {

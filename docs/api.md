@@ -330,7 +330,8 @@ value, a deny rule or the content of a file.
 It reports, for `claude` and `codex` each:
 
 - the executable a run would use and where it came from (`DELEGA_CLAUDE_BIN` or
-  `DELEGA_CODEX_BIN`, or `PATH`);
+  `DELEGA_CODEX_BIN`, or `PATH`; a library caller that sets
+  `ProviderOptions::executable` gets `option`);
 - the version from the probe, and for Claude Code whether the command hook
   interface is available (2.1.325 or later, which `--allow-command` needs); Codex
   has no minimum;
@@ -348,13 +349,16 @@ executable with their digests, as `delega version --output json` lists them; and
 whether process inspection works, by running one `ps` listing as cleanup does.
 
 **Problems.** Each problem has a stable `kind`, a message, the provider it is
-about (null when it is about the whole system) and what it `blocks`:
+about (null when it is about the whole system) and what it `blocks`: `run`,
+`command_grants`, `cleanup`, or `nothing` (a warning: no run is refused). Doctor's
+verdicts always match the refusals `run` would give: a problem blocks `run` only
+where a run is refused for it.
 
 | Kind | Blocks | Meaning |
 | --- | --- | --- |
 | `provider_not_found` | `run` | No executable by the lookup, or the override names none. |
-| `version_probe_failed` | `run` | `--version` exited with an error, was ended by a signal or could not be started. |
-| `version_probe_timed_out` | `run` | `--version` did not answer in five seconds. |
+| `version_probe_failed` | `command_grants` for Claude, `nothing` for Codex | `--version` exited with an error, was ended by a signal or could not be started. A run records no version and goes on; only a Claude run that grants exact commands is refused. |
+| `version_probe_timed_out` | `command_grants` for Claude, `nothing` for Codex | `--version` did not answer in five seconds. Same effect as a failed probe. |
 | `unsupported_provider_version` | `command_grants` | Claude Code is older than 2.1.325 or its version could not be read, so a run with `--allow-command` is refused. Other runs go ahead. |
 | `settings_unreadable` | `run` | A Claude Code settings file in the user's or the current directory's places exists and cannot be used, so every Claude run here is refused. The message names the file. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound, so every Claude run here is refused. |
@@ -364,7 +368,7 @@ Another refusal a run would give while it is built, such as a settings argument
 over its bound, is reported under its own kind and blocks `run`. A provider is
 `ready` when no problem blocks `run` for it.
 
-**Output.** Text is the default. `--output json` prints one versioned object
+**Output.** Text is the default; control characters in a provider's version text are shown as `?`. `--output json` prints one versioned object
 (`schema_version` 1) with `ready`, `version`, `cwd`, `providers`,
 `process_inspection`, `limits`, `problems` and `skills`; its JSON Schema is
 `schemas/doctor.schema.json`, generated from the types, checked by a test and

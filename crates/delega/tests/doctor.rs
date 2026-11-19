@@ -243,30 +243,64 @@ fn no_executable_for_either_provider_exits_one() {
 }
 
 #[test]
-fn a_version_probe_that_fails_is_a_problem_that_stops_every_run_with_it() {
+fn a_failing_version_probe_blocks_only_command_grants_for_claude_as_run_does() {
     let rig = Rig::new();
     let failing = script(&rig, "failing-claude", "exit 3");
     let out = doctor_with(&rig, &["--output", "json"], |c| {
         c.env("DELEGA_CLAUDE_BIN", &failing);
     });
-    // Codex still works, so a run can go ahead.
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     let report = json_of(&out);
     assert_eq!(
         problem_kinds(&report),
         [("claude".to_string(), "version_probe_failed".to_string())]
     );
-    assert_eq!(report["problems"][0]["blocks"], "run");
+    assert_eq!(report["problems"][0]["blocks"], "command_grants");
     let claude = provider(&report, "claude");
-    assert_eq!(claude["ready"], false);
+    // `run` goes ahead without a version unless exact commands are granted.
+    assert_eq!(claude["ready"], true);
     assert_eq!(claude["version"], Value::Null);
-    assert!(claude["executable"].is_string());
-    let both = doctor_with(&rig, &[], |c| {
+    assert_eq!(claude["command_hook"]["available"], false);
+    // Codex: a failing probe is a warning that blocks nothing.
+    let both = doctor_with(&rig, &["--output", "json"], |c| {
         c.env("DELEGA_CLAUDE_BIN", &failing)
             .env("DELEGA_CODEX_BIN", &failing);
     });
-    assert_eq!(both.status.code(), Some(1));
-    assert!(text(&both.stdout).contains("version_probe_failed"));
+    assert_eq!(both.status.code(), Some(0));
+    let report = json_of(&both);
+    let codex_problem = report["problems"]
+        .as_array()
+        .expect("problems")
+        .iter()
+        .find(|p| p["provider"] == "codex")
+        .expect("codex problem");
+    assert_eq!(codex_problem["kind"], "version_probe_failed");
+    assert_eq!(codex_problem["blocks"], "nothing");
+    assert_eq!(provider(&report, "codex")["ready"], true);
+}
+
+#[test]
+fn a_version_with_escape_sequences_is_shown_without_them_in_text() {
+    let rig = Rig::new();
+    let noisy = script(
+        &rig,
+        "noisy-claude",
+        r"printf '2.1.400 \033[31mred\033]0;title\007\n'",
+    );
+    let out = doctor_with(&rig, &[], |c| {
+        c.env("DELEGA_CLAUDE_BIN", &noisy);
+    });
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        !out.stdout.contains(&0x1b) && !out.stdout.contains(&0x07),
+        "control characters reached the output"
+    );
+    assert!(text(&out.stdout).contains("version: 2.1.400 ?[31mred?]0;title?"));
+    // JSON escapes them.
+    let json = doctor_with(&rig, &["--output", "json"], |c| {
+        c.env("DELEGA_CLAUDE_BIN", &noisy);
+    });
+    assert!(!json.stdout.contains(&0x1b));
 }
 
 #[test]
@@ -456,5 +490,6 @@ fn a_version_probe_that_does_not_answer_is_reported_as_timed_out() {
         problem_kinds(&report),
         [("codex".to_string(), "version_probe_timed_out".to_string())]
     );
-    assert_eq!(provider(&report, "codex")["ready"], false);
+    assert_eq!(report["problems"][0]["blocks"], "nothing");
+    assert_eq!(provider(&report, "codex")["ready"], true);
 }

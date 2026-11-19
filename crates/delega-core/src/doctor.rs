@@ -137,7 +137,8 @@ pub struct ReportedProblem {
     pub message: String,
     /// What the problem stops: `run` (every run with the provider),
     /// `command_grants` (only runs that grant exact commands) or `cleanup`
-    /// (runs start, but cleanup cannot be confirmed).
+    /// (runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no
+    /// run is refused).
     pub blocks: Blocks,
 }
 
@@ -323,6 +324,7 @@ fn blocks_text(blocks: Blocks) -> &'static str {
         Blocks::Run => "stops every run",
         Blocks::CommandGrants => "stops runs that grant exact commands",
         Blocks::Cleanup => "cleanup would not be confirmed",
+        Blocks::Nothing => "warning, no run is refused",
     }
 }
 
@@ -335,7 +337,16 @@ fn provider_text(out: &mut String, found: &ProviderCheck) {
         }
         _ => out.push_str("  executable: not found\n"),
     }
-    let version = found.version.as_deref().unwrap_or("not reported");
+    let version = found.version.as_deref().map_or_else(
+        || "not reported".to_string(),
+        |v| {
+            // The text is the provider's own: show control characters as `?`
+            // so an escape sequence cannot reach the terminal.
+            v.chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect()
+        },
+    );
     let _ = writeln!(out, "  version: {version}");
     if let Some(hook) = &found.command_hook {
         let _ = writeln!(
