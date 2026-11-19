@@ -20,7 +20,8 @@ use crate::contract::result::Cleanup;
 use super::limits::{
     CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
     EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT,
-    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
+    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL, TERM_SWEEP_RETRY_MAX_PAUSE,
+    TERM_SWEEP_RETRY_PAUSE,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -200,28 +201,67 @@ impl Shared {
     }
 
     /// The polite stop: TERM to the group, then CONT so a stopped process
-    /// receives it, then TERM (and CONT) to everything a sweep finds outside
-    /// the group. The group is signalled first and without waiting.
-    pub(super) async fn terminate(&self) {
+    /// receives it, then TERM (and CONT) to everything one sweep finds outside
+    /// the group. The group is signalled first and without waiting. Returns
+    /// whether that sweep completed within its budget; when it did not, no
+    /// descendant outside the group has been signalled yet and
+    /// [`Shared::retry_sweeps`] must follow.
+    pub(super) async fn terminate(&self) -> bool {
         self.signal_group(Signal::TERM);
         self.signal_group(Signal::CONT);
-        self.signal_swept(Signal::TERM).await;
+        self.signal_swept(Signal::TERM).await
+    }
+
+    /// Repeat a sweep that did not complete within its budget at the stop
+    /// (TERM at the stop, KILL at the grace). The first attempt is bounded so
+    /// the group signal and the owner never wait on a listing; this one runs
+    /// beside the owner's reads, which it does not block, so it is not bounded
+    /// by the budget. Each listing is bounded by `PS_TIMEOUT` inside the lister.
+    /// It runs one sweep at a time, so at most one listing of its own is in
+    /// flight, and a failed or timed-out listing is retried after a pause that
+    /// doubles from `TERM_SWEEP_RETRY_PAUSE` to `TERM_SWEEP_RETRY_MAX_PAUSE`,
+    /// so a `ps` that is always slower than the budget still gets one answer,
+    /// and one that fails at once is not run in a tight loop. Each retry counts
+    /// in `inspection.attempts`. A sweep signals everything it found from one
+    /// snapshot with no await between the snapshot and the signals, so the
+    /// first sweep that returns a listing has signalled what it found and ends
+    /// the repeats: a descendant gets one such signal from here. The caller
+    /// drops this future when the grace period ends (a TERM retry) or when the
+    /// loop ends, so it never outlives the run.
+    pub(super) async fn retry_sweeps(&self, signal: Signal) {
+        let mut pause = TERM_SWEEP_RETRY_PAUSE;
+        loop {
+            tokio::time::sleep(pause).await;
+            if self.sweep_and_signal(signal).await {
+                return;
+            }
+            pause = (pause * 2).min(TERM_SWEEP_RETRY_MAX_PAUSE);
+        }
     }
 
     /// The hard stop: KILL to the group, then to everything a sweep finds.
-    pub(super) async fn kill_all(&self) {
+    /// Returns whether the sweep completed within its budget; when it did not,
+    /// [`Shared::retry_sweeps`] with KILL must follow.
+    pub(super) async fn kill_all(&self) -> bool {
         self.signal_group(Signal::KILL);
-        self.signal_swept(Signal::KILL).await;
+        self.signal_swept(Signal::KILL).await
     }
 
     /// Signal what a fresh sweep finds, within a budget so a slow or hung
-    /// listing cannot hold the owner. A cleanup pass signals again later.
-    async fn signal_swept(&self, signal: Signal) {
-        let _ = tokio::time::timeout(self.descendant_signal_budget, async {
-            let result = self.tree.lock().await.sweep(Some(signal)).await;
-            self.note_sweep(signal, result);
-        })
-        .await;
+    /// listing cannot hold the owner. Returns whether the sweep produced a
+    /// listing in time (and so signalled what it found).
+    async fn signal_swept(&self, signal: Signal) -> bool {
+        tokio::time::timeout(self.descendant_signal_budget, self.sweep_and_signal(signal))
+            .await
+            .unwrap_or(false)
+    }
+
+    /// One sweep with no budget of its own: whether it returned a listing.
+    async fn sweep_and_signal(&self, signal: Signal) -> bool {
+        let result = self.tree.lock().await.sweep(Some(signal)).await;
+        let listed = result.is_ok();
+        self.note_sweep(signal, result);
+        listed
     }
 
     /// Record a sweep that signalled: the signal log, the session members
@@ -494,7 +534,7 @@ impl OwnedProcess {
         }
         let first_term = term_at.unwrap_or_else(Instant::now);
         if term_at.is_none() && !hard_stop {
-            shared.terminate().await;
+            let _ = shared.terminate().await;
         }
         let mut next_kill = if hard_stop {
             Instant::now()

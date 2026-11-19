@@ -70,10 +70,20 @@ pub const MAX_ERROR_CHARS: usize = 1000;
 /// deadline that has already passed still allows one inspection and verdict.
 pub const FINAL_CLEANUP_PASS: Duration = Duration::from_millis(1000);
 
-/// How long a stop spends signalling descendants before it moves on. The group
-/// is signalled first and without waiting; this only bounds the part that
-/// needs a process listing, so a slow or hung listing cannot hold the owner.
+/// How long one sweep that signals descendants may take before the owner moves
+/// on. The group is signalled first and without waiting; this only bounds the
+/// part that needs a process listing, so a slow or hung listing cannot hold the
+/// owner. A stop sweep that runs out of it is repeated without this bound, beside
+/// the owner's reads (see `TERM_SWEEP_RETRY_PAUSE`).
 pub const DESCENDANT_SIGNAL_BUDGET: Duration = Duration::from_millis(250);
+/// First pause before the repeat of a stop sweep (TERM, or KILL after the
+/// grace) whose bounded first attempt did not complete within
+/// `DESCENDANT_SIGNAL_BUDGET`. The repeat runs one unbounded sweep at a time
+/// and pauses again, doubling up to `TERM_SWEEP_RETRY_MAX_PAUSE`, only after a
+/// failed or timed-out listing.
+pub const TERM_SWEEP_RETRY_PAUSE: Duration = Duration::from_millis(100);
+/// Longest pause between repeats of a stop sweep.
+pub const TERM_SWEEP_RETRY_MAX_PAUSE: Duration = Duration::from_millis(2000);
 /// Consecutive failed listings during cleanup after which inspection is
 /// treated as unavailable and cleanup finishes with what it can check.
 pub const INSPECTION_FAILURE_LIMIT: u32 = 3;

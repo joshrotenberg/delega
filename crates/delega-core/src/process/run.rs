@@ -19,6 +19,7 @@ use super::limits::{FAR_FUTURE, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
+use super::sys::Signal;
 use super::tap::TapWorker;
 
 /// Warning recorded when the owner closed pipes that something still held.
@@ -212,6 +213,14 @@ async fn drive(
     // runs beside the reads so a wait for it never stalls the output.
     let mut exit_listing: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
         None;
+    // The TERM sweep of the stop when its first attempt ran out of budget. It
+    // runs beside the reads, so a slow listing never stalls the output, and it
+    // is dropped before the KILL so it holds no lock the KILL sweep needs.
+    let mut term_retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        None;
+    // The same for the KILL sweep after the grace.
+    let mut kill_retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        None;
 
     loop {
         if exited && stdout.is_none() && stderr.is_none() {
@@ -230,7 +239,7 @@ async fn drive(
                         }
                         ending = Some(Ending::Interrupted);
                         term_at = Some(Instant::now());
-                        shared.terminate().await;
+                        term_retry = retry_for(shared, Signal::TERM, shared.terminate().await);
                     }
                 }
             },
@@ -244,13 +253,14 @@ async fn drive(
                         }
                         ending = Some(Ending::TimedOut { limit: spec.time_limit });
                         term_at = Some(Instant::now());
-                        shared.terminate().await;
+                        term_retry = retry_for(shared, Signal::TERM, shared.terminate().await);
                     }
                 }
             },
             _ = tokio::time::sleep_until(term_at.map(|t| t + spec.stop_grace).unwrap_or_else(far)),
                 if term_at.is_some() && !kill_sent => {
-                shared.kill_all().await;
+                term_retry = None;
+                kill_retry = retry_for(shared, Signal::KILL, shared.kill_all().await);
                 kill_sent = true;
                 drain_deadline = Some(Instant::now() + spec.drain_bound);
             },
@@ -280,7 +290,15 @@ async fn drive(
                 if exit_listing.is_some() => {
                 exit_listing = None;
                 term_at = Some(Instant::now());
-                shared.terminate().await;
+                term_retry = retry_for(shared, Signal::TERM, shared.terminate().await);
+            },
+            _ = async { term_retry.as_mut().expect("guarded").await },
+                if term_retry.is_some() => {
+                term_retry = None;
+            },
+            _ = async { kill_retry.as_mut().expect("guarded").await },
+                if kill_retry.is_some() => {
+                kill_retry = None;
             },
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
                 if stdout.is_some() => match n {
@@ -317,8 +335,10 @@ async fn drive(
         // The pipes closed before the listing finished; the signals still wait.
         listing.await;
         term_at = Some(Instant::now());
-        shared.terminate().await;
+        let _ = shared.terminate().await;
     }
+    drop(term_retry);
+    drop(kill_retry);
     if !exited {
         owner.exit_rx = Some(exit_rx);
     }
@@ -334,6 +354,20 @@ async fn drive(
         term_at,
         hard_stop: false,
     }
+}
+
+/// The repeat of a stop sweep, when the stop's own bounded sweep did not
+/// complete.
+fn retry_for(
+    shared: &Arc<Shared>,
+    signal: Signal,
+    completed: bool,
+) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    if completed {
+        return None;
+    }
+    let shared = shared.clone();
+    Some(Box::pin(async move { shared.retry_sweeps(signal).await }))
 }
 
 #[allow(clippy::too_many_arguments)]
