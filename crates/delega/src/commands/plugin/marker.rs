@@ -72,6 +72,11 @@ fn plain_relative(path: &str) -> bool {
 /// Whether `init` of this build can write `path`: the marketplaces, the
 /// executable and the plugin's manifests, identity and skills. Anything else a
 /// marker names is not ours to delete.
+///
+/// Skill names are `[a-z0-9-]`, as the skill parser requires; an uppercase
+/// name could alias a real skill on a case-insensitive filesystem. A path that
+/// a later build stops writing must stay allowed here, or markers written by
+/// older builds become invalid and both commands stop.
 pub fn writable(path: &str) -> bool {
     const FIXED: [&str; 3] = [
         ".claude-plugin/marketplace.json",
@@ -100,7 +105,7 @@ pub fn writable(path: &str) -> bool {
         (parts.next(), parts.next(), parts.next(), parts.next()),
         (Some("skills"), Some(name), Some("SKILL.md"), None)
             if !name.is_empty()
-                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     )
 }
 

@@ -427,7 +427,7 @@ fn the_managed_files_have_the_documented_bytes() {
     }
     // Both MCP manifests start the copied executable with `mcp`.
     let claude = read_json(&plugin.join(".mcp.json"));
-    // No `cwd`: each host starts the server in its own default directory.
+    // No `cwd`: the host decides the server's working directory.
     assert!(claude["mcpServers"]["delega"].get("cwd").is_none());
     assert_eq!(
         claude["mcpServers"]["delega"]["command"],
@@ -993,6 +993,8 @@ fn a_marker_naming_a_path_this_delega_does_not_write_is_refused() {
         "plugin/delega/notes.txt",
         "plugin/delega/skills/run/other.md",
         "plugin/delega/skills/a b/SKILL.md",
+        "plugin/delega/skills/RUN/SKILL.md",
+        "plugin/delega/skills/my_skill/SKILL.md",
         "plugin/other/plugin.json",
     ] {
         let rig = installed_for_both();

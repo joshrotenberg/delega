@@ -436,25 +436,40 @@ directory that does not exist is nothing to do and runs no host command.
 nothing. For `uninstall` it does not read the listings, so it does not verify
 ownership.
 
-The manifests set no `cwd`, so each host starts the server in its own default
-directory, normally the project, and not in the plugin directory or a host's
-cached copy of it. A `start` without `cwd` uses the server's working directory,
-so a caller should always pass `cwd` explicitly.
+The manifests set no `cwd`. A host decides the server's working directory: the
+Agent Plugins specification makes it the plugin root when `cwd` is omitted, so on
+Codex the server starts in the plugin's directory, and Claude Code does not
+document it for plugin MCP servers. A `start` without `cwd` runs the worker in
+the server's working directory, which is whatever directory the host gave the
+server, so here it could be the plugin's directory. A caller should pass `cwd`
+explicitly, always for a `write` worker.
 
-Removing by hand: if the managed directory was deleted by hand, `uninstall`
-reports it absent and runs no host command, because without the marker it cannot
-tell whose registration it would remove. Remove the registrations with the
-hosts' own commands, from a neutral directory: `claude plugin uninstall
-delega@delega-local --scope user` and `claude plugin marketplace remove
-delega-local --scope user`; `codex plugin remove delega@delega-local` and
-`codex plugin marketplace remove delega-local`. `uninstall` also removes the
-managed directory itself when it ends up empty, including an empty directory the
-user chose with `--install-dir`. It deletes only files the marker lists, and a
-marker that names a path `init` of this build cannot write (anything outside the
-marketplaces, the executable, the plugin's manifests, `IDENTITY.json` and
-`skills/<name>/SKILL.md`) is refused as invalid, not deleted. There is no lock:
-running `init` or `uninstall` concurrently, or against the same directory from
-two sessions, is not supported.
+Claude Code puts an enabled plugin's `bin/` directory on the Bash tool's `PATH`,
+so `delega` becomes a bare command in Claude Code sessions. Claude.ai and Cowork
+refuse to install a plugin that has a top-level `bin/`, and this plugin has one
+(`plugin/delega/bin/`), so it cannot be installed there.
+
+The installed plugin starts `delega mcp` with only the argument `mcp`, so its
+workers get only the fixed environment allowlist and no `--env` names or values.
+
+Cleanup and limits:
+
+- **Removal by hand.** If the managed directory was deleted by hand, `uninstall`
+  reports it absent and runs no host command, because without the marker it cannot
+  tell whose registration it would remove. Remove the registrations with the
+  hosts' own commands, from a neutral directory: `claude plugin uninstall
+  delega@delega-local --scope user` and `claude plugin marketplace remove
+  delega-local --scope user`; `codex plugin remove delega@delega-local` and
+  `codex plugin marketplace remove delega-local`.
+- **Empty directory.** `uninstall` removes the managed directory when it ends up
+  empty, including an empty one chosen with `--install-dir`. It deletes only the
+  files the marker lists, so other files keep the directory.
+- **Marker paths.** A marker that names a path `init` of this build cannot write
+  (anything outside the marketplaces, the executable, the plugin's manifests,
+  `IDENTITY.json` and `skills/<name>/SKILL.md` with a name of `a-z`, `0-9` and
+  `-`) is refused as invalid, not deleted.
+- **No lock.** Do not run `init` or `uninstall` concurrently on one directory;
+  it is not supported.
 
 After `init`, each host needs a reload to start the new server: in Claude Code,
 start a new session or reconnect `plugin:delega:delega` from `/mcp`

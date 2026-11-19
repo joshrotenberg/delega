@@ -32,9 +32,10 @@ fn document(value: Value) -> Vec<u8> {
 }
 
 /// The MCP server entry: the copied executable with the argument `mcp`. There
-/// is no `cwd`: each host starts the server in its own default, so a worker
-/// started without a `cwd` does not run in the plugin directory or in a host's
-/// cached copy of it.
+/// is no `cwd`, so the server's working directory is whatever the host
+/// defines. The Agent Plugins specification makes it the plugin root when `cwd`
+/// is omitted, so on Codex a `start` without `cwd` would run a worker in the
+/// plugin's directory. Callers must pass `cwd`.
 fn mcp_server(command: &str) -> Value {
     json!({
         "mcpServers": {
