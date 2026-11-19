@@ -92,6 +92,18 @@ pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
 /// Where `ps` is looked for, in order.
 const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
 
+/// The deadline for one `ps` run. A test build allows far longer than any
+/// listing takes, so a busy machine cannot turn a slow `ps` into a failed
+/// inspection; the tests about a failed or hung listing inject their own
+/// lister instead.
+fn ps_timeout() -> std::time::Duration {
+    if cfg!(test) {
+        std::time::Duration::from_secs(60)
+    } else {
+        PS_TIMEOUT
+    }
+}
+
 /// Run bounded process inspection with the first of `programs` that starts.
 pub(crate) async fn list_processes_from(
     programs: &[PathBuf],
@@ -150,7 +162,7 @@ pub(crate) async fn list_processes_from(
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
-    let result = match tokio::time::timeout(PS_TIMEOUT, read).await {
+    let result = match tokio::time::timeout(ps_timeout(), read).await {
         Ok(result) => result.and_then(|s| validate_listing(&s, std::process::id())),
         Err(_) => Err(InspectError::TimedOut),
     };

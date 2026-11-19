@@ -21,7 +21,7 @@ async fn a_fast_child_is_identified_when_the_first_snapshot_follows_its_exit() {
         let pid_file = pid_file.clone();
         let confirmed = confirmed.clone();
         Box::pin(async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
             loop {
                 let pid = std::fs::read_to_string(&pid_file)
                     .ok()
@@ -39,7 +39,7 @@ async fn a_fast_child_is_identified_when_the_first_snapshot_follows_its_exit() {
             }
         })
     });
-    let spec = ProcessSpec::new("/bin/sh", Duration::from_secs(3))
+    let spec = ProcessSpec::new("/bin/sh", Duration::from_secs(60))
         .args(["-c", "printf '%s' $$ > leader; printf '[]'; exit 0"])
         .cwd(s.dir())
         .env(crate::process::EnvPolicy::empty())

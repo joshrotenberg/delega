@@ -1,10 +1,34 @@
 //! Shared helpers: scratch directory, fake children, process checks.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use tokio::sync::watch;
 
 use crate::process::sys::{self, Signal};
+use crate::process::tree::{Lister, list_processes};
 use crate::process::{EnvPolicy, ProcessHandle, ProcessReport, ProcessSpec};
+
+/// How long a fixture waits for an event it does not control (a pid file, a
+/// marker, a process state). The wait costs nothing when the event arrives, so
+/// it is far longer than any load makes it take; it only ends a test whose
+/// event never comes, with a message that says what was awaited.
+pub(super) const AWAIT: Duration = Duration::from_secs(90);
+
+/// Poll `ready` every 10 ms until it holds, for at most [`AWAIT`]. `what` names
+/// the event for the failure message.
+pub(super) async fn await_event(what: &str, mut ready: impl FnMut() -> bool) {
+    let began = Instant::now();
+    while !ready() {
+        assert!(
+            began.elapsed() < AWAIT,
+            "waited {AWAIT:?} and never saw: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 /// A private directory per test for pid files and markers.
 pub(super) struct Scratch {
@@ -29,28 +53,25 @@ impl Scratch {
     /// Wait until a script has written a pid to the named file.
     pub(super) async fn pid(&self, name: &str) -> i32 {
         let path = self.path(name);
-        for _ in 0..1000 {
-            if let Some(pid) = std::fs::read_to_string(&path)
+        let read = || {
+            std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|text| text.trim().parse::<i32>().ok())
-            {
-                return pid;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the script never wrote {name}");
+        };
+        await_event(&format!("the script writing a pid to {name}"), || {
+            read().is_some()
+        })
+        .await;
+        read().expect("the pid file was just read")
     }
 
     /// Wait until a file exists and is not empty.
     pub(super) async fn exists(&self, name: &str) {
         let path = self.path(name);
-        for _ in 0..1000 {
-            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the script never wrote {name}");
+        await_event(&format!("the script writing {name}"), || {
+            std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
+        })
+        .await;
     }
 
     /// The pid in a file that must already exist.
@@ -75,16 +96,19 @@ impl Drop for Reaper {
     }
 }
 
-/// A shell script as a child, in the scratch directory, with a short grace
-/// and drain so stop paths run quickly, and only `PATH` inherited.
+/// A shell script as a child, in the scratch directory, and only `PATH`
+/// inherited. The grace, the drain bound and the cleanup deadline are long
+/// compared with anything a loaded machine adds, so a run does not end by one
+/// of them unless the test makes it (a test about a child that ignores TERM
+/// pays the grace once, one second).
 pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpec {
     let mut spec = ProcessSpec::new("/bin/sh", limit)
         .args(["-c", script])
         .cwd(scratch.dir())
         .env(EnvPolicy::inherit_only(["PATH"]));
-    spec.stop_grace = Duration::from_millis(200);
-    spec.drain_bound = Duration::from_millis(500);
-    spec.cleanup_deadline = Duration::from_secs(8);
+    spec.stop_grace = Duration::from_secs(1);
+    spec.drain_bound = Duration::from_secs(10);
+    spec.cleanup_deadline = Duration::from_secs(120);
     spec
 }
 
@@ -100,16 +124,34 @@ pub(super) fn is_running(pid: i32) -> bool {
     !stat.is_empty() && !stat.starts_with('Z')
 }
 
-/// Wait up to five seconds for every pid to be gone, then assert it.
+/// [`is_running`] on a thread of its own. A `ps` run blocks, and under load it
+/// takes seconds; run on the runtime's thread it would also keep the owner task
+/// under test from running for just as long.
+pub(super) async fn is_running_async(pid: i32) -> bool {
+    tokio::task::spawn_blocking(move || is_running(pid))
+        .await
+        .expect("the ps task ended")
+}
+
+/// Wait for every pid to be gone (see [`AWAIT`]), then assert it.
 pub(super) async fn assert_gone(what: &str, pids: &[i32]) {
-    for _ in 0..500 {
-        if pids.iter().all(|pid| !is_running(*pid)) {
+    let began = Instant::now();
+    loop {
+        let mut alive = Vec::new();
+        for pid in pids {
+            if is_running_async(*pid).await {
+                alive.push(*pid);
+            }
+        }
+        if alive.is_empty() {
             return;
         }
+        assert!(
+            began.elapsed() < AWAIT,
+            "{what}: still running after {AWAIT:?}: {alive:?}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let alive: Vec<_> = pids.iter().filter(|pid| is_running(**pid)).collect();
-    panic!("{what}: still running: {alive:?}");
 }
 
 pub(super) fn assert_confirmed(report: &ProcessReport) {
@@ -160,26 +202,71 @@ pub(super) const WAIT_ESCAPED: &str =
 /// Wait until a process leads its own group, for tests that must not race the
 /// descendant's own `setsid`.
 pub(super) async fn wait_own_group(pid: i32) {
-    for _ in 0..500 {
-        let out = std::process::Command::new("/bin/ps")
-            .args(["-o", "pgid=", "-p", &pid.to_string()])
-            .output()
-            .expect("run ps");
-        if String::from_utf8_lossy(&out.stdout).trim() == pid.to_string() {
+    let began = Instant::now();
+    loop {
+        let own = tokio::task::spawn_blocking(move || {
+            let out = std::process::Command::new("/bin/ps")
+                .args(["-o", "pgid=", "-p", &pid.to_string()])
+                .output()
+                .expect("run ps");
+            String::from_utf8_lossy(&out.stdout).trim() == pid.to_string()
+        })
+        .await
+        .expect("the ps task ended");
+        if own {
             return;
         }
+        assert!(
+            began.elapsed() < AWAIT,
+            "waited {AWAIT:?} and never saw: process {pid} becoming a group leader"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("process {pid} never became a group leader");
 }
 
 /// Wait until the periodic scan has recorded `pid` as a tracked descendant.
 pub(super) async fn wait_tracked(handle: &ProcessHandle, pid: i32) {
-    for _ in 0..1000 {
-        if handle.tracked_pids().contains(&(pid as u32)) {
-            return;
+    await_event(&format!("the scan tracking {pid}"), || {
+        handle.tracked_pids().contains(&(pid as u32))
+    })
+    .await;
+}
+
+/// A lister that, while armed, does not answer until the gate is opened, and
+/// then reads the real table. It counts the calls that had to wait.
+#[derive(Clone)]
+pub(super) struct Held {
+    pub(super) armed: Arc<AtomicBool>,
+    pub(super) waiting: Arc<AtomicU32>,
+    open: watch::Sender<bool>,
+}
+
+impl Held {
+    pub(super) fn new(armed: bool) -> Self {
+        Self {
+            armed: Arc::new(AtomicBool::new(armed)),
+            waiting: Arc::new(AtomicU32::new(0)),
+            open: watch::channel(false).0,
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("the scan never tracked {pid}");
+
+    pub(super) fn lister(&self) -> Lister {
+        let held = self.clone();
+        Arc::new(move || {
+            let armed = held.armed.load(Ordering::SeqCst);
+            let waiting = held.waiting.clone();
+            let mut gate = held.open.subscribe();
+            Box::pin(async move {
+                if armed {
+                    waiting.fetch_add(1, Ordering::SeqCst);
+                    let _ = gate.wait_for(|open| *open).await;
+                }
+                list_processes().await
+            })
+        })
+    }
+
+    pub(super) fn release(&self) {
+        self.open.send_replace(true);
+    }
 }

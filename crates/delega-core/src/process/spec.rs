@@ -170,6 +170,56 @@ pub struct ProcessSpec {
     /// `limits::CAPTURE_INTERVAL`, so a test can rule a periodic scan out.
     #[cfg(test)]
     pub(crate) capture_interval: Option<Duration>,
+    /// The waits that depend on how fast `ps` answers. See [`Timings`].
+    pub(crate) timings: Timings,
+}
+
+/// The waits that depend on how fast `ps` answers and the size of the tap's
+/// queue, in one struct that every build compiles and the owner reads. A
+/// production spec has [`Timings::production`], the constants of `limits`. A
+/// test build starts every spec with [`Timings::generous`], waits far longer
+/// than any listing takes, so that a test about what happens when a listing
+/// is late says so explicitly (a short `stop_listing`, or a lister that waits
+/// for a gate, or the production values) and every other test is independent
+/// of speed. The one place that chooses is `ProcessSpec::new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Timings {
+    /// How long a requested stop waits for the listing before its first signal.
+    pub(crate) stop_listing: Duration,
+    /// How long the first signal after a natural exit waits for its listing.
+    pub(crate) exit_listing: Duration,
+    /// Least time the last cleanup pass gets.
+    pub(crate) final_cleanup_pass: Duration,
+    /// How long a signal waits for the sweep that follows it.
+    pub(crate) descendant_signal: Duration,
+    /// Chunks queued for the stdout tap.
+    pub(crate) tap_queue_chunks: usize,
+}
+
+impl Timings {
+    /// The values of [`limits`](super::limits).
+    pub(crate) const fn production() -> Self {
+        Self {
+            stop_listing: super::limits::STOP_LISTING_BUDGET,
+            exit_listing: super::limits::EXIT_LISTING_BUDGET,
+            final_cleanup_pass: super::limits::FINAL_CLEANUP_PASS,
+            descendant_signal: super::limits::DESCENDANT_SIGNAL_BUDGET,
+            tap_queue_chunks: super::limits::TAP_QUEUE_CHUNKS,
+        }
+    }
+
+    /// Waits no load exhausts, for tests that do not test a wait.
+    #[cfg(test)]
+    pub(crate) const fn generous() -> Self {
+        let long = Duration::from_secs(120);
+        Self {
+            stop_listing: long,
+            exit_listing: long,
+            final_cleanup_pass: long,
+            descendant_signal: long,
+            tap_queue_chunks: super::limits::TAP_QUEUE_CHUNKS,
+        }
+    }
 }
 
 impl ProcessSpec {
@@ -205,6 +255,10 @@ impl ProcessSpec {
             panic_in_loop: false,
             #[cfg(test)]
             capture_interval: None,
+            #[cfg(test)]
+            timings: Timings::generous(),
+            #[cfg(not(test))]
+            timings: Timings::production(),
         }
     }
 

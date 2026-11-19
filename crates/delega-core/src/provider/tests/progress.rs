@@ -1,8 +1,10 @@
 //! Live progress events, for each provider, against the fakes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use super::{Rig, both, run_checked};
+use super::{Rig, both, is_running, run_checked};
 use crate::contract::outcome::Outcome;
 use crate::contract::request::Provider;
 use crate::provider::{ProgressEvent, ProgressSink, ProviderOptions};
@@ -134,16 +136,59 @@ both!(
 );
 
 async fn a_slow_sink_loses_output_and_the_run_says_so(provider: Provider) {
+    // Proves: when the sink cannot take events the output is dropped whole
+    // chunks at a time, counted, announced before `Finished` and noted in the
+    // result. Not speed dependent: the sink is stuck on its first provider event until
+    // the fake has exited, the tap's queue holds two chunks, and the fake's
+    // output (about 1.8 MB, read in chunks of at most 64 KB, with at most one
+    // pipe's worth unread when it exits) is at least 25 chunks, so at least 20
+    // are dropped however fast anything runs.
     let rig = Rig::new();
     let mut options = rig.options(provider);
+    options.tap_queue_chunks = Some(2);
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink_events = events.clone();
+    let release = Arc::new(AtomicBool::new(false));
+    let sink_release = release.clone();
     let sink: ProgressSink = Arc::new(move |event| {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Only the events built from the provider's output, which come from the
+        // tap's thread, are held; the run's own events come from the run itself
+        // and must not wait.
+        if matches!(event, ProgressEvent::Provider { .. }) {
+            while !sink_release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         sink_events.lock().expect("lock").push(event);
     });
     options.progress = Some(sink);
+    // Released from a thread of its own: the run cannot end while the sink is
+    // stuck, so nothing on the runtime can be the one to release it.
+    let record = rig.record.clone();
+    let releaser = std::thread::spawn(move || {
+        // A fake that is slow because the machine is busy is waited for; one
+        // that never finishes is not waited for forever, so the run can end and
+        // the test fail with what it saw instead of hanging.
+        let give_up = Duration::from_secs(120);
+        let began = Instant::now();
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(record.join("pid"))
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                break Some(pid);
+            }
+            if began.elapsed() > give_up {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        while pid.is_some_and(is_running) && began.elapsed() < give_up {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        release.store(true, Ordering::SeqCst);
+    });
     let result = run_checked(rig.request(provider, "chatty"), options).await;
+    releaser.join().expect("the releasing thread");
     assert_eq!(result.outcome, Outcome::Completed);
 
     let events = events.lock().expect("lock").clone();
