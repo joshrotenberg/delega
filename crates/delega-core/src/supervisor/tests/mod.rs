@@ -12,6 +12,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -32,8 +33,48 @@ mod stops;
 mod stress;
 mod waits;
 
+/// How many of these tests may run at once. Each starts shell processes and
+/// polls them, so on a busy machine running them all in parallel with the
+/// timing-sensitive tests of the process layer makes those tests fail.
+const CONCURRENT_TESTS: usize = 3;
+
+static SLOTS: Slots = Slots {
+    free: Mutex::new(CONCURRENT_TESTS),
+    freed: Condvar::new(),
+};
+
+struct Slots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// A held slot. Dropping it lets the next test start.
+struct Slot;
+
+impl Slots {
+    fn take(&'static self) -> Slot {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        while *free == 0 {
+            free = self
+                .freed
+                .wait(free)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *free -= 1;
+        Slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        *SLOTS.free.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        SLOTS.freed.notify_one();
+    }
+}
+
 /// A private area per test.
 pub(super) struct Rig {
+    _slot: Slot,
     _tmp: TempDir,
     root: PathBuf,
     work: PathBuf,
@@ -94,6 +135,7 @@ impl Gate {
 
 impl Rig {
     pub fn new() -> Self {
+        let slot = SLOTS.take();
         let tmp = tempfile::tempdir().expect("create temporary directory");
         let root = std::fs::canonicalize(tmp.path()).expect("resolve temporary directory");
         let make = |name: &str| {
@@ -116,6 +158,7 @@ impl Rig {
             root.file_name().and_then(|n| n.to_str()).unwrap_or("x")
         );
         Self {
+            _slot: slot,
             work: make("work"),
             record: make("record"),
             home: make("home"),
