@@ -141,7 +141,21 @@ pub fn merge(
     problems: &mut Vec<Problem>,
     explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
 ) -> PartialRequest {
-    let mut merged = merge_unresolved(path, detail, problems, explicit);
+    merge_over(PartialRequest::default(), path, detail, problems, explicit)
+}
+
+/// [`merge`] with a lowest layer under the profile: the defaults of the
+/// configuration file ([`crate::config::Config::request_defaults`]). The order
+/// is `base`, then the profile, then `explicit`, each replacing the fields the
+/// one before set.
+pub fn merge_over(
+    base: PartialRequest,
+    path: Option<&Path>,
+    detail: ErrorDetail,
+    problems: &mut Vec<Problem>,
+    explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
+) -> PartialRequest {
+    let mut merged = merge_unresolved_over(base, path, detail, problems, explicit);
     resolve_paths(&mut merged);
     merged
 }
@@ -156,9 +170,20 @@ pub fn merge_unresolved(
     problems: &mut Vec<Problem>,
     explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
 ) -> PartialRequest {
+    merge_unresolved_over(PartialRequest::default(), path, detail, problems, explicit)
+}
+
+/// [`merge_over`] without [`resolve_paths`].
+pub fn merge_unresolved_over(
+    base: PartialRequest,
+    path: Option<&Path>,
+    detail: ErrorDetail,
+    problems: &mut Vec<Problem>,
+    explicit: impl FnOnce(&mut Vec<Problem>) -> PartialRequest,
+) -> PartialRequest {
     let profile = path
         .and_then(|path| read_profile(path, problems, detail))
         .unwrap_or_default();
     let explicit = explicit(problems);
-    profile.merge(explicit)
+    base.merge(profile).merge(explicit)
 }

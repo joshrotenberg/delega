@@ -124,7 +124,18 @@ pub fn run(args: Args) -> ExitCode {
 
 fn go(args: &Args, log: &log::Log) -> ExitCode {
     let format = args.output.unwrap_or(OutputFormat::Text);
-    let request = match request::build(args) {
+    // The configuration file comes first: the request is built from it, so a
+    // file that cannot be used refuses before anything else is looked at.
+    let config = match super::config::read().into_config() {
+        Ok(config) => config,
+        Err(refusal) => {
+            if args.progress {
+                log.line("progress: finished: refused");
+            }
+            return output::refuse_dry_run(format, &request::flag_facts(args), &refusal, log);
+        }
+    };
+    let request = match request::build(args, &config) {
         Ok(request) => request,
         Err(failure) => {
             if args.progress {
@@ -138,6 +149,7 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
         hook: super::guard_command(),
         ..ProviderOptions::default()
     };
+    config.apply_to_options(&mut options);
     super::apply_env(&mut options, &args.env);
     if args.dry_run {
         return match dry_run(&request, &options) {

@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "delega configuration file",
+  "description": "The user-level delega configuration file, a TOML document with the keys below.",
+  "type": "object",
+  "properties": {
+    "defaults": {
+      "description": "Request defaults.",
+      "$ref": "#/$defs/Defaults"
+    },
+    "env": {
+      "description": "Environment for workers.",
+      "$ref": "#/$defs/EnvSection"
+    },
+    "mcp": {
+      "description": "Limits of the MCP server.",
+      "$ref": "#/$defs/Mcp"
+    },
+    "providers": {
+      "description": "Provider executables.",
+      "$ref": "#/$defs/Providers"
+    },
+    "schema_version": {
+      "description": "The version of this format: 1. Required.",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version"
+  ],
+  "$defs": {
+    "DefaultPermissions": {
+      "description": "`[defaults.permissions]`.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "The request's `permissions.mode`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Mode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "strict": {
+          "description": "The request's `permissions.strict`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "Defaults": {
+      "description": "The request defaults of `[defaults]`.",
+      "type": "object",
+      "properties": {
+        "effort": {
+          "description": "Reasoning effort, as the request's `effort`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "description": "Provider model name or alias, as the request's `model`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "permissions": {
+          "description": "What a worker may do, by default. `prompt` and `cwd` have no default:\nthey belong to one request.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DefaultPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "description": "The provider a request uses when it names none.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "timeout_secs": {
+          "description": "Limit for a run in whole seconds, as the request's `timeout_secs`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 86400,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "Effort": {
+      "description": "How much reasoning effort to ask the provider for.",
+      "oneOf": [
+        {
+          "description": "Least effort.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Moderate effort.",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "Most effort.",
+          "type": "string",
+          "const": "high"
+        }
+      ]
+    },
+    "EnvSection": {
+      "description": "`[env]`: variables every worker is given, with the rules and the refusals of\n`--env`.",
+      "type": "object",
+      "properties": {
+        "pass": {
+          "description": "Names of variables whose value is taken from the environment of the\nprocess that reads this file, as `--env NAME`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "description": "Variables set to a value, as `--env NAME=VALUE`. A value is never\nprinted, in a result, a report or an error.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "Mcp": {
+      "description": "`[mcp]`: the limits of the server `delega mcp` runs. Each is bounded by the\nconstant that is the default today, so the file can lower a limit and cannot\nraise one.",
+      "type": "object",
+      "properties": {
+        "max_live_workers": {
+          "description": "Most workers live at once, from 1 to 16.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 16,
+          "minimum": 1
+        },
+        "max_queued_per_worker": {
+          "description": "Most runs waiting behind one worker's running run, from 0 to 16.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 16,
+          "minimum": 0
+        },
+        "max_running_runs": {
+          "description": "Most runs running at once, from 1 to 4.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 4,
+          "minimum": 1
+        },
+        "wait_ceiling_secs": {
+          "description": "The longest one `wait` blocks, in seconds, from 1 to 300.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 300,
+          "minimum": 1
+        },
+        "wait_default_secs": {
+          "description": "The timeout `wait` uses when it gets none, in seconds, from 0 to 300 and\nat most the wait ceiling.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Mode": {
+      "description": "How much a worker may do in its working directory.",
+      "oneOf": [
+        {
+          "description": "May read the working directory; no writes and no commands.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "May edit files in the working directory.",
+          "type": "string",
+          "const": "write"
+        },
+        {
+          "description": "No restriction from delega.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "Provider": {
+      "description": "The provider CLI that runs the assignment.",
+      "oneOf": [
+        {
+          "description": "Claude Code.",
+          "type": "string",
+          "const": "claude"
+        },
+        {
+          "description": "Codex CLI.",
+          "type": "string",
+          "const": "codex"
+        }
+      ]
+    },
+    "ProviderEntry": {
+      "description": "One provider's entry in `[providers]`.",
+      "type": "object",
+      "properties": {
+        "executable": {
+          "description": "Absolute path of the provider's executable. `DELEGA_CLAUDE_BIN` or\n`DELEGA_CODEX_BIN` overrides it.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "Providers": {
+      "description": "`[providers]`.",
+      "type": "object",
+      "properties": {
+        "claude": {
+          "description": "Claude Code.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "codex": {
+          "description": "Codex CLI.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

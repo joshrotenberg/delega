@@ -50,12 +50,13 @@ fn join(problems: &[Problem]) -> String {
 
 /// Build the request from the arguments of `start`.
 ///
-/// The profile, if named, is read first and every other argument replaces the
-/// matching field, with the code `delega run` uses ([`profile::merge_unresolved`]). Only a
+/// `defaults` come first (the configuration file's request defaults), then the
+/// profile, if named, and every other argument replaces the matching field,
+/// with the code `delega run` uses ([`profile::merge_unresolved_over`]). Only a
 /// request with no provider or no prompt cannot be built; any other problem is
 /// left to the supervisor, which refuses the run, so the caller reads it with
 /// `read` as it would any refusal. The error is the text of a tool error.
-pub fn build_request(mut args: Value) -> Result<Request, String> {
+pub fn build_request(defaults: PartialRequest, mut args: Value) -> Result<Request, String> {
     if args.is_null() {
         args = json!({});
     }
@@ -70,7 +71,8 @@ pub fn build_request(mut args: Value) -> Result<Request, String> {
     let explicit: PartialRequest =
         serde_json::from_value(args).map_err(|err| format!("invalid arguments: {err}"))?;
     let mut problems = Vec::new();
-    let mut merged = profile::merge_unresolved(
+    let mut merged = profile::merge_unresolved_over(
+        defaults,
         path.as_deref(),
         ErrorDetail::Position,
         &mut problems,

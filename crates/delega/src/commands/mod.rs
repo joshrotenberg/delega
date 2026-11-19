@@ -1,6 +1,7 @@
 //! One module per subcommand. Adding a subcommand adds a file here and a line
 //! in [`Command`].
 
+mod config;
 mod doctor;
 mod hook;
 mod init;

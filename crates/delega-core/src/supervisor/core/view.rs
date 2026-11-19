@@ -179,6 +179,7 @@ impl Core {
                 retained_bytes_now: self.retained_bytes,
                 retention_secs: limits.retention.as_secs(),
                 wait_ceiling_secs: limits.wait_ceiling.as_secs(),
+                default_wait_secs: limits.wait_default.as_secs(),
             },
             workers: workers
                 .into_iter()

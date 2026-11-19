@@ -28,6 +28,9 @@ pub struct Limits {
     pub retention: Duration,
     /// The longest one `wait` blocks.
     pub wait_ceiling: Duration,
+    /// The timeout `wait` uses when the caller gives none, capped at
+    /// `wait_ceiling` like any other.
+    pub wait_default: Duration,
 }
 
 impl Default for Limits {
@@ -40,6 +43,7 @@ impl Default for Limits {
             retained_bytes: limits::RETAINED_BYTES,
             retention: limits::RETENTION,
             wait_ceiling: limits::WAIT_CEILING,
+            wait_default: limits::DEFAULT_WAIT,
         }
     }
 }

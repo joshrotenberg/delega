@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use delega_core::contract::partial::PartialRequest;
 use delega_core::supervisor::{
     CloseResponse, Detail, Error, FollowUpResponse, InterruptResponse, ListResponse, ReadResponse,
     StartResponse, Supervisor, Target, WaitResponse, WaitTargets,
@@ -80,7 +81,7 @@ pub struct ToolSchemas {
 /// The schemas of the seven tools, built from the same definitions the server
 /// lists, without a supervisor or a runtime.
 pub fn tool_schemas() -> Vec<ToolSchemas> {
-    tools(None)
+    tools(None, PartialRequest::default())
         .iter()
         .map(|tool| {
             let definition = tool.definition();
@@ -120,6 +121,8 @@ fn answer<T: Serialize>(result: Result<T, Error>) -> CallToolResult {
 #[derive(Clone)]
 struct Adapter {
     supervisor: Option<Supervisor>,
+    /// The request defaults every `start` begins from.
+    defaults: PartialRequest,
 }
 
 impl Adapter {
@@ -137,8 +140,11 @@ impl Adapter {
 }
 
 /// The tools over `supervisor`, or the tools alone, for their schemas.
-pub(crate) fn tools(supervisor: Option<Supervisor>) -> Vec<Tool> {
-    let adapter = Arc::new(Adapter { supervisor });
+pub(crate) fn tools(supervisor: Option<Supervisor>, defaults: PartialRequest) -> Vec<Tool> {
+    let adapter = Arc::new(Adapter {
+        supervisor,
+        defaults,
+    });
     vec![
         start_tool(&adapter),
         follow_up_tool(&adapter),
@@ -160,7 +166,9 @@ fn start_tool(adapter: &Arc<Adapter>) -> Tool {
             |State(adapter): State<Arc<Adapter>>, RawArgs(args): RawArgs| async move {
                 // A profile is read from disk, so the work is off the runtime's
                 // threads: a stuck filesystem must not hold up other calls.
-                let built = tokio::task::spawn_blocking(move || start::build_request(args)).await;
+                let defaults = adapter.defaults.clone();
+                let built =
+                    tokio::task::spawn_blocking(move || start::build_request(defaults, args)).await;
                 Ok(match built {
                     Ok(Ok(request)) => {
                         adapter

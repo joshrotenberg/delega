@@ -6,6 +6,8 @@
 
 pub mod canonical;
 
+pub mod config;
+
 pub mod contract;
 
 pub mod doctor;

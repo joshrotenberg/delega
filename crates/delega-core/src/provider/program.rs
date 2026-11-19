@@ -70,7 +70,8 @@ fn explicit(provider: Provider, path: &Path, source: &str) -> Result<PathBuf, Re
 }
 
 /// Resolve the executable: the option, then the override variable, then the
-/// provider's name on the absolute entries of `PATH`. Relative and empty
+/// one a configuration file names, then the provider's name on the absolute
+/// entries of `PATH`. Relative and empty
 /// `PATH` entries are skipped, so a program in the working directory is never
 /// picked up by accident.
 pub(super) fn resolve(
@@ -91,6 +92,9 @@ pub(super) fn resolve(
     let variable = override_variable(provider);
     if let Some(value) = lookup(variable).filter(|v| !v.is_empty()) {
         return explicit(provider, Path::new(value), variable);
+    }
+    if let Some(path) = options.configured_executable(provider) {
+        return explicit(provider, path, "the configuration file");
     }
     let name = default_name(provider);
     if let Some(path) = lookup("PATH") {

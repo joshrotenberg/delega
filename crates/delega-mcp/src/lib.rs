@@ -25,6 +25,7 @@ mod serve;
 mod start;
 mod tools;
 
+use delega_core::contract::partial::PartialRequest;
 use delega_core::supervisor::Supervisor;
 use tower_mcp::McpRouter;
 
@@ -45,13 +46,26 @@ pub const INSTRUCTIONS: &str = "delega supervises Claude Code and Codex workers.
 /// resource. The error is the text of a skill that the Skills extension cannot
 /// serve, which the build's own checks rule out.
 pub fn router(supervisor: Supervisor, build: &BuildInfo) -> Result<McpRouter, String> {
+    router_with_defaults(supervisor, build, PartialRequest::default())
+}
+
+/// [`router`] with request defaults under every `start`: the lowest layer, below
+/// a `profile` and the arguments of the call. `delega mcp` passes the defaults of
+/// the user-level configuration file
+/// ([`delega_core::config::Config::request_defaults`]), so the order is built-in
+/// defaults, the file, a profile, then the call's own arguments.
+pub fn router_with_defaults(
+    supervisor: Supervisor,
+    build: &BuildInfo,
+    defaults: PartialRequest,
+) -> Result<McpRouter, String> {
     let skills = resources::skill_set().map_err(|error| error.to_string())?;
     let mut router = McpRouter::new()
         .server_info("delega", delega_core::VERSION)
         .instructions(INSTRUCTIONS)
         .skills(skills)
         .resource(resources::identity_resource(build));
-    for tool in tools::tools(Some(supervisor)) {
+    for tool in tools::tools(Some(supervisor), defaults) {
         router = router.tool(tool);
     }
     Ok(router)

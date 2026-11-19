@@ -29,6 +29,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use delega_core::contract::outcome::Outcome;
+use delega_core::contract::partial::PartialRequest;
 use delega_core::provider::ProviderOptions;
 use delega_core::supervisor::{Supervisor, SupervisorConfig};
 use delega_mcp::Ended;
@@ -70,6 +71,15 @@ pub fn run(args: Args) -> ExitCode {
 }
 
 fn go(args: &Args, log: &Log) -> ExitCode {
+    // The configuration file is read once, now: a file that cannot be used
+    // refuses to start the server, as a bad `--env` does.
+    let config = match super::config::read().into_config() {
+        Ok(config) => config,
+        Err(refusal) => {
+            log.line(format!("delega mcp: refused: {refusal}"));
+            return ExitCode::from(EXIT_REFUSED);
+        }
+    };
     // What `delega run` reads for provider options, read the same way: the
     // provider executable overrides (`DELEGA_CLAUDE_BIN`, `DELEGA_CODEX_BIN`)
     // by the provider layer from this process's environment, and the command
@@ -78,6 +88,7 @@ fn go(args: &Args, log: &Log) -> ExitCode {
         hook: guard_command(),
         ..ProviderOptions::default()
     };
+    config.apply_to_options(&mut options);
     apply_env(&mut options, &args.env);
     // The names are checked now, with the rules and messages `delega run` uses,
     // so a bad `--env` is a refusal to start and not a server whose every `start`
@@ -89,7 +100,8 @@ fn go(args: &Args, log: &Log) -> ExitCode {
         log.line(format!("delega mcp: refused: {refusal}"));
         return ExitCode::from(EXIT_REFUSED);
     }
-    let config = SupervisorConfig {
+    let supervisor_config = SupervisorConfig {
+        limits: config.limits(),
         provider: options,
         ..SupervisorConfig::default()
     };
@@ -103,7 +115,7 @@ fn go(args: &Args, log: &Log) -> ExitCode {
             return ExitCode::from(EXIT_REFUSED);
         }
     };
-    let code = runtime.block_on(serve(config, log));
+    let code = runtime.block_on(serve(supervisor_config, config.request_defaults(), log));
     // Every worker was stopped, or reported not to be, before this point. The
     // thread that reads standard input may still be blocked in `read`, and
     // dropping the runtime normally would wait for it.
@@ -111,7 +123,7 @@ fn go(args: &Args, log: &Log) -> ExitCode {
     code
 }
 
-async fn serve(config: SupervisorConfig, log: &Log) -> ExitCode {
+async fn serve(config: SupervisorConfig, defaults: PartialRequest, log: &Log) -> ExitCode {
     let signals = match Signals::install() {
         Ok(signals) => signals,
         Err(err) => {
@@ -122,7 +134,11 @@ async fn serve(config: SupervisorConfig, log: &Log) -> ExitCode {
         }
     };
     let supervisor = Supervisor::new(config);
-    let router = match delega_mcp::router(supervisor.clone(), &version::build_info()) {
+    let router = match delega_mcp::router_with_defaults(
+        supervisor.clone(),
+        &version::build_info(),
+        defaults,
+    ) {
         Ok(router) => router,
         Err(err) => {
             log.line(format!("delega mcp: cannot build the server: {err}"));
