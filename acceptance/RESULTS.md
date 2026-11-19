@@ -10,8 +10,8 @@ confirmed and what remains.
 
 - Machine: Darwin 27.2.0 arm64.
 - delega: version 0.1.0-dev.
-- Harness commit: `489c14b`.
-- 188 rows, 8 at a time, finished in 100 s.
+- Harness commit: `53b18c9`.
+- 188 rows, 8 at a time, finished in 96 s.
 - Fake providers only, a temporary `HOME` and a cleared environment per case; no real `claude` or `codex`.
 - Survivors are measured by a per-case marker in the process table and by a heartbeat file, 1 s after
 `delega` exits, whatever `delega` reported; the harness then kills them.
@@ -71,12 +71,12 @@ grace period before SIGKILL. SIGKILL rows are left out.
 
 | Measure | Rows | p50 | p90 | p99 | max |
 | --- | --- | --- | --- | --- | --- |
-| signal to exit | 38 | 191 ms | 329 ms | 446 ms | 446 ms |
-| signal to exit, a process ignores TERM | 10 | 1770 ms | 1810 ms | 1820 ms | 1820 ms |
-| timeout overshoot | 52 | 206 ms | 372 ms | 410 ms | 410 ms |
-| timeout overshoot, a process ignores TERM | 12 | 1772 ms | 1944 ms | 1985 ms | 1985 ms |
-| run to exit | 62 | 758 ms | 1393 ms | 2342 ms | 2342 ms |
-| run to exit, a process ignores TERM | 6 | 2225 ms | 2739 ms | 2739 ms | 2739 ms |
+| signal to exit | 38 | 188 ms | 211 ms | 235 ms | 235 ms |
+| signal to exit, a process ignores TERM | 10 | 1724 ms | 1777 ms | 1796 ms | 1796 ms |
+| timeout overshoot | 52 | 199 ms | 235 ms | 313 ms | 313 ms |
+| timeout overshoot, a process ignores TERM | 12 | 1705 ms | 1804 ms | 1831 ms | 1831 ms |
+| run to exit | 62 | 698 ms | 1174 ms | 2043 ms | 2043 ms |
+| run to exit, a process ignores TERM | 6 | 2215 ms | 2673 ms | 2673 ms | 2673 ms |
 
 ## Failures that are not expected
 
@@ -217,191 +217,191 @@ No row changed verdict, outcome, exit status, survivors or cleanup report betwee
 
 | Row | Action | Outcome | Exit | One document | Cleanup confirmed | Left running | Honest | Latency | Verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| claude-a-plain | wait | completed | 0 | yes | yes | none | yes | 932 ms | pass |
-| claude-a-child | wait | completed | 0 | yes | yes | none | yes | 1107 ms | pass |
-| claude-a-setsid | wait | completed | 0 | yes | yes | none | yes | 1201 ms | pass |
-| claude-a-ignore | wait | completed | 0 | yes | yes | none | yes | 2486 ms | pass |
-| claude-a-stubborn | wait | completed | 0 | yes | yes | none | yes | 895 ms | pass |
-| claude-a-pipe | wait | completed | 0 | yes | yes | none | yes | 1267 ms | pass |
-| claude-a-orphan | wait | completed | 0 | yes | yes | leaf-setsid | NO | 1107 ms | expected_failure |
-| claude-a-orphan-late | wait | completed | 0 | yes | yes | none | yes | 1476 ms | pass |
-| claude-a-relay | wait | completed | 0 | yes | yes | relay-heartbeat | NO | 525 ms | expected_failure |
-| claude-a-bare | wait | completed | 0 | yes | yes | bare | NO | 687 ms | expected_failure |
-| claude-b-plain | wait | failed | 1 | yes | yes | none | yes | 564 ms | pass |
-| claude-b-child | wait | failed | 1 | yes | yes | none | yes | 703 ms | pass |
-| claude-b-setsid | wait | failed | 1 | yes | yes | none | yes | 907 ms | pass |
-| claude-c-plain | wait | timed_out | 124 | yes | yes | none | yes | 279 ms | pass |
-| claude-c-child | wait | timed_out | 124 | yes | yes | none | yes | 384 ms | pass |
-| claude-c-setsid | wait | timed_out | 124 | yes | yes | none | yes | 410 ms | pass |
-| claude-c-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1802 ms | pass |
-| claude-c-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1944 ms | pass |
-| claude-c-pipe | wait | timed_out | 124 | yes | yes | none | yes | 358 ms | pass |
-| claude-c-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 343 ms | expected_failure |
-| claude-c-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 344 ms | pass |
-| claude-c-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 302 ms | expected_failure |
-| claude-c-bare | wait | timed_out | 124 | yes | yes | none | yes | 284 ms | pass |
-| claude-d-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 385 ms | pass |
-| claude-d-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 290 ms | pass |
-| claude-d-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 446 ms | pass |
-| claude-d-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1820 ms | pass |
-| claude-d-stubborn | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1810 ms | pass |
-| claude-d-pipe | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 282 ms | pass |
-| claude-d-orphan | SIGINT at 1000 ms | interrupted | 130 | yes | yes | leaf-setsid | NO | 314 ms | expected_failure |
-| claude-d-orphan-late | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 329 ms | pass |
-| claude-d-relay | SIGINT at 1000 ms | interrupted | 130 | yes | yes | relay-heartbeat | NO | 323 ms | expected_failure |
-| claude-d-bare | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 349 ms | pass |
-| claude-dt-plain | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 300 ms | pass |
-| claude-dt-child | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 275 ms | pass |
-| claude-dt-setsid | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 209 ms | pass |
-| claude-dt-stubborn | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1780 ms | pass |
-| claude-dh-plain | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 180 ms | pass |
-| claude-dh-child | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 183 ms | pass |
-| claude-dh-setsid | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 239 ms | pass |
-| claude-dh-stubborn | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1795 ms | pass |
-| claude-e-plain | wait | failed | 1 | yes | yes | none | yes | 960 ms | pass |
-| claude-e-child | wait | failed | 1 | yes | yes | none | yes | 1366 ms | pass |
-| claude-e-setsid | wait | failed | 1 | yes | yes | none | yes | 1327 ms | pass |
-| claude-e-ignore | wait | failed | 1 | yes | yes | none | yes | 2739 ms | pass |
-| claude-e-pipe | wait | failed | 1 | yes | yes | none | yes | 1340 ms | pass |
-| claude-e-orphan | wait | failed | 1 | yes | yes | leaf-setsid | NO | 1515 ms | expected_failure |
-| claude-e-orphan-late | wait | failed | 1 | yes | yes | none | yes | 1530 ms | pass |
-| claude-e-relay | wait | failed | 1 | yes | yes | relay-heartbeat | NO | 1393 ms | expected_failure |
-| claude-e-bare | wait | failed | 1 | yes | yes | none | yes | 1459 ms | pass |
-| claude-ed-plain | wait | failed | 1 | yes | yes | none | yes | 1296 ms | pass |
-| claude-ed-pipe | wait | failed | 1 | yes | yes | none | yes | 1300 ms | pass |
-| claude-fd-plain | wait | timed_out | 124 | yes | yes | none | yes | 330 ms | pass |
-| claude-fd-child | wait | timed_out | 124 | yes | yes | none | yes | 317 ms | pass |
-| claude-fd-setsid | wait | timed_out | 124 | yes | yes | none | yes | 330 ms | pass |
-| claude-fd-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1818 ms | pass |
-| claude-fd-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1888 ms | pass |
-| claude-fd-pipe | wait | timed_out | 124 | yes | yes | none | yes | 293 ms | pass |
-| claude-fd-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 341 ms | expected_failure |
-| claude-fd-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 383 ms | pass |
-| claude-fd-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 235 ms | expected_failure |
-| claude-fd-bare | wait | timed_out | 124 | yes | yes | none | yes | 191 ms | pass |
-| claude-hd-plain | wait | timed_out | 124 | yes | yes | none | yes | 196 ms | pass |
-| claude-hd-child | wait | timed_out | 124 | yes | yes | none | yes | 380 ms | pass |
-| claude-i-plain | wait | failed | 1 | yes | yes | none | yes | 489 ms | pass |
-| claude-i-child | wait | failed | 1 | yes | yes | none | yes | 581 ms | pass |
-| claude-i-setsid | wait | failed | 1 | yes | yes | none | yes | 657 ms | pass |
-| claude-id-plain | wait | failed | 1 | yes | yes | none | yes | 423 ms | pass |
-| claude-fl-plain | wait | timed_out | 124 | yes | yes | none | yes | 302 ms | pass |
-| claude-fl-child | wait | timed_out | 124 | yes | yes | none | yes | 372 ms | pass |
-| claude-fl-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1985 ms | pass |
-| claude-fli-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 177 ms | pass |
-| claude-fli-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 305 ms | pass |
-| claude-dc-plain | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 360 ms | pass |
-| claude-dc-child | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 401 ms | pass |
-| claude-dc-setsid | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 275 ms | pass |
-| claude-dca-plain | close stdout at 300 ms | none | 0 | n/a | n/a | none | n/a | 2342 ms | pass |
-| claude-k-plain | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 9 ms | expected_failure |
+| claude-a-plain | wait | completed | 0 | yes | yes | none | yes | 660 ms | pass |
+| claude-a-child | wait | completed | 0 | yes | yes | none | yes | 827 ms | pass |
+| claude-a-setsid | wait | completed | 0 | yes | yes | none | yes | 955 ms | pass |
+| claude-a-ignore | wait | completed | 0 | yes | yes | none | yes | 2309 ms | pass |
+| claude-a-stubborn | wait | completed | 0 | yes | yes | none | yes | 674 ms | pass |
+| claude-a-pipe | wait | completed | 0 | yes | yes | none | yes | 813 ms | pass |
+| claude-a-orphan | wait | completed | 0 | yes | yes | leaf-setsid | NO | 757 ms | expected_failure |
+| claude-a-orphan-late | wait | completed | 0 | yes | yes | none | yes | 908 ms | pass |
+| claude-a-relay | wait | completed | 0 | yes | yes | relay-heartbeat | NO | 599 ms | expected_failure |
+| claude-a-bare | wait | completed | 0 | yes | yes | bare | NO | 621 ms | expected_failure |
+| claude-b-plain | wait | failed | 1 | yes | yes | none | yes | 462 ms | pass |
+| claude-b-child | wait | failed | 1 | yes | yes | none | yes | 490 ms | pass |
+| claude-b-setsid | wait | failed | 1 | yes | yes | none | yes | 544 ms | pass |
+| claude-c-plain | wait | timed_out | 124 | yes | yes | none | yes | 219 ms | pass |
+| claude-c-child | wait | timed_out | 124 | yes | yes | none | yes | 223 ms | pass |
+| claude-c-setsid | wait | timed_out | 124 | yes | yes | none | yes | 199 ms | pass |
+| claude-c-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1680 ms | pass |
+| claude-c-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1720 ms | pass |
+| claude-c-pipe | wait | timed_out | 124 | yes | yes | none | yes | 199 ms | pass |
+| claude-c-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 188 ms | expected_failure |
+| claude-c-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 197 ms | pass |
+| claude-c-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 206 ms | expected_failure |
+| claude-c-bare | wait | timed_out | 124 | yes | yes | none | yes | 190 ms | pass |
+| claude-d-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 197 ms | pass |
+| claude-d-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 198 ms | pass |
+| claude-d-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 205 ms | pass |
+| claude-d-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1679 ms | pass |
+| claude-d-stubborn | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1728 ms | pass |
+| claude-d-pipe | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 166 ms | pass |
+| claude-d-orphan | SIGINT at 1000 ms | interrupted | 130 | yes | yes | leaf-setsid | NO | 193 ms | expected_failure |
+| claude-d-orphan-late | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 195 ms | pass |
+| claude-d-relay | SIGINT at 1000 ms | interrupted | 130 | yes | yes | relay-heartbeat | NO | 222 ms | expected_failure |
+| claude-d-bare | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 235 ms | pass |
+| claude-dt-plain | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 235 ms | pass |
+| claude-dt-child | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 157 ms | pass |
+| claude-dt-setsid | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 188 ms | pass |
+| claude-dt-stubborn | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1777 ms | pass |
+| claude-dh-plain | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 207 ms | pass |
+| claude-dh-child | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 185 ms | pass |
+| claude-dh-setsid | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 190 ms | pass |
+| claude-dh-stubborn | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1796 ms | pass |
+| claude-e-plain | wait | failed | 1 | yes | yes | none | yes | 892 ms | pass |
+| claude-e-child | wait | failed | 1 | yes | yes | none | yes | 1033 ms | pass |
+| claude-e-setsid | wait | failed | 1 | yes | yes | none | yes | 1106 ms | pass |
+| claude-e-ignore | wait | failed | 1 | yes | yes | none | yes | 2544 ms | pass |
+| claude-e-pipe | wait | failed | 1 | yes | yes | none | yes | 1005 ms | pass |
+| claude-e-orphan | wait | failed | 1 | yes | yes | leaf-setsid | NO | 1049 ms | expected_failure |
+| claude-e-orphan-late | wait | failed | 1 | yes | yes | none | yes | 1109 ms | pass |
+| claude-e-relay | wait | failed | 1 | yes | yes | relay-heartbeat | NO | 958 ms | expected_failure |
+| claude-e-bare | wait | failed | 1 | yes | yes | none | yes | 1174 ms | pass |
+| claude-ed-plain | wait | failed | 1 | yes | yes | none | yes | 932 ms | pass |
+| claude-ed-pipe | wait | failed | 1 | yes | yes | none | yes | 1005 ms | pass |
+| claude-fd-plain | wait | timed_out | 124 | yes | yes | none | yes | 200 ms | pass |
+| claude-fd-child | wait | timed_out | 124 | yes | yes | none | yes | 189 ms | pass |
+| claude-fd-setsid | wait | timed_out | 124 | yes | yes | none | yes | 169 ms | pass |
+| claude-fd-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1705 ms | pass |
+| claude-fd-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1724 ms | pass |
+| claude-fd-pipe | wait | timed_out | 124 | yes | yes | none | yes | 244 ms | pass |
+| claude-fd-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 223 ms | expected_failure |
+| claude-fd-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 206 ms | pass |
+| claude-fd-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 216 ms | expected_failure |
+| claude-fd-bare | wait | timed_out | 124 | yes | yes | none | yes | 221 ms | pass |
+| claude-hd-plain | wait | timed_out | 124 | yes | yes | none | yes | 192 ms | pass |
+| claude-hd-child | wait | timed_out | 124 | yes | yes | none | yes | 235 ms | pass |
+| claude-i-plain | wait | failed | 1 | yes | yes | none | yes | 400 ms | pass |
+| claude-i-child | wait | failed | 1 | yes | yes | none | yes | 513 ms | pass |
+| claude-i-setsid | wait | failed | 1 | yes | yes | none | yes | 578 ms | pass |
+| claude-id-plain | wait | failed | 1 | yes | yes | none | yes | 371 ms | pass |
+| claude-fl-plain | wait | timed_out | 124 | yes | yes | none | yes | 272 ms | pass |
+| claude-fl-child | wait | timed_out | 124 | yes | yes | none | yes | 313 ms | pass |
+| claude-fl-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1804 ms | pass |
+| claude-fli-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 149 ms | pass |
+| claude-fli-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 188 ms | pass |
+| claude-dc-plain | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 186 ms | pass |
+| claude-dc-child | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 144 ms | pass |
+| claude-dc-setsid | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 209 ms | pass |
+| claude-dca-plain | close stdout at 300 ms | none | 0 | n/a | n/a | none | n/a | 1954 ms | pass |
+| claude-k-plain | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 7 ms | expected_failure |
 | claude-k-child | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | child,provider | n/a | 7 ms | expected_failure |
-| claude-k-setsid | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | leaf-setsid,mid,provider | n/a | 9 ms | expected_failure |
-| claude-k-stubborn | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 6 ms | expected_failure |
-| claude-u-plain | wait | completed | 0 | yes | NO | none | yes | 261 ms | pass |
-| claude-u-child | wait | completed | 0 | yes | NO | none | yes | 449 ms | pass |
-| claude-u-setsid | wait | completed | 0 | yes | NO | leaf-setsid | yes | 507 ms | pass |
-| claude-u-orphan | wait | completed | 0 | yes | NO | leaf-setsid | yes | 471 ms | pass |
-| claude-u-bare | wait | completed | 0 | yes | NO | bare | yes | 468 ms | pass |
-| claude-ud-plain | wait | timed_out | 124 | yes | NO | none | yes | 57 ms | pass |
-| claude-ud-child | wait | timed_out | 124 | yes | NO | none | yes | 60 ms | pass |
-| claude-ud-setsid | wait | timed_out | 124 | yes | NO | leaf-setsid | yes | 66 ms | pass |
-| claude-ud-stubborn | wait | timed_out | 124 | yes | NO | none | yes | 1562 ms | pass |
-| claude-ui-plain | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 38 ms | pass |
-| claude-ui-child | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 68 ms | pass |
-| claude-ui-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | NO | leaf-setsid | yes | 44 ms | pass |
-| claude-ui-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 39 ms | pass |
-| codex-a-plain | wait | completed | 0 | yes | yes | none | yes | 534 ms | pass |
-| codex-a-child | wait | completed | 0 | yes | yes | none | yes | 758 ms | pass |
-| codex-a-setsid | wait | completed | 0 | yes | yes | none | yes | 785 ms | pass |
-| codex-a-ignore | wait | completed | 0 | yes | yes | none | yes | 2225 ms | pass |
+| claude-k-setsid | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | leaf-setsid,mid,provider | n/a | 7 ms | expected_failure |
+| claude-k-stubborn | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 11 ms | expected_failure |
+| claude-u-plain | wait | completed | 0 | yes | NO | none | yes | 119 ms | pass |
+| claude-u-child | wait | completed | 0 | yes | NO | none | yes | 262 ms | pass |
+| claude-u-setsid | wait | completed | 0 | yes | NO | leaf-setsid | yes | 233 ms | pass |
+| claude-u-orphan | wait | completed | 0 | yes | NO | leaf-setsid | yes | 213 ms | pass |
+| claude-u-bare | wait | completed | 0 | yes | NO | bare | yes | 342 ms | pass |
+| claude-ud-plain | wait | timed_out | 124 | yes | NO | none | yes | 22 ms | pass |
+| claude-ud-child | wait | timed_out | 124 | yes | NO | none | yes | 43 ms | pass |
+| claude-ud-setsid | wait | timed_out | 124 | yes | NO | leaf-setsid | yes | 42 ms | pass |
+| claude-ud-stubborn | wait | timed_out | 124 | yes | NO | none | yes | 1566 ms | pass |
+| claude-ui-plain | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 27 ms | pass |
+| claude-ui-child | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 26 ms | pass |
+| claude-ui-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | NO | leaf-setsid | yes | 27 ms | pass |
+| claude-ui-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 34 ms | pass |
+| codex-a-plain | wait | completed | 0 | yes | yes | none | yes | 455 ms | pass |
+| codex-a-child | wait | completed | 0 | yes | yes | none | yes | 668 ms | pass |
+| codex-a-setsid | wait | completed | 0 | yes | yes | none | yes | 668 ms | pass |
+| codex-a-ignore | wait | completed | 0 | yes | yes | none | yes | 2215 ms | pass |
 | codex-a-stubborn | wait | completed | 0 | yes | yes | none | yes | 535 ms | pass |
-| codex-a-pipe | wait | completed | 0 | yes | yes | none | yes | 674 ms | pass |
-| codex-a-orphan | wait | completed | 0 | yes | yes | leaf-setsid | NO | 605 ms | expected_failure |
-| codex-a-orphan-late | wait | completed | 0 | yes | yes | none | yes | 803 ms | pass |
-| codex-a-relay | wait | completed | 0 | yes | yes | relay-heartbeat | NO | 658 ms | expected_failure |
-| codex-a-bare | wait | completed | 0 | yes | yes | bare | NO | 757 ms | expected_failure |
-| codex-b-plain | wait | failed | 1 | yes | yes | none | yes | 519 ms | pass |
-| codex-b-child | wait | failed | 1 | yes | yes | none | yes | 642 ms | pass |
-| codex-b-setsid | wait | failed | 1 | yes | yes | none | yes | 662 ms | pass |
-| codex-c-plain | wait | timed_out | 124 | yes | yes | none | yes | 175 ms | pass |
-| codex-c-child | wait | timed_out | 124 | yes | yes | none | yes | 160 ms | pass |
-| codex-c-setsid | wait | timed_out | 124 | yes | yes | none | yes | 173 ms | pass |
-| codex-c-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1683 ms | pass |
-| codex-c-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1752 ms | pass |
-| codex-c-pipe | wait | timed_out | 124 | yes | yes | none | yes | 194 ms | pass |
-| codex-c-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 180 ms | expected_failure |
-| codex-c-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 206 ms | pass |
-| codex-c-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 178 ms | expected_failure |
-| codex-c-bare | wait | timed_out | 124 | yes | yes | none | yes | 174 ms | pass |
-| codex-d-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 167 ms | pass |
-| codex-d-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 174 ms | pass |
-| codex-d-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 146 ms | pass |
-| codex-d-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1676 ms | pass |
-| codex-d-stubborn | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1770 ms | pass |
-| codex-d-pipe | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 175 ms | pass |
-| codex-d-orphan | SIGINT at 1000 ms | interrupted | 130 | yes | yes | leaf-setsid | NO | 176 ms | expected_failure |
-| codex-d-orphan-late | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 210 ms | pass |
-| codex-d-relay | SIGINT at 1000 ms | interrupted | 130 | yes | yes | relay-heartbeat | NO | 159 ms | expected_failure |
-| codex-d-bare | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 182 ms | pass |
-| codex-dt-plain | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 209 ms | pass |
-| codex-dt-child | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 200 ms | pass |
-| codex-dt-setsid | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 172 ms | pass |
+| codex-a-pipe | wait | completed | 0 | yes | yes | none | yes | 687 ms | pass |
+| codex-a-orphan | wait | completed | 0 | yes | yes | leaf-setsid | NO | 553 ms | expected_failure |
+| codex-a-orphan-late | wait | completed | 0 | yes | yes | none | yes | 575 ms | pass |
+| codex-a-relay | wait | completed | 0 | yes | yes | relay-heartbeat | NO | 714 ms | expected_failure |
+| codex-a-bare | wait | completed | 0 | yes | yes | bare | NO | 804 ms | expected_failure |
+| codex-b-plain | wait | failed | 1 | yes | yes | none | yes | 579 ms | pass |
+| codex-b-child | wait | failed | 1 | yes | yes | none | yes | 730 ms | pass |
+| codex-b-setsid | wait | failed | 1 | yes | yes | none | yes | 698 ms | pass |
+| codex-c-plain | wait | timed_out | 124 | yes | yes | none | yes | 216 ms | pass |
+| codex-c-child | wait | timed_out | 124 | yes | yes | none | yes | 181 ms | pass |
+| codex-c-setsid | wait | timed_out | 124 | yes | yes | none | yes | 188 ms | pass |
+| codex-c-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1666 ms | pass |
+| codex-c-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1721 ms | pass |
+| codex-c-pipe | wait | timed_out | 124 | yes | yes | none | yes | 201 ms | pass |
+| codex-c-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 176 ms | expected_failure |
+| codex-c-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 174 ms | pass |
+| codex-c-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 233 ms | expected_failure |
+| codex-c-bare | wait | timed_out | 124 | yes | yes | none | yes | 206 ms | pass |
+| codex-d-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 199 ms | pass |
+| codex-d-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 188 ms | pass |
+| codex-d-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 209 ms | pass |
+| codex-d-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1750 ms | pass |
+| codex-d-stubborn | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1724 ms | pass |
+| codex-d-pipe | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 193 ms | pass |
+| codex-d-orphan | SIGINT at 1000 ms | interrupted | 130 | yes | yes | leaf-setsid | NO | 199 ms | expected_failure |
+| codex-d-orphan-late | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 211 ms | pass |
+| codex-d-relay | SIGINT at 1000 ms | interrupted | 130 | yes | yes | relay-heartbeat | NO | 169 ms | expected_failure |
+| codex-d-bare | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 166 ms | pass |
+| codex-dt-plain | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 176 ms | pass |
+| codex-dt-child | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 209 ms | pass |
+| codex-dt-setsid | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 193 ms | pass |
 | codex-dt-stubborn | SIGTERM at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1770 ms | pass |
-| codex-dh-plain | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 273 ms | pass |
-| codex-dh-child | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 202 ms | pass |
-| codex-dh-setsid | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 191 ms | pass |
-| codex-dh-stubborn | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1720 ms | pass |
-| codex-e-plain | wait | failed | 1 | yes | yes | none | yes | 1067 ms | pass |
-| codex-e-child | wait | failed | 1 | yes | yes | none | yes | 1109 ms | pass |
-| codex-e-setsid | wait | failed | 1 | yes | yes | none | yes | 1122 ms | pass |
-| codex-e-ignore | wait | failed | 1 | yes | yes | none | yes | 2670 ms | pass |
-| codex-e-pipe | wait | failed | 1 | yes | yes | none | yes | 1188 ms | pass |
-| codex-e-orphan | wait | failed | 1 | yes | yes | leaf-setsid | NO | 1314 ms | expected_failure |
-| codex-e-orphan-late | wait | failed | 1 | yes | yes | none | yes | 1297 ms | pass |
-| codex-e-relay | wait | failed | 1 | yes | yes | relay-heartbeat | NO | 1109 ms | expected_failure |
-| codex-e-bare | wait | failed | 1 | yes | yes | none | yes | 1290 ms | pass |
-| codex-ed-plain | wait | failed | 1 | yes | yes | none | yes | 1074 ms | pass |
-| codex-ed-pipe | wait | failed | 1 | yes | yes | none | yes | 1179 ms | pass |
-| codex-fd-plain | wait | timed_out | 124 | yes | yes | none | yes | 207 ms | pass |
-| codex-fd-child | wait | timed_out | 124 | yes | yes | none | yes | 184 ms | pass |
-| codex-fd-setsid | wait | timed_out | 124 | yes | yes | none | yes | 181 ms | pass |
-| codex-fd-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1736 ms | pass |
-| codex-fd-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1777 ms | pass |
-| codex-fd-pipe | wait | timed_out | 124 | yes | yes | none | yes | 173 ms | pass |
-| codex-fd-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 208 ms | expected_failure |
-| codex-fd-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 226 ms | pass |
-| codex-fd-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 189 ms | expected_failure |
-| codex-fd-bare | wait | timed_out | 124 | yes | yes | none | yes | 181 ms | pass |
-| codex-hd-plain | wait | timed_out | 124 | yes | yes | none | yes | 180 ms | pass |
-| codex-hd-child | wait | timed_out | 124 | yes | yes | none | yes | 218 ms | pass |
-| codex-i-plain | wait | failed | 1 | yes | yes | none | yes | 508 ms | pass |
-| codex-i-child | wait | failed | 1 | yes | yes | none | yes | 691 ms | pass |
-| codex-i-setsid | wait | failed | 1 | yes | yes | none | yes | 627 ms | pass |
-| codex-id-plain | wait | failed | 1 | yes | yes | none | yes | 496 ms | pass |
-| codex-fl-plain | wait | timed_out | 124 | yes | yes | none | yes | 196 ms | pass |
-| codex-fl-child | wait | timed_out | 124 | yes | yes | none | yes | 234 ms | pass |
-| codex-fl-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1772 ms | pass |
-| codex-fli-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 156 ms | pass |
-| codex-fli-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 197 ms | pass |
-| codex-dc-plain | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 165 ms | pass |
-| codex-dc-child | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 176 ms | pass |
-| codex-dc-setsid | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 191 ms | pass |
-| codex-dca-plain | close stdout at 300 ms | none | 0 | n/a | n/a | none | n/a | 2026 ms | pass |
-| codex-k-plain | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 6 ms | expected_failure |
-| codex-k-child | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | child,provider | n/a | 7 ms | expected_failure |
-| codex-k-setsid | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | leaf-setsid,mid,provider | n/a | 7 ms | expected_failure |
-| codex-k-stubborn | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 7 ms | expected_failure |
-| codex-u-plain | wait | completed | 0 | yes | NO | none | yes | 155 ms | pass |
-| codex-u-child | wait | completed | 0 | yes | NO | none | yes | 224 ms | pass |
-| codex-u-setsid | wait | completed | 0 | yes | NO | leaf-setsid | yes | 252 ms | pass |
-| codex-u-orphan | wait | completed | 0 | yes | NO | leaf-setsid | yes | 263 ms | pass |
-| codex-u-bare | wait | completed | 0 | yes | NO | bare | yes | 381 ms | pass |
-| codex-ud-plain | wait | timed_out | 124 | yes | NO | none | yes | 25 ms | pass |
-| codex-ud-child | wait | timed_out | 124 | yes | NO | none | yes | 39 ms | pass |
-| codex-ud-setsid | wait | timed_out | 124 | yes | NO | leaf-setsid | yes | 41 ms | pass |
-| codex-ud-stubborn | wait | timed_out | 124 | yes | NO | none | yes | 1518 ms | pass |
-| codex-ui-plain | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 30 ms | pass |
-| codex-ui-child | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 32 ms | pass |
-| codex-ui-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | NO | leaf-setsid | yes | 29 ms | pass |
-| codex-ui-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 28 ms | pass |
+| codex-dh-plain | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 180 ms | pass |
+| codex-dh-child | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 155 ms | pass |
+| codex-dh-setsid | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 170 ms | pass |
+| codex-dh-stubborn | SIGHUP at 1000 ms | interrupted | 130 | yes | yes | none | yes | 1706 ms | pass |
+| codex-e-plain | wait | failed | 1 | yes | yes | none | yes | 988 ms | pass |
+| codex-e-child | wait | failed | 1 | yes | yes | none | yes | 1193 ms | pass |
+| codex-e-setsid | wait | failed | 1 | yes | yes | none | yes | 1177 ms | pass |
+| codex-e-ignore | wait | failed | 1 | yes | yes | none | yes | 2673 ms | pass |
+| codex-e-pipe | wait | failed | 1 | yes | yes | none | yes | 1131 ms | pass |
+| codex-e-orphan | wait | failed | 1 | yes | yes | leaf-setsid | NO | 1167 ms | expected_failure |
+| codex-e-orphan-late | wait | failed | 1 | yes | yes | none | yes | 1215 ms | pass |
+| codex-e-relay | wait | failed | 1 | yes | yes | relay-heartbeat | NO | 1160 ms | expected_failure |
+| codex-e-bare | wait | failed | 1 | yes | yes | none | yes | 1319 ms | pass |
+| codex-ed-plain | wait | failed | 1 | yes | yes | none | yes | 1109 ms | pass |
+| codex-ed-pipe | wait | failed | 1 | yes | yes | none | yes | 1106 ms | pass |
+| codex-fd-plain | wait | timed_out | 124 | yes | yes | none | yes | 175 ms | pass |
+| codex-fd-child | wait | timed_out | 124 | yes | yes | none | yes | 175 ms | pass |
+| codex-fd-setsid | wait | timed_out | 124 | yes | yes | none | yes | 198 ms | pass |
+| codex-fd-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1675 ms | pass |
+| codex-fd-stubborn | wait | timed_out | 124 | yes | yes | none | yes | 1729 ms | pass |
+| codex-fd-pipe | wait | timed_out | 124 | yes | yes | none | yes | 184 ms | pass |
+| codex-fd-orphan | wait | timed_out | 124 | yes | yes | leaf-setsid | NO | 207 ms | expected_failure |
+| codex-fd-orphan-late | wait | timed_out | 124 | yes | yes | none | yes | 242 ms | pass |
+| codex-fd-relay | wait | timed_out | 124 | yes | yes | relay-heartbeat | NO | 220 ms | expected_failure |
+| codex-fd-bare | wait | timed_out | 124 | yes | yes | none | yes | 202 ms | pass |
+| codex-hd-plain | wait | timed_out | 124 | yes | yes | none | yes | 188 ms | pass |
+| codex-hd-child | wait | timed_out | 124 | yes | yes | none | yes | 213 ms | pass |
+| codex-i-plain | wait | failed | 1 | yes | yes | none | yes | 545 ms | pass |
+| codex-i-child | wait | failed | 1 | yes | yes | none | yes | 692 ms | pass |
+| codex-i-setsid | wait | failed | 1 | yes | yes | none | yes | 737 ms | pass |
+| codex-id-plain | wait | failed | 1 | yes | yes | none | yes | 557 ms | pass |
+| codex-fl-plain | wait | timed_out | 124 | yes | yes | none | yes | 170 ms | pass |
+| codex-fl-child | wait | timed_out | 124 | yes | yes | none | yes | 274 ms | pass |
+| codex-fl-ignore | wait | timed_out | 124 | yes | yes | none | yes | 1831 ms | pass |
+| codex-fli-plain | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 129 ms | pass |
+| codex-fli-child | SIGINT at 1000 ms | interrupted | 130 | yes | yes | none | yes | 177 ms | pass |
+| codex-dc-plain | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 216 ms | pass |
+| codex-dc-child | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 207 ms | pass |
+| codex-dc-setsid | close stdout at 1000 ms | none | 124 | n/a | n/a | none | n/a | 190 ms | pass |
+| codex-dca-plain | close stdout at 300 ms | none | 0 | n/a | n/a | none | n/a | 2043 ms | pass |
+| codex-k-plain | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 7 ms | expected_failure |
+| codex-k-child | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | child,provider | n/a | 9 ms | expected_failure |
+| codex-k-setsid | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | leaf-setsid,mid,provider | n/a | 8 ms | expected_failure |
+| codex-k-stubborn | SIGKILL at 1000 ms | none | signal 9 | n/a | n/a | provider | n/a | 6 ms | expected_failure |
+| codex-u-plain | wait | completed | 0 | yes | NO | none | yes | 175 ms | pass |
+| codex-u-child | wait | completed | 0 | yes | NO | none | yes | 287 ms | pass |
+| codex-u-setsid | wait | completed | 0 | yes | NO | leaf-setsid | yes | 328 ms | pass |
+| codex-u-orphan | wait | completed | 0 | yes | NO | leaf-setsid | yes | 254 ms | pass |
+| codex-u-bare | wait | completed | 0 | yes | NO | bare | yes | 406 ms | pass |
+| codex-ud-plain | wait | timed_out | 124 | yes | NO | none | yes | 19 ms | pass |
+| codex-ud-child | wait | timed_out | 124 | yes | NO | none | yes | 46 ms | pass |
+| codex-ud-setsid | wait | timed_out | 124 | yes | NO | leaf-setsid | yes | 27 ms | pass |
+| codex-ud-stubborn | wait | timed_out | 124 | yes | NO | none | yes | 1517 ms | pass |
+| codex-ui-plain | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 26 ms | pass |
+| codex-ui-child | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 37 ms | pass |
+| codex-ui-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | NO | leaf-setsid | yes | 36 ms | pass |
+| codex-ui-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 26 ms | pass |
