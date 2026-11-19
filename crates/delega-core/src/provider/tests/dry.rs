@@ -34,9 +34,21 @@ async fn reports_what_would_run(provider: Provider) {
     assert_eq!(plan.cwd, rig.work.to_string_lossy());
     assert_eq!(plan.time_limit_secs, 90);
     assert!(plan.stdin_bytes >= PROMPT.len());
-    assert!(plan.env_names.contains(&"MY_PLAIN_SETTING".to_string()));
     assert!(plan.env_names.contains(&"MY_EXPLICIT_SECRET".to_string()));
+    assert!(!plan.env_names.contains(&"MY_PLAIN_SETTING".to_string()));
     assert!(!plan.env_names.contains(&"MY_SERVICE_API_TOKEN".to_string()));
+    assert_eq!(plan.env.base, ["HOME", "PATH"]);
+    assert!(
+        plan.env
+            .set_by_caller
+            .contains(&"MY_EXPLICIT_SECRET".to_string())
+    );
+    assert_eq!(plan.env.withheld_count, 2);
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.starts_with("2 environment variables of the caller were withheld;"))
+    );
     assert!(plan.before_start.iter().any(|l| l.contains("--version")));
     assert_eq!(plan.mapping.on_request, "deny");
 

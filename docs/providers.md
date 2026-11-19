@@ -123,7 +123,8 @@ characters and a note says how many lines were affected.
 
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
-`provider_not_found`, `unsupported_provider_version` (all refused before start);
+`provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
+`forbidden_env_name` (all refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
 `provider_preparation_failed`, `spawn_failed`, `process_signaled`,
@@ -418,48 +419,92 @@ option before it is refused.
 
 ## Environment policy
 
-The provider gets the parent environment minus four groups of variables, then
-`env_set`, then the adapter's own variables.
+The policy is an allowlist. The provider receives only the variables below,
+taken from the parent environment when it has them, then `env_set`, then the
+adapter's own variables. Everything else is withheld, whatever its name.
 
-1. **The other provider's.** A Claude Code run loses `CODEX_*` and `OPENAI_*`. A
-   Codex run loses `CLAUDECODE`, `CLAUDE_*` and `ANTHROPIC_*`. The earlier project
-   did the same.
-2. **Variables that describe the calling session**, for both providers, so a
-   worker started from inside a Claude Code session does not take that session's
-   identity. A name matches when it is one of `AI_AGENT`, `CLAUDECODE`,
-   `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_ENTRYPOINT`,
-   `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ATTENDED`,
-   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PID`,
-   `CLAUDE_CODE_MESSAGING_SOCKET`, or starts with `CLAUDE_CODE_` and contains
-   `SESSION`, `MESSAGING` or `BRIDGE` (this covers
-   `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_BRIDGE_SESSION_ID`). Other
-   `CLAUDE_*` and `ANTHROPIC_*` names are configuration and pass to a Claude Code
-   run as before: an API key or base URL, `CLAUDE_CONFIG_DIR` and
-   `CLAUDE_CODE_OAUTH_TOKEN`. No variable a calling Codex session sets is known,
-   so none is listed for Codex; a Codex worker loses the Claude names above
-   under group 1 and `AI_AGENT` under this group.
-3. **Names that look like secrets**, unless they belong to the provider being
-   run (`ANTHROPIC_*`, `CLAUDE_*` for Claude Code; `OPENAI_*`, `CODEX_*` for
-   Codex). A name matches when, in upper case, it contains
-   `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY`,
-   `ACCESS_KEY` or `CONNECTION_STRING`, ends in `_KEY`, `_PAT`, `APIKEY`,
-   `_URL`, `_URI` or `_DSN`, or is `SSH_AUTH_SOCK`. Connection addresses count
-   because they often carry a user name and password.
-   The earlier project passed every other variable. This rule is added because a
-   worker can print its environment. It is a heuristic; a secret under an
-   ordinary name is passed.
-4. **delega's own settings**: `DELEGA_*`.
+1. **Base.** `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `TERM`,
+   `TMPDIR`, `TZ`, every name starting with `LC_`, the base directory variables
+   `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`,
+   and the switches `NO_COLOR` and `CI`. The `XDG_*` variables are locations,
+   so a worker finds the same configuration and cache as the caller's shell
+   would. `NO_COLOR` and `CI` are switches tools read to decide how to print.
+   None of these carries a secret.
+2. **Network.** `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` in upper
+   and lower case, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS`.
+3. **The provider's own.** For Claude Code, `CLAUDECODE`, `CLAUDE_*` and
+   `ANTHROPIC_*`; for Codex, `CODEX_*` and `OPENAI_*`; in each case minus the
+   variables that describe the calling session (group below). The other
+   provider's variables are not passed, so a Claude Code worker does not see
+   Codex credentials and the reverse.
+4. **Named by the caller.** `ProviderOptions::env_pass`, which the CLI fills
+   from `--env NAME` (repeatable, short `-e`). A name that is not set in the parent
+   environment is ignored in a run and listed as "named but not set" by a dry
+   run. A name that is not a valid variable name (letters, digits and
+   underscore, not starting with a digit), a calling-session variable or a
+   `DELEGA_*` variable is `refused` before start, with kind `invalid_env_name`
+   or `forbidden_env_name`; the message never repeats an invalid name, because
+   a mistaken `NAME=value` would put a value in it. A named variable may belong
+   to the other provider. Naming a variable whose name looks like a secret (see
+   below) is allowed, because the caller asked, and the result carries a
+   `provider_notes` entry naming each such variable.
+5. **Set by the caller or the adapter.** `env_set`, which the CLI fills from
+   `--env NAME=VALUE`, sets variables after the rules above, whatever the parent
+   environment holds. The names are checked as in group 4: an invalid,
+   calling-session or `DELEGA_*` name is `refused`, and a secret-looking name
+   gets a note. Prefer `NAME` (group 4) for secrets on the command line, since a
+   value there is visible in the process table and shell history. The adapter's variables (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`,
+   `DELEGA_EXACT_BASH_GRANTS`) cannot be overridden.
 
-`ProviderOptions::env_pass` names variables to pass although 1 to 4 would remove
-them. `env_set` sets variables after the policy runs. The adapter's variables
-(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, `DELEGA_EXACT_BASH_GRANTS`) cannot be overridden. A variable whose name is not valid UTF-8 is dropped.
+Never passed, even when named: `DELEGA_*`, and the variables that describe the
+calling session, so a worker started from inside a Claude Code session does not
+take that session's identity. A name is a calling-session variable when it is
+one of `AI_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`,
+`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`,
+`CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`,
+`CLAUDE_PID`, `CLAUDE_CODE_MESSAGING_SOCKET`, or starts with `CLAUDE_CODE_` and
+contains `SESSION`, `MESSAGING` or `BRIDGE`. Other `CLAUDE_*` and `ANTHROPIC_*`
+names are configuration and pass to a Claude Code run: an API key or base URL,
+`CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`. No variable a calling Codex
+session sets is known, so none is listed for Codex.
 
-Only names are reported: `dry_run().env_names`, `ProviderOptions`'s `Debug` and
-the `ResolvedEnv` type show names. The prompt, the instructions and variable
-values are not in a dry run. In a result, the only text that can carry a value is
-text the provider wrote (an error message or the standard error excerpt), which
-is redacted as described under [Text from the provider](#text-from-the-provider),
-and the answer, which is the provider's own output.
+Consequences for a caller:
+
+- Cloud credentials for Claude Code on Bedrock or Vertex (`AWS_*`, `GOOGLE_*`
+  and the like) are not passed by default. Name each one with `--env NAME`.
+- Variables that a command the worker may run needs are not passed either:
+  a toolchain home such as `JAVA_HOME`, `CARGO_HOME` or `GOPATH`, `GIT_*`,
+  `GH_TOKEN`, `SSH_AUTH_SOCK`, a package registry token, `DATABASE_URL`. Name
+  what the task needs. `COLORTERM`, `FORCE_COLOR` and `XDG_RUNTIME_DIR` are not
+  on the base list either.
+- A variable whose name is not valid UTF-8 is never passed.
+
+A name **looks like a secret** when, in upper case, it contains `SECRET`,
+`TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `PRIVATE_KEY`, `ACCESS_KEY` or
+`CONNECTION_STRING`, ends in `_KEY`, `_PAT`, `APIKEY`, `_URL`, `_URI` or `_DSN`,
+or is `SSH_AUTH_SOCK`. This heuristic is not part of what is passed. It decides
+two things: which passed values are removed from text the provider writes (see
+[Text from the provider](#text-from-the-provider)), together with the values of
+the provider's own variables, and which explicitly named variables get a note.
+
+What is visible, by names and counts only:
+
+- `dry_run().env_names` lists every name that would be passed, and
+  `dry_run().env` (`EnvReport`) groups them as `base`, `network`, `provider`,
+  `named`, `set_by_caller` and `set_by_delega`, lists `named_not_set`, and gives `withheld_count`, the
+  number of the caller's variables that are not passed. The names of withheld
+  variables are not reported anywhere.
+- Every result carries one `provider_notes` entry of the form `N environment
+  variables of the caller were withheld; M were passed`. `M` counts every
+  variable the provider receives, including those set by the caller and the
+  adapter.
+
+`ProviderOptions`'s `Debug` and the `ResolvedEnv` type show names only. The
+prompt, the instructions and variable values are not in a dry run. In a result,
+the only text that can carry a value is text the provider wrote (an error
+message or the standard error excerpt), which is redacted as described under
+[Text from the provider](#text-from-the-provider), and the answer, which is the
+provider's own output.
 
 ## Verified against the real CLI
 

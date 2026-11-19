@@ -5,8 +5,10 @@ use std::ffi::OsString;
 use super::{Rig, both, run_checked};
 use crate::contract::request::Provider;
 use crate::provider::env::{
-    EnvInputs, is_calling_session, is_other_providers, is_secret_name, owned_by, resolve,
+    BASE_NAMES, EnvInputs, NETWORK_NAMES, check_names, is_calling_session, is_secret_name,
+    is_valid_name, owned_by, resolve,
 };
+use crate::provider::{ProviderOptions, dry_run};
 
 const CANARY: &str = "canary-value-must-not-appear";
 
@@ -67,11 +69,98 @@ fn secret_looking_names_are_recognised_and_ordinary_ones_are_not() {
     }
 }
 
+fn resolved(
+    provider: Provider,
+    parent: &[(OsString, OsString)],
+    pass: &[&str],
+) -> crate::provider::env::ResolvedEnv {
+    let pass: Vec<String> = pass.iter().map(ToString::to_string).collect();
+    resolve(&EnvInputs {
+        provider,
+        parent,
+        pass: &pass,
+        set: &[],
+        adapter: &[],
+    })
+}
+
 #[test]
-fn each_provider_keeps_its_own_variables_and_loses_the_other_providers() {
+fn only_the_allowlist_passes_and_each_group_is_reported_under_its_reason() {
     let env = parent(&[
         "PATH",
         "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "XDG_CONFIG_HOME",
+        "NO_COLOR",
+        "CI",
+        "HTTPS_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "NODE_EXTRA_CA_CERTS",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CONFIG_DIR",
+        "EDITOR",
+        "JAVA_HOME",
+        "DATABASE_URL",
+        "MY_SERVICE_API_TOKEN",
+    ]);
+    let resolved = resolved(Provider::Claude, &env, &[]);
+    let report = resolved.report();
+    assert_eq!(
+        report.base,
+        [
+            "CI",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "NO_COLOR",
+            "PATH",
+            "XDG_CONFIG_HOME"
+        ]
+    );
+    assert_eq!(
+        report.network,
+        [
+            "HTTPS_PROXY",
+            "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE",
+            "no_proxy"
+        ]
+    );
+    assert_eq!(report.provider, ["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]);
+    assert!(report.named.is_empty() && report.set_by_caller.is_empty());
+    assert!(report.set_by_delega.is_empty());
+    assert_eq!(report.withheld_count, 4);
+    let names = resolved.names();
+    for withheld in [
+        "EDITOR",
+        "JAVA_HOME",
+        "DATABASE_URL",
+        "MY_SERVICE_API_TOKEN",
+    ] {
+        assert!(!names.contains(&withheld.to_string()), "{withheld}");
+    }
+}
+
+#[test]
+fn every_listed_base_and_network_name_passes_for_both_providers() {
+    let mut all: Vec<&str> = BASE_NAMES.to_vec();
+    all.extend(NETWORK_NAMES);
+    let env = parent(&all);
+    for provider in [Provider::Claude, Provider::Codex] {
+        let mut expected: Vec<String> = all.iter().map(ToString::to_string).collect();
+        expected.sort();
+        assert_eq!(names_for(provider, &env, &[]), expected, "{provider:?}");
+    }
+}
+
+#[test]
+fn each_provider_receives_its_own_variables_and_not_the_other_providers() {
+    let env = parent(&[
+        "PATH",
         "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDECODE",
@@ -84,37 +173,168 @@ fn each_provider_keeps_its_own_variables_and_loses_the_other_providers() {
     ]);
     assert_eq!(
         names_for(Provider::Claude, &env, &[]),
-        [
-            "ANTHROPIC_API_KEY",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "HOME",
-            "PATH",
-            "UNRELATED_VALUE"
-        ]
+        ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "PATH"]
     );
     assert_eq!(
         names_for(Provider::Codex, &env, &[]),
+        ["CODEX_HOME", "OPENAI_API_KEY", "PATH"]
+    );
+}
+
+#[test]
+fn a_named_variable_passes_only_that_name_and_may_belong_to_the_other_provider() {
+    let env = parent(&["PATH", "UNRELATED_SECRET", "OTHER_SECRET", "OPENAI_API_KEY"]);
+    let resolved = resolved(
+        Provider::Claude,
+        &env,
+        &["UNRELATED_SECRET", "OPENAI_API_KEY"],
+    );
+    assert_eq!(
+        resolved.names(),
+        ["OPENAI_API_KEY", "PATH", "UNRELATED_SECRET"]
+    );
+    assert_eq!(
+        resolved.report().named,
+        ["OPENAI_API_KEY", "UNRELATED_SECRET"]
+    );
+    assert_eq!(resolved.report().withheld_count, 1);
+}
+
+#[test]
+fn a_named_variable_that_is_not_set_is_ignored_and_listed_as_not_set() {
+    let env = parent(&["PATH"]);
+    let resolved = resolved(Provider::Codex, &env, &["JAVA_HOME", "PATH"]);
+    assert_eq!(resolved.names(), ["PATH"]);
+    assert_eq!(resolved.report().named_not_set, ["JAVA_HOME"]);
+    assert!(
+        resolved.notes().iter().all(|n| !n.contains("JAVA_HOME")),
+        "{:?}",
+        resolved.notes()
+    );
+}
+
+#[test]
+fn the_notes_give_counts_and_name_each_explicit_secret_looking_variable() {
+    let env = parent(&[
+        "PATH",
+        "HOME",
+        "EDITOR",
+        "JAVA_HOME",
+        "AWS_SECRET_ACCESS_KEY",
+    ]);
+    let plain = resolved(Provider::Claude, &env, &[]);
+    assert_eq!(
+        plain.notes(),
+        ["3 environment variables of the caller were withheld; 2 were passed"]
+    );
+    let named = resolved(
+        Provider::Claude,
+        &env,
+        &["AWS_SECRET_ACCESS_KEY", "JAVA_HOME", "NOT_SET_TOKEN"],
+    );
+    assert_eq!(
+        named.notes(),
         [
-            "CODEX_HOME",
-            "HOME",
-            "OPENAI_API_KEY",
-            "PATH",
-            "UNRELATED_VALUE"
+            "environment variable AWS_SECRET_ACCESS_KEY was passed because the caller named \
+             it; its name looks like a secret",
+            "1 environment variables of the caller were withheld; 4 were passed"
+        ]
+    );
+    let shown = format!("{:?}", named.notes());
+    assert!(!shown.contains(CANARY), "{shown}");
+}
+
+#[test]
+fn set_variables_are_reported_by_who_set_them_and_not_under_another_reason() {
+    let env = parent(&["PATH", "XDG_CONFIG_HOME"]);
+    let resolved = resolve(&EnvInputs {
+        provider: Provider::Claude,
+        parent: &env,
+        pass: &[],
+        set: &[
+            ("XDG_CONFIG_HOME".into(), "elsewhere".into()),
+            ("MY_DEPLOY_TOKEN".into(), "v".into()),
+            ("EMPTY_ONE".into(), String::new()),
+        ],
+        adapter: &[("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "1".into())],
+    });
+    let report = resolved.report();
+    assert_eq!(report.base, ["PATH"]);
+    assert_eq!(
+        report.set_by_caller,
+        ["EMPTY_ONE", "MY_DEPLOY_TOKEN", "XDG_CONFIG_HOME"]
+    );
+    assert_eq!(
+        report.set_by_delega,
+        ["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]
+    );
+    assert_eq!(report.withheld_count, 0);
+    assert_eq!(
+        resolved.notes(),
+        [
+            "environment variable MY_DEPLOY_TOKEN was set to a value the caller gave; its name \
+             looks like a secret",
+            "0 environment variables of the caller were withheld; 5 were passed"
         ]
     );
 }
 
 #[test]
-fn a_named_pass_overrides_the_policy_and_only_for_that_name() {
-    let env = parent(&["PATH", "UNRELATED_SECRET", "OTHER_SECRET", "OPENAI_API_KEY"]);
-    assert_eq!(
-        names_for(
-            Provider::Claude,
-            &env,
-            &["UNRELATED_SECRET", "OPENAI_API_KEY"]
-        ),
-        ["OPENAI_API_KEY", "PATH", "UNRELATED_SECRET"]
-    );
+fn names_to_pass_or_set_are_validated_before_a_run_starts() {
+    for bad in [
+        "",
+        "1ABC",
+        "A-B",
+        "A B",
+        "A=b",
+        "NAME=secret-value",
+        "A.B",
+        "\u{e9}",
+    ] {
+        let error = check_names(&[bad.to_string()], &[]).unwrap_err();
+        assert_eq!(error.kind, "invalid_env_name", "{bad:?}");
+        assert!(
+            bad.is_empty() || !error.message.contains(bad),
+            "the message does not echo the text: {}",
+            error.message
+        );
+        assert!(!is_valid_name(bad), "{bad:?}");
+        let error = check_names(&[], &[(bad.to_string(), "v".into())]).unwrap_err();
+        assert_eq!(error.kind, "invalid_env_name", "set {bad:?}");
+        assert!(error.message.contains("to set"), "{}", error.message);
+    }
+    for good in ["A", "_A", "a1_B2", "JAVA_HOME"] {
+        assert!(is_valid_name(good), "{good}");
+        check_names(&[good.to_string()], &[(good.to_string(), "x=y".into())]).unwrap();
+    }
+    for forbidden in [
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "AI_AGENT",
+        "DELEGA_CLAUDE_BIN",
+        "DELEGA_ANYTHING",
+    ] {
+        let error = check_names(&["PATH".to_string(), forbidden.to_string()], &[]).unwrap_err();
+        assert_eq!(error.kind, "forbidden_env_name", "{forbidden}");
+        assert!(error.message.contains(forbidden), "{}", error.message);
+        let error = check_names(&[], &[(forbidden.to_string(), "v".into())]).unwrap_err();
+        assert_eq!(error.kind, "forbidden_env_name", "set {forbidden}");
+    }
+}
+
+#[test]
+fn a_refused_pass_stops_a_dry_run_with_the_refusal() {
+    let rig = Rig::new();
+    for (name, kind) in [
+        ("1BAD", "invalid_env_name"),
+        ("DELEGA_CODEX_BIN", "forbidden_env_name"),
+    ] {
+        let mut options: ProviderOptions = rig.options(Provider::Codex);
+        options.env_pass = vec![name.to_string()];
+        let error = dry_run(&rig.request(Provider::Codex, "p"), &options).unwrap_err();
+        assert_eq!(error.kind, kind);
+    }
 }
 
 #[test]
@@ -143,15 +363,11 @@ fn set_variables_apply_and_adapter_variables_cannot_be_overridden() {
 }
 
 #[test]
-fn ownership_and_stripping_rules_do_not_overlap_by_accident() {
+fn ownership_and_session_rules_are_stated_by_name() {
     assert!(owned_by(Provider::Claude, "ANTHROPIC_API_KEY"));
     assert!(!owned_by(Provider::Claude, "OPENAI_API_KEY"));
-    assert!(is_other_providers(Provider::Codex, "ANTHROPIC_API_KEY"));
-    assert!(is_other_providers(Provider::Claude, "CODEX_HOME"));
-    assert!(!is_other_providers(
-        Provider::Claude,
-        "CLAUDE_CODE_OAUTH_TOKEN"
-    ));
+    assert!(owned_by(Provider::Codex, "OPENAI_API_KEY"));
+    assert!(!owned_by(Provider::Codex, "CLAUDE_CONFIG_DIR"));
     assert!(is_calling_session("CLAUDE_CODE_MESSAGING_SOCKET"));
     assert!(is_calling_session("CLAUDE_CODE_MESSAGING_TOKEN"));
     assert!(is_calling_session("CLAUDE_CODE_BRIDGE_SESSION_ID"));
@@ -205,11 +421,20 @@ fn session_variables_are_withheld_from_both_providers_and_configuration_passes()
 }
 
 #[test]
-fn an_explicit_pass_overrides_the_session_variable_rule() {
-    let env = parent(&["PATH", "CLAUDE_CODE_SESSION_ID", "AI_AGENT"]);
+fn a_session_or_delega_variable_is_withheld_even_when_named() {
+    let env = parent(&[
+        "PATH",
+        "CLAUDE_CODE_SESSION_ID",
+        "AI_AGENT",
+        "DELEGA_CLAUDE_BIN",
+    ]);
     assert_eq!(
-        names_for(Provider::Claude, &env, &["AI_AGENT"]),
-        ["AI_AGENT", "PATH"]
+        names_for(
+            Provider::Claude,
+            &env,
+            &["AI_AGENT", "CLAUDE_CODE_SESSION_ID", "DELEGA_CLAUDE_BIN"]
+        ),
+        ["PATH"]
     );
 }
 
@@ -217,7 +442,7 @@ async fn session_variables_do_not_reach_the_child(provider: Provider) {
     let rig = Rig::new();
     let mut options = rig.options(provider);
     let mut env = options.parent_env.take().unwrap();
-    for name in SESSION.iter().chain(&["PLAIN_CONTROL_VARIABLE"]) {
+    for name in SESSION.iter().chain(&["LC_ALL"]) {
         env.push((OsString::from(name), OsString::from(CANARY)));
     }
     options.parent_env = Some(env);
@@ -227,12 +452,9 @@ async fn session_variables_do_not_reach_the_child(provider: Provider) {
         assert!(!seen.contains(&name.to_string()), "{name}: {seen:?}");
     }
     assert!(seen.contains(&"HOME".to_string()), "{seen:?}");
-    // The control has an ordinary name, so a rule that withholds too much
+    // The control is on the allowlist, so a rule that withholds too much
     // fails here.
-    assert!(
-        seen.contains(&"PLAIN_CONTROL_VARIABLE".to_string()),
-        "{seen:?}"
-    );
+    assert!(seen.contains(&"LC_ALL".to_string()), "{seen:?}");
     rig.assert_nothing_left().await;
 }
 both!(
@@ -240,31 +462,50 @@ both!(
     session_variables_do_not_reach_the_child
 );
 
-async fn secret_is_not_passed_unless_allowed(provider: Provider) {
-    let canary_name = "MY_SERVICE_API_TOKEN";
-    let other_name = match provider {
-        Provider::Claude => "OPENAI_API_KEY",
-        Provider::Codex => "ANTHROPIC_API_KEY",
-    };
+async fn only_allowlisted_names_reach_the_child(provider: Provider) {
     let own_name = match provider {
         Provider::Claude => "ANTHROPIC_API_KEY",
         Provider::Codex => "OPENAI_API_KEY",
     };
+    let other_name = match provider {
+        Provider::Claude => "OPENAI_API_KEY",
+        Provider::Codex => "ANTHROPIC_API_KEY",
+    };
+    let allowed = ["LANG", "LC_ALL", "HTTPS_PROXY", "no_proxy", own_name];
+    let withheld = [
+        "MY_SERVICE_API_TOKEN",
+        "EDITOR",
+        "JAVA_HOME",
+        "DATABASE_URL",
+        "SSH_AUTH_SOCK",
+        "GH_TOKEN",
+        other_name,
+        "DELEGA_CLAUDE_BIN",
+    ];
 
     let rig = Rig::new();
     let mut options = rig.options(provider);
     let mut env = options.parent_env.take().unwrap();
-    for name in [canary_name, other_name, own_name, "DELEGA_CLAUDE_BIN"] {
+    for name in allowed.iter().chain(&withheld) {
         env.push((OsString::from(name), OsString::from(CANARY)));
     }
     options.parent_env = Some(env.clone());
     let result = run_checked(rig.request(provider, "success"), options.clone()).await;
     let seen = rig.env_names();
-    assert!(!seen.contains(&canary_name.to_string()), "{seen:?}");
-    assert!(!seen.contains(&other_name.to_string()), "{seen:?}");
-    assert!(!seen.contains(&"DELEGA_CLAUDE_BIN".to_string()), "{seen:?}");
-    assert!(seen.contains(&own_name.to_string()), "{seen:?}");
-    assert!(seen.contains(&"HOME".to_string()), "{seen:?}");
+    for name in allowed {
+        assert!(seen.contains(&name.to_string()), "{name}: {seen:?}");
+    }
+    for name in withheld {
+        assert!(!seen.contains(&name.to_string()), "{name}: {seen:?}");
+    }
+    let note = format!(
+        "{} environment variables of the caller were withheld; {} were passed",
+        withheld.len(),
+        seen.iter()
+            .filter(|n| !matches!(n.as_str(), "PWD" | "OLDPWD" | "SHLVL" | "_"))
+            .count()
+    );
+    assert!(result.provider_notes.contains(&note), "{note}");
     let shown = format!("{result:?} {options:?}");
     assert!(
         !shown.contains(CANARY),
@@ -272,17 +513,49 @@ async fn secret_is_not_passed_unless_allowed(provider: Provider) {
     );
     rig.assert_nothing_left().await;
 
+    // Naming a withheld variable passes it, and the result says its name
+    // looks like a secret.
     let rig = Rig::new();
     let mut options = rig.options(provider);
     options.parent_env = Some(env);
-    options.env_pass = vec![canary_name.to_string()];
-    run_checked(rig.request(provider, "success"), options).await;
-    assert!(rig.env_names().contains(&canary_name.to_string()));
+    options.env_pass = vec!["MY_SERVICE_API_TOKEN".into(), "JAVA_HOME".into()];
+    let result = run_checked(rig.request(provider, "success"), options).await;
+    let seen = rig.env_names();
+    assert!(seen.contains(&"MY_SERVICE_API_TOKEN".to_string()));
+    assert!(seen.contains(&"JAVA_HOME".to_string()));
+    assert!(!seen.contains(&"EDITOR".to_string()));
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| { n.contains("MY_SERVICE_API_TOKEN") && n.contains("looks like a secret") })
+    );
+    assert!(
+        !result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("JAVA_HOME"))
+    );
+    assert!(!format!("{result:?}").contains(CANARY));
     rig.assert_nothing_left().await;
 }
 both!(
-    withholds_a_secret_looking_variable_unless_it_is_allowed,
-    secret_is_not_passed_unless_allowed
+    passes_only_allowlisted_and_named_variables_to_the_child,
+    only_allowlisted_names_reach_the_child
+);
+
+async fn a_refused_pass_starts_nothing(provider: Provider) {
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    options.env_pass = vec!["BAD=value".into()];
+    let result = run_checked(rig.request(provider, "success"), options).await;
+    assert_eq!(result.outcome, crate::contract::outcome::Outcome::Refused);
+    assert_eq!(result.error.expect("error").kind, "invalid_env_name");
+    assert!(!rig.record.join("pid").exists());
+}
+both!(
+    refuses_a_bad_pass_name_before_starting,
+    a_refused_pass_starts_nothing
 );
 
 async fn explicit_set_reaches_the_provider(provider: Provider) {

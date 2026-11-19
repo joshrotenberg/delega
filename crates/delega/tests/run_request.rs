@@ -84,6 +84,8 @@ fn stdin_supplies_the_assignment_and_reaches_the_provider() {
             "--provider",
             provider,
             "--stdin",
+            "--env",
+            "FAKE_RECORD_DIR",
             "-C",
             &rig.work.to_string_lossy(),
         ]
@@ -517,7 +519,11 @@ fn progress_reports_a_denial_and_never_a_command_or_an_environment_value() {
     let out = rig
         .command()
         .env("MY_SERVICE_API_TOKEN", "never-print-this-value-1234")
-        .args(rig.run_args("codex", "denied-completed", &["--progress"]))
+        .args(rig.run_args(
+            "codex",
+            "denied-completed",
+            &["--progress", "--env", "MY_SERVICE_API_TOKEN"],
+        ))
         .output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0));
@@ -705,6 +711,7 @@ fn a_prompt_that_starts_with_a_hyphen_is_given_in_the_equals_form() {
             .command()
             .args(["run", "--provider", "claude", form, "-C"])
             .arg(&rig.work)
+            .args(["--env", "FAKE_RECORD_DIR"])
             .output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(0), "{form}: {}", text(&out.stderr));
@@ -855,4 +862,330 @@ fn wait_bounded_kills_a_child_that_does_not_exit_and_fails_the_test() {
         .spawn()
         .expect("spawn sleep");
     let _ = wait_bounded_for(child, std::time::Duration::from_millis(200));
+}
+
+const CANARY: &str = "canary-value-must-not-appear-5521";
+
+/// A command whose environment carries a canary in names of every kind: on
+/// the allowlist, withheld, secret-looking, owned by each provider, and named.
+fn canary_command(rig: &Rig) -> std::process::Command {
+    let mut command = rig.command();
+    for name in [
+        "LC_ALL",
+        "HTTPS_PROXY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "MY_SERVICE_API_TOKEN",
+        "EDITOR",
+        "JAVA_HOME",
+        "DATABASE_URL",
+        "NAMED_ONE",
+        "NAMED_TOKEN",
+    ] {
+        command.env(name, CANARY);
+    }
+    command
+}
+
+fn seen_by_the_fake(rig: &Rig) -> Vec<String> {
+    rig.recorded("env").lines().map(String::from).collect()
+}
+
+#[test]
+fn only_the_allowlist_and_named_variables_reach_the_worker() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = canary_command(&rig)
+            .args(rig.run_args(
+                provider,
+                "success",
+                &[
+                    "--env",
+                    "NAMED_ONE",
+                    "--env",
+                    "NAMED_TOKEN",
+                    "--env",
+                    "NOT_SET_ANYWHERE",
+                    "--output",
+                    "json",
+                ],
+            ))
+            .output()
+            .expect("run delega");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: {}",
+            text(&out.stderr)
+        );
+        let seen = seen_by_the_fake(&rig);
+        let own = if provider == "claude" {
+            ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+        } else {
+            ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        };
+        for name in ["LC_ALL", "HTTPS_PROXY", own.0, "NAMED_ONE", "NAMED_TOKEN"] {
+            assert!(
+                seen.contains(&name.to_string()),
+                "{provider} {name}: {seen:?}"
+            );
+        }
+        for name in [
+            own.1,
+            "MY_SERVICE_API_TOKEN",
+            "EDITOR",
+            "JAVA_HOME",
+            "DATABASE_URL",
+            "NOT_SET_ANYWHERE",
+            "DELEGA_CLAUDE_BIN",
+            "DELEGA_CODEX_BIN",
+        ] {
+            assert!(
+                !seen.contains(&name.to_string()),
+                "{provider} {name}: {seen:?}"
+            );
+        }
+        let result = result_of(&out);
+        let notes = result.provider_notes.join("\n");
+        assert!(
+            notes.contains("environment variables of the caller were withheld;"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains("NAMED_TOKEN") && notes.contains("looks like a secret"),
+            "{notes}"
+        );
+        assert!(!notes.contains("NAMED_ONE") && !notes.contains("NOT_SET_ANYWHERE"));
+        assert!(!text(&out.stdout).contains(CANARY));
+        assert!(!text(&out.stderr).contains(CANARY));
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn a_dry_run_groups_the_names_counts_the_withheld_and_prints_no_value() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let args = rig.run_args(
+            provider,
+            "success",
+            &[
+                "--dry-run",
+                "--env",
+                &format!("SET_ONE={CANARY}"),
+                "--env",
+                "NAMED_ONE",
+                "--env",
+                "NOT_SET_ANYWHERE",
+            ],
+        );
+        let out = canary_command(&rig)
+            .args(&args)
+            .output()
+            .expect("run delega");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: {}",
+            text(&out.stderr)
+        );
+        let shown = text(&out.stdout);
+        for line in [
+            "  base: ",
+            "  network: HTTPS_PROXY",
+            "  provider: ",
+            "  named by the caller: FAKE_RECORD_DIR, NAMED_ONE",
+            "  set by the caller: SET_ONE",
+            "  set by delega: ",
+            "  named but not set: NOT_SET_ANYWHERE",
+            "  withheld from the caller's environment: ",
+        ] {
+            assert!(shown.contains(line), "{provider} {line:?} missing: {shown}");
+        }
+        assert!(shown.contains("LC_ALL"), "{shown}");
+        for name in [
+            "EDITOR",
+            "JAVA_HOME",
+            "DATABASE_URL",
+            "MY_SERVICE_API_TOKEN",
+        ] {
+            assert!(
+                !shown.contains(name),
+                "withheld names are not shown: {name}"
+            );
+        }
+        assert!(!shown.contains(CANARY));
+        assert!(!text(&out.stderr).contains(CANARY));
+
+        let mut json_args = args.clone();
+        json_args.extend(["--output".into(), "json".into()]);
+        let out = canary_command(&rig)
+            .args(&json_args)
+            .output()
+            .expect("run delega");
+        let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        let env = &value["dry_run"]["env"];
+        assert!(
+            env["named"]
+                .as_array()
+                .unwrap()
+                .contains(&"NAMED_ONE".into())
+        );
+        assert_eq!(env["named_not_set"][0], "NOT_SET_ANYWHERE");
+        // Nine withheld: the other provider's key and its configuration
+        // variable the rig sets, a token, EDITOR, JAVA_HOME, DATABASE_URL,
+        // NAMED_TOKEN, and the two DELEGA_*_BIN variables the rig sets.
+        assert_eq!(env["withheld_count"], 9, "{env}");
+        assert!(!text(&out.stdout).contains(CANARY));
+        assert!(!rig.record.join("argv").exists(), "{provider} was started");
+    }
+}
+
+#[test]
+fn a_bad_env_name_is_refused_before_start_and_its_text_is_not_echoed() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        // The name part is bad in each: it starts with a digit, is empty, or
+        // has a space. The value must not be echoed.
+        for value in [
+            format!("1BAD={CANARY}"),
+            format!("={CANARY}"),
+            format!("BAD NAME={CANARY}"),
+        ] {
+            let out = rig
+                .command()
+                .args(rig.run_args(provider, "success", &["--env", &value, "--output", "json"]))
+                .output()
+                .expect("run delega");
+            assert_eq!(out.status.code(), Some(2), "{provider}");
+            let result = result_of(&out);
+            assert_eq!(result.outcome, Outcome::Refused);
+            assert_eq!(result.error.expect("error").kind, "invalid_env_name");
+            assert!(!text(&out.stdout).contains(CANARY));
+            assert!(!text(&out.stderr).contains(CANARY));
+            assert!(!rig.record.join("argv").exists(), "{provider} was started");
+        }
+
+        let out = rig
+            .command()
+            .args(rig.run_args(provider, "success", &["--env", "1ABC", "--dry-run"]))
+            .output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(2), "{provider}");
+        assert!(text(&out.stderr).contains("invalid_env_name"));
+    }
+}
+
+#[test]
+fn env_refuses_a_calling_session_or_delega_variable_in_either_form() {
+    let rig = Rig::new();
+    for (name, needle) in [
+        ("CLAUDE_CODE_SESSION_ID", "calling session"),
+        ("CLAUDECODE", "calling session"),
+        ("DELEGA_CLAUDE_BIN", "configures delega itself"),
+    ] {
+        for given in [name.to_string(), format!("{name}=value")] {
+            let out = rig
+                .command()
+                .args(rig.run_args("claude", "success", &["--env", &given, "--output", "json"]))
+                .output()
+                .expect("run delega");
+            assert_eq!(out.status.code(), Some(2), "{name}");
+            let error = result_of(&out).error.expect("error");
+            assert_eq!(error.kind, "forbidden_env_name", "{name}");
+            assert!(
+                error.message.contains(name) && error.message.contains(needle),
+                "{}",
+                error.message
+            );
+        }
+    }
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn the_help_documents_env_and_a_profile_does_not_carry_it() {
+    let rig = Rig::new();
+    let help = text(&rig.delega(&["run", "--help"]).stdout);
+    assert!(help.contains("-e, --env <NAME[=VALUE]>"), "{help}");
+    assert!(help.contains("Prefer NAME for secrets"), "{help}");
+    let file = profile(
+        &rig,
+        r#"{"schema_version":1,"provider":"claude","prompt":"success","pass_env":["X"]}"#,
+    );
+    let out = rig
+        .command()
+        .args(["run", "--request", &file, "-C"])
+        .arg(&rig.work)
+        .args(["--output", "json"])
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn env_with_a_value_sets_it_for_the_worker_whatever_the_caller_has() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        // FAKE_VERSION is printed by the fake as its version, so the result
+        // shows the value arrived. The value holds `=` and spaces.
+        let out = rig
+            .command()
+            .env("FAKE_VERSION", "caller-value")
+            .args(rig.run_args(
+                provider,
+                "success",
+                &[
+                    "-e",
+                    "FAKE_VERSION=7.7.7 (build=x y)",
+                    "-e",
+                    "EMPTY_ONE=",
+                    "--output",
+                    "json",
+                ],
+            ))
+            .output()
+            .expect("run delega");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: {}",
+            text(&out.stderr)
+        );
+        let seen = seen_by_the_fake(&rig);
+        assert!(seen.contains(&"EMPTY_ONE".to_string()), "{seen:?}");
+        let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        assert_eq!(
+            value["provenance"]["provider_version"], "7.7.7 (build=x y)",
+            "{provider}"
+        );
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn env_with_a_secret_looking_name_is_noted_in_both_forms_without_the_value() {
+    let rig = Rig::new();
+    let out = canary_command(&rig)
+        .args(rig.run_args(
+            "claude",
+            "success",
+            &[
+                "-e",
+                "NAMED_TOKEN",
+                "-e",
+                &format!("SET_API_TOKEN={CANARY}"),
+                "--output",
+                "json",
+            ],
+        ))
+        .output()
+        .expect("run delega");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let notes = result_of(&out).provider_notes.join("\n");
+    assert!(notes.contains("NAMED_TOKEN was passed"), "{notes}");
+    assert!(notes.contains("SET_API_TOKEN was set"), "{notes}");
+    assert!(!text(&out.stdout).contains(CANARY));
+    assert!(!text(&out.stderr).contains(CANARY));
 }

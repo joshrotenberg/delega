@@ -98,7 +98,8 @@ impl Rig {
     }
 
     /// The arguments of `delega run` for a provider, a prompt and the working
-    /// directory, followed by `extra`.
+    /// directory, followed by `extra`. The record directory variable the fakes
+    /// write into is passed by name, because workers do not inherit it.
     pub fn run_args(&self, provider: &str, prompt: &str, extra: &[&str]) -> Vec<String> {
         let mut args: Vec<String> = [
             "run",
@@ -108,6 +109,8 @@ impl Rig {
             prompt,
             "-C",
             &self.work.to_string_lossy(),
+            "--env",
+            "FAKE_RECORD_DIR",
         ]
         .map(String::from)
         .to_vec();
@@ -121,6 +124,7 @@ impl Rig {
         self.command()
             .args(["run", "--provider", provider, "-p", prompt, "-C"])
             .arg(cwd)
+            .args(["--env", "FAKE_RECORD_DIR"])
             .args(extra)
             .output()
             .expect("run delega")

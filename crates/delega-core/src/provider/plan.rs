@@ -64,6 +64,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
         })?),
         None => None,
     };
+    env::check_names(&options.env_pass, &options.env_set)?;
     let scope = permissions::scope(request)?;
     let parent = options.parent_env();
     let program = program::resolve(request.provider, options, &parent)?;
@@ -91,6 +92,7 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
     let mut notes = built.notes;
     notes.extend(wide_scope_note(&scope, &parent));
     notes.extend(assembled.notes);
+    notes.extend(env.notes());
     let mapping = Mapping {
         mode: scope.mode,
         commands: built.commands,
