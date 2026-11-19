@@ -129,7 +129,8 @@ characters and a note says how many lines were affected.
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
 `provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
-`forbidden_env_name` (all refused before start);
+`forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit` (all
+refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
 `provider_preparation_failed`, `spawn_failed`, `process_signaled`,
@@ -279,15 +280,163 @@ same text is accepted for Codex, which has no rule text.
   that is accepted is read as split fragments by such a reader, which fails
   closed (the rule matches less) and never adds a tool.
 
+### Deny rules
+
+A Claude worker starts with `--setting-sources ""`, so Claude Code loads none of
+the user's or the project's settings. One part of them is carried over: the
+`permissions.deny` rules. A rule the user wrote can only narrow a run, so delega
+reads those rules itself at launch and adds them to the worker. The earlier
+project (commit `8fa4645`) merged them for every worker and anchored only its
+reviewer workers' rules; this layer passes rules as written (see Anchoring).
+
+**Files, in order.** The directories come from the environment the worker will
+receive (`ProviderOptions::parent_env`, `env_pass`, `env_set` and the base
+variables), not from the calling process.
+
+1. User settings: `settings.json` in `CLAUDE_CONFIG_DIR` when the worker's
+   environment has it, otherwise `.claude/settings.json` under the worker's
+   `HOME`. When the worker has neither, no user file is looked for and a note
+   says so.
+2. `.claude/settings.json` under the working directory, and only there, as
+   Claude Code reads it.
+3. `.claude/settings.local.json` under the working directory, then under the root
+   of the git repository the working directory is inside (Claude Code reads it
+   from the repository root as well as the start directory), then under the main
+   checkout when that root is a linked worktree. The root is the nearest ancestor
+   holding `.git`. `git` is not run. The working directory's own files are
+   always read.
+
+   *A root is skipped.* As Claude Code does, a root that is the user's home
+   directory is skipped, and so is a root whose root directory, `.git` entry,
+   `.claude` directory or settings file is not owned by the current user. This
+   applies to the main checkout as to any other root. The file is not read, and a
+   note and the dry run's `deny_rules.skipped` name its path and the reason.
+
+   *Links.* In a repository root other than the start directory, the root's
+   `.git` entry is never followed if it is a symbolic link: the root's file is
+   skipped for that reason. A symbolic link at `.claude` or at the settings
+   file is followed only when all three hold: the link is owned by the current
+   user; the directory that holds it (the root for `.claude`, the `.claude`
+   directory for the file) is owned by the current user and not writable by group
+   or others; and the target, once opened, is owned by the current user (a
+   directory for `.claude`, a regular file for the file). Otherwise the file is
+   skipped and the note says which condition failed, and a link to nothing is
+   skipped as such. The reason: another user can plant a link only in a directory
+   they can write, so a link the user owns in a directory only the user can write
+   was put there by the user, as a dotfiles manager does, while a link in a
+   group-writable or world-writable tree (or one under `/tmp`) may be planted to
+   make the user's own files read as that project's rules. Ownership is judged
+   on the open handles, each directory opened from the one above, so nothing
+   swapped in after a check is read. Ownership is judged before kind and before
+   readability: an entry or link target that the current user does not own is
+   always skipped with the ownership note, whatever it is (a pipe, a device, a
+   directory with mode 000) and is never read (a link target is not opened). Kind and
+   readability errors refuse only for what the user owns: a link to a pipe the
+   user owns, like a pipe named as the file, is refused as not a regular file; a
+   link to `/dev/zero` is skipped as a foreign target (when run as its owner,
+   root, it is refused as not a regular file). A file or directory the user owns
+   that exists but cannot be opened or searched (mode 000 or 600, an I/O error)
+   refuses the
+   run with `settings_unreadable`, as it does for the start directory; only a
+   file that does not exist contributes nothing. The user's own settings file
+   (item 1) and the working directory's files (items 2 and 3) may be symbolic
+   links, as a dotfiles setup makes them; a link to a regular file is followed.
+
+   *The main checkout.* For a worktree, the `.git` file's `gitdir:` line is
+   followed only to a directory directly under a `worktrees` directory inside a
+   directory called `.git` (a worktree may be named `worktrees`), and only when
+   that directory's `gitdir` file names this worktree's `.git` file. A `.git`
+   file planted in a tree such as an unpacked archive therefore cannot borrow
+   another checkout's rules. When the main checkout cannot be identified (a
+   `.git` file that is not owned by the user, that has no `gitdir:` line or names
+   nothing, a `.git` that is a symbolic link or a git directory kept elsewhere,
+   or a `gitdir` file that does not name this worktree) only the nearest root is
+   read and a note says the main checkout could not be identified and why. A
+   `.git` file that points elsewhere than a `worktrees` directory, as a
+   submodule's does, is not a linked worktree and gets no note.
+
+Home and configuration directories are resolved to their real paths, so paths in
+notes are real paths. Managed (enterprise) settings are not read. A missing file contributes nothing, and an empty
+file (or one with only whitespace) is a file with no rules. A UTF-8 byte order
+mark is ignored.
+
+**What is taken.** Only `permissions.deny`, a list of strings. Everything else in
+a file is dropped when it is parsed and is in no argument, note, result or dry
+run. That covers hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers,
+instructions and the `allow` and `ask` lists.
+
+**Refused before start.** A file that exists and cannot be used refuses the run,
+with kind `settings_unreadable`, naming the file and the reason and never its
+content: it cannot be inspected or read, it is not a regular file (a directory,
+device or pipe is refused before it is opened, and the file is opened without
+blocking and checked again), it is larger than
+`SETTINGS_FILE_BYTES` (1 MiB), it is not a JSON object, `permissions` is not an
+object, `permissions.deny` is not a list, an entry is not a string, is empty or
+holds a control character. A rule over a bound refuses with kind
+`deny_rules_over_limit`: more than `MAX_DENY_RULES_PER_FILE` (256) in a file,
+more than `MAX_DENY_RULES` (512) after removing duplicates and adding the
+absolute form of one-slash rules, or a
+rule longer than `MAX_DENY_RULE_CHARS` (512). Nothing is truncated; a rule the
+user set is never dropped to make the run fit. The generated settings argument
+is also held to `SETTINGS_ARGUMENT_LIMIT`.
+
+**Anchoring.** Every rule is passed as written. Claude Code resolves `path` and
+`./path` against the working directory in every settings source (a live probe of
+inline `--settings` showed `Read(./secret.txt)`, `Read(secret.txt)` and
+`Read(**/secret.txt)` each deny `secret.txt` and `sub/secret.txt` under the
+working directory), so those need no help. The one form that loses its meaning
+inline is a `Read` or `Edit` rule with exactly one leading slash, which Claude
+Code defines as relative to the settings file's location: for it the original
+rule is passed and an absolute rule `//BASE/path` is added beside it, where BASE
+is, for the user's `settings.json`, the directory holding it (the configuration
+directory, also when `CLAUDE_CONFIG_DIR` is set). For a project or local file
+there is one added rule for the working directory and, when the file is in the
+repository root or main checkout, another for the directory holding its
+`.claude`, which covers either reading of the documentation. Adding a rule can only narrow a run. Rules for other tools
+and rules starting `//` or `~/` are unchanged. Glob characters in BASE are
+escaped. Duplicates are removed, keeping the first.
+
+**How they are passed.** The rules are the `permissions.deny` array of the JSON
+given to `--settings`, in all three modes (deny narrows `full` too):
+
+```json
+{"disableAllHooks":true,"permissions":{"deny":["Read(./secret.txt)","Edit(/out/x)","Edit(//base/out/x)"]}}
+```
+
+A rule is the user's own text, so a comma, bracket, quote or space in it is not
+refused. It cannot become an allow rule or change the allow list because it is
+only ever a string element of that array, which `serde_json` escapes: no text can
+end the string or the array or add a key such as `permissions.allow`, and
+`--allowedTools`, `--tools` and every other argument are built from delega's own
+data and never from a rule. A string in a deny list is a deny pattern whatever
+it holds, so a rule that is not well formed matches less and allows nothing.
+This is held by a generated test and a test of hostile rules, which compare the
+launch with and without rules and find only the added `permissions` key.
+
+**What a user sees.** A note on every Claude run says that settings other than
+deny rules were not applied (hooks, env, apiKeyHelper, plugins, skills, MCP
+servers, instructions), and another gives the number of rules applied with the
+path and count of each file, or says none were found. A settings file that was
+ignored (see the roots above) and a main checkout that could not be identified
+each get their own note naming the path and the reason. The mapping lists
+`denyRules=N`. `dry_run` has a `deny_rules` object: the files read with their
+rule counts, any local settings files ignored with the reason (`skipped`), `applied`, and `user_deny_rules`, the rules as they would be passed,
+at most `DRY_RUN_DENY_RULES_SHOWN` (100) of them and each at most
+`DRY_RUN_DENY_RULE_CHARS` (200) characters, with `omitted` counting the rest. The
+rules are permission patterns the user wrote, not secrets, and they appear only
+there; the `--settings` argument in a dry run shows their count in their place.
+Text output prints the same under "user deny rules".
+
+**Codex.** Claude deny rules do not apply to Codex. The Codex adapter reads no
+Claude Code settings and its dry run has an empty `deny_rules`.
+
 ### What cannot be enforced
 
 - `--setting-sources ""` means Claude Code loads no user, project or local
-  settings file. Not applied to the worker: the user's and project's
-  `permissions.deny` rules, hooks, `env`, `apiKeyHelper`, plugins, skills, MCP
-  servers and settings-defined instructions. Every Claude run carries a note
-  saying the user's and project's settings, including deny rules, were not
-  applied. The earlier project merged those deny rules into the launch; this
-  layer does not (see [Not done](#not-done)).
+  settings file. Only their `permissions.deny` rules reach the worker (see
+  [Deny rules](#deny-rules)). Not applied: hooks, `env`, `apiKeyHelper`,
+  plugins, skills, MCP servers and settings-defined instructions. Every Claude
+  run carries a note saying so.
 - Which instruction files Claude Code still reads is not controlled by delega.
   Reference directories contribute none (the variable that would load them is
   not set). Whether the working directory's own `CLAUDE.md` is read with empty
@@ -559,6 +708,12 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
 - The Codex `workspace-write` sandbox blocks writes outside the working
   directory.
 - Session resume works on both.
+- Deny rules passed as `permissions.deny` in the `--settings` JSON with empty
+  settings sources are applied, on 2026-11-18 with Claude Code 2.1.328: a project
+  deny rule blocks `Read`, hides the file from `Grep`, and overrides an allowed
+  command. Relative rules in inline settings (`./x`, `x`, `**/x`) resolve against
+  the working directory and match at any depth. Not run: the added absolute form
+  of one-slash rules.
 
 ## Unverified against the real CLI
 
@@ -586,12 +741,10 @@ each.
 
 ## Not done
 
-- **User deny rules and instructions for Claude Code.** The earlier project
-  read the user's and project's `permissions.deny` arrays and the user's
-  `CLAUDE.md` and copied them into the launch, because `--setting-sources ""`
-  otherwise drops them. That reads the user's own files and is a separate
-  decision about what may be read. This layer does not read them; every Claude
-  result says the settings were not applied.
+- **User instructions for Claude Code.** The earlier project also copied the
+  user's `CLAUDE.md` into the launch. This layer does not read it. The
+  `permissions.deny` rules are carried over (see [Deny rules](#deny-rules)).
+- **Managed settings.** Enterprise managed deny rules are not read.
 - **Command shape in the result.** The contract's `provenance` has no field for
   it. `dry_run` reports the shape; a run records the executable and version.
 - **Live asking** (`on_request: ask`), as in [api.md](api.md).

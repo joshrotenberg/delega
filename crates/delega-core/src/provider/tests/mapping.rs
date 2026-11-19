@@ -101,7 +101,7 @@ fn claude_read_mode_grants_reading_the_working_directory_and_nothing_else() {
     assert!(
         plan.notes
             .iter()
-            .any(|n| n.contains("including their deny rules, were not applied"))
+            .any(|n| n.contains("other than their deny rules were not applied"))
     );
 }
 
@@ -200,6 +200,7 @@ fn claude_grants_value_is_the_exact_command_list() {
         hook: Some(&hook_command),
         system: "s",
         native: &[],
+        deny: &crate::provider::deny::DenyRules::default(),
     })
     .unwrap();
     let grants = built

@@ -224,7 +224,7 @@ async fn claude_denial_reasons_from_tool_errors_are_kept() {
 }
 
 #[test]
-fn every_claude_run_says_settings_and_deny_rules_were_not_applied() {
+fn every_claude_run_says_settings_other_than_deny_rules_were_not_applied() {
     let rig = Rig::new();
     for mode in [
         crate::contract::permissions::Mode::Read,
@@ -237,7 +237,7 @@ fn every_claude_run_says_settings_and_deny_rules_were_not_applied() {
         assert!(
             plan.notes
                 .iter()
-                .any(|n| n.contains("including their deny rules, were not applied")),
+                .any(|n| n.contains("other than their deny rules were not applied")),
             "{mode:?}"
         );
         assert!(

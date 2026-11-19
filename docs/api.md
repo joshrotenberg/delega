@@ -147,6 +147,19 @@ Behavior:
 
 - **Timeout.** `--timeout` accepts `90s`, `20m`, `2h` or a plain number of
   seconds, and the CLI converts it to the request's `timeout_secs`.
+- **Claude Code settings.** A Claude worker starts with settings sources off, so
+  it inherits no hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers or
+  instructions from the user's or the project's Claude Code settings. It does get
+  their `permissions.deny` rules: delega reads the user's settings file and the
+  working directory's `.claude/settings.json` and `settings.local.json` (the
+  latter also from the git repository root), takes
+  only that list, and adds the rules to the worker, where they can only narrow
+  the run (also in `full`). A settings file that exists and cannot be used
+  (unreadable, not JSON, a wrong type, over a limit) refuses the run with kind
+  `settings_unreadable` or `deny_rules_over_limit`, naming the file. The result's
+  `provider_notes` say how many rules were applied and from which files, and
+  `--dry-run` lists the files and, under `user_deny_rules`, the rules. Codex
+  gets none of this. See [providers.md](providers.md#deny-rules).
 - **Environment.** A worker does not inherit the caller's environment. It
   receives a fixed base (the user, shell, locale, temporary and base directory
   variables), proxy and certificate variables, and the provider's own
@@ -266,7 +279,10 @@ Behavior:
   the caller's variables that are withheld (`withheld_count`); text output
   prints the same groups. It lists environment variable names, never values,
   never the names of withheld variables, and not the assignment, instructions or settings text, which are replaced by their
-  size. A request that would be refused prints the refusal as for a run (a
+  size. For Claude it adds `deny_rules`: the settings files read with their rule
+  counts, any local settings files ignored with the reason (`skipped`: a root that is the home directory, an entry that is not owned by the current user, or, in a repository root, a `.git` link or a `.claude` or settings-file link that is not the user's own in a directory only the user can write, with a target the user owns; anything the user does not own is skipped whatever its kind or mode), `applied`, and the user's own deny rules under `user_deny_rules`
+  (bounded, with `omitted`); a main checkout that could not be identified is a note, not a `skipped` entry; the launch arguments show a count in their place.
+  A request that would be refused prints the refusal as for a run (a
   `refused` result in JSON, a line on standard error in text) and exits 2.
   A dry run exits 0 otherwise.
 - **Progress.** `--progress` writes one line per provider event to standard
