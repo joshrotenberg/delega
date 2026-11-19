@@ -35,6 +35,17 @@ A path from 1 or 2 must be absolute and an executable file. Otherwise the run is
 `refused` with kind `provider_not_found`, and the message names the variable to
 set. The path used is `provenance.provider_executable`.
 
+## Diagnostics
+
+`delega doctor` ([api.md](api.md#doctor)) runs this lookup and the `--version`
+probe of step 2 below, with the same environment and time limit, for both
+providers, and reads the Claude Code settings with the reader described under
+[Deny rules](#deny-rules), without starting a worker. It reports the executable,
+the version and whether the command hook interface is available, counts of the
+environment variables and deny rules a run would get, and the problems that
+would refuse a run, each with a stable kind (the kind a refused run has, where
+there is one), plus the process inspection check. It never prints a value or a rule.
+
 ## Run sequence
 
 1. Validate the request (`Request::validate`), the `native_args`, and the

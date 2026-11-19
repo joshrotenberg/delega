@@ -71,6 +71,19 @@ visible in the process table and in shell history. A `NAME` that is not set is
 ignored, and `--dry-run` lists what would be passed by reason, with the count
 of what is withheld.
 
+## Diagnose a refusal
+
+When a run is refused because a provider is missing, because Claude Code is too
+old for `--allow-command`, or because a Claude Code settings file cannot be
+used, run `delega doctor` in the same working directory. It starts no worker and
+writes nothing. It names each provider's executable and version, the limits in
+force, and every problem that would stop a run, per provider, and `delega doctor
+--output json` prints the same as a versioned object to read in a script. It
+exits 0 when a run can go ahead, 1 when something would stop one, and 2 when it
+cannot run itself. Environment variables and deny rules appear as counts and
+file names, never as values or rule text. It also tells you when process
+inspection is unavailable, which is why a run's `cleanup.confirmed` is false.
+
 ## Outcomes and exit status
 
 Every run ends in exactly one outcome, and the exit status follows it.
