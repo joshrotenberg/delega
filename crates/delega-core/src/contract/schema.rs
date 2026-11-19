@@ -171,9 +171,30 @@ pub fn generate_result_schema() -> String {
     render(&schemars::schema_for!(RunResult))
 }
 
+/// The value with every object's keys in alphabetical order. A JSON object has
+/// no order, but the committed files are compared as text, `properties` is
+/// written in map order, and another crate in the build (the MCP server's
+/// `tower-mcp`) can switch `serde_json` to insertion order for every crate in
+/// it. Sorting makes the text the same whichever way the build goes.
+fn sorted(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(entries.into_iter().map(|(k, v)| (k, sorted(v))).collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
+}
+
 fn render(schema: &schemars::Schema) -> String {
+    // Back to a `Schema`, so that its own ordering of the well-known keywords
+    // (`$schema`, `title`, `description`, `type`, ...) still applies.
+    let canonical =
+        Schema::try_from(sorted(schema.clone().to_value())).unwrap_or_else(|_| schema.clone());
     // A schema is a JSON value with string keys, so serializing cannot fail.
-    let mut text = serde_json::to_string_pretty(schema).unwrap_or_default();
+    let mut text = serde_json::to_string_pretty(&canonical).unwrap_or_default();
     text.push('\n');
     text
 }

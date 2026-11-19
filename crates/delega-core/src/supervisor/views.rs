@@ -5,6 +5,7 @@
 //! activity history, the supervisor's own diagnostics and every field of the
 //! result.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::contract::outcome::Outcome;
@@ -18,7 +19,7 @@ use super::limits::{COMPACT_RESULT_TEXT_CHARS, COMPACT_STRUCTURED_BYTES};
 use super::state::{RunState, WorkerState};
 
 /// How much a read returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Detail {
     /// The answer and what went wrong; for a running run, the end of the
@@ -71,7 +72,7 @@ pub struct WaitTargets {
 /// A run that could not go ahead is finished at once: `state` is `finished`,
 /// `outcome` is `refused` and `error` says why. `read` returns its result. A
 /// refused `start` creates no worker, so `worker` is absent.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct StartResponse {
     /// The worker, absent when `start` was refused.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,7 +98,7 @@ pub struct StartResponse {
 pub type FollowUpResponse = StartResponse;
 
 /// One run in a `wait` response.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct RunBrief {
     /// The run.
     pub run: String,
@@ -115,7 +116,7 @@ pub struct RunBrief {
 }
 
 /// One worker in a `wait` or `list` response.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WorkerBrief {
     /// The worker.
     pub worker: String,
@@ -139,7 +140,7 @@ pub struct WorkerBrief {
 
 /// The answer to `wait`. A timeout is not an error: `timed_out` is true and
 /// the states are current.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WaitResponse {
     /// Pass this as `after_cursor` on the next call to see only what finishes
     /// after this response.
@@ -157,7 +158,7 @@ pub struct WaitResponse {
 }
 
 /// A result, compact or whole.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ResultView {
     /// What a caller needs to know what happened.
@@ -169,7 +170,7 @@ pub enum ResultView {
 /// The compact form of a [`RunResult`]: the outcome, the answer, the error, the
 /// cleanup verdict, the denials, the session and the timing. Usage and
 /// provenance are left out.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CompactResult {
     /// Run id.
     pub run: String,
@@ -228,7 +229,7 @@ pub struct CompactResult {
 }
 
 /// Where a window of the answer text sits in the whole answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct TextWindow {
     /// Characters before the window.
     pub offset: usize,
@@ -337,7 +338,7 @@ impl ResultView {
 }
 
 /// How an unfinished run is going.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ProgressView {
     /// Time waiting in the queue so far, or in total once started.
     pub queued_ms: u64,
@@ -366,7 +367,7 @@ pub struct ProgressView {
 
 /// What the supervisor knows about a run beyond its progress. The provider
 /// layer does not expose the child's process diagnostics, so none appear here.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct RunDiagnostics {
     /// The provider the run uses.
     pub provider: Provider,
@@ -385,7 +386,7 @@ pub struct RunDiagnostics {
 }
 
 /// The answer to `read`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ReadResponse {
     /// The worker, when the run has one or the target was one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -421,7 +422,7 @@ pub struct ReadResponse {
 }
 
 /// The limits in force and what is in use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct LimitsView {
     /// Most live workers.
     pub max_live_workers: usize,
@@ -448,7 +449,7 @@ pub struct LimitsView {
 }
 
 /// One worker in `list`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WorkerView {
     /// The state and the runs.
     #[serde(flatten)]
@@ -471,7 +472,7 @@ pub struct WorkerView {
 }
 
 /// The answer to `list`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ListResponse {
     /// The latest cursor.
     pub cursor: u64,
@@ -483,7 +484,7 @@ pub struct ListResponse {
 }
 
 /// The answer to `interrupt`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct InterruptResponse {
     /// The worker the run belongs to.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -507,7 +508,7 @@ pub struct InterruptResponse {
 
 /// The answer to `close`. Closing twice answers the same way, with
 /// `already_closed` true.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CloseResponse {
     /// The worker.
     pub worker: String,

@@ -7,18 +7,18 @@
 //! printed as a result, so a caller reads one shape whatever happened.
 
 mod execute;
-mod log;
+pub(super) mod log;
 mod output;
 mod request;
-mod signals;
+pub(super) mod signals;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgGroup, Parser, ValueEnum};
-use delega_core::provider::{HookCommand, ProviderOptions, dry_run};
+use delega_core::provider::{ProviderOptions, dry_run};
 
-use super::{OutputFormat, hook};
+use super::OutputFormat;
 use crate::duration::parse_duration_secs;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -131,15 +131,10 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     };
     let facts = request::Facts::of(&request);
     let mut options = ProviderOptions {
-        hook: guard_command(),
+        hook: super::guard_command(),
         ..ProviderOptions::default()
     };
-    for given in &args.env {
-        match given.split_once('=') {
-            Some((name, value)) => options.env_set.push((name.to_string(), value.to_string())),
-            None => options.env_pass.push(given.clone()),
-        }
-    }
+    super::apply_env(&mut options, &args.env);
     if args.dry_run {
         return match dry_run(&request, &options) {
             Ok(plan) => output::dry_run(format, &plan, log),
@@ -153,14 +148,4 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     execute::run(request, options, &facts, log, move |result| {
         output::print_result(format, &result, &writer_log)
     })
-}
-
-/// The hook command that runs this executable's command guard, so
-/// `--allow-command` can be enforced for Claude Code. Without a usable path to
-/// this executable no guard is configured, and the result says that exact
-/// command grants were not applied.
-fn guard_command() -> Option<HookCommand> {
-    let exe = std::env::current_exe().ok()?;
-    exe.is_absolute()
-        .then(|| HookCommand::new(exe, [hook::NAME]))
 }

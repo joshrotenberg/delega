@@ -8,6 +8,8 @@ pub mod contract;
 
 pub mod process;
 
+pub mod profile;
+
 pub mod provider;
 
 pub mod skills;

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::contract::outcome::Outcome;
@@ -19,7 +20,7 @@ use crate::provider::ProgressEvent;
 use super::limits::{MAX_ACTIVITY, MAX_PARTIAL_TEXT_CHARS};
 
 /// One thing the run did, as the provider layer reported it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ActivityEntry {
     /// Position in the supervisor's one cursor sequence. Pass the largest one
     /// you have seen as `after_cursor` to `read` to get only later entries.

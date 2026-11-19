@@ -1,0 +1,402 @@
+{
+  "name": "start",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "PartialRequest",
+    "description": "A request with every field optional, for profiles and for building a request\nfrom several sources.\n\nDeserializing accepts a missing `schema_version`, because explicit values\nbuilt in code carry none. Use [`PartialRequest::from_profile_json`] for a\nfile, which requires it.",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "description": "See [`Request::schema_version`].",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0
+      },
+      "provider": {
+        "description": "See [`Request::provider`].",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Provider"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "prompt": {
+        "description": "See [`Request::prompt`].",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cwd": {
+        "description": "See [`Request::cwd`].",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "name": {
+        "description": "See [`Request::name`].",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "instructions": {
+        "description": "See [`Request::instructions`].",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "model": {
+        "description": "See [`Request::model`].",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "effort": {
+        "description": "See [`Request::effort`].",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Effort"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout_secs": {
+        "description": "See [`Request::timeout_secs`].",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint64",
+        "minimum": 0
+      },
+      "permissions": {
+        "description": "See [`Request::permissions`].",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PartialPermissions"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "answer_schema": {
+        "description": "See [`Request::answer_schema`]."
+      },
+      "session": {
+        "description": "See [`Request::session`].",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PartialSession"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "native_args": {
+        "description": "See [`Request::native_args`].",
+        "type": [
+          "array",
+          "null"
+        ],
+        "items": {
+          "type": "string"
+        }
+      },
+      "profile": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "Path of a profile file: a partial request saved as JSON, with schema_version. Fields given in this call replace the profile's; lists replace, they are not added. A relative path resolves against the server's working directory."
+      }
+    },
+    "additionalProperties": false,
+    "$defs": {
+      "Provider": {
+        "description": "The provider CLI that runs the assignment.",
+        "oneOf": [
+          {
+            "description": "Claude Code.",
+            "type": "string",
+            "const": "claude"
+          },
+          {
+            "description": "Codex CLI.",
+            "type": "string",
+            "const": "codex"
+          }
+        ]
+      },
+      "Effort": {
+        "description": "How much reasoning effort to ask the provider for.",
+        "oneOf": [
+          {
+            "description": "Least effort.",
+            "type": "string",
+            "const": "low"
+          },
+          {
+            "description": "Moderate effort.",
+            "type": "string",
+            "const": "medium"
+          },
+          {
+            "description": "Most effort.",
+            "type": "string",
+            "const": "high"
+          }
+        ]
+      },
+      "PartialPermissions": {
+        "description": "The permissions part of a [`PartialRequest`].",
+        "type": "object",
+        "properties": {
+          "mode": {
+            "description": "See [`Permissions::mode`].",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Mode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "commands": {
+            "description": "See [`Permissions::commands`].",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "directories": {
+            "description": "See [`Permissions::directories`].",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "on_request": {
+            "description": "See [`Permissions::on_request`].",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OnRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Mode": {
+        "description": "How much a worker may do in its working directory.",
+        "oneOf": [
+          {
+            "description": "May read the working directory; no writes and no commands.",
+            "type": "string",
+            "const": "read"
+          },
+          {
+            "description": "May edit files in the working directory.",
+            "type": "string",
+            "const": "write"
+          },
+          {
+            "description": "No restriction from delega.",
+            "type": "string",
+            "const": "full"
+          }
+        ]
+      },
+      "OnRequest": {
+        "description": "What happens when the provider asks for something that was not granted.",
+        "oneOf": [
+          {
+            "description": "Answer no at once and record the request in the result. The only\nchoice in this version; asking the caller comes later.",
+            "type": "string",
+            "const": "deny"
+          }
+        ]
+      },
+      "PartialSession": {
+        "description": "The session part of a [`PartialRequest`].",
+        "type": "object",
+        "properties": {
+          "ephemeral": {
+            "description": "See [`Session::ephemeral`].",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "resume": {
+            "description": "See [`Session::resume`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "StartResponse",
+    "description": "The answer to `start` and to `follow_up`.\n\nA run that could not go ahead is finished at once: `state` is `finished`,\n`outcome` is `refused` and `error` says why. `read` returns its result. A\nrefused `start` creates no worker, so `worker` is absent.",
+    "type": "object",
+    "properties": {
+      "worker": {
+        "description": "The worker, absent when `start` was refused.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "run": {
+        "description": "The run.",
+        "type": "string"
+      },
+      "state": {
+        "description": "`queued` or `running`, or `finished` for a refusal.",
+        "$ref": "#/$defs/RunState"
+      },
+      "ahead": {
+        "description": "Runs ahead of this one on its worker, counting the running one. Present\nwhile queued.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint",
+        "minimum": 0
+      },
+      "outcome": {
+        "description": "Present only for a refusal.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Outcome"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "error": {
+        "description": "Present only for a refusal.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ErrorDetail"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "run",
+      "state"
+    ],
+    "$defs": {
+      "RunState": {
+        "description": "Where a run is.",
+        "oneOf": [
+          {
+            "description": "Waiting behind another run on its worker, or for a running slot.",
+            "type": "string",
+            "const": "queued"
+          },
+          {
+            "description": "The provider is running.",
+            "type": "string",
+            "const": "running"
+          },
+          {
+            "description": "Ended, with exactly one result.",
+            "type": "string",
+            "const": "finished"
+          }
+        ]
+      },
+      "Outcome": {
+        "description": "How a run ended. Every run ends in exactly one of these.",
+        "oneOf": [
+          {
+            "description": "The provider finished the assignment and returned a final answer.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "The provider or delega hit an error; `error.kind` says which.",
+            "type": "string",
+            "const": "failed"
+          },
+          {
+            "description": "The run's time limit passed.",
+            "type": "string",
+            "const": "timed_out"
+          },
+          {
+            "description": "The caller stopped the run, or went away.",
+            "type": "string",
+            "const": "interrupted"
+          },
+          {
+            "description": "The run did not go ahead: invalid request, a limit, or a denied\npermission that stopped it.",
+            "type": "string",
+            "const": "refused"
+          }
+        ]
+      },
+      "ErrorDetail": {
+        "description": "Why a run did not complete. Present unless the outcome is `completed`.",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "description": "A short machine-readable label for the kind of error. Free text, so a\nreader must tolerate values it does not know. The values used so far:\n`invalid_request` (a refused run whose request failed validation),\n`timed_out` and `interrupted` (set by the matching constructors).",
+            "type": "string"
+          },
+          "message": {
+            "description": "A human-readable description.",
+            "type": "string"
+          },
+          "provider_exit_code": {
+            "description": "The provider process exit code, when it exited with one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ]
+      }
+    }
+  }
+}

@@ -106,7 +106,9 @@ fn writer(
     tap_dropped: &AtomicU64,
     stop: &AtomicBool,
 ) {
-    let mut err = std::io::stderr().lock();
+    // The lock of standard error is taken for one line at a time and never held
+    // between lines, so a write that blocks holds nothing else up.
+    let mut err = std::io::stderr();
     loop {
         match receiver.recv_timeout(IDLE_POLL) {
             Ok(line) => {

@@ -1,12 +1,173 @@
-//! `delega mcp`: Serve the MCP tools over stdio. Not built yet.
+//! `delega mcp`: serve the MCP tools over stdio.
+//!
+//! One connection, one supervisor. The server ends when standard input reaches
+//! end of file, or on SIGINT, SIGTERM, SIGHUP or SIGQUIT. Either way it stops
+//! accepting calls, stops every worker and everything they started, waits for
+//! that (bounded by the supervisor's own shutdown bound) and only then lets the
+//! runtime drop and exits.
+//!
+//! Standard output carries protocol messages and nothing else. Diagnostics go
+//! to standard error through the queue and writer thread `delega run` uses
+//! ([`super::run::log`]), which never waits on standard error and takes its
+//! lock for one line at a time.
+//!
+//! Exit status: 0 after end of input, 130 after a signal (the status `delega
+//! run` gives an interrupted run, for all four signals), 1 when the workers
+//! could not be confirmed stopped, the supervisor itself had failed or reading
+//! or writing the transport failed after end of input, and 2 when the server
+//! could not start (the status `delega run` gives when nothing was started).
+//!
+//! The first signal starts the stop. A signal that arrives while it goes on is
+//! acknowledged once on standard error and otherwise ignored, as in `delega
+//! run`, so a second Ctrl-C cannot end the server while workers are still being
+//! stopped. SIGKILL cannot be handled: workers of a server killed that way keep
+//! running, as for `delega run`.
 
 use std::process::ExitCode;
 
 use clap::Parser;
+use delega_core::contract::outcome::Outcome;
+use delega_core::provider::ProviderOptions;
+use delega_core::supervisor::{Supervisor, SupervisorConfig};
+use delega_mcp::Ended;
+use tokio::runtime::Builder;
+
+use super::run::log::Log;
+use super::run::signals::Signals;
+use super::{EXIT_REFUSED, apply_env, guard_command, version};
+
+/// What `delega run` exits with for an interrupted run, and so for a signal.
+const EXIT_SIGNALLED: u8 = Outcome::Interrupted.exit_status();
+/// The workers were not confirmed stopped, or the transport failed.
+const EXIT_FAILED: u8 = 1;
+
+/// Said once when a signal arrives while the workers are being stopped.
+const STILL_STOPPING: &str =
+    "delega mcp: still stopping the workers; waiting for cleanup to finish";
 
 #[derive(Debug, Parser)]
-pub struct Args {}
+pub struct Args {
+    /// Give every worker an environment variable (repeatable). NAME passes this
+    /// environment's value; NAME=VALUE sets it. Workers receive a fixed set
+    /// only (user, shell, locale, proxy and certificate variables and the
+    /// provider's own) plus what is given here. Prefer NAME for secrets: a
+    /// value on the command line shows in the process table and shell history.
+    /// A name that is not valid, that describes the calling session or that
+    /// delega owns is refused when a worker starts, as for `delega run`
+    #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
+    env: Vec<String>,
+}
 
-pub fn run(_args: Args) -> ExitCode {
-    super::not_implemented("mcp")
+pub fn run(args: Args) -> ExitCode {
+    let log = Log::start();
+    let code = go(&args, &log);
+    // Bounded: a blocked standard error cannot hold the exit.
+    log.finish();
+    code
+}
+
+fn go(args: &Args, log: &Log) -> ExitCode {
+    // What `delega run` reads for provider options, read the same way: the
+    // provider executable overrides (`DELEGA_CLAUDE_BIN`, `DELEGA_CODEX_BIN`)
+    // by the provider layer from this process's environment, and the command
+    // guard from this executable's own path.
+    let mut options = ProviderOptions {
+        hook: guard_command(),
+        ..ProviderOptions::default()
+    };
+    apply_env(&mut options, &args.env);
+    let config = SupervisorConfig {
+        provider: options,
+        ..SupervisorConfig::default()
+    };
+    // One thread is enough: the supervisor's work is asynchronous input and
+    // output and timers, its filesystem checks run on threads of their own, and
+    // so does reading a profile for `start`.
+    let runtime = match Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            log.line(format!("delega mcp: cannot start the async runtime: {err}"));
+            return ExitCode::from(EXIT_REFUSED);
+        }
+    };
+    let code = runtime.block_on(serve(config, log));
+    // Every worker was stopped, or reported not to be, before this point. The
+    // thread that reads standard input may still be blocked in `read`, and
+    // dropping the runtime normally would wait for it.
+    runtime.shutdown_background();
+    code
+}
+
+async fn serve(config: SupervisorConfig, log: &Log) -> ExitCode {
+    let signals = match Signals::install() {
+        Ok(signals) => signals,
+        Err(err) => {
+            log.line(format!(
+                "delega mcp: cannot install the signal handlers that stop the workers: {err}"
+            ));
+            return ExitCode::from(EXIT_REFUSED);
+        }
+    };
+    let supervisor = Supervisor::new(config);
+    let router = match delega_mcp::router(supervisor.clone(), &version::build_info()) {
+        Ok(router) => router,
+        Err(err) => {
+            log.line(format!("delega mcp: cannot build the server: {err}"));
+            supervisor.shutdown().await;
+            return ExitCode::from(EXIT_REFUSED);
+        }
+    };
+    let (first, stop) = tokio::sync::oneshot::channel::<()>();
+    let watcher = tokio::spawn(watch(signals, first, log.clone()));
+    log.line(format!("delega mcp: {} ready", delega_core::VERSION));
+    let served = delega_mcp::serve(router, &supervisor, async {
+        let _ = stop.await;
+    })
+    .await;
+    watcher.abort();
+
+    let mut failed = false;
+    if let Some(error) = &served.transport_error {
+        log.line(format!("delega mcp: transport error: {error}"));
+        failed = true;
+    }
+    if let Some(why) = &served.shutdown.failed {
+        log.line(format!("delega mcp: supervisor failed: {why}"));
+        failed = true;
+    }
+    if !served.shutdown.unsettled.is_empty() {
+        log.line(format!(
+            "delega mcp: cleanup not confirmed for {} run(s): {}",
+            served.shutdown.unsettled.len(),
+            served.shutdown.unsettled.join(", ")
+        ));
+        failed = true;
+    }
+    match served.ended {
+        Ended::Stopped => ExitCode::from(EXIT_SIGNALLED),
+        Ended::EndOfInput if failed => ExitCode::from(EXIT_FAILED),
+        Ended::EndOfInput => ExitCode::SUCCESS,
+    }
+}
+
+/// Wait for the first signal and tell the server, then swallow the rest,
+/// saying so once. The handlers stay installed while the workers are stopped,
+/// so no later signal takes its default action.
+async fn watch(mut signals: Signals, first: tokio::sync::oneshot::Sender<()>, log: Log) {
+    if signals.next().await.is_none() {
+        // The handlers stopped delivering; stop anyway.
+        let _ = first.send(());
+        return;
+    }
+    log.line("delega mcp: signal received, stopping the workers");
+    let _ = first.send(());
+    let mut told = false;
+    while signals.next().await.is_some() {
+        if !told {
+            told = true;
+            log.line(STILL_STOPPING);
+        }
+    }
+    // Handlers gone: nothing left to swallow.
+    std::future::pending::<()>().await;
 }

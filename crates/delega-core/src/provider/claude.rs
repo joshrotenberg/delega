@@ -159,8 +159,34 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
     })
 }
 
+/// The value with every object's keys in alphabetical order. A JSON object has
+/// no order, but the settings text is compared byte for byte in tests and read by
+/// the fake Claude Code with `sed`, and another crate in the build (the MCP
+/// server's `tower-mcp`) can switch `serde_json` to insertion order for every
+/// crate in it. Sorting makes the text the same whichever way the build goes.
+fn canonical(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, canonical(v)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
+        other => other,
+    }
+}
+
 /// The `--settings` value: the command guard hook, or hooks switched off.
 fn settings_json(guard: Option<&HookCommand>) -> Value {
+    canonical(settings_value(guard))
+}
+
+fn settings_value(guard: Option<&HookCommand>) -> Value {
     match guard {
         Some(hook) => json!({
             "disableAllHooks": false,

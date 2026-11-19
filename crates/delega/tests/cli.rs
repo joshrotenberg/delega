@@ -78,8 +78,61 @@ fn version_json_has_name_version_and_schema_version() {
 }
 
 #[test]
+fn version_json_carries_a_digest_of_each_skill_that_matches_skill_list_and_show() {
+    let version: serde_json::Value =
+        serde_json::from_str(&text(&delega(&["version", "--output", "json"]).stdout))
+            .expect("JSON");
+    let list: serde_json::Value = serde_json::from_str(&text(
+        &delega(&["skill", "list", "--output", "json"]).stdout,
+    ))
+    .expect("JSON");
+    // The same facts, name, uri and digest of every skill, from both commands.
+    assert_eq!(
+        version["skills"],
+        list["skills"].as_array().map_or_else(
+            || serde_json::Value::Null,
+            |skills| serde_json::Value::Array(
+                skills
+                    .iter()
+                    .map(|s| serde_json::json!({
+                        "name": s["name"], "uri": s["uri"], "digest": s["digest"],
+                    }))
+                    .collect()
+            )
+        )
+    );
+    // And the digest is of the bytes `skill show` prints.
+    for skill in version["skills"].as_array().expect("skills") {
+        let name = skill["name"].as_str().expect("name");
+        let shown = delega(&["skill", "show", name]).stdout;
+        let digest = {
+            use std::io::Write;
+            let mut child = Command::new("/usr/bin/shasum")
+                .args(["-a", "256"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("run shasum");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(&shown)
+                .expect("write");
+            let out = child.wait_with_output().expect("shasum");
+            text(&out.stdout)
+                .split_whitespace()
+                .next()
+                .expect("digest")
+                .to_string()
+        };
+        assert_eq!(skill["digest"], digest.as_str(), "{name}");
+    }
+}
+
+#[test]
 fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
-    for args in [&["mcp"][..], &["init", "--dry-run"], &["doctor"]] {
+    for args in [&["init", "--dry-run"][..], &["doctor"]] {
         let out = delega(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(
