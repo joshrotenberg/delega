@@ -47,6 +47,43 @@ pub(super) struct Plan {
 
 /// Resolve a request into a launch, or say why it is refused.
 pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan, Refusal> {
+    build_with(request, options, None)
+}
+
+/// [`build`] for a caller that wants the launch even where a run would be
+/// refused for a missing executable or for unusable settings files. Those two
+/// refusals are pushed on `problems` and the plan goes on with an empty program
+/// path and no deny rules; every other refusal is returned as before. `doctor`
+/// uses it to report the environment a worker would get next to the problems.
+pub(super) fn build_lenient(
+    request: &Request,
+    options: &ProviderOptions,
+    problems: &mut Vec<Refusal>,
+) -> Result<Plan, Refusal> {
+    build_with(request, options, Some(problems))
+}
+
+/// Keep a refusal for later when `problems` is given, and use the default value
+/// in its place; otherwise return it.
+fn tolerate<T: Default>(
+    result: Result<T, Refusal>,
+    problems: &mut Option<&mut Vec<Refusal>>,
+) -> Result<T, Refusal> {
+    match (result, problems.as_deref_mut()) {
+        (Ok(value), _) => Ok(value),
+        (Err(refusal), Some(list)) => {
+            list.push(refusal);
+            Ok(T::default())
+        }
+        (Err(refusal), None) => Err(refusal),
+    }
+}
+
+fn build_with(
+    request: &Request,
+    options: &ProviderOptions,
+    mut problems: Option<&mut Vec<Refusal>>,
+) -> Result<Plan, Refusal> {
     if let Err(problems) = request.validate() {
         let message = problems
             .iter()
@@ -70,10 +107,13 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
     };
     let scope = permissions::scope(request)?;
     let parent = options.parent_env();
-    let program = program::resolve(request.provider, options, &parent)?;
+    let program = tolerate(
+        program::resolve(request.provider, options, &parent),
+        &mut problems,
+    )?;
     let assembled = prompt::assemble(request);
     let deny = match request.provider {
-        Provider::Claude => claude_deny_rules(&scope, &parent, options)?,
+        Provider::Claude => tolerate(claude_deny_rules(&scope, &parent, options), &mut problems)?,
         Provider::Codex => DenyRules::default(),
     };
 

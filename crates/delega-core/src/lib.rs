@@ -8,6 +8,8 @@ pub mod canonical;
 
 pub mod contract;
 
+pub mod doctor;
+
 pub mod process;
 
 pub mod profile;

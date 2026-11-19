@@ -9,6 +9,9 @@ Use these tools when you want to start several workers, keep working, and
 collect results later. For one assignment in the foreground, use the `run` skill
 instead.
 
+To add these tools and skills to Claude Code or Codex, run `delega init`
+(`delega init --dry-run` first shows the files and host commands).
+
 A worker is one provider conversation and holds the provider's session. A run is
 one assignment given to a worker. A worker takes one assignment at a time. Each
 run ends in exactly one outcome and produces one result.
@@ -39,7 +42,10 @@ pass first, `settled` is false: `read` the run later.
 `name`, `instructions`, `model`, `effort`, `timeout_secs`, `permissions`,
 `answer_schema`, `session` and `native_args`. `provider` and `prompt` are
 required. The worker does not see your conversation, so write each `prompt` as a
-standalone assignment.
+standalone assignment. Always pass `cwd`, an absolute path to the directory the
+worker should work in. Without it the worker runs in the server's own working
+directory, which is whatever the host started the server in, and that may not
+be your project.
 
 `profile` is the path of a profile file, a partial request saved as JSON. Fields
 you give in the same call replace the profile's. A list replaces the profile's
@@ -118,6 +124,10 @@ A call that cannot go ahead is not always an error.
   reached limit (the result names it), a full queue, a closed worker, a worker
   with no session to continue, and an invalid request or prompt. A refused
   `start` creates no worker.
+- A refusal that says a provider is missing, a version is unsupported or a
+  settings file is unusable can be diagnosed from a terminal in the same working
+  directory with `delega doctor`, which starts no worker. Use `delega doctor
+  --output json` to read the problems per provider.
 - A call whose arguments cannot be understood is a tool error with a message.
   This includes a `start` with no `provider` or no `prompt`, a `read` or
   `interrupt` that gives neither `run` nor `worker` or both, and a `wait` that

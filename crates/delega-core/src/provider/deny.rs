@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -72,7 +73,7 @@ pub(super) const UNREADABLE: &str = "settings_unreadable";
 pub(super) const OVER_LIMIT: &str = "deny_rules_over_limit";
 
 /// A settings file that was read, and how many deny rules it held.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct DenyFile {
     /// The file's path.
     pub path: String,
@@ -81,7 +82,7 @@ pub struct DenyFile {
 }
 
 /// A local settings file that was not read, and why.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SkippedFile {
     /// The file's path.
     pub path: String,
