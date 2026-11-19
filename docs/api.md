@@ -1,16 +1,15 @@
-# The delega API: a proposal
+# The delega API
 
-Status: agreed design. The request and result contract, the CLI commands
-`run`, `mcp`, `init`, `uninstall`, `doctor`, `schema`, `skill` and `version`,
-the provider layer behind `run`, the library `Supervisor`
-([supervisor.md](supervisor.md)) and the MCP server over it are built. Josh settled
-the open questions on 2026-11-18; the decisions and what was deferred are listed
-at the end. Parts marked **Later** are not in the first version.
-
-The aim is to fix the surface first, then work backwards from it to the engine
-and forwards from the parts [due](https://github.com/joshrotenberg/due) and
-[counterpart](https://github.com/joshrotenberg/counterpart) already have. The
-last section maps every part of this surface to where it would come from.
+This document describes the surface: the contract, the command line, the MCP
+server and the skills. The request and result contract, the CLI commands `run`,
+`mcp`, `init`, `uninstall`, `doctor`, `schema`, `skill` and `version`, the
+provider layer behind `run`, the library `Supervisor`
+([supervisor.md](supervisor.md)) and the MCP server over it are built. Josh
+settled the open questions on 2026-11-18; the decisions and what was deferred are
+listed at the end. Parts marked **Later** are not built.
+[Where each part comes from](#where-each-part-comes-from) maps each part to its
+source in [due](https://github.com/joshrotenberg/due) and
+[counterpart](https://github.com/joshrotenberg/counterpart).
 
 ## The model
 
@@ -44,8 +43,15 @@ not stay open without a deadline.
 checking that belongs to the caller.
 
 A run that was denied a permission but still returned a final answer is
-`completed`, with the denial listed in `permissions.denied`. It is `refused`
-only when the run stopped because of the denial.
+`completed`, with the denial listed in `permissions.denied`. It is `refused`,
+with kind `permission_denied`, only when the run stopped because of the denial
+([providers.md](providers.md#outcomes) gives the rule).
+
+Error kinds are listed in [providers.md](providers.md#error-kinds). The
+supervisor adds the refusals `name_in_use`, `limit_reached`, `queue_full`,
+`worker_closed`, `no_session` and `preflight_timeout`, and `delega mcp` adds
+`cwd_required` (see [MCP](#mcp)). `delega run` adds `runtime_unavailable` and
+`signals_unavailable` (see [Command line](#command-line)).
 
 ## The request
 
@@ -55,19 +61,25 @@ arguments, and the library from a struct. A partial request saved as a file is a
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `schema_version` | integer | Required in a file. |
+| `schema_version` | integer | Must be 1. Required in a profile file; MCP arguments and the library default it to 1. |
 | `provider` | `claude` or `codex` | Required after merging profile and flags. |
-| `prompt` | string | The assignment. Always sent to the provider on stdin. |
-| `cwd` | path | Working directory of the worker. Must exist. |
-| `name` | string | Optional label for the worker, unique among live workers. |
-| `instructions` | string | Extra system instructions for the worker. |
-| `model` | string | Provider model name or alias. Absent keeps the provider default. |
+| `prompt` | string | The assignment, at most 4 MiB, not blank. Always sent to the provider on stdin. |
+| `cwd` | path | Working directory of the worker. For `delega run` and the library, absent means the caller's working directory and a relative path resolves against it. MCP `start` requires an absolute `cwd` (`cwd_required`, see [MCP](#mcp)). Must exist and be a directory, or the run is refused `cwd_unusable`. |
+| `name` | string | Optional label for the worker, at most 64 characters. Under the supervisor (MCP, library) it must be unique among live workers, or the start is refused `name_in_use`; a closed worker's name is free again. |
+| `instructions` | string | Extra system instructions for the worker, at most 256 KiB. `delega run` takes it only from a profile. |
+| `model` | string | Provider model name or alias, at most 256 bytes, not starting with `-`. Absent keeps the provider default. |
 | `effort` | `low`, `medium`, `high` | Absent keeps the provider default. |
 | `timeout_secs` | integer | Limit for the run in whole seconds, 1 to 86400. Default 600 (10 minutes). The limit applied is stated in the result as `timing.timeout_secs`. |
 | `permissions` | object | See below. |
-| `answer_schema` | JSON Schema | Ask for a structured answer and validate it. |
-| `session` | object | `ephemeral: bool`, or `resume: <provider session id>` to continue saved history in a new worker. |
-| `native_args` | list of strings | Provider options passed through, restricted by an allowlist. The escape hatch. |
+| `answer_schema` | JSON Schema | Ask for a structured answer and validate it. An object or a boolean, at most 256 KiB as compact JSON; one that does not compile is refused `invalid_answer_schema`. |
+| `session` | object | `ephemeral: bool`, or `resume: <provider session id>` (at most 256 bytes) to continue saved history in a new worker. Not both. |
+| `native_args` | list of strings | Provider options passed through, restricted by an allowlist; a rejected option is refused `native_arg_rejected`. At most 64 entries. The escape hatch. |
+
+Every length and count bound is a constant in
+`crates/delega-core/src/contract/limits.rs`. The request schema
+(`delega schema request`) carries the ranges and list counts, not string
+lengths. A value outside a bound is refused `invalid_request`, with every
+problem listed.
 
 ### Permissions
 
@@ -77,8 +89,8 @@ result reports what happened.
 | Field | Values | Meaning |
 | --- | --- | --- |
 | `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `full`: no restriction from delega. |
-| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly. They add to `read` and `write`; `full` already allows every command. |
-| `permissions.directories` | list of paths | Extra directories the worker may read. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
+| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`; `full` already allows every command. |
+| `permissions.directories` | list of paths | Extra directories the worker may read, at most 64. Each must exist, or the run is refused `directory_unusable`. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
 | `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: the run goes ahead and a `provider_notes` entry says what is wider than requested. `full` asks for nothing confined, so it is never refused for this. |
 
@@ -88,7 +100,10 @@ per provider, and where a provider cannot enforce part of it the result says so
 in `provider_notes`, or, with `permissions.strict`, the run is refused before it
 starts. The refusal kind is `permissions_not_enforceable`; the message reads
 `permissions.strict is set and <provider> cannot enforce these permissions as
-stated: <part>; <part>`. A dry run reports the same refusal.
+stated: <part>; <part>`. A dry run reports the same refusal. With Codex,
+`strict` refuses every `read` and `write` request, because Codex confines
+neither reads nor commands. With Claude Code it refuses only
+`permissions.commands` when no command guard is configured.
 
 `--strict` only turns the field on: a profile's `strict: true` stays on for
 `delega run`, because there is no flag to turn it off. MCP `start` can pass
@@ -100,19 +115,25 @@ reported: `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
 `settings_unreadable` and `deny_rules_over_limit` from reading the settings
 files, then the provider's own mapping of the request (for Claude Code:
 `cwd_unusable` or `directory_unusable` for a path it cannot write as a rule,
-`unsupported_command`, and `deny_rules_over_limit` for the generated settings
-argument), then `permissions_not_enforceable`, then `invalid_env_name` and
-`forbidden_env_name`.
+`unsupported_command`, and, for a generated settings argument over its bound,
+`deny_rules_over_limit` when user deny rules are part of it and
+`unsupported_command` otherwise), then `permissions_not_enforceable`, then
+`invalid_env_name` and `forbidden_env_name`.
 So a strict request that Codex cannot enforce and that also has an invalid
 environment name is refused as `permissions_not_enforceable`; without strict it
 is refused as `invalid_env_name`. `unsupported_provider_version` is found later,
-after the provider's version is read.
+after the provider's version is read; if that probe's processes could not be
+confirmed stopped, the result is `failed` with the same kind. For Codex, a failed
+listing of its MCP servers is then `failed` with kind
+`provider_preparation_failed`. A dry run starts no probe, so it reports neither.
 
-`delega mcp` adds one refusal, `cwd_required`, for a `start` whose merged request
-(after any `profile`) has no `cwd` or a relative one. It is found after
-`invalid_request`, a name in use and the live-worker limit, and before every
-provider check above, so no provider check or process runs. See
-[MCP](#mcp). `delega run` has no such refusal.
+Under the supervisor, `start` first checks the request (`invalid_request`), the
+name (`name_in_use`) and the live-worker limit (`limit_reached`), then this
+list, bounded by 10 s (`preflight_timeout`). `delega mcp` adds one refusal,
+`cwd_required`, for a `start` whose merged request (after any `profile`) has no
+`cwd` or a relative one. It is found after `invalid_request`, a name in use and
+the live-worker limit, and before every provider check above, so no provider
+check or process runs. See [MCP](#mcp). `delega run` has no such refusal.
 
 `permissions.strict` is an optional field with a default, so a request without it
 means what it meant before and `schema_version` stays 1. The result does not
@@ -130,19 +151,20 @@ One JSON object, versioned, the same from every surface.
 | --- | --- |
 | `schema_version` | |
 | `run` | Run id. |
-| `worker` | Worker id and `name`, if any. |
-| `provider` | |
+| `worker` | Worker id and `name`. Present only under the supervisor (MCP, library), and absent for a refused `start`; `delega run` results have none. |
+| `provider` | Absent only on a refused result for a request that named no provider. |
 | `outcome` | One of the five above. |
 | `text` | The final answer, or empty. |
-| `structured` | The structured answer when `answer_schema` was given, with `structured_valid: bool`. |
-| `error` | `kind`, `message`, `provider_exit_code`. Present unless `completed`. |
-| `cleanup` | `confirmed: bool`, and when false, what could not be confirmed stopped (pids, process groups) and why. |
+| `structured` | The structured answer when `answer_schema` was given. |
+| `structured_valid` | Whether `structured` satisfied the schema; present with `structured`. |
+| `error` | `kind`, `message`, and `provider_exit_code` when the provider process exited with one. Present unless `completed`. |
+| `cleanup` | `confirmed: true` when a final sweep after the provider exited found nothing left in its process group, its session or its tracked descendants; otherwise `confirmed: false` with `pids`, `process_groups` and `reason`. Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
 | `permissions` | `mode` applied, and `denied`: requests answered no. **Later:** `asked`, requests the caller answered. |
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
 | `usage` | Tokens in and out, cached, reasoning; `cost_usd` when the provider reports it. |
 | `timing` | Queued, started and finished times, duration, and the time limit applied as `timeout_secs`. |
-| `provenance` | delega version and build, provider executable path and version. |
+| `provenance` | delega version, and the provider executable path and version. `build` is in the schema but not filled yet. |
 
 A caller that only needs to know what happened reads `outcome`, `text`, `error`
 and `cleanup`.
@@ -168,34 +190,46 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 | `delega schema request\|result` | Print the contracts built into this executable. |
 | `delega skill list\|show NAME` | List the skills built into this executable, or print one. See [Skills](#skills). |
 | `delega doctor` | Report providers found, their versions, limits in force and anything that would stop a run; `--output text\|json`. See [Doctor](#doctor). |
-| `delega version` | Version, source revision and features; `--output json`. |
+| `delega version` | Print the version; `--output json` prints the build identity (name, version, `schema_version`, revision, features and each skill's name, URI and digest), the same document as `delega://identity`. |
+
+`delega skill show` with an unknown name lists the known names on standard error
+and exits 2. `delega skill show NAME --output json` adds `content` to the name,
+description, URI and digest that `delega skill list --output json` gives.
 
 `delega run` options: `--request FILE`, `--provider`, `-p/--prompt`, `--stdin`,
 `-C/--cwd`, `--name`, `--model`, `--effort`, `--timeout`, `--read`, `--write`,
 `--full`, `--strict`, `--allow-command CMD` (repeatable), `--add-dir DIR` (repeatable),
 `-e/--env NAME[=VALUE]` (repeatable), `--schema FILE`, `--resume ID`, `--ephemeral`,
-`--output text|json`, `--dry-run`, and provider options after `--`.
+`--output text|json`, `--dry-run`, `--progress`, and provider options after `--`.
+`--name` is checked but does not appear in the result, because `delega run`
+creates no worker; it matters for MCP and the library.
 
 Behavior:
 
 - **Timeout.** `--timeout` accepts `90s`, `20m`, `2h` or a plain number of
-  seconds, and the CLI converts it to the request's `timeout_secs`.
+  seconds, and the CLI converts it to the request's `timeout_secs`. A value
+  outside 1 to 86400 seconds (`0`, `25h`) is refused `invalid_request`, not a
+  usage error.
 - **Claude Code settings.** A Claude worker starts with settings sources off, so
   it inherits no hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers or
   instructions from the user's or the project's Claude Code settings. It does get
-  their `permissions.deny` rules: delega reads the user's settings file and the
-  working directory's `.claude/settings.json` and `settings.local.json` (the
-  latter also from the git repository root), takes
+  their `permissions.deny` rules: delega reads the user's settings file
+  (`settings.json` in the worker's `CLAUDE_CONFIG_DIR`, else
+  `.claude/settings.json` under the worker's `HOME`) and the working directory's
+  `.claude/settings.json` and `settings.local.json` (the latter also from the
+  root of the git repository and, when that root is a linked worktree, from the
+  main checkout), takes
   only that list, and adds the rules to the worker, where they can only narrow
   the run (also in `full`). A settings file that exists and cannot be used
-  (unreadable, not JSON, a wrong type, over a limit) refuses the run with kind
+  (unreadable, not a regular file, not JSON, a wrong type, over a limit) refuses the run with kind
   `settings_unreadable` or `deny_rules_over_limit`, naming the file. The result's
   `provider_notes` say how many rules were applied and from which files, and
   `--dry-run` lists the files and, under `user_deny_rules`, the rules. Codex
   gets none of this. See [providers.md](providers.md#deny-rules).
 - **Environment.** A worker does not inherit the caller's environment. It
-  receives a fixed base (the user, shell, locale, temporary and base directory
-  variables), proxy and certificate variables, and the provider's own
+  receives a fixed base (`PATH`, the user, shell, locale, terminal, time zone,
+  temporary and base directory variables, and the switches `NO_COLOR` and `CI`),
+  proxy and certificate variables, and the provider's own
   variables, and nothing else; the lists are in
   [providers.md](providers.md#environment-policy). `--env NAME` (short `-e`)
   passes the caller's value of one more variable; `--env NAME=VALUE` sets it to
@@ -210,8 +244,8 @@ Behavior:
   the position of an invalid name and never repeats it, so a value is not
   echoed. A variable whose name looks like a secret is allowed and adds a
   `provider_notes` entry that names it, for a passed variable and for one given
-  a value. Every result carries one note with the number of variables withheld
-  and passed. `--env` is caller-side: a profile file does not carry it, and an
+  a value. Every result of a run that passed the checks before start carries
+  one note with the number of variables withheld and passed. `--env` is caller-side: a profile file does not carry it, and an
   `env` or `pass_env` field in one is refused as an unknown field. `delega mcp`
   takes the same flag, parsed the same way and applied to every worker the
   server starts; the refusals are the same, with the same kinds and messages.
@@ -229,9 +263,10 @@ Behavior:
   `session.resume`. The prompt comes from `-p` or from `--stdin`, which reads
   standard input as UTF-8 up to the prompt limit; giving both is a refusal, not
   a usage error. `--schema FILE` is read as JSON and becomes `answer_schema`.
+  `instructions` has no flag; give it in a profile.
   The profile and the schema file must be regular files; a device or a pipe is
-  refused, and so is a file over the limit (the prompt, instructions and
-  headroom for a profile; four times the schema limit for a schema), with the
+  refused, and so is a file over the limit (5.25 MiB for a profile, enough for
+  the largest prompt and instructions; 1 MiB for a schema file), with the
   limit named. A prompt that starts with a hyphen is given as `--prompt=-text` (or `-p=-text`); `-p -text` is a usage error, so `-p` never swallows the flag after it. Every relative path
   resolves against the caller's working directory: `--request`, `--schema`,
   `-C`, `--add-dir`, and `cwd` and `permissions.directories` in a profile. (The
@@ -239,7 +274,7 @@ Behavior:
   worker's own working directory, so the CLI makes the paths absolute first.)
 - **Output.** `--output text` (the default) prints the answer text to standard
   output, with a newline added when it lacks one, and nothing else there, and
-  only when the outcome is `completed`. For any other outcome nothing is printed
+  only when the outcome is `completed`; an empty answer prints nothing. For any other outcome nothing is printed
   on standard output, whatever partial text the provider produced; that text is
   in `text` of `--output json`. The outcome and the error of a run that did not
   complete go to standard error as one line, `delega run: <outcome>: <error.kind>: <error.message>`. Each denied
@@ -261,11 +296,14 @@ Behavior:
   `error.kind` `invalid_request` and the message lists every problem found, as
   `field: problem` separated by `; `; with text output each problem is a line
   on standard error, `delega run: refused: <field>: <problem>`, and standard
-  output stays empty. The exit status is 2 in both. Only an argument clap
-  rejects (an unknown flag, `--write` with `--full`, `--resume` with
-  `--ephemeral`, a malformed `--timeout`) is a plain usage error with its own
-  message and no result. Such a result has no `worker`, no `started_at` and a
-  confirmed `cleanup`, and the CLI makes its run id.
+  output stays empty. The exit status is 2 in both. Such a result has no
+  `worker`, no `started_at` and a confirmed `cleanup`, and the CLI makes its run
+  id. Only an argument clap rejects (an unknown flag, two of `--read`, `--write`
+  and `--full`, `--resume` with `--ephemeral`, a malformed `--timeout`) is a
+  plain usage error with its own message and no result. If `delega` cannot
+  start its async runtime or install the signal handlers, it prints a `refused`
+  result with kind `runtime_unavailable` or `signals_unavailable` and starts
+  nothing.
 - **Interrupt.** The worker runs in a session of its own, so a terminal Ctrl-C
   or a hangup when the terminal closes reaches only `delega`. SIGINT, SIGTERM,
   SIGHUP and SIGQUIT to `delega` are handled alike: `delega` interrupts the run
@@ -276,7 +314,7 @@ Behavior:
   Signals that arrive while it goes on are acknowledged once on standard error
   and otherwise ignored, so a second Ctrl-C cannot end `delega` while processes
   are still being stopped. The wait is bounded by the process layer's cleanup
-  deadline, after which the result says what could not be confirmed. A signal
+  deadline (10 s by default), after which the result says what could not be confirmed. A signal
   during `--dry-run`, or before the handlers are installed at startup, has no
   worker to stop and takes the default action. **SIGKILL cannot be handled**:
   if `delega` is killed with it, or crashes without running its exit code, the
@@ -319,7 +357,7 @@ Behavior:
   the caller's variables that are withheld (`withheld_count`); text output
   prints the same groups. It lists environment variable names, never values,
   never the names of withheld variables, and not the assignment, instructions or settings text, which are replaced by their
-  size. For Claude it adds `deny_rules`: the settings files read with their rule
+  size. `deny_rules` is always present and empty for Codex; for Claude it holds the settings files read with their rule
   counts, any local settings files ignored with the reason (`skipped`: a root that is the home directory, an entry that is not owned by the current user, or, in a repository root, a `.git` link or a `.claude` or settings-file link that is not the user's own in a directory only the user can write, with a target the user owns; anything the user does not own is skipped whatever its kind or mode; a link the user owns whose target cannot be opened or examined, such as one into a directory the user cannot search or through a regular file, is not skipped but refuses the run with `settings_unreadable`, because the owner cannot be known and a broken target of the user's own link is theirs to fix), `applied`, and the user's own deny rules under `user_deny_rules`
   (bounded, with `omitted`); a main checkout that could not be identified is a note, not a `skipped` entry; the launch arguments show a count in their place.
   A request that would be refused prints the refusal as for a run (a
@@ -337,8 +375,10 @@ Behavior:
   error event, at most 80 characters of its text with credentials removed,
   which is free text the provider chose to write. A `denied:` line carries the
   denied request as `permissions.denied` lists it, so it can name a command or
-  a path. `finished` is always the last line, also for a request refused before
-  it starts, including one refused while it is built. **Later:** due's trace files, heartbeats and
+  a path. `finished` is always the last `progress:` line (only the dropped-count
+  line can follow it), also for a request refused before it starts, including
+  one refused while it is built. With `--dry-run`, `--progress` writes nothing
+  unless the request cannot be built. **Later:** due's trace files, heartbeats and
   summaries.
 - **Provider executable.** The CLI honours `DELEGA_CLAUDE_BIN` and
   `DELEGA_CODEX_BIN` in its own environment, as the provider layer does
@@ -575,14 +615,14 @@ eighth, `respond`, when live asking is added.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | At once: worker id, run id, state `queued` or `running`. |
-| `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new run id. Queues behind a running run. |
-| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes or needs an answer, or on timeout: their current states and a cursor. Never an error on timeout. |
-| `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state, partial text and recent activity. |
-| `list` | none | Workers on this connection, their state, queue length and session ids. |
-| `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted: the result, with `interrupted`. |
+| `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
+| `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
+| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. |
+| `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
+| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force and in use; a `cursor`. |
+| `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
-| `close` | `worker` | Stops the worker, discards queued assignments, frees its slot. Results already produced stay readable for a bounded time. |
+| `close` | `worker` | Stops the worker's running run (at most 30 s), discards queued runs and frees its slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. Results already produced stay readable for the retention time. Closing again answers the same way. |
 
 `start` requires an absolute `cwd`. The MCP server's own working directory is
 chosen by the host (Codex starts a plugin's server in the plugin root), so it is
@@ -599,22 +639,27 @@ which only the MCP adapter calls.
 
 Rules that hold for every tool:
 
-- **Starting returns at once.** Only `wait` and `interrupt` wait for anything,
-  and `close` waits while it stops a running run; each is bounded. `wait` is
-  capped by the wait ceiling (300 s); `interrupt` and `close` wait for the run to
-  settle for at most 30 s, after which the response says it has not settled.
-  The MCP layer should keep waits short and pass the cursor back instead of
-  waiting long.
+- **Starting never waits for the run.** `start` returns once its request checks
+  finish (at most 10 s); `follow_up` returns at once. Only `wait`, `interrupt`
+  and `close` wait on a run, each bounded. `wait` is capped by the wait ceiling
+  (300 s) and accepts `timeout_secs: 0`, which returns the current states at
+  once; `interrupt` and `close` wait for the run to settle for at most 30 s,
+  after which the response says it has not settled. A caller should keep each
+  wait short and pass the cursor back instead of waiting long.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
   **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
   an outcome. A worker is `queued` when nothing is running and a run waits for a
   running slot, `running` while a run goes (more may wait behind it), `idle` when
   nothing is running or queued, and `closed` for good after `close`. The
   transition tables are in [supervisor.md](supervisor.md#states).
-- **Detail.** Every response is compact by default. `detail: "full"` adds
-  process diagnostics, activity history and every field of the result.
-- **Limits** are admission limits on live workers and running runs, reported by
-  `list` and `delega doctor`. A closed worker frees its slot. Reaching a limit
+- **Detail.** `read` is compact by default; `detail: "full"` adds every field of
+  the result, the full activity history, progress for a finished run, and the
+  supervisor's diagnostics for the run (provider, mode, times, why a stop was
+  requested). Process diagnostics from the provider are not included.
+  `interrupt` and `close` return compact results.
+- **Limits** are admission limits: 16 live workers, 4 running runs and 16 runs
+  queued behind one worker by default, reported by `list` with what is in use,
+  and by `delega doctor` as configured. A closed worker frees its slot. Reaching a limit
   is a `refused` outcome with the limit named, not a dead end that needs a
   restart. The supervisor applies them so: a `start` beyond the live-worker limit
   is refused (`limit_reached`); a `follow_up` beyond the per-worker queue limit
@@ -627,9 +672,16 @@ Rules that hold for every tool:
   [supervisor.md](supervisor.md#limits-and-defaults).
 - **Refusals are runs.** A `start` or `follow_up` that cannot go ahead returns a
   run id whose result is `refused`, and `read` returns it. A refused `start`
-  creates no worker. A `follow_up` is refused when the worker is closed
-  (`worker_closed`), its queue is full, the worker has no session to continue
-  (`no_session`, as for an `ephemeral` worker) or the prompt is invalid. An id
+  creates no worker; it is refused for an invalid request (`invalid_request`), a
+  name already used by a live worker (`name_in_use`), the live-worker limit
+  (`limit_reached`), a missing or relative `cwd` (`cwd_required`), any refusal
+  the provider layer finds before start, or checks that did not finish in 10 s
+  (`preflight_timeout`). A `follow_up` is refused when the worker is closed
+  (`worker_closed`), its queue is full (`queue_full`), it was started
+  `ephemeral` or no earlier run reported a session (`no_session`), or the
+  request is invalid (`invalid_request`). Once the server is stopping, `start`
+  and `follow_up` are tool errors: "the supervisor was shut down and takes no
+  new work". An id
   that names nothing is an error, not a run, for `follow_up`, `read`,
   `interrupt` and `close`. `wait` is the exception: it lists ids that name
   nothing in `unknown` and waits for the others, and a `wait` whose ids all name
@@ -642,14 +694,25 @@ Rules that hold for every tool:
 - **Long answers.** A compact `read` returns the first 20000 characters of the
   answer and says so, with the full length; `text_offset` reads the window that
   starts at that character, with the total and whether more follows. `detail:
-  full` returns everything. Page a long answer by run id. A `read` by worker
+  full` without `text_offset` returns the whole answer. A compact read leaves
+  out a structured answer larger than 16 KiB serialized and says so
+  (`structured_omitted`, `structured_bytes`). For a run that has not finished, a
+  compact read returns the last 2000 characters of partial text and the last 10
+  activity entries; the supervisor keeps at most 16384 characters and 200
+  entries per run. Page a long answer by run id. A `read` by worker
   returns the worker's latest run, and a follow-up that finishes between two
   pages makes the next page come from the new run; the response names the run, so
   take the run id from the first page and pass it on the later ones, and treat a
   different run id as a different answer.
-- **Retention.** Finished results stay readable for a bounded count (256) and
-  time (1 hour), after which their ids are unknown. Closing a worker discards its
-  queued runs, each finished `interrupted` with the message `discarded by close`.
+- **Retention.** Finished results stay readable for a bounded count (256),
+  estimated size (64 MiB, oldest dropped first, the newest always kept) and time
+  (1 hour), after which their ids are unknown. Closing a worker discards its
+  queued runs, each finished `interrupted` with a message that starts
+  `discarded by close` (`discarded by shutdown` when the server stops).
+- **Follow-ups.** A follow-up runs with the worker's first request (provider,
+  `cwd`, permissions, model, effort, instructions, `answer_schema`,
+  `native_args`), the new prompt, `timeout_secs` when given, and the session the
+  worker's latest run reported.
 - **Ownership.** Workers belong to the connection that started them and stop
   when it closes.
 - **History is data.** Text a worker returns is never an instruction to the
@@ -673,9 +736,12 @@ Rules that hold for every tool:
   working directory. The merged request must have an absolute `cwd`, or the start
   is refused `cwd_required`. A request that has a provider and a prompt but fails the contract
   (a blank prompt, for example) is a refused run, not a tool error. The input
-  schema states the request schema's ranges and lengths (`timeout_secs`
-  between 1 and 86400, the list limits) from the same refinements, so a value
-  outside them is rejected as an invalid argument before the request is built.
+  schema states the request schema's ranges and list counts (`timeout_secs`
+  between 1 and 86400, at most 64 `native_args`, 256 `permissions.commands` and
+  64 `permissions.directories`) from the same refinements, so a value outside
+  them is rejected as an invalid argument before the request is built. String
+  lengths are not in the schema; an over-long value is a refused run
+  (`invalid_request`).
   There is no per-call environment argument. `follow_up.timeout_secs` has the
   same range in its schema. `profile` lets the client make the server read a
   path it can read, which is no more than `cwd` with `permissions.mode: full`
@@ -694,7 +760,9 @@ Rules that hold for every tool:
 supervisor. Standard output carries protocol messages and nothing else.
 Diagnostics (a ready line, a signal received, cleanup that could not be
 confirmed) go to standard error through the writer `delega run` uses, which
-never waits on standard error and takes its lock for one line at a time.
+never waits on standard error and takes its lock for one line at a time. The
+ready line reads `delega mcp: <version> ready`. At most 128 calls are handled at
+once, and one input message may be at most 32 MiB.
 
 - **Provider executables and environment.** `DELEGA_CLAUDE_BIN` and
   `DELEGA_CODEX_BIN` are honoured as for `run`, and so is the rest that `run`
@@ -726,7 +794,8 @@ never waits on standard error and takes its lock for one line at a time.
   settled) or the supervisor had failed, which wins over 0 and 130, or the
   transport failed after end of input; each is described on standard error. A
   transport that had to be given up on after a signal does not change 130. 2
-  when the server could not start. A signal during start-up, before the
+  when the server could not start (a refused `--env`, no async runtime, no
+  signal handlers). A signal during start-up, before the
   handlers are installed, takes its default action, and so does SIGKILL, which
   cannot be handled: the workers of a server killed that way keep running.
 - **Second signal.** As in `run`, a signal that arrives while the workers are
@@ -748,21 +817,21 @@ the behavior installed, with no source checkout or network.
 There is one source and three doors.
 
 - **Source.** Each skill is a directory in the repository, `skills/<name>/`,
-  holding a `SKILL.md` with name and description frontmatter and any supporting
-  files. The build embeds them as one catalog. Nothing is read from disk at run
-  time.
+  holding a `SKILL.md` with name and description frontmatter. The build embeds
+  every `SKILL.md` as one catalog and refuses a skill that does not parse.
+  Nothing is read from disk at run time. Supporting files are not embedded yet.
 - **CLI.** `delega skill list` prints names and descriptions, and
   `delega skill show NAME` prints one. `--output json` gives a versioned
   catalog a program can select from.
 - **MCP.** The server offers the same catalog through the MCP Skills extension
-  (SEP-2640): each skill is discoverable and readable as a resource at
-  `skill://delega/<name>/SKILL.md`, with its supporting files beside it. A host
-  without the extension can still read them as ordinary resources. The bytes
-  are those of `delega skill show NAME`. The catalog holds each skill's
-  `SKILL.md` only, so there are no supporting files to serve yet. The server
-  also serves `delega://identity`, JSON with the name, version, contract schema
-  version, revision, features and the name, URI and SHA-256 digest of each
-  skill; `delega version --output json` prints the same document.
+  (SEP-2640): each skill is listed by `skills/list` and by `resources/list`, so
+  a host without the extension can still read it as an ordinary resource, and
+  is readable at `skill://delega/<name>/SKILL.md`, with the bytes of
+  `delega skill show NAME`. The server also serves `delega://identity`, JSON
+  with `name`, `version`, `schema_version` (the contract's), `revision` (a
+  12-character source revision or `unknown`), `features` (empty: the crates
+  define no Cargo features) and `skills`, the name, URI and SHA-256 digest of
+  each skill; `delega version --output json` prints the same document.
 - **Plugin.** `delega init` installs the same files as a plugin into Claude Code
   and Codex, for hosts that load skills from disk
   ([Install and uninstall](#install-and-uninstall)).
@@ -770,11 +839,11 @@ There is one source and three doors.
 Rules:
 
 - **Same bytes everywhere.** The three doors serve identical content. The build
-  identity (`delega version`, and the server's identity over MCP) carries a
-  digest of each skill, so a caller can tell which guidance it has.
+  identity (`delega version --output json`, and `delega://identity` over MCP)
+  carries a digest of each skill, so a caller can tell which guidance it has.
 - **Skills only describe what exists.** A test fails if a skill names a command,
-  flag, tool or argument that this build does not offer. A build without the MCP
-  server does not ship the skill that describes it.
+  flag, tool or argument that this build does not offer. Every build includes
+  the MCP server, so every build ships both skills.
 - **Reading is not permission.** Reading a skill does not activate it, grant a
   tool, or allow a bundled script to run. That stays with the host.
 - **No project policy.** Skills describe how to use delega. Rules that belong to
@@ -794,7 +863,8 @@ review layer.
 
 The CLI and the MCP server are thin layers over one Rust API with the same
 nouns: build a `Request`, `start` it on a `Supervisor` to get a worker id and a
-run id, `wait` for the result, `read` it, `follow_up`, `interrupt`, `close`.
+run id, `wait` for the result, `read` it, `follow_up`, `interrupt`, `close`,
+`list`, and `shutdown` to stop every worker.
 Anything both surfaces compute lives in the library. `delega run` uses the
 provider layer's `run` directly, for one assignment in the foreground; the
 supervisor is for several at once.
@@ -812,20 +882,20 @@ supervisor is for several at once.
 
 ## Where each part comes from
 
-| Part of this surface | due | counterpart | Proposal |
+| Part of this surface | due | counterpart | delega |
 | --- | --- | --- | --- |
 | `run` command, profiles, `--dry-run`, `--stdin` | `due run`, `--request`, `--dry-run` | none | Take due's. |
 | Request and result as versioned JSON Schema | `run-request`, `run-result` schemas, `due schema` | Tool schemas in `contract/`, no versioning promise | Take due's shape; add `outcome`, `cleanup`, `permissions`, `provider_notes`. |
 | Outcome set | `succeeded`, `failed`, `timed_out`, `cancelled`, `planned` | `completed`, `failed`, `interrupted`, `closed`, plus timeouts as errors | The five above; `planned` becomes dry-run output, not an outcome. |
-| Cleanup report | Settlement reporting; limits documented | `cleanup` field, descendant identity tracking, repeated signalling | Take counterpart's, pending issue 1. |
+| Cleanup report | Settlement reporting; limits documented | `cleanup` field, descendant identity tracking, repeated signalling | Counterpart's model, built: process group and session sweeps, descendant tracking by start time, repeated signalling, and an unconfirmed verdict that names pids, groups and the reason. |
 | Permissions, stated up front | Provider options passed through, allowlisted | Tool lists, exact Bash guard hook, sandbox mode, deny rules | Provider-neutral modes over counterpart's enforcement. |
 | Permissions, asked live | `respond`, interaction references, `Reject` mode | none | Later: take due's, behind `on_request: ask`. |
-| Long-lived provider session | Resident engine | One process per run, resumed by session id | Decided by issue 1. |
-| Queue and limits | Admission limits, 16 sessions | Queue, pool of 4 running, lifetime cap of 64 | Queue with admission limits; no lifetime cap. |
+| Long-lived provider session | Resident engine | One process per run, resumed by session id | One process per run, continued by provider session id (`session.resume`, `follow_up`); a resident session is deferred (issue 1). |
+| Queue and limits | Admission limits, 16 sessions | Queue, pool of 4 running, lifetime cap of 64 | Queue with admission limits (16 live workers, 4 running runs, 16 queued per worker); no lifetime cap. |
 | MCP tools | `spawn`, `follow_up`, `inspect`, `wait`, `interrupt`, `respond`, `release_run`, `release_session`, `read_items` | `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `read_agent`, `list_agents`, `interrupt_agent`, `close_agent` | The seven above, then `respond`. |
 | Compact and full responses | none | `detail: summary\|full` with a field audit | Take counterpart's idea, simpler. |
 | Trace files and summaries | `--trace`, `--trace-file`, `due trace summarize` | Activity history in `read_agent` | Start with stderr progress and `read`. |
-| Install into hosts | `due init` | `counterpart init` | One `init`, through the hosts' commands. |
+| Install into hosts | `due init` | `counterpart init` | One `init` and one `uninstall`, through the hosts' commands. |
 | Onboard skills | `due skills list\|show` over skills embedded in the binary | One catalog served as `skill://counterpart/<name>/SKILL.md` and installed as a plugin; digests in the identity | One embedded catalog behind the CLI, the MCP Skills extension and the plugin. |
 | Usage and cost | In the result | In the result, with scope notes | Take both. |
 | Provider executable identity | `--binary`, provenance in the result | Identity resource | Provenance in the result and `doctor`. |

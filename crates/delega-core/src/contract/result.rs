@@ -27,9 +27,11 @@ pub struct WorkerRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorDetail {
     /// A short machine-readable label for the kind of error. Free text, so a
-    /// reader must tolerate values it does not know. The values used so far:
-    /// `invalid_request` (a refused run whose request failed validation),
-    /// `timed_out` and `interrupted` (set by the matching constructors).
+    /// reader must tolerate values it does not know. The kinds in use are
+    /// listed in `docs/providers.md` (Error kinds) and `docs/api.md`
+    /// (Outcomes): `invalid_request` for a request that failed validation,
+    /// other refusal kinds such as `cwd_unusable` or `limit_reached`, failure
+    /// kinds such as `provider_exit`, and `timed_out` and `interrupted`.
     pub kind: String,
     /// A human-readable description.
     pub message: String,
