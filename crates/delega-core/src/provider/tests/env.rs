@@ -210,10 +210,7 @@ async fn session_variables_do_not_reach_the_child(provider: Provider) {
     let rig = Rig::new();
     let mut options = rig.options(provider);
     let mut env = options.parent_env.take().unwrap();
-    for name in SESSION
-        .iter()
-        .chain(&["PLAIN_CONTROL_VARIABLE"])
-    {
+    for name in SESSION.iter().chain(&["PLAIN_CONTROL_VARIABLE"]) {
         env.push((OsString::from(name), OsString::from(CANARY)));
     }
     options.parent_env = Some(env);
