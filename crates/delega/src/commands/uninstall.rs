@@ -118,28 +118,33 @@ pub fn run(args: Args) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let dir = match fsops::canonical_dir(&configured) {
-        Ok(dir) => dir,
-        Err(error) => {
-            eprintln!("delega uninstall: {error}");
-            return ExitCode::from(1);
-        }
-    };
     let mut named = Vec::new();
     for host in args.hosts {
         if !named.contains(&host) {
             named.push(host);
         }
     }
-    let report = uninstall(&Request {
-        dir,
-        named,
-        programs: Host::ALL
-            .into_iter()
-            .map(|host| (host, plugin::find_host(host)))
-            .collect(),
-        dry_run: args.dry_run,
-    });
+    let report = match fsops::canonical_dir(&configured) {
+        Ok(dir) => uninstall(&Request {
+            dir,
+            named,
+            programs: Host::ALL
+                .into_iter()
+                .map(|host| (host, plugin::find_host(host)))
+                .collect(),
+            dry_run: args.dry_run,
+        }),
+        // Still a document, so a caller that asked for JSON always gets one.
+        Err(error) => Report {
+            dry_run: args.dry_run,
+            dir: configured,
+            directory: "kept",
+            files: Vec::new(),
+            hosts: Vec::new(),
+            error: None,
+        }
+        .failed(error),
+    };
     let text = match args.output {
         OutputFormat::Text => report.text(),
         OutputFormat::Json => report.json(),

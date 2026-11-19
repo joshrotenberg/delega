@@ -412,7 +412,7 @@ fn the_managed_files_have_the_documented_bytes() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let version = format!("{}.{digest}", env!("CARGO_PKG_VERSION"));
+    let version = format!("{}+{digest}", env!("CARGO_PKG_VERSION"));
     assert_eq!(doc["plugin_version"], version.as_str());
     for manifest in [
         "plugin.json",
@@ -427,6 +427,8 @@ fn the_managed_files_have_the_documented_bytes() {
     }
     // Both MCP manifests start the copied executable with `mcp`.
     let claude = read_json(&plugin.join(".mcp.json"));
+    // No `cwd`: each host starts the server in its own default directory.
+    assert!(claude["mcpServers"]["delega"].get("cwd").is_none());
     assert_eq!(
         claude["mcpServers"]["delega"]["command"],
         "${CLAUDE_PLUGIN_ROOT}/bin/delega"
@@ -436,6 +438,7 @@ fn the_managed_files_have_the_documented_bytes() {
         serde_json::json!(["mcp"])
     );
     let codex = read_json(&plugin.join("mcp.json"));
+    assert!(codex["mcpServers"]["delega"].get("cwd").is_none());
     assert_eq!(codex["mcpServers"]["delega"]["command"], "./bin/delega");
     assert_eq!(
         codex["mcpServers"]["delega"]["args"],
@@ -862,4 +865,178 @@ fn a_recorded_host_that_cannot_be_found_keeps_everything() {
     assert_eq!(doc["hosts"][0]["host"], "codex");
     assert_eq!(doc["hosts"][0]["status"], "failed");
     assert!(rig.install.exists());
+}
+
+// ---- links, scope, stale files, hand-edited markers, JSON failures ----
+
+use std::os::unix::fs::symlink;
+
+fn host_calls(rig: &Rig) -> (Vec<String>, Vec<String>) {
+    (rig.log("claude", true), rig.log("codex", true))
+}
+
+#[test]
+fn a_linked_file_or_directory_in_the_managed_directory_is_refused() {
+    for linked_directory in [false, true] {
+        let rig = installed_for_both();
+        let outside = rig.home.join("outside");
+        fs::create_dir_all(outside.join("run")).unwrap();
+        let target = outside.join("run/SKILL.md");
+        fs::write(&target, "outside content").unwrap();
+        let skills = rig.install.join("plugin/delega/skills");
+        if linked_directory {
+            fs::remove_dir_all(&skills).unwrap();
+            symlink(&outside, &skills).unwrap();
+        } else {
+            let file = skills.join("run/SKILL.md");
+            fs::remove_file(&file).unwrap();
+            symlink(&target, &file).unwrap();
+        }
+        let calls = host_calls(&rig);
+        for args in [&["init"][..], &["uninstall"]] {
+            let (code, _, err) = rig.run_json(args);
+            assert_eq!(code, 1, "{args:?} linked_directory={linked_directory}");
+            assert!(err.contains("is a symbolic link"), "{args:?}: {err}");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "outside content");
+            assert_eq!(host_calls(&rig), calls, "{args:?}: a host was called");
+            assert!(rig.install.join(".delega-install.json").exists());
+        }
+        assert!(outside.join("run").is_dir());
+    }
+}
+
+#[test]
+fn claude_registrations_outside_user_scope_are_not_removed() {
+    for (variable, expected) in [
+        ("FAKE_MARKETPLACE_SCOPE", "another or unverified directory"),
+        ("FAKE_PLUGIN_SCOPE", "cannot be attributed to"),
+    ] {
+        let mut rig = installed_for_both();
+        rig.set(variable, "project");
+        let (code, _, err) = rig.run_json(&["uninstall", "--host", "claude"]);
+        assert_eq!(code, 1, "{variable}");
+        assert!(err.contains(expected), "{variable}: {err}");
+        assert!(rig.state("claude", "plugin").exists(), "{variable}");
+        assert!(rig.state("claude", "marketplace").exists(), "{variable}");
+        assert!(
+            rig.log("claude", false)
+                .iter()
+                .all(|c| !c.contains("uninstall") && !c.contains("remove")),
+            "{variable}"
+        );
+        assert!(rig.install.join("plugin/delega/bin/delega").exists());
+    }
+}
+
+#[test]
+fn an_upgrade_deletes_files_an_earlier_install_wrote_and_this_one_does_not() {
+    let rig = Rig::new();
+    assert_eq!(rig.run(&["init", "--host", "codex"]).status.code(), Some(0));
+    let stale = "plugin/delega/skills/retired/SKILL.md";
+    fs::create_dir_all(rig.install.join("plugin/delega/skills/retired")).unwrap();
+    fs::write(rig.install.join(stale), "old").unwrap();
+    let mut marker = rig.marker();
+    marker["files"].as_array_mut().unwrap().push(stale.into());
+    fs::write(
+        rig.install.join(".delega-install.json"),
+        serde_json::to_vec(&marker).unwrap(),
+    )
+    .unwrap();
+    let (code, _, err) = rig.run_json(&["init", "--host", "codex"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!rig.install.join(stale).exists());
+    assert!(
+        !rig.install.join("plugin/delega/skills/retired").exists(),
+        "the emptied directory stays"
+    );
+    assert!(!rig.marker()["files"].to_string().contains("retired"));
+    assert!(
+        rig.install
+            .join("plugin/delega/skills/run/SKILL.md")
+            .exists()
+    );
+}
+
+#[test]
+fn uninstall_removes_only_the_listed_files_and_reports_files_removed() {
+    let rig = installed_for_both();
+    fs::write(rig.install.join("extra.txt"), "mine").unwrap();
+    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(doc["directory"], "files_removed");
+    assert!(rig.install.join("extra.txt").exists());
+    assert!(!rig.install.join(".delega-install.json").exists());
+    assert!(!rig.install.join("plugin").exists());
+    assert!(!rig.install.join(".claude-plugin").exists());
+    let names: Vec<_> = fs::read_dir(&rig.install)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["extra.txt"]);
+}
+
+#[test]
+fn uninstall_removes_an_empty_directory_the_user_chose() {
+    let rig = Rig::new();
+    fs::create_dir_all(&rig.install).unwrap();
+    assert_eq!(rig.run(&["init", "--host", "codex"]).status.code(), Some(0));
+    let (code, doc, _) = rig.run_json(&["uninstall"]);
+    assert_eq!(code, 0);
+    assert_eq!(doc["directory"], "removed");
+    assert!(!rig.install.exists());
+}
+
+#[test]
+fn a_marker_naming_a_path_this_delega_does_not_write_is_refused() {
+    for path in [
+        "notes.txt",
+        "plugin/delega/notes.txt",
+        "plugin/delega/skills/run/other.md",
+        "plugin/delega/skills/a b/SKILL.md",
+        "plugin/other/plugin.json",
+    ] {
+        let rig = installed_for_both();
+        fs::write(rig.install.join("notes.txt"), "mine").unwrap();
+        let mut marker = rig.marker();
+        marker["files"].as_array_mut().unwrap().push(path.into());
+        fs::write(
+            rig.install.join(".delega-install.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        let calls = host_calls(&rig);
+        for args in [&["uninstall"][..], &["init"]] {
+            let (code, _, err) = rig.run_json(args);
+            assert_eq!(code, 1, "{path} {args:?}");
+            assert!(
+                err.contains("is not a path this delega writes"),
+                "{path}: {err}"
+            );
+            assert_eq!(host_calls(&rig), calls, "{path}");
+        }
+        assert_eq!(
+            fs::read_to_string(rig.install.join("notes.txt")).unwrap(),
+            "mine"
+        );
+        assert!(
+            rig.install.join("plugin/delega/bin/delega").exists(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn every_failure_prints_the_json_document() {
+    let rig = Rig::new();
+    for command in ["init", "uninstall"] {
+        let (code, doc, err) = rig.run_json(&[command, "--install-dir", "/"]);
+        assert_eq!(code, 1, "{command}");
+        assert_eq!(doc["ok"], false);
+        assert!(
+            doc["error"].as_str().unwrap().contains("filesystem root"),
+            "{doc}"
+        );
+        assert!(err.contains("filesystem root"), "{err}");
+    }
+    rig.no_calls();
 }

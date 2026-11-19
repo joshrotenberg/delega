@@ -34,7 +34,9 @@ fn the_plugin_version_follows_the_executable_bytes() {
     let one = plugin_version(b"one");
     assert_eq!(one, plugin_version(b"one"));
     assert_ne!(one, plugin_version(b"two"));
-    let (version, digest) = one.rsplit_once('.').expect("a dot before the digest");
+    let (version, digest) = one
+        .split_once('+')
+        .expect("build metadata after the version");
     assert_eq!(version, delega_core::VERSION);
     assert_eq!(digest.len(), 64);
     assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));

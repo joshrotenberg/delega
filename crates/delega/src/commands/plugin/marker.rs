@@ -11,7 +11,7 @@ use std::path::Path;
 use delega_core::canonical::sorted;
 use serde_json::{Value, json};
 
-use super::{Host, MARKER};
+use super::{EXECUTABLE, Host, MARKER, PLUGIN_DIR};
 
 const MAX_BYTES: u64 = 1024 * 1024;
 
@@ -67,6 +67,41 @@ fn plain_relative(path: &str) -> bool {
         && path
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+/// Whether `init` of this build can write `path`: the marketplaces, the
+/// executable and the plugin's manifests, identity and skills. Anything else a
+/// marker names is not ours to delete.
+pub fn writable(path: &str) -> bool {
+    const FIXED: [&str; 3] = [
+        ".claude-plugin/marketplace.json",
+        ".agents/plugins/marketplace.json",
+        EXECUTABLE,
+    ];
+    const PLUGIN_FILES: [&str; 5] = [
+        "plugin.json",
+        "mcp.json",
+        ".mcp.json",
+        ".claude-plugin/plugin.json",
+        "IDENTITY.json",
+    ];
+    if FIXED.contains(&path) {
+        return true;
+    }
+    let Some(inside) = path.strip_prefix(&format!("{PLUGIN_DIR}/")) else {
+        return false;
+    };
+    if PLUGIN_FILES.contains(&inside) {
+        return true;
+    }
+    // skills/<name>/SKILL.md
+    let mut parts = inside.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("skills"), Some(name), Some("SKILL.md"), None)
+            if !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    )
 }
 
 /// Read the marker in `dir`. `Ok(None)` when there is none; an error when
@@ -128,6 +163,11 @@ pub fn read(dir: &Path) -> Result<Option<Marker>, String> {
             .as_str()
             .filter(|file| plain_relative(file) && *file != MARKER)
             .ok_or_else(|| invalid("files must hold plain relative paths"))?;
+        if !writable(file) {
+            return Err(invalid(&format!(
+                "{file} is not a path this delega writes, so it will not be deleted"
+            )));
+        }
         if files.iter().any(|seen| seen == file) {
             return Err(invalid("a file is listed twice"));
         }

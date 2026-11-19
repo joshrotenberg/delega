@@ -161,23 +161,29 @@ pub fn run(args: Args) -> ExitCode {
             .map(|executable| (dir, executable))
             .map_err(|error| format!("cannot resolve this executable: {error}"))
     });
-    let (dir, executable) = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("delega init: {error}");
-            return ExitCode::from(1);
+    let report = match prepared {
+        Ok((dir, executable)) => install(&Request {
+            dir,
+            explicit,
+            hosts: wanted
+                .into_iter()
+                .map(|host| (host, plugin::find_host(host)))
+                .collect(),
+            executable,
+            dry_run: args.dry_run,
+        }),
+        // Still a document, so a caller that asked for JSON always gets one.
+        Err(error) => Report {
+            dry_run: args.dry_run,
+            dir: configured,
+            plugin_version: None,
+            executable: PathBuf::new(),
+            files: Vec::new(),
+            hosts: Vec::new(),
+            error: None,
         }
+        .failed(error),
     };
-    let report = install(&Request {
-        dir,
-        explicit,
-        hosts: wanted
-            .into_iter()
-            .map(|host| (host, plugin::find_host(host)))
-            .collect(),
-        executable,
-        dry_run: args.dry_run,
-    });
     let text = match args.output {
         OutputFormat::Text => report.text(),
         OutputFormat::Json => report.json(),

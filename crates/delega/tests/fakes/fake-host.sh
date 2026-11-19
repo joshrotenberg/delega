@@ -11,6 +11,8 @@
 # Test controls, all environment variables:
 #   FAKE_FAIL=word      every call whose arguments include `word` exits 1
 #   FAKE_GARBAGE=yes    the JSON listings print text that is not JSON
+#   FAKE_MARKETPLACE_SCOPE=word, FAKE_PLUGIN_SCOPE=word
+#                       the scope Claude Code's listings report (default user)
 PATH=/usr/bin:/bin
 host=$(basename "$0")
 dir=${FAKE_DIR:-$(dirname "$0")}
@@ -40,7 +42,7 @@ list_marketplaces() {
     fi
     if [ "$host" = claude ]; then
         if [ -f "$marketplace" ]; then
-            printf '[{"name":"delega-local","source":"directory","path":"%s","scope":"user"}]\n' "$(cat "$marketplace")"
+            printf '[{"name":"delega-local","source":"directory","path":"%s","scope":"%s"}]\n' "$(cat "$marketplace")" "${FAKE_MARKETPLACE_SCOPE:-user}"
         else
             echo '[]'
         fi
@@ -61,7 +63,7 @@ list_plugins() {
     rows=""
     if [ -f "$plugin" ]; then
         if [ "$host" = claude ]; then
-            rows=$(printf '{"id":"%s","scope":"user","installPath":"%s"}' "$id" "$(cat "$plugin")")
+            rows=$(printf '{"id":"%s","scope":"%s","installPath":"%s"}' "$id" "${FAKE_PLUGIN_SCOPE:-user}" "$(cat "$plugin")")
         else
             rows=$(printf '{"pluginId":"%s","installed":true,"source":{"source":"local","path":"%s"}}' "$id" "$(cat "$plugin")")
         fi
