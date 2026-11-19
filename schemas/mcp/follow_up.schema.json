@@ -1,0 +1,171 @@
+{
+  "name": "follow_up",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "FollowUpArgs",
+    "description": "Arguments of `follow_up`.",
+    "type": "object",
+    "properties": {
+      "worker": {
+        "description": "The worker to give another assignment.",
+        "type": "string"
+      },
+      "prompt": {
+        "description": "The assignment. It continues the worker's provider session, so it can\nrefer to earlier work.",
+        "type": "string"
+      },
+      "timeout_secs": {
+        "description": "Time limit for this run in whole seconds, replacing the worker's.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint64",
+        "minimum": 1,
+        "default": null,
+        "maximum": 86400
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "worker",
+      "prompt"
+    ]
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "StartResponse",
+    "description": "The answer to `start` and to `follow_up`.\n\nA run that could not go ahead is finished at once: `state` is `finished`,\n`outcome` is `refused` and `error` says why. `read` returns its result. A\nrefused `start` creates no worker, so `worker` is absent.",
+    "type": "object",
+    "properties": {
+      "worker": {
+        "description": "The worker, absent when `start` was refused.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "run": {
+        "description": "The run.",
+        "type": "string"
+      },
+      "state": {
+        "description": "`queued` or `running`, or `finished` for a refusal.",
+        "$ref": "#/$defs/RunState"
+      },
+      "ahead": {
+        "description": "Runs ahead of this one on its worker, counting the running one. Present\nwhile queued.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint",
+        "minimum": 0
+      },
+      "outcome": {
+        "description": "Present only for a refusal.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Outcome"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "error": {
+        "description": "Present only for a refusal.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ErrorDetail"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "run",
+      "state"
+    ],
+    "$defs": {
+      "RunState": {
+        "description": "Where a run is.",
+        "oneOf": [
+          {
+            "description": "Waiting behind another run on its worker, or for a running slot.",
+            "type": "string",
+            "const": "queued"
+          },
+          {
+            "description": "The provider is running.",
+            "type": "string",
+            "const": "running"
+          },
+          {
+            "description": "Ended, with exactly one result.",
+            "type": "string",
+            "const": "finished"
+          }
+        ]
+      },
+      "Outcome": {
+        "description": "How a run ended. Every run ends in exactly one of these.",
+        "oneOf": [
+          {
+            "description": "The provider finished the assignment and returned a final answer.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "The provider or delega hit an error; `error.kind` says which.",
+            "type": "string",
+            "const": "failed"
+          },
+          {
+            "description": "The run's time limit passed.",
+            "type": "string",
+            "const": "timed_out"
+          },
+          {
+            "description": "The caller stopped the run, or went away.",
+            "type": "string",
+            "const": "interrupted"
+          },
+          {
+            "description": "The run did not go ahead: invalid request, a limit, or a denied\npermission that stopped it.",
+            "type": "string",
+            "const": "refused"
+          }
+        ]
+      },
+      "ErrorDetail": {
+        "description": "Why a run did not complete. Present unless the outcome is `completed`.",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "description": "A short machine-readable label for the kind of error. Free text, so a\nreader must tolerate values it does not know. The values used so far:\n`invalid_request` (a refused run whose request failed validation),\n`timed_out` and `interrupted` (set by the matching constructors).",
+            "type": "string"
+          },
+          "message": {
+            "description": "A human-readable description.",
+            "type": "string"
+          },
+          "provider_exit_code": {
+            "description": "The provider process exit code, when it exited with one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ]
+      }
+    }
+  }
+}

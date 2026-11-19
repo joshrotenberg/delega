@@ -167,10 +167,10 @@ pub fn refuse_dry_run(
 /// Print what a dry run found and exit 0.
 pub fn dry_run(format: OutputFormat, plan: &DryRun, log: &Log) -> ExitCode {
     let text = match format {
-        OutputFormat::Json => json_document(&json!({
+        OutputFormat::Json => json_document(&delega_core::canonical::sorted(json!({
             "schema_version": SCHEMA_VERSION,
             "dry_run": plan,
-        })),
+        }))),
         OutputFormat::Text => dry_run_text(plan),
     };
     if emit(log, &text) {

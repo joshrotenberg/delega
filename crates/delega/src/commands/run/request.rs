@@ -1,22 +1,20 @@
 //! From a profile file and the command line flags to one validated request.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use delega_core::contract::limits::{
-    DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_INSTRUCTIONS_BYTES, MAX_PROMPT_BYTES,
+    DEFAULT_TIMEOUT_SECS, MAX_ANSWER_SCHEMA_BYTES, MAX_PROMPT_BYTES,
 };
 use delega_core::contract::partial::{PartialPermissions, PartialRequest, PartialSession};
 use delega_core::contract::permissions::Mode;
 use delega_core::contract::request::{Provider, Request};
 use delega_core::contract::validate::Problem;
+use delega_core::profile::{self, ErrorDetail, problem, read_limited};
 use serde_json::Value;
 
 use super::{Args, Effort, Provider as ProviderArg};
 
-/// Largest profile file read: a full prompt and instructions with room for the
-/// other fields.
-const MAX_PROFILE_BYTES: usize = MAX_PROMPT_BYTES + MAX_INSTRUCTIONS_BYTES + 1024 * 1024;
 /// Largest schema file read. The contract bounds the schema as compact JSON; a
 /// file may carry whitespace, so it gets a multiple.
 const MAX_SCHEMA_FILE_BYTES: usize = MAX_ANSWER_SCHEMA_BYTES * 4;
@@ -50,27 +48,18 @@ pub struct Failure {
     pub facts: Facts,
 }
 
-fn problem(field: &str, message: impl Into<String>) -> Problem {
-    Problem {
-        field: field.to_string(),
-        message: message.into(),
-    }
-}
-
 /// Build the request: the profile first, explicit flags over it, then the
 /// contract's own validation. Problems in reading the inputs are reported
 /// together and stop before validation, which would only repeat them as a
 /// missing field.
 pub fn build(args: &Args) -> Result<Request, Failure> {
     let mut problems = Vec::new();
-    let profile = args
-        .request
-        .as_deref()
-        .and_then(|path| read_profile(path, &mut problems))
-        .unwrap_or_default();
-    let flags = flags(args, &mut problems);
-    let mut merged = profile.merge(flags);
-    resolve_paths(&mut merged);
+    let merged = profile::merge(
+        args.request.as_deref(),
+        ErrorDetail::Full,
+        &mut problems,
+        |problems| flags(args, problems),
+    );
     let facts = Facts {
         provider: merged.provider,
         mode: merged
@@ -86,69 +75,6 @@ pub fn build(args: &Args) -> Result<Request, Failure> {
     merged
         .into_request()
         .map_err(|problems| Failure { problems, facts })
-}
-
-/// Read a regular file of at most `limit` bytes as UTF-8. A device, a pipe or a
-/// directory is refused before it is opened, so reading cannot block or run
-/// without end, and a file over the limit is refused naming the limit.
-fn read_limited(path: &Path, limit: usize) -> Result<String, String> {
-    let meta = std::fs::metadata(path).map_err(|err| err.to_string())?;
-    if !meta.is_file() {
-        return Err("it is not a regular file".to_string());
-    }
-    let file = std::fs::File::open(path).map_err(|err| err.to_string())?;
-    let mut bytes = Vec::new();
-    file.take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|err| err.to_string())?;
-    if bytes.len() > limit {
-        return Err(format!("it is larger than the limit of {limit} bytes"));
-    }
-    String::from_utf8(bytes).map_err(|_| "it is not valid UTF-8".to_string())
-}
-
-/// Make every relative path in the request relative to the caller's working
-/// directory: `cwd` and `permissions.directories`, whether they came from the
-/// flags or from the profile. Without this a relative extra directory would be
-/// resolved against the worker's own working directory. A path that cannot be
-/// made absolute, such as an empty one, is left for validation to report.
-fn resolve_paths(request: &mut PartialRequest) {
-    let absolute = |path: &PathBuf| std::path::absolute(path).unwrap_or_else(|_| path.clone());
-    if let Some(cwd) = &mut request.cwd {
-        *cwd = absolute(cwd);
-    }
-    if let Some(dirs) = request
-        .permissions
-        .as_mut()
-        .and_then(|p| p.directories.as_mut())
-    {
-        for dir in dirs {
-            *dir = absolute(dir);
-        }
-    }
-}
-
-fn read_profile(path: &Path, problems: &mut Vec<Problem>) -> Option<PartialRequest> {
-    let text = match read_limited(path, MAX_PROFILE_BYTES) {
-        Ok(text) => text,
-        Err(err) => {
-            problems.push(problem(
-                "request",
-                format!("cannot read {}: {err}", path.display()),
-            ));
-            return None;
-        }
-    };
-    match PartialRequest::from_profile_json(&text) {
-        Ok(profile) => Some(profile),
-        Err(err) => {
-            problems.push(problem(
-                "request",
-                format!("{} is not a valid profile: {err}", path.display()),
-            ));
-            None
-        }
-    }
 }
 
 /// The request fields the flags set explicitly. A flag that was not given sets

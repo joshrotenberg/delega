@@ -78,8 +78,61 @@ fn version_json_has_name_version_and_schema_version() {
 }
 
 #[test]
+fn version_json_carries_a_digest_of_each_skill_that_matches_skill_list_and_show() {
+    let version: serde_json::Value =
+        serde_json::from_str(&text(&delega(&["version", "--output", "json"]).stdout))
+            .expect("JSON");
+    let list: serde_json::Value = serde_json::from_str(&text(
+        &delega(&["skill", "list", "--output", "json"]).stdout,
+    ))
+    .expect("JSON");
+    // The same facts, name, uri and digest of every skill, from both commands.
+    assert_eq!(
+        version["skills"],
+        list["skills"].as_array().map_or_else(
+            || serde_json::Value::Null,
+            |skills| serde_json::Value::Array(
+                skills
+                    .iter()
+                    .map(|s| serde_json::json!({
+                        "name": s["name"], "uri": s["uri"], "digest": s["digest"],
+                    }))
+                    .collect()
+            )
+        )
+    );
+    // And the digest is of the bytes `skill show` prints.
+    for skill in version["skills"].as_array().expect("skills") {
+        let name = skill["name"].as_str().expect("name");
+        let shown = delega(&["skill", "show", name]).stdout;
+        let digest = {
+            use std::io::Write;
+            let mut child = Command::new("/usr/bin/shasum")
+                .args(["-a", "256"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("run shasum");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(&shown)
+                .expect("write");
+            let out = child.wait_with_output().expect("shasum");
+            text(&out.stdout)
+                .split_whitespace()
+                .next()
+                .expect("digest")
+                .to_string()
+        };
+        assert_eq!(skill["digest"], digest.as_str(), "{name}");
+    }
+}
+
+#[test]
 fn unimplemented_subcommands_say_so_on_stderr_and_exit_two() {
-    for args in [&["mcp"][..], &["init", "--dry-run"], &["doctor"]] {
+    for args in [&["init", "--dry-run"][..], &["doctor"]] {
         let out = delega(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(
@@ -276,5 +329,36 @@ fn help_lists_every_planned_subcommand() {
             help.lines().any(|l| l.trim_start().starts_with(name)),
             "help does not list {name}"
         );
+    }
+}
+
+/// Whether every object in the value, at any depth, has its keys in
+/// alphabetical order. `serde_json` is built here with `preserve_order` (the MCP
+/// server's `tower-mcp` turns it on), so the order of the parsed value is the
+/// order of the text.
+fn keys_sorted(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<&String> = map.keys().collect();
+            keys.windows(2).all(|w| w[0] < w[1]) && map.values().all(keys_sorted)
+        }
+        serde_json::Value::Array(items) => items.iter().all(keys_sorted),
+        _ => true,
+    }
+}
+
+#[test]
+fn json_documents_built_from_values_have_alphabetical_keys_in_every_build() {
+    // The same text a build without `preserve_order` writes, so a caller sees one
+    // document whichever crate was built.
+    for args in [
+        &["version", "--output", "json"][..],
+        &["skill", "list", "--output", "json"],
+        &["skill", "show", "run", "--output", "json"],
+    ] {
+        let out = delega(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        let value: serde_json::Value = serde_json::from_str(&text(&out.stdout)).expect("JSON");
+        assert!(keys_sorted(&value), "{args:?}: {value}");
     }
 }

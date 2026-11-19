@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use delega_core::canonical::sorted;
 use delega_core::contract::SCHEMA_VERSION;
 use delega_core::skills::{self, Skill};
 use serde_json::{Value, json};
@@ -59,10 +60,10 @@ fn list(output: OutputFormat) -> ExitCode {
             .collect(),
         OutputFormat::Json => format!(
             "{}\n",
-            json!({
+            sorted(json!({
                 "schema_version": SCHEMA_VERSION,
                 "skills": catalog.iter().map(summary).collect::<Vec<_>>(),
-            })
+            }))
         ),
     };
     super::output::emit("skill list", text.as_bytes())
@@ -83,7 +84,7 @@ fn show(name: &str, output: OutputFormat) -> ExitCode {
         OutputFormat::Json => {
             let mut value = summary(skill);
             value["content"] = Value::String(skill.content().to_string());
-            super::output::emit("skill show", format!("{value}\n").as_bytes())
+            super::output::emit("skill show", format!("{}\n", sorted(value)).as_bytes())
         }
     }
 }

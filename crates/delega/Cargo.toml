@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 delega-core.workspace = true
+delega-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["signal"] }

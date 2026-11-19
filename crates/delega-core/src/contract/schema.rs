@@ -78,6 +78,21 @@ pub(super) fn refine_request(schema: &mut Schema) {
     );
 }
 
+/// The same refinements for the partial request that the MCP `start` tool and
+/// profiles use, so the tool's schema states the ranges and lengths of the
+/// request's. Every field of a partial request may be absent or `null`, so the
+/// version is `1` or `null` instead of the constant `1`.
+pub(super) fn refine_partial_request(schema: &mut Schema) {
+    refine_request(schema);
+    match schema.pointer_mut("/properties/schema_version") {
+        Some(Value::Object(target)) => {
+            target.remove("const");
+            target.insert("enum".to_string(), json!([SCHEMA_VERSION, null]));
+        }
+        _ => panic!("schema refinement: no object at /properties/schema_version"),
+    }
+}
+
 /// A confirmed cleanup has no leftovers; an unconfirmed one gives a reason.
 pub(super) fn refine_cleanup(schema: &mut Schema) {
     schema.insert(
@@ -172,8 +187,12 @@ pub fn generate_result_schema() -> String {
 }
 
 fn render(schema: &schemars::Schema) -> String {
+    // Back to a `Schema`, so that its own ordering of the well-known keywords
+    // (`$schema`, `title`, `description`, `type`, ...) still applies.
+    let canonical = Schema::try_from(crate::canonical::sorted(schema.clone().to_value()))
+        .unwrap_or_else(|_| schema.clone());
     // A schema is a JSON value with string keys, so serializing cannot fail.
-    let mut text = serde_json::to_string_pretty(schema).unwrap_or_default();
+    let mut text = serde_json::to_string_pretty(&canonical).unwrap_or_default();
     text.push('\n');
     text
 }

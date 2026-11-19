@@ -169,6 +169,10 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
 /// a deny list is a deny pattern whatever it contains, so a rule that is not
 /// well formed matches less and never allows anything.
 fn settings_json(guard: Option<&HookCommand>, deny: &[String]) -> Value {
+    crate::canonical::sorted(settings_value(guard, deny))
+}
+
+fn settings_value(guard: Option<&HookCommand>, deny: &[String]) -> Value {
     let mut settings = match guard {
         Some(hook) => json!({
             "disableAllHooks": false,
