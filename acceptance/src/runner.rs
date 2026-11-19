@@ -32,6 +32,11 @@ pub fn case_marker(run_id: &str, n: u64) -> String {
     format!("{MARKER_PREFIX}{run_id}-{n}/")
 }
 
+/// The verdict of a known-gap row on a run where no survivor remained.
+pub const GAP_NOT_SHOWN: &str = "gap_not_shown";
+/// The verdict of a known-gap row that showed no gap in every repeat of a run.
+pub const GAP_CLOSED: &str = "gap_closed";
+
 /// A case that has not ended this long after it started is a hang.
 const HARD_LIMIT: Duration = Duration::from_secs(30);
 /// How long after `delega` exits the harness waits before it measures what is
@@ -128,6 +133,10 @@ pub struct Measured {
     pub expected_confirmed: Option<bool>,
     pub expected_survivors: Vec<String>,
     pub expected_leak: LeakClass,
+    /// The row's gap depends on timing, so a run without a survivor is
+    /// `gap_not_shown` and not a failure (`Expect::timing_dependent`).
+    #[serde(default)]
+    pub timing_dependent: bool,
     pub expected_reason: Option<String>,
     pub verdict: String,
     pub problems: Vec<String>,
@@ -325,6 +334,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
             .map(|s| (*s).to_string())
             .collect(),
         expected_leak: case.expect.leak,
+        timing_dependent: case.expect.timing_dependent,
         expected_reason: case.expect.reason.map(str::to_string),
         verdict: String::new(),
         problems: Vec::new(),
@@ -552,10 +562,17 @@ pub fn cleanup_mismatch(actual: Option<bool>, expected: Option<bool>) -> String 
 /// Anything but criterion 2 that differs from the expectation is a `fail`: the
 /// outcome, the exit status, the document on standard output, the cleanup
 /// verdict (`confirmed`, and the reason when it is not) and a hang. Criterion 2
-/// is judged on the survivors: they must be exactly the roles the row lists
-/// (none, unless it is an expected failure or the report says cleanup was not
-/// confirmed). A row whose expected survivors are absent has closed its gap
-/// (`unexpected_pass`); one with any other survivor fails.
+/// is judged on the survivors. Most rows list none, and any survivor fails
+/// them. A known-gap row says a survivor of the listed roles may remain: all
+/// of them present is `expected_failure` (the gap showed). None present is
+/// `gap_not_shown` when the gap depends on timing (relay, orphan, bare: whether
+/// a late process is caught varies, and a gap shown on one run and not on the
+/// next is not a regression) and `unexpected_pass` when it does not (SIGKILL of
+/// `delega`, after which the worker always survives), which fails.
+/// The run does not fail on `gap_not_shown`; [`crate::run_all::close_gaps`]
+/// turns a row that did not show its gap in every repeat of a run into
+/// `gap_closed`. Anything else (a survivor of another role, a subset of the
+/// listed roles, an unrecorded survivor) fails.
 fn judge(m: &mut Measured, case: &Case) {
     let expect = &case.expect;
     let mut problems = std::mem::take(&mut m.problems);
@@ -651,10 +668,16 @@ fn judge(m: &mut Measured, case: &Case) {
             m.problems
                 .push("a row expected to fail criterion 2 passed; correct the table".to_string());
         }
+    } else if gap && actual.is_empty() && expect.timing_dependent {
+        m.verdict = GAP_NOT_SHOWN.to_string();
+        m.problems.push(format!(
+            "no survivor where {} was allowed: the gap did not show in this run",
+            list(&wanted_sorted)
+        ));
     } else if gap && actual.is_empty() {
         m.verdict = "unexpected_pass".to_string();
         m.problems.push(format!(
-            "no survivor where {} was expected: the gap is closed; correct the table",
+            "no survivor where {} is certain: this gap does not depend on timing, so the row no longer shows it; correct the table or find the regression",
             list(&wanted_sorted)
         ));
     } else {
@@ -692,5 +715,125 @@ fn check_unconfirmed(m: &Measured, reason: Option<&str>, problems: &mut Vec<Stri
         problems.push(format!(
             "cleanup.reason does not say what could not be checked: {text:?}"
         ));
+    }
+}
+
+#[cfg(test)]
+mod judge_tests {
+    use super::*;
+
+    fn relay_row() -> Case {
+        crate::matrix::all()
+            .into_iter()
+            .find(|r| r.id == "claude-a-relay")
+            .expect("the relay row")
+    }
+
+    /// A measurement of `row` that met everything but the survivors.
+    fn measured(row: &Case, survivors: &[&str]) -> Measured {
+        let mut m: Measured = serde_json::from_str(
+            r#"{"id":"x","repeat":1,"provider":"claude","case":"a","variant":"relay",
+            "behaviour":"success","action":"","timeout_secs":null,"exit_code":0,
+            "exit_signal":null,"hang":false,"stdout_docs":1,"result_valid":true,
+            "outcome":"completed","error_kind":null,"cleanup_confirmed":true,
+            "cleanup_reason":null,"cleanup_pids":[],"cleanup_groups":[],
+            "provider_pid":null,"survivors_at_exit":[],"survivors":[],"honest":true,
+            "latency_ms":null,"latency_kind":"","elapsed_ms":null,
+            "expected_outcome":"completed","expected_exit":{"Code":0},
+            "expected_confirmed":true,"expected_survivors":[],
+            "expected_leak":"none","expected_reason":null,
+            "verdict":"","problems":[],"stderr_first":null}"#,
+        )
+        .expect("a measurement");
+        m.expected_leak = row.expect.leak;
+        m.timing_dependent = row.expect.timing_dependent;
+        m.expected_survivors = row
+            .expect
+            .survivors
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        m.survivors = survivors.iter().map(|s| (*s).to_owned()).collect();
+        judge(&mut m, row);
+        m
+    }
+
+    #[test]
+    fn a_known_gap_row_with_its_survivor_is_an_expected_failure() {
+        let m = measured(&relay_row(), &["relay-heartbeat"]);
+        assert_eq!(m.verdict, "expected_failure", "{:?}", m.problems);
+    }
+
+    #[test]
+    fn a_known_gap_row_without_its_survivor_is_gap_not_shown() {
+        let m = measured(&relay_row(), &[]);
+        assert_eq!(m.verdict, GAP_NOT_SHOWN, "{:?}", m.problems);
+    }
+
+    fn sigkill_row() -> Case {
+        crate::matrix::all()
+            .into_iter()
+            .find(|r| r.id == "claude-k-plain")
+            .expect("the SIGKILL row")
+    }
+
+    /// The SIGKILL rows measured with `delega` killed: no output, signal 9.
+    fn killed(row: &Case, survivors: &[&str]) -> Measured {
+        let mut m = measured(row, survivors);
+        m.exit_code = None;
+        m.exit_signal = Some(9);
+        m.stdout_docs = Some(0);
+        m.problems.clear();
+        m.survivors = survivors.iter().map(|s| (*s).to_owned()).collect();
+        judge(&mut m, row);
+        m
+    }
+
+    #[test]
+    fn a_gap_that_does_not_depend_on_timing_is_strict() {
+        let row = sigkill_row();
+        assert!(!row.expect.timing_dependent);
+        assert!(relay_row().expect.timing_dependent);
+        assert_eq!(killed(&row, &["provider"]).verdict, "expected_failure");
+        // No survivor after SIGKILL is not load noise: the worker cannot have gone.
+        assert_eq!(killed(&row, &[]).verdict, "unexpected_pass");
+        assert_eq!(killed(&row, &["child"]).verdict, "fail");
+    }
+
+    #[test]
+    fn an_unrecorded_survivor_still_fails_a_known_gap_row() {
+        let m = measured(&relay_row(), &["relay-heartbeat", "unrecorded"]);
+        assert_eq!(m.verdict, "fail");
+        let m = measured(&relay_row(), &["unrecorded"]);
+        assert_eq!(m.verdict, "fail");
+    }
+
+    #[test]
+    fn a_survivor_of_another_role_still_fails_a_known_gap_row() {
+        let m = measured(&relay_row(), &["child"]);
+        assert_eq!(m.verdict, "fail");
+        let m = measured(&relay_row(), &["relay-heartbeat", "child"]);
+        assert_eq!(m.verdict, "fail");
+    }
+
+    #[test]
+    fn a_wrong_exit_status_fails_a_known_gap_row_whether_or_not_the_gap_shows() {
+        let row = relay_row();
+        let mut m = measured(&row, &[]);
+        m.exit_code = Some(1);
+        m.problems.clear();
+        judge(&mut m, &row);
+        assert_eq!(m.verdict, "fail");
+    }
+
+    #[test]
+    fn a_row_with_no_gap_fails_on_any_survivor_and_passes_on_none() {
+        let row = crate::matrix::all()
+            .into_iter()
+            .find(|r| r.id == "claude-a-child")
+            .expect("a strict row");
+        assert_eq!(measured(&row, &[]).verdict, "pass");
+        assert_eq!(measured(&row, &["child"]).verdict, "fail");
+        assert_eq!(measured(&row, &["relay-heartbeat"]).verdict, "fail");
     }
 }

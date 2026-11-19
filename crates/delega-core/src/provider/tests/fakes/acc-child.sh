@@ -27,17 +27,22 @@ case "$1" in
     # exits, so no process stays alive for longer than one process listing. It
     # stops by itself after 1500 generations, or as soon as the file `stop`
     # exists (the harness creates it). The first process stays as a plain
-    # child of the provider.
+    # child of the provider. Every generation appends `relay-heartbeat PID` to
+    # the ledger as its first act, so the harness attributes it to its role
+    # instead of finding it unrecorded.
     record relay $$
-    exec perl -e 'use POSIX; my ($beat, $stop) = @ARGV;
+    exec perl -e 'use POSIX; my ($beat, $stop, $pids) = @ARGV;
       my $p = fork();
-      if ($p == 0) { $SIG{TERM} = q(IGNORE);
+      if ($p == 0) {
+        open L, q(>>), $pids; print L "relay-heartbeat $$\n"; close L;
+        $SIG{TERM} = q(IGNORE);
         for (1..1500) { last if -e $stop; setpgid(0,0);
           open H, q(>), $beat; print H $$; close H;
           select(undef, undef, undef, 0.005);
           my $q = fork();
-          if ($q) { exit 0 } }
+          if ($q) { exit 0 }
+          open L, q(>>), $pids; print L "relay-heartbeat $$\n"; close L; }
         exit 0 }
-      sleep 60' "$ACC_DIR/beat" "$ACC_DIR/stop"
+      sleep 60' "$ACC_DIR/beat" "$ACC_DIR/stop" "$ACC_DIR/pids"
     ;;
 esac
