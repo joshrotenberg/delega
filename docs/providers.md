@@ -17,8 +17,8 @@ describes behaviour in its own terms, and states where it differs on purpose.
 
 `ProviderOptions` carries what is not part of the request: `executable` (an
 absolute path), `hook` (see [Claude commands](#commands-and-directories)),
-`env_pass`, `env_set`, `parent_env`, `run_id`, `worker`, `max_output_bytes` and
-`stop_grace`. Its `Debug` output lists environment variable names only.
+`env_pass`, `env_set`, `parent_env`, `run_id`, `worker`, `max_output_bytes`,
+`stop_grace` and `progress`. Its `Debug` output lists environment variable names only.
 
 Numeric limits are in `provider/limits.rs`.
 
@@ -54,6 +54,21 @@ set. The path used is `provenance.provider_executable`.
 
 The probes run in the working directory with the same environment as the run. A
 probe's cleanup verdict is merged into the result's `cleanup`.
+
+## Progress events
+
+`ProviderOptions::progress` takes a `ProgressSink`, a function the provider
+layer calls with a `ProgressEvent` from the task that reads the provider's
+output, so it must return at once. The events are `Started` (the provider
+process is about to start), `Provider { kind, summary }` (one per output line,
+as it is read), `Denied { request }` (one per entry of `permissions.denied`,
+after the provider has ended) and `Finished { outcome }` (always last, also for
+a request refused before start). `kind` is the provider's own event type. The
+summary is empty or short: at most 80 characters of a message with credentials
+removed, or the item type and status for a Codex item. A command, a path or an
+environment value is never in one. The probes (`--version`, `mcp list`) report
+nothing. The process layer's `ProcessSpec::stdout_tap` is the hook that
+delivers the output chunks.
 
 ## Outcomes
 
@@ -200,9 +215,11 @@ granted is denied at once. Denials come back in the result event's
   `full`, commands are not listed: every command is allowed.
 - The hook is a program the caller supplies in `ProviderOptions::hook`
   (`HookCommand { program, args }`). `provider::hook::run` is the entry point it
-  calls; the `delega` binary will expose it as a subcommand. Without a hook,
-  `permissions.commands` is not granted at all and a note says so. Claude Code
-  must be 2.1.325 or later for the hook interface.
+  calls; the `delega` binary exposes it as the hidden subcommand
+  `command-guard`, and `delega run` passes its own executable path and that
+  subcommand as the hook. Without a hook, `permissions.commands` is not granted
+  at all and a note says so. Claude Code must be 2.1.325 or later for the hook
+  interface.
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
   It is readable, not editable: no `Edit` or `Write` rule names it.
 

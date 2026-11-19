@@ -2,6 +2,7 @@
 //! in [`Command`].
 
 mod doctor;
+mod hook;
 mod init;
 mod mcp;
 pub(crate) mod output;
@@ -43,6 +44,9 @@ pub enum Command {
     Doctor(doctor::Args),
     /// Print the version
     Version(version::Args),
+    /// The command guard Claude Code calls before a Bash tool call
+    #[command(name = hook::NAME, hide = true)]
+    Guard(hook::Args),
 }
 
 impl Command {
@@ -56,6 +60,7 @@ impl Command {
             Command::Skill(a) => skill::run(a),
             Command::Doctor(a) => doctor::run(a),
             Command::Version(a) => version::run(a),
+            Command::Guard(a) => hook::run(a),
         }
     }
 }

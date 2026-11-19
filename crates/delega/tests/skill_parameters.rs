@@ -123,7 +123,8 @@ fn walk(cmd: &clap::Command, path: Vec<String>, out: &mut BTreeMap<Vec<String>, 
             info.shorts.insert(short, flag);
         }
     }
-    for sub in cmd.get_subcommands() {
+    // A hidden subcommand is not part of the surface a skill may name.
+    for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
         info.subs.insert(sub.get_name().to_string());
         let mut next = path.clone();
         next.push(sub.get_name().to_string());

@@ -6,10 +6,13 @@ Run Claude Code and Codex agents from a program, for any purpose, reliably.
 definite result. It is reached from a command line, from Rust, and over MCP.
 
 This repository is new. The request and result contract, the process layer and
-the provider layer exist so far. `delega schema request|result`,
-`delega skill list|show NAME` and `delega version` work, and the other commands
-print "not implemented yet": the provider layer is a library API that no command
-calls yet. It merges two earlier
+the provider layer exist so far. `delega run`, `delega schema request|result`,
+`delega skill list|show NAME` and `delega version` work, and `mcp`, `init` and
+`doctor` print "not implemented yet". `delega run` runs one assignment on a
+Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
+`--progress`, `--allow-command` and the exit statuses in
+[docs/api.md](docs/api.md); it has been tested against fake providers only, not
+against the real CLIs. It merges two earlier
 projects, [due](https://github.com/joshrotenberg/due) and
 [counterpart](https://github.com/joshrotenberg/counterpart), and the first work
 is deciding what to carry over and proving the core. The design record that led
@@ -59,7 +62,7 @@ Out of scope:
 | `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and, later, the rest of the engine. |
 | `schemas` | JSON Schemas for the request and result, generated from the core types. |
 | `crates/delega-mcp` | The MCP adapter over the core. |
-| `crates/delega` | The `delega` binary. |
+| `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
 | `docs/api.md` | The agreed design for the CLI and MCP surface. |
 | `docs/providers.md` | How each provider is started: command shape, permission mapping, `native_args` allowlist, environment policy, and what is unverified against the real CLIs. |
 
@@ -74,8 +77,8 @@ cargo test --workspace
 ## The API
 
 [docs/api.md](docs/api.md) is the agreed design for the CLI and MCP surface,
-with what is deferred listed at the end. The request and result contract is
-built; the rest is not.
+with what is deferred listed at the end. The request and result contract and
+the `run` command are built; the MCP server and the library `Engine` are not.
 
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.

@@ -17,7 +17,7 @@ with flags:
 - `--provider claude` or `--provider codex`. Required, either in a flag or in a
   profile file given with `--request FILE`. Explicit flags override the file.
 - `-p` or `--prompt` for the assignment, or `--stdin` to read it from standard
-  input. Use `--stdin` for long or multi-line assignments.
+  input, not both. Use `--stdin` for long or multi-line assignments.
 - `-C` or `--cwd` for the working directory. It must exist.
 - `--timeout` for the time limit, for example `--timeout 20m`. The default is 10
   minutes, and the limit applied is stated in the result.
@@ -54,7 +54,9 @@ is listed in `permissions.denied` in the result.
 
 `--dry-run` validates the merged request and prints the provider executable,
 arguments, working directory and applied permissions without starting anything.
-Use it when the request is built from several sources.
+Use it when the request is built from several sources. With `--output json` it
+prints a versioned object that lists the environment variable names the worker
+would receive, never their values.
 
 ## Outcomes and exit status
 
@@ -70,9 +72,17 @@ Every run ends in exactly one outcome, and the exit status follows it.
 
 ## Read the result
 
-By default the answer is printed as text. Use `--output json` to get the whole
-result; with it the result is always printed, whatever the exit status. Add
-`--progress` to see one line per provider event on stderr.
+By default the answer is printed as text, and nothing else is on standard
+output. When the run did not complete, one line on standard error gives the
+outcome and the error, and each denied request is listed there too. Use
+`--output json` to get the whole result; with it the result is always printed,
+whatever the exit status. Add `--progress` to see one line per provider event on
+stderr, each starting with `progress: `; standard output does not change.
+
+A request that cannot start, such as an unreadable profile, a missing prompt or
+provider, or an unreadable schema file, is a `refused` result too. With
+`--output json` it is printed as the result, with every problem listed in
+`error.message`. In text mode each problem is a line on standard error. Either way the exit status is 2.
 
 To know what happened, read `outcome`, `text`, `error` and `cleanup`:
 

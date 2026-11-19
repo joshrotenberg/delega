@@ -1,11 +1,24 @@
-//! `delega run`: run one assignment in the foreground. Not built yet.
+//! `delega run`: run one assignment in the foreground.
+//!
+//! This module holds the command line definition and the order of work. Each
+//! step is a module of its own: [`request`] builds the request from the profile
+//! and the flags, [`execute`] runs it (with [`signals`] and [`progress`]), and
+//! [`output`] prints what came out. Every failure before a run exists is still
+//! printed as a result, so a caller reads one shape whatever happened.
+
+mod execute;
+mod output;
+mod progress;
+mod request;
+mod signals;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgGroup, Parser, ValueEnum};
+use delega_core::provider::{HookCommand, ProviderOptions, dry_run};
 
-use super::OutputFormat;
+use super::{OutputFormat, hook};
 use crate::duration::parse_duration_secs;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -21,11 +34,9 @@ pub enum Effort {
     High,
 }
 
-/// Options from `docs/api.md`. They are parsed and checked now so that the
-/// help text shows the planned surface; nothing uses them yet.
+/// Options from `docs/api.md`.
 #[derive(Debug, Parser)]
 #[command(group(ArgGroup::new("mode").args(["read", "write", "full"])))]
-#[allow(dead_code)]
 pub struct Args {
     /// A request or profile file; explicit options override it
     #[arg(long, value_name = "FILE")]
@@ -92,6 +103,38 @@ pub struct Args {
     native_args: Vec<String>,
 }
 
-pub fn run(_args: Args) -> ExitCode {
-    super::not_implemented("run")
+pub fn run(args: Args) -> ExitCode {
+    let format = args.output.unwrap_or(OutputFormat::Text);
+    let request = match request::build(&args) {
+        Ok(request) => request,
+        Err(failure) => return output::refuse(format, &failure),
+    };
+    let facts = request::Facts::of(&request);
+    let progress = args.progress.then(progress::Printer::start);
+    let mut options = ProviderOptions {
+        hook: guard_command(),
+        ..ProviderOptions::default()
+    };
+    if args.dry_run {
+        return match dry_run(&request, &options) {
+            Ok(plan) => output::dry_run(format, &plan),
+            Err(refusal) => output::refuse_dry_run(format, &facts, &refusal),
+        };
+    }
+    options.progress = progress.as_ref().map(progress::Printer::sink);
+    let result = execute::run(request, options, &facts);
+    if let Some(printer) = progress {
+        printer.finish();
+    }
+    output::print_result(format, &result)
+}
+
+/// The hook command that runs this executable's command guard, so
+/// `--allow-command` can be enforced for Claude Code. Without a usable path to
+/// this executable no guard is configured, and the result says that exact
+/// command grants were not applied.
+fn guard_command() -> Option<HookCommand> {
+    let exe = std::env::current_exe().ok()?;
+    exe.is_absolute()
+        .then(|| HookCommand::new(exe, [hook::NAME]))
 }
