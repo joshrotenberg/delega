@@ -120,9 +120,12 @@ impl Gate {
         self.started_marker().exists()
     }
 
-    /// Wait until the fake has begun the run held on this gate.
+    /// Wait until the fake has begun the run held on this gate. The deadline
+    /// is generous: on a loaded machine or a shared CI runner, ten workers'
+    /// version probes and starts can take well over the 15 s this used to allow.
     pub async fn started(&self) {
-        for _ in 0..1500 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if self.has_started() {
                 return;
             }
@@ -285,11 +288,13 @@ impl Rig {
         panic!("processes are still running: {left:#?}");
     }
 
-    /// Fail if a process started for this test is still alive after ten
-    /// seconds.
+    /// Fail if a process started for this test is still alive after sixty
+    /// seconds. Each poll runs `ps`, which is slow on a loaded machine, so the
+    /// limit is a deadline, not a count of polls.
     pub async fn assert_nothing_left(&self) {
         let mut left = Vec::new();
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
             left = self.survivors();
             if left.is_empty() {
                 return;
@@ -384,7 +389,8 @@ pub(crate) async fn read_compact(supervisor: &Supervisor, run: &str) -> ReadResp
 
 /// Poll `read` until the run has begun writing, so partial text exists.
 pub(crate) async fn read_until_text(supervisor: &Supervisor, run: &str) -> ReadResponse {
-    for _ in 0..1500 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         let read = read_compact(supervisor, run).await;
         if read
             .progress

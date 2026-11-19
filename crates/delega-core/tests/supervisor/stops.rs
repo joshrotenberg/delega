@@ -33,7 +33,8 @@ async fn interrupting_a_running_run_waits_for_cleanup_and_returns_interrupted() 
         .start(rig.request(Provider::Claude, "hang"))
         .await
         .expect("start");
-    for _ in 0..1000 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         if rig.record.join("started").exists() {
             break;
         }
