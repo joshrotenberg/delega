@@ -63,7 +63,7 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
-sid="${resume:-fake-codex-thread-1}"
+sid="${resume:-${FAKE_SESSION_ID:-fake-codex-thread-1}}"
 
 IFS= read -r mode || true
 rest=$(cat)
@@ -102,6 +102,19 @@ case "$mode" in
   success)
     init
     final '"fake final answer"'
+    done_ok
+    ;;
+  echo:*)
+    init
+    final "\"answered $mode sid=$sid\""
+    done_ok
+    ;;
+  gate:*)
+    init
+    gate=${mode#gate:}
+    : > "$gate.started"
+    while [ ! -e "$gate" ]; do sleep 0.05; done
+    final "\"answered $mode sid=$sid\""
     done_ok
     ;;
   structured)

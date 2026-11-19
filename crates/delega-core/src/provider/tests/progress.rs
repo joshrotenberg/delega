@@ -168,3 +168,74 @@ both!(
     a_slow_sink_gets_a_dropped_event_and_a_note,
     a_slow_sink_loses_output_and_the_run_says_so
 );
+
+fn messages(events: &[ProgressEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ProgressEvent::Message { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn message_text_is_sent_only_when_asked_for(provider: Provider) {
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    let quiet = recording(&mut options);
+    run_checked(rig.request(provider, "success"), options).await;
+    assert!(
+        messages(&quiet.lock().expect("lock")).is_empty(),
+        "text must be opt-in"
+    );
+
+    let mut options = rig.options(provider);
+    options.progress_text = true;
+    let loud = recording(&mut options);
+    run_checked(rig.request(provider, "success"), options).await;
+    let events = loud.lock().expect("lock").clone();
+    // The commentary message of the fake, then the final answer for Codex,
+    // which writes its answer as a message item too.
+    let texts = messages(&events);
+    assert_eq!(texts.first(), Some(&"working"), "{events:?}");
+    let first_text = events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::Message { .. }))
+        .expect("a message event");
+    assert!(
+        matches!(&events[first_text - 1], ProgressEvent::Provider { summary, .. } if summary == "message: 7 chars"),
+        "the length event comes first: {events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(ProgressEvent::Finished { .. })
+    ));
+    rig.assert_nothing_left().await;
+}
+both!(
+    message_text_arrives_as_message_events_only_on_request,
+    message_text_is_sent_only_when_asked_for
+);
+
+async fn message_text_has_credentials_removed_and_is_bounded(provider: Provider) {
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    options.progress_text = true;
+    options
+        .env_set
+        .push(("MY_SERVICE_API_TOKEN".into(), "tok-value-123456".into()));
+    let events = recording(&mut options);
+    run_checked(rig.request(provider, "chatty"), options).await;
+    let events = events.lock().expect("lock").clone();
+    let text: String = messages(&events).concat();
+    assert!(!text.contains("tok-value-123456"));
+    assert!(
+        messages(&events)
+            .iter()
+            .all(|t| t.chars().count() <= crate::provider::limits::PROGRESS_TEXT_CHARS + 3)
+    );
+}
+both!(
+    message_text_is_redacted_and_bounded,
+    message_text_has_credentials_removed_and_is_bounded
+);

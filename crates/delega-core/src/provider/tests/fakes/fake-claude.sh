@@ -15,6 +15,7 @@
 # Environment (set by the test, never inherited from a real session):
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
+#   FAKE_SESSION_ID  the session id reported when the run is not resuming one
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -46,7 +47,7 @@ for arg in "$@"; do
   esac
   prev="$arg"
 done
-sid="${resume:-fake-claude-session-1}"
+sid="${resume:-${FAKE_SESSION_ID:-fake-claude-session-1}}"
 
 IFS= read -r mode || true
 rest=$(cat)
@@ -143,6 +144,21 @@ case "$mode" in
   success)
     init
     success '"fake final answer"' '[]'
+    ;;
+  echo:*)
+    # Answers with its own mode and the session it ran in, so a test can tell
+    # which run produced the answer and whether the session was resumed.
+    init
+    success "\"answered $mode sid=$sid\"" '[]'
+    ;;
+  gate:*)
+    # Runs until the file named after `gate:` exists, then answers as `echo:`.
+    # Writes `<file>.started` when it begins, so a test can tell it is running.
+    init
+    gate=${mode#gate:}
+    : > "$gate.started"
+    while [ ! -e "$gate" ]; do sleep 0.05; done
+    success "\"answered $mode sid=$sid\"" '[]'
     ;;
   structured)
     init

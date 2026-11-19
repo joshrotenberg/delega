@@ -35,7 +35,7 @@ use crate::contract::request::Provider;
 use crate::contract::result::RunResult;
 use crate::process::OutputTap;
 
-use super::limits::{MAX_LINE_BYTES, PROGRESS_SUMMARY_CHARS};
+use super::limits::{MAX_LINE_BYTES, PROGRESS_SUMMARY_CHARS, PROGRESS_TEXT_CHARS};
 use super::redact::Redactor;
 use super::refusal::clip;
 use super::stream::str_field;
@@ -57,6 +57,15 @@ pub enum ProgressEvent {
         kind: String,
         /// A short description, possibly empty.
         summary: String,
+    },
+    /// The text of one agent message, with credentials removed and cut to
+    /// [`PROGRESS_TEXT_CHARS`]. Sent, after the [`Provider`](Self::Provider)
+    /// event that gives the message's length, only when
+    /// [`ProviderOptions::progress_text`](super::ProviderOptions::progress_text)
+    /// is set.
+    Message {
+        /// The message text.
+        text: String,
     },
     /// A request the provider made was answered no.
     Denied {
@@ -86,6 +95,8 @@ pub type ProgressSink = Arc<dyn Fn(ProgressEvent) + Send + Sync>;
 #[derive(Clone, Default)]
 pub(super) struct Progress {
     sink: Option<ProgressSink>,
+    /// Whether message texts are sent too.
+    text: bool,
     /// Chunks of output the process layer could not hand to the tap.
     dropped: Arc<AtomicU64>,
     /// True once the run's last events were sent. The tap runs on a thread
@@ -95,9 +106,10 @@ pub(super) struct Progress {
 }
 
 impl Progress {
-    pub fn new(sink: Option<ProgressSink>) -> Self {
+    pub fn new(sink: Option<ProgressSink>, text: bool) -> Self {
         Self {
             sink,
+            text,
             dropped: Arc::default(),
             closed: Arc::default(),
         }
@@ -161,6 +173,11 @@ impl Progress {
                 for (kind, summary) in describe_line(provider, &line, &redactor) {
                     progress.emit(ProgressEvent::Provider { kind, summary });
                 }
+                if progress.text {
+                    for text in message_texts(provider, &line, &redactor) {
+                        progress.emit(ProgressEvent::Message { text });
+                    }
+                }
             }
         }))
     }
@@ -212,6 +229,39 @@ fn describe_line(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<(S
     described
         .into_iter()
         .map(|(kind, summary)| (kind, short(&summary, redactor)))
+        .collect()
+}
+
+/// The texts of the agent messages one output line holds, with credentials
+/// removed and cut to [`PROGRESS_TEXT_CHARS`]. Claude Code: each text block of
+/// an assistant event. Codex: an agent message item that completed.
+fn message_texts(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<String> {
+    let Ok(Value::Object(event)) = serde_json::from_slice::<Value>(line.trim_ascii()) else {
+        return Vec::new();
+    };
+    let texts: Vec<String> = match provider {
+        Provider::Claude if str_field(&event, "type") == Some("assistant") => event
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_string))
+            .collect(),
+        Provider::Codex if str_field(&event, "type") == Some("item.completed") => event
+            .get("item")
+            .filter(|i| i.get("type").and_then(Value::as_str) == Some("agent_message"))
+            .and_then(|i| i.get("text").and_then(Value::as_str))
+            .map(str::to_string)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    };
+    texts
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .map(|t| clip(&redactor.apply(&t), PROGRESS_TEXT_CHARS))
         .collect()
 }
 
@@ -426,6 +476,37 @@ mod tests {
                 "item.completed".to_string(),
                 "command_execution completed".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn message_texts_have_credentials_removed_and_are_cut() {
+        let redactor = Redactor::default();
+        let event = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "key sk-ant-abcdefghijklmnopqrstuvwx here"},
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "text", "text": ""}
+            ]}
+        });
+        let out = message_texts(Provider::Claude, event.to_string().as_bytes(), &redactor);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(!out[0].contains("sk-ant-"), "{out:?}");
+
+        let long = serde_json::json!({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "w".repeat(PROGRESS_TEXT_CHARS * 2)}
+        });
+        let out = message_texts(Provider::Codex, long.to_string().as_bytes(), &redactor);
+        assert_eq!(out[0].chars().count(), PROGRESS_TEXT_CHARS + 3);
+
+        let started = serde_json::json!({
+            "type": "item.started",
+            "item": {"type": "agent_message", "text": "draft"}
+        });
+        assert!(
+            message_texts(Provider::Codex, started.to_string().as_bytes(), &redactor).is_empty()
         );
     }
 

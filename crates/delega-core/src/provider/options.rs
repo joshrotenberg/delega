@@ -45,6 +45,11 @@ pub struct ProviderOptions {
     /// Receives [`ProgressEvent`](super::ProgressEvent)s while the run goes
     /// on. Without it nothing is reported live.
     pub progress: Option<ProgressSink>,
+    /// Also send each agent message's text, with credentials removed and cut to
+    /// [`limits::PROGRESS_TEXT_CHARS`](super::limits::PROGRESS_TEXT_CHARS), as
+    /// [`ProgressEvent::Message`](super::ProgressEvent::Message). Off by
+    /// default, so a sink sees message lengths only. Needs `progress`.
+    pub progress_text: bool,
 }
 
 impl ProviderOptions {
@@ -76,6 +81,7 @@ impl fmt::Debug for ProviderOptions {
             .field("max_output_bytes", &self.max_output_bytes)
             .field("stop_grace", &self.stop_grace)
             .field("progress", &self.progress.is_some())
+            .field("progress_text", &self.progress_text)
             .finish()
     }
 }

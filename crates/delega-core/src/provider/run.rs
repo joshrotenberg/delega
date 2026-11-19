@@ -144,7 +144,7 @@ pub async fn run(request: Request, options: ProviderOptions) -> RunResult {
 pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
     let queued_at = SystemTime::now();
     let mut facts = Facts::new(&request, &options, queued_at);
-    let progress = Progress::new(options.progress.clone());
+    let progress = Progress::new(options.progress.clone(), options.progress_text);
     let cancel = CancellationToken::new();
     match plan::build(&request, &options) {
         Err(refusal) => {
