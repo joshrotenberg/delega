@@ -442,7 +442,12 @@ Claude Code settings and its dry run has an empty `deny_rules`.
 
 With `permissions.strict`, Claude Code refuses before start only when
 `permissions.commands` is set and no command guard hook is configured, because
-the commands cannot be granted exactly. With a hook, and in `full`, nothing is
+the commands cannot be granted exactly. The commands are not granted at all, so
+the run would be narrower than asked, not wider; strict refuses it because the
+request cannot be carried out as stated. The `delega` binary configures the hook
+from its own executable, so this arises only when delega
+cannot locate its own executable as an absolute path, or for an embedder that
+sets no `ProviderOptions::hook`. With a hook, and in `full`, nothing is
 refused. The run's other notes (settings not applied, instruction files) do not
 describe a part of the permissions the provider fails to enforce, so strict
 ignores them.
@@ -571,7 +576,8 @@ before start with `permissions_not_enforceable`, because the request cannot be
 enforced as stated. The message names these parts: reads are not confined to the
 working directory and `permissions.directories`; commands that need no write
 access and no network access can run although the request allows only the
-commands it lists; and, when `permissions.commands` is set, that it has no
+commands it lists (in `write`, commands that write inside the working directory
+also run); and, when `permissions.commands` is set, that it has no
 effect. A Codex `full` run is not refused: it asks for nothing confined.
 
 ### What cannot be enforced

@@ -131,9 +131,14 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
                 .to_string(),
         );
         unenforceable.push(
-            "commands that need no write access and no network access can run although the \
-             request allows only the commands it lists"
-                .to_string(),
+            if scope.mode == Mode::Write {
+                "commands that write inside the working directory or need no write access and no \
+                 network access can run although the request allows only the commands it lists"
+            } else {
+                "commands that need no write access and no network access can run although the \
+                 request allows only the commands it lists"
+            }
+            .to_string(),
         );
         if !scope.commands.is_empty() {
             unenforceable.push("permissions.commands has no effect".to_string());

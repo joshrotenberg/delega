@@ -74,7 +74,8 @@ fn codex_write_with_strict_names_the_same_two_parts() {
         r.message
     );
     assert!(
-        r.message.contains("commands that need no write access"),
+        r.message
+            .contains("commands that write inside the working directory or need no write access"),
         "{}",
         r.message
     );
@@ -187,4 +188,20 @@ async fn a_strict_refusal_starts_no_provider_process() {
     let started = std::fs::read_dir(&rig.record).expect("record").count();
     assert_eq!(started, 0, "the fake recorded a start");
     rig.assert_nothing_left().await;
+}
+
+#[test]
+fn strict_is_checked_before_the_environment_names() {
+    let rig = Rig::new();
+    let bad = |strict: bool| {
+        let mut options = options(&rig, Provider::Codex, true);
+        options.env_pass = vec!["1BAD".to_string()];
+        dry_run(
+            &request(&rig, Provider::Codex, Mode::Read, &[], strict),
+            &options,
+        )
+        .expect_err("refused")
+    };
+    assert_eq!(bad(true).kind, "permissions_not_enforceable");
+    assert_eq!(bad(false).kind, "invalid_env_name");
 }
