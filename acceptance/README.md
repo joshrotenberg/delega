@@ -27,10 +27,17 @@ cargo run --release -p delega-acceptance -- --all          # the whole matrix, a
 cargo run --release -p delega-acceptance -- --all --repeat 3 --out /tmp/repeats.jsonl
 cargo run -p delega-acceptance -- --smoke                  # the rows `cargo test` runs
 cargo run -p delega-acceptance -- --filter codex-d-       # rows whose id contains the text
+cargo run --release -p delega-acceptance -- --timing-gaps --repeat 3 --out /tmp/gaps.jsonl  # only the timing-dependent gap rows
 cargo run -p delega-acceptance -- --list                   # row ids
 cargo run -p delega-acceptance -- --report                 # regenerate RESULTS.md and COMPARISON.md
 cargo run -p delega-acceptance -- --sweep                  # kill leftovers of an interrupted harness run
 ```
+
+`--timing-gaps` selects the rows whose expectation is a timing-dependent known
+gap, by the matrix flag and not by name. It combines with `--repeat` and narrows
+`--all`, `--smoke` and `--filter`; with no other selector it starts from the
+whole matrix. If it selects no row the harness exits 2, like a filter that
+matches nothing.
 
 `--all` writes `acceptance/results.jsonl` and `results.meta.json`; use `--out`
 to write elsewhere. `--jobs N` sets how many cases run at once (default 8) and
@@ -273,13 +280,14 @@ survivor. A known-gap row says a survivor of the listed roles may remain:
 
   ```sh
   cargo run --release --locked -p delega-acceptance -- \
-    --filter relay --filter orphan --filter bare --repeat 3 --out acceptance-gaps.jsonl
+    --timing-gaps --repeat 3 --out acceptance-gaps.jsonl
   ```
 
-  `--filter` is a substring match on the row id. These three select 44 rows:
-  the 22 timing-dependent gap rows and 22 others (`orphan-late` and the rows of
-  those variants whose process listing is unavailable), which are judged as
-  before. Locally the repeat takes about a minute.
+  `--timing-gaps` selects by the matrix flag, so a renamed variant stays in the
+  step and the strict rows (`orphan-late`, the rows whose process listing is
+  unavailable, and the `c`, `d`, `e` and `fd` bare rows) are not repeated. It
+  selects exactly the 22 timing-dependent gap rows. Locally the repeat takes
+  about a minute. A skipped timing-dependent row is never marked `gap_closed`.
 - **`unexpected_pass`**: a known-gap row whose gap does not depend on timing
   (the SIGKILL `k` rows: after `delega` is killed nothing can stop the worker,
   so the provider always survives) had no survivor. That is not load noise and
