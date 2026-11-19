@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use super::{BOTH, Rig, finished, read_compact, read_full, result_of};
-use crate::contract::outcome::Outcome;
-use crate::contract::request::{Provider, Request};
-use crate::supervisor::{Detail, Error, ResultView, RunState, Target, WorkerState};
+use delega_core::contract::outcome::Outcome;
+use delega_core::contract::request::{Provider, Request};
+use delega_core::supervisor::{Detail, Error, ResultView, RunState, Target, WorkerState};
 
 async fn a_started_run_ends_in_one_valid_completed_result(provider: Provider) {
     let rig = Rig::new();
@@ -26,7 +26,10 @@ async fn a_started_run_ends_in_one_valid_completed_result(provider: Provider) {
         result.worker.as_ref().map(|w| &w.id),
         started.worker.as_ref()
     );
-    assert_eq!(result.cleanup, crate::contract::result::Cleanup::Confirmed);
+    assert_eq!(
+        result.cleanup,
+        delega_core::contract::result::Cleanup::Confirmed
+    );
     assert!(result.timing.started_at.is_some());
 
     supervisor.shutdown().await;
@@ -186,13 +189,13 @@ async fn a_follow_up_keeps_the_workers_permissions_and_settings() {
     let rig = Rig::new();
     let supervisor = rig.supervisor(Provider::Claude);
     let mut request = rig.request(Provider::Claude, "echo:one");
-    request.permissions.mode = crate::contract::permissions::Mode::Write;
+    request.permissions.mode = delega_core::contract::permissions::Mode::Write;
     request.timeout_secs = 321;
     let first = supervisor.start(request).await.expect("start");
     let one = result_of(&supervisor, &first.run).await;
     assert_eq!(
         one.permissions.mode,
-        crate::contract::permissions::Mode::Write
+        delega_core::contract::permissions::Mode::Write
     );
 
     let worker = first.worker.expect("worker");
@@ -203,7 +206,7 @@ async fn a_follow_up_keeps_the_workers_permissions_and_settings() {
     let two = result_of(&supervisor, &second.run).await;
     assert_eq!(
         two.permissions.mode,
-        crate::contract::permissions::Mode::Write
+        delega_core::contract::permissions::Mode::Write
     );
     assert_eq!(two.timing.timeout_secs, 321);
 

@@ -4,9 +4,9 @@
 use std::time::{Duration, Instant};
 
 use super::{Rig, finished, result_of};
-use crate::contract::outcome::Outcome;
-use crate::contract::request::Provider;
-use crate::supervisor::{Error, Limits, RunState, Supervisor, WaitTargets, WorkerState};
+use delega_core::contract::outcome::Outcome;
+use delega_core::contract::request::Provider;
+use delega_core::supervisor::{Error, Limits, RunState, Supervisor, WaitTargets, WorkerState};
 
 fn runs(ids: &[&str]) -> WaitTargets {
     WaitTargets {

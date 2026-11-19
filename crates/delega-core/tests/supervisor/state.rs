@@ -1,6 +1,6 @@
 //! The state tables: every pair of states, and the illegal ones.
 
-use crate::supervisor::{IllegalTransition, RunState, WorkerState};
+use delega_core::supervisor::{IllegalTransition, RunState, WorkerState};
 
 const RUN_STATES: [RunState; 3] = [RunState::Queued, RunState::Running, RunState::Finished];
 const WORKER_STATES: [WorkerState; 4] = [

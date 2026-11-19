@@ -1,17 +1,11 @@
 //! `read` while a run goes on: partial text, activity, compact against full,
 //! and the bounds.
 
-use std::sync::atomic::AtomicU64;
-
 use super::{BOTH, Rig, read_compact, read_full, read_until_text, result_of};
-use crate::contract::outcome::Outcome;
-use crate::contract::request::Provider;
-use crate::provider::ProgressEvent;
-use crate::supervisor::activity::Activity;
-use crate::supervisor::limits::{
-    COMPACT_ACTIVITY, COMPACT_PARTIAL_TEXT_CHARS, MAX_ACTIVITY, MAX_PARTIAL_TEXT_CHARS,
-};
-use crate::supervisor::{Detail, RunState, Target, WorkerState};
+use delega_core::contract::outcome::Outcome;
+use delega_core::contract::request::Provider;
+use delega_core::supervisor::limits::{COMPACT_ACTIVITY, COMPACT_PARTIAL_TEXT_CHARS, MAX_ACTIVITY};
+use delega_core::supervisor::{Detail, RunState, Target, WorkerState};
 
 async fn a_running_run_shows_partial_text_and_activity(provider: Provider) {
     let rig = Rig::new();
@@ -270,66 +264,4 @@ async fn reading_an_unknown_run_or_worker_is_an_error_naming_the_id() {
         .await
         .expect_err("unknown");
     assert!(error.to_string().contains("worker-x"));
-}
-
-#[test]
-fn partial_text_is_bounded_and_keeps_its_end() {
-    let activity = Activity::default();
-    let cursor = AtomicU64::new(0);
-    let block = "x".repeat(MAX_PARTIAL_TEXT_CHARS / 2);
-    for _ in 0..3 {
-        activity.record(
-            ProgressEvent::Message {
-                text: block.clone(),
-            },
-            &cursor,
-        );
-    }
-    activity.record(
-        ProgressEvent::Message {
-            text: "the end".to_string(),
-        },
-        &cursor,
-    );
-    let snapshot = activity.snapshot();
-    assert!(snapshot.text.chars().count() <= MAX_PARTIAL_TEXT_CHARS);
-    assert!(snapshot.text.ends_with("the end"));
-    assert!(snapshot.text_truncated);
-    assert!(
-        snapshot.entries.is_empty(),
-        "a message is text, not an entry"
-    );
-}
-
-#[test]
-fn partial_text_cuts_on_a_character_boundary() {
-    let activity = Activity::default();
-    let cursor = AtomicU64::new(0);
-    let text = "é".repeat(MAX_PARTIAL_TEXT_CHARS + 10);
-    activity.record(ProgressEvent::Message { text }, &cursor);
-    let snapshot = activity.snapshot();
-    assert_eq!(snapshot.text.chars().count(), MAX_PARTIAL_TEXT_CHARS);
-}
-
-#[test]
-fn the_activity_ring_drops_the_oldest_and_counts_them() {
-    let activity = Activity::default();
-    let cursor = AtomicU64::new(0);
-    let total = MAX_ACTIVITY + COMPACT_ACTIVITY;
-    for n in 0..total {
-        activity.record(
-            ProgressEvent::Provider {
-                kind: "assistant".to_string(),
-                summary: format!("n={n}"),
-            },
-            &cursor,
-        );
-    }
-    let snapshot = activity.snapshot();
-    assert_eq!(snapshot.entries.len(), MAX_ACTIVITY);
-    assert_eq!(snapshot.total, total as u64);
-    assert_eq!(snapshot.omitted, COMPACT_ACTIVITY as u64);
-    assert_eq!(snapshot.entries[0].summary, format!("n={COMPACT_ACTIVITY}"));
-    let cursors: Vec<u64> = snapshot.entries.iter().map(|e| e.cursor).collect();
-    assert!(cursors.windows(2).all(|w| w[0] < w[1]), "cursors increase");
 }

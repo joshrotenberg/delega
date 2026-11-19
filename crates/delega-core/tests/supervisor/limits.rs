@@ -3,31 +3,34 @@
 use std::time::Duration;
 
 use super::{Rig, finished, read_compact, result_of};
-use crate::contract::outcome::Outcome;
-use crate::contract::request::Provider;
-use crate::supervisor::{Error, Limits, RunState, Supervisor, Target, WorkerState};
+use delega_core::contract::outcome::Outcome;
+use delega_core::contract::request::Provider;
+use delega_core::supervisor::{Error, Limits, RunState, Supervisor, Target, WorkerState};
 
 #[tokio::test]
 async fn defaults_are_the_named_constants() {
     let limits = Limits::default();
     assert_eq!(
         limits.max_live_workers,
-        crate::supervisor::limits::MAX_LIVE_WORKERS
+        delega_core::supervisor::limits::MAX_LIVE_WORKERS
     );
     assert_eq!(
         limits.max_running_runs,
-        crate::supervisor::limits::MAX_RUNNING_RUNS
+        delega_core::supervisor::limits::MAX_RUNNING_RUNS
     );
     assert_eq!(
         limits.max_queued_per_worker,
-        crate::supervisor::limits::MAX_QUEUED_PER_WORKER
+        delega_core::supervisor::limits::MAX_QUEUED_PER_WORKER
     );
     assert_eq!(
         limits.retained_results,
-        crate::supervisor::limits::RETAINED_RESULTS
+        delega_core::supervisor::limits::RETAINED_RESULTS
     );
-    assert_eq!(limits.retention, crate::supervisor::limits::RETENTION);
-    assert_eq!(limits.wait_ceiling, crate::supervisor::limits::WAIT_CEILING);
+    assert_eq!(limits.retention, delega_core::supervisor::limits::RETENTION);
+    assert_eq!(
+        limits.wait_ceiling,
+        delega_core::supervisor::limits::WAIT_CEILING
+    );
 
     let rig = Rig::new();
     let supervisor = rig.supervisor(Provider::Claude);

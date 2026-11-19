@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{Rig, read_full};
-use crate::contract::outcome::Outcome;
-use crate::contract::request::Provider;
-use crate::supervisor::{Limits, ResultView, Supervisor, WaitTargets, WorkerState};
+use delega_core::contract::outcome::Outcome;
+use delega_core::contract::request::Provider;
+use delega_core::supervisor::{Limits, ResultView, Supervisor, WaitTargets, WorkerState};
 
 #[tokio::test]
 async fn fifty_runs_across_ten_workers_all_complete_in_order_and_resume_their_sessions() {
@@ -97,7 +97,10 @@ async fn fifty_runs_across_ten_workers_all_complete_in_order_and_resume_their_se
                 result.text,
                 format!("answered {prompt} sid={}", rig.session())
             );
-            assert_eq!(result.cleanup, crate::contract::result::Cleanup::Confirmed);
+            assert_eq!(
+                result.cleanup,
+                delega_core::contract::result::Cleanup::Confirmed
+            );
             finished_at.push(result.timing.finished_at.clone());
         }
         let mut sorted = finished_at.clone();

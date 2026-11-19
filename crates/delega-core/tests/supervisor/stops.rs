@@ -1,13 +1,13 @@
 //! Interrupt, close, shutdown, drop, and a run's task that panics.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{Rig, read_compact, read_full, result_of};
-use crate::contract::outcome::Outcome;
-use crate::contract::request::Provider;
-use crate::provider;
-use crate::supervisor::{Error, Limits, ResultView, RunState, Supervisor, Target, WorkerState};
+use delega_core::contract::outcome::Outcome;
+use delega_core::contract::request::Provider;
+use delega_core::supervisor::{
+    Error, Limits, ResultView, RunState, Supervisor, Target, WorkerState,
+};
 
 #[tokio::test]
 async fn the_rig_sees_a_process_that_is_running_and_not_one_that_ended() {
@@ -50,7 +50,10 @@ async fn interrupting_a_running_run_waits_for_cleanup_and_returns_interrupted() 
         panic!("{response:#?}");
     };
     assert_eq!(result.outcome, Outcome::Interrupted);
-    assert_eq!(result.cleanup, crate::contract::result::Cleanup::Confirmed);
+    assert_eq!(
+        result.cleanup,
+        delega_core::contract::result::Cleanup::Confirmed
+    );
     assert_eq!(result.error.as_ref().expect("error").kind, "interrupted");
     rig.assert_nothing_left().await;
 
@@ -128,7 +131,10 @@ async fn interrupting_a_queued_run_removes_it_with_an_interrupted_result_that_ne
     assert_eq!(result.outcome, Outcome::Interrupted);
     assert_eq!(result.timing.started_at, None);
     assert_eq!(result.timing.duration_ms, 0);
-    assert_eq!(result.cleanup, crate::contract::result::Cleanup::Confirmed);
+    assert_eq!(
+        result.cleanup,
+        delega_core::contract::result::Cleanup::Confirmed
+    );
     assert!(!g2.has_started());
     let list = supervisor.list().await.expect("list");
     assert_eq!(list.workers[0].brief.queue_length, 1);
@@ -329,7 +335,10 @@ async fn shutdown_stops_ten_running_workers_and_leaves_nothing() {
     for (_, run) in &started {
         let result = result_of(&supervisor, run).await;
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.cleanup, crate::contract::result::Cleanup::Confirmed);
+        assert_eq!(
+            result.cleanup,
+            delega_core::contract::result::Cleanup::Confirmed
+        );
     }
     rig.assert_nothing_left().await;
 
@@ -450,73 +459,6 @@ async fn dropping_one_clone_keeps_the_supervisor_and_the_last_drop_stops_it() {
         "another clone keeps it alive"
     );
     drop(other);
-    rig.assert_nothing_left().await;
-}
-
-fn panicking_launcher() -> crate::supervisor::runner::Launch {
-    Arc::new(|request, options| {
-        assert!(
-            !request.prompt.starts_with("panic"),
-            "the launcher was told to panic"
-        );
-        provider::start(request, options)
-    })
-}
-
-#[tokio::test]
-async fn a_panic_in_one_runs_task_fails_that_run_and_leaves_the_rest_working() {
-    let rig = Rig::new();
-    let supervisor = Supervisor::with_launcher(rig.config(Provider::Claude), panicking_launcher());
-    let gate = rig.gate("bystander");
-    let bystander = supervisor
-        .start(rig.request(Provider::Claude, &gate.prompt()))
-        .await
-        .expect("start");
-    gate.started().await;
-    let doomed = supervisor
-        .start(rig.request(Provider::Claude, "panic now"))
-        .await
-        .expect("start");
-
-    let result = result_of(&supervisor, &doomed.run).await;
-    assert_eq!(result.outcome, Outcome::Failed);
-    let error = result.error.as_ref().expect("error");
-    assert_eq!(error.kind, "internal_error");
-    assert!(error.message.contains("panicked"), "{error:?}");
-    assert!(matches!(
-        result.cleanup,
-        crate::contract::result::Cleanup::Unconfirmed { .. }
-    ));
-
-    // The bystander runs on, and the supervisor still answers and starts runs.
-    let still = read_compact(&supervisor, &bystander.run).await;
-    assert_eq!(still.state, Some(RunState::Running));
-    let list = supervisor.list().await.expect("list");
-    assert_eq!(
-        list.limits.running_runs, 1,
-        "the panicked run freed its slot"
-    );
-    let worker = list
-        .workers
-        .iter()
-        .find(|w| Some(&w.brief.worker) == doomed.worker.as_ref())
-        .expect("the worker of the panicked run");
-    assert_eq!(worker.brief.state, WorkerState::Idle);
-    let after = supervisor
-        .start(rig.request(Provider::Claude, "echo:after"))
-        .await
-        .expect("start");
-    assert_eq!(
-        result_of(&supervisor, &after.run).await.outcome,
-        Outcome::Completed
-    );
-
-    gate.open();
-    assert_eq!(
-        result_of(&supervisor, &bystander.run).await.outcome,
-        Outcome::Completed
-    );
-    supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
 

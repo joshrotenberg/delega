@@ -1,4 +1,10 @@
-//! Tests for the supervisor, against the fake provider executables.
+//! Tests for the supervisor through its public API, against the fake provider
+//! executables.
+//!
+//! They are a test target of their own, so `cargo test` runs them apart from
+//! the library's unit tests: they start many processes and poll them, and beside
+//! the timing-sensitive tests of the process layer they made those fail on a busy
+//! machine.
 //!
 //! Each test copies the fakes into a directory of its own, so the path of that
 //! directory is in the command line of every process the test starts. The
@@ -10,6 +16,8 @@
 //! `<file>.started`, then wait until `<file>` exists. That makes the order of
 //! events a test depends on a fact about files, not about timing.
 
+#![cfg(unix)]
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError};
@@ -17,12 +25,13 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use crate::contract::request::{Provider, Request};
-use crate::contract::result::RunResult;
-use crate::provider::ProviderOptions;
+use delega_core::contract::request::{Provider, Request};
+use delega_core::contract::result::RunResult;
+use delega_core::provider::ProviderOptions;
 
-use super::{
-    Detail, Limits, ReadResponse, ResultView, Supervisor, SupervisorConfig, Target, WaitTargets,
+use delega_core::supervisor::{
+    Detail, Limits, ReadResponse, ResultView, Supervisor, SupervisorConfig, Target, WaitResponse,
+    WaitTargets,
 };
 
 mod lifecycle;
@@ -73,7 +82,7 @@ impl Drop for Slot {
 }
 
 /// A private area per test.
-pub(super) struct Rig {
+pub(crate) struct Rig {
     _slot: Slot,
     _tmp: TempDir,
     root: PathBuf,
@@ -86,7 +95,7 @@ pub(super) struct Rig {
 }
 
 /// A run held open until the test lets it go.
-pub(super) struct Gate(PathBuf);
+pub(crate) struct Gate(PathBuf);
 
 impl Gate {
     /// The prompt that holds a run on this gate.
@@ -269,7 +278,7 @@ impl Rig {
 }
 
 /// Wait for the runs to finish; the wait must not time out.
-pub(super) async fn finished(supervisor: &Supervisor, runs: &[&str]) -> super::WaitResponse {
+pub(crate) async fn finished(supervisor: &Supervisor, runs: &[&str]) -> WaitResponse {
     let targets = WaitTargets {
         runs: runs.iter().map(ToString::to_string).collect(),
         workers: Vec::new(),
@@ -283,7 +292,7 @@ pub(super) async fn finished(supervisor: &Supervisor, runs: &[&str]) -> super::W
 }
 
 /// Wait for one run to finish and return its whole result, checked.
-pub(super) async fn result_of(supervisor: &Supervisor, run: &str) -> RunResult {
+pub(crate) async fn result_of(supervisor: &Supervisor, run: &str) -> RunResult {
     loop {
         let waited = finished(supervisor, &[run]).await;
         if waited.runs.iter().all(|r| r.outcome.is_some()) {
@@ -298,14 +307,14 @@ pub(super) async fn result_of(supervisor: &Supervisor, run: &str) -> RunResult {
     *result
 }
 
-pub(super) async fn read_full(supervisor: &Supervisor, run: &str) -> ReadResponse {
+pub(crate) async fn read_full(supervisor: &Supervisor, run: &str) -> ReadResponse {
     supervisor
         .read(Target::Run(run.to_string()), Detail::Full, None)
         .await
         .expect("read answers")
 }
 
-pub(super) async fn read_compact(supervisor: &Supervisor, run: &str) -> ReadResponse {
+pub(crate) async fn read_compact(supervisor: &Supervisor, run: &str) -> ReadResponse {
     supervisor
         .read(Target::Run(run.to_string()), Detail::Compact, None)
         .await
@@ -313,7 +322,7 @@ pub(super) async fn read_compact(supervisor: &Supervisor, run: &str) -> ReadResp
 }
 
 /// Poll `read` until the run has begun writing, so partial text exists.
-pub(super) async fn read_until_text(supervisor: &Supervisor, run: &str) -> ReadResponse {
+pub(crate) async fn read_until_text(supervisor: &Supervisor, run: &str) -> ReadResponse {
     for _ in 0..1500 {
         let read = read_compact(supervisor, run).await;
         if read
@@ -329,4 +338,4 @@ pub(super) async fn read_until_text(supervisor: &Supervisor, run: &str) -> ReadR
 }
 
 /// A request for each provider.
-pub(super) const BOTH: [Provider; 2] = [Provider::Claude, Provider::Codex];
+pub(crate) const BOTH: [Provider; 2] = [Provider::Claude, Provider::Codex];

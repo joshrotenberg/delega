@@ -227,8 +227,14 @@ name anything here. Ids are unique for the supervisor's life and never reused.
 
 ## Tests
 
-The tests run the fake providers in `provider/tests/fakes`, copied per test into
-a directory whose path is in every process's command line. A test ends by
+The tests are in `crates/delega-core/tests/supervisor/`, a test target of their
+own that uses only the public API, plus a few unit tests in
+`src/supervisor/tests.rs` for the activity buffer and for a run's task that
+panics. They run the fake providers in `provider/tests/fakes`, copied per test
+into a directory whose path is in every process's command line. At most three
+run at once, and `cargo test` runs the target apart from the library's unit
+tests, because many shell processes polled in parallel starved the timing tests
+of the process layer on a busy machine. A test ends by
 checking the process table for any process that carries it. A run is held open by
 a gate (`gate:FILE`), so the order of events depends on files, not on timing. The
 tests cover every operation, the state tables, queue order, resuming a session,
