@@ -603,6 +603,12 @@ pub fn all() -> Vec<Row> {
     rows
 }
 
+/// Whether a row's expectation is a timing-dependent known gap, the rows
+/// `--timing-gaps` selects.
+pub fn is_timing_gap(row: &Row) -> bool {
+    row.expect.timing_dependent
+}
+
 /// A handful of rows for `cargo test`: both providers, a normal run, an
 /// error, a timeout with a child, a signal, a crash, and a SIGKILL of delega
 /// that leaves a worker the harness must clean up.
@@ -644,4 +650,26 @@ pub fn roles_of(variant: &str) -> &'static [&'static str] {
 /// Whether a variant needs `perl` (descendants are started through it).
 pub fn needs_perl(variant: &str) -> bool {
     variant != "plain" && variant != "stubborn"
+}
+
+#[cfg(test)]
+mod timing_gap_tests {
+    use super::*;
+
+    #[test]
+    fn timing_gap_selection_is_exactly_the_timing_dependent_gap_rows() {
+        let rows = all();
+        let expected = rows.iter().filter(|r| r.expect.timing_dependent).count();
+        let selected: Vec<&Row> = rows.iter().filter(|r| is_timing_gap(r)).collect();
+        assert!(expected > 0, "the matrix has timing-dependent gap rows");
+        assert_eq!(selected.len(), expected);
+        assert!(selected.len() < rows.len());
+        for row in &selected {
+            assert!(row.expect.timing_dependent);
+            assert_ne!(row.expect.leak, LeakClass::None, "{}", row.id);
+        }
+        for row in rows.iter().filter(|r| !is_timing_gap(r)) {
+            assert!(!row.expect.timing_dependent, "{}", row.id);
+        }
+    }
 }
