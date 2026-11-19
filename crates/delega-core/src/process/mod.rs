@@ -35,15 +35,21 @@
 //! because the TERM that follows can end a member and orphan what it started. A
 //! stop is SIGTERM to the group, then SIGCONT (so a stopped
 //! process receives it), then the same to everything a sweep finds outside the
-//! group. That sweep is bounded by `DESCENDANT_SIGNAL_BUDGET` (250 ms) so a slow
-//! `ps` cannot hold the owner; when it does not complete in time it signalled
-//! nothing, and the owner repeats the TERM sweep beside its reads (each attempt
-//! bounded the same way, `TERM_SWEEP_RETRY_PAUSE` apart) until one completes or
-//! the grace period ends. A completed sweep is not repeated, so a descendant
-//! gets one TERM from the stop however many attempts it took, and the signal
-//! records and diagnostics keep their meaning: one `Descendants` entry per
-//! completed sweep. SIGKILL follows after the grace period, and the group KILL
-//! repeats on a timer that does not wait for inspection. A leader that is only stopped has
+//! group. That first sweep is bounded by `DESCENDANT_SIGNAL_BUDGET` (250 ms)
+//! so a slow `ps` cannot hold the owner or delay the group signal. When it does
+//! not complete in time it signalled nothing, and the owner repeats the sweep
+//! beside its reads, without that bound: one sweep at a time (so at most one
+//! listing of its own in flight, each bounded by `PS_TIMEOUT`), repeated only
+//! after a listing that failed or timed out, after a pause that doubles from
+//! `TERM_SWEEP_RETRY_PAUSE` (100 ms) to `TERM_SWEEP_RETRY_MAX_PAUSE` (2 s). The
+//! first sweep that returns a listing ends the repeats, so a descendant gets
+//! one TERM from the stop however many attempts it took. SIGKILL follows after
+//! the grace period (the group KILL repeats on a timer that does not wait for
+//! inspection) with the same treatment: a bounded sweep, then an unbounded
+//! repeat if it did not complete. Signal records keep their meaning (one
+//! `Descendants` entry per completed sweep); `inspection.attempts` counts every
+//! listing started, including these repeats.
+//! A leader that is only stopped has
 //! not exited and is stopped like any other. The leader's exit is observed
 //! without reaping it.
 //!

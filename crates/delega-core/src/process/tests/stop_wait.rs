@@ -317,3 +317,128 @@ async fn a_stop_whose_listing_never_completes_still_ends_at_the_grace_with_kill(
     );
     super::fixtures::assert_gone("leader", &[leader]).await;
 }
+
+/// A lister that answers at once until armed, and then takes `delay` for every
+/// listing, which is longer than the sweep budget. It counts the listings
+/// started since it was armed.
+#[derive(Clone)]
+struct Slow {
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    started: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    delay: Duration,
+}
+
+impl Slow {
+    fn new(delay: Duration) -> Self {
+        Self {
+            armed: Default::default(),
+            started: Default::default(),
+            delay,
+        }
+    }
+
+    fn lister(&self) -> crate::process::tree::Lister {
+        let slow = self.clone();
+        std::sync::Arc::new(move || {
+            let slow = slow.clone();
+            Box::pin(async move {
+                if slow.armed.load(Ordering::SeqCst) {
+                    slow.started.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(slow.delay).await;
+                }
+                crate::process::tree::list_processes().await
+            })
+        })
+    }
+}
+
+/// Start `script` with a listing that is slower than the sweep budget once
+/// armed, with a tracked descendant in its own session, and stop it.
+async fn stop_with_slow_listings(
+    script: &str,
+    grace: Duration,
+) -> (
+    ProcessReport,
+    i32,
+    std::sync::Arc<std::sync::atomic::AtomicU32>,
+) {
+    let s = Scratch::new();
+    let slow = Slow::new(Duration::from_millis(400));
+    let mut spec = sh(&s, script, LONG).with_lister(slow.lister());
+    spec.capture_interval = Some(Duration::from_millis(100));
+    spec.stop_grace = grace;
+    spec.drain_bound = LONG;
+    spec.cleanup_deadline = Duration::from_secs(180);
+    spec.timings.stop_listing = SHORT_BUDGET;
+    spec.timings.descendant_signal = Duration::from_millis(250);
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let gc = s.pid("gc").await;
+    let _reaper = Reaper(vec![leader, gc]);
+    super::fixtures::wait_own_group(gc).await;
+    super::fixtures::wait_tracked(&handle, gc).await;
+    slow.armed.store(true, Ordering::SeqCst);
+    // The periodic scan is not what is under test: let the stop's own listing
+    // be the next one that starts.
+    handle.interrupt();
+    let report = tokio::time::timeout(DEADLINE, handle.wait())
+        .await
+        .expect("the stop waited for the grace or for the descendant to end by itself");
+    super::fixtures::assert_gone("descendant", &[gc]).await;
+    (report, gc, slow.started)
+}
+
+#[tokio::test]
+async fn a_listing_always_slower_than_the_sweep_budget_still_gets_the_descendant_one_term() {
+    // Proves: every listing after the first takes longer than the budget of a
+    // bounded sweep, yet the repeat (one unbounded sweep at a time) completes
+    // and the descendant in its own session, which holds the pipes, gets one
+    // TERM and the run ends long before the 60 s grace, without piling up
+    // listings.
+    if !super::fixtures::perl_available() {
+        eprintln!("skipped: perl is not available");
+        return;
+    }
+    let (report, _gc, started) = stop_with_slow_listings(SESSION_DESCENDANT, LONG).await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    assert_eq!(term_to_descendants(&report), 1, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics
+            .signals
+            .iter()
+            .any(|record| record.signal == "SIGKILL"),
+        "{report:#?}"
+    );
+    let started = started.load(Ordering::SeqCst);
+    assert!(started <= 10, "{started} listings started during the stop");
+}
+
+#[tokio::test]
+async fn a_listing_always_slower_than_the_sweep_budget_still_kills_a_term_ignoring_descendant() {
+    // Proves: the KILL sweep after the grace is repeated the same way, so a
+    // descendant that ignores TERM and never exits is killed at the grace and
+    // does not hold the run until the drain bound (a minute) closes its pipes.
+    if !super::fixtures::perl_available() {
+        eprintln!("skipped: perl is not available");
+        return;
+    }
+    let script = "echo $$ > leader; perl -e 'use POSIX; POSIX::setsid(); \
+                  $SIG{TERM} = q(IGNORE); exec q(sleep), q(60)' & echo $! > gc; wait";
+    let (report, _gc, started) = stop_with_slow_listings(script, Duration::from_secs(1)).await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .signals
+            .iter()
+            .any(|record| record.signal == "SIGKILL"
+                && matches!(
+                    record.target,
+                    crate::process::SignalTarget::Descendants { .. }
+                )),
+        "{report:#?}"
+    );
+    let started = started.load(Ordering::SeqCst);
+    assert!(started <= 20, "{started} listings started during the stop");
+}
