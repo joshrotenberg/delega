@@ -306,6 +306,57 @@ fn dry_run(rig: &Rig, provider: &str, extra: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn a_claude_dry_run_lists_deny_files_and_rules_under_their_own_heading_and_nothing_else() {
+    let rig = Rig::new();
+    let config = rig.path("home");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("settings.json"),
+        r#"{"permissions":{"deny":["Bash(make deploy)"]},"env":{"X":"CANARY-ENV-BLOCK"},
+            "hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"CANARY-HOOK"}]}]}}"#,
+    )
+    .unwrap();
+    let out = dry_run(&rig, "claude", &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("Claude Code settings files read for deny rules:"),
+        "{shown}"
+    );
+    assert!(shown.contains("settings.json: 1 deny rules"), "{shown}");
+    assert!(shown.contains("user deny rules (1 applied;"), "{shown}");
+    assert!(shown.contains("\"Bash(make deploy)\""), "{shown}");
+    assert!(!shown.contains("CANARY"), "{shown}");
+
+    let out = dry_run(&rig, "claude", &["--output", "json"]);
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json["dry_run"]["deny_rules"]["user_deny_rules"],
+        serde_json::json!(["Bash(make deploy)"])
+    );
+    assert!(!text(&out.stdout).contains("CANARY"));
+
+    // Codex has no deny rules and prints no such heading.
+    let out = dry_run(&rig, "codex", &[]);
+    let shown = text(&out.stdout);
+    assert!(!shown.contains("deny rules"), "{shown}");
+}
+
+#[test]
+fn a_malformed_claude_settings_file_refuses_the_run_with_exit_two_naming_the_file() {
+    let rig = Rig::new();
+    let config = rig.path("home");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("settings.json"), "{ CANARY-NOT-JSON").unwrap();
+    let out = dry_run(&rig, "claude", &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(err.contains("settings_unreadable"), "{err}");
+    assert!(err.contains("settings.json"), "{err}");
+    assert!(!err.contains("CANARY"), "{err}");
+}
+
+#[test]
 fn a_dry_run_describes_the_launch_for_each_provider_and_starts_nothing() {
     for provider in PROVIDERS {
         let rig = Rig::new();

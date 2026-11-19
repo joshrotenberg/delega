@@ -11,6 +11,20 @@ pub const ARGUMENT_LIMIT: usize = 120 * 1024;
 /// The longest generated Claude `--settings` argument, in bytes.
 pub const SETTINGS_ARGUMENT_LIMIT: usize = 120 * 1024;
 
+/// The largest Claude Code settings file read for deny rules, in bytes. A larger
+/// file, or one that is not a regular file, refuses the run.
+pub const SETTINGS_FILE_BYTES: usize = 1024 * 1024;
+/// Most deny rules accepted from one settings file.
+pub const MAX_DENY_RULES_PER_FILE: usize = 256;
+/// Most deny rules passed to a worker after anchoring and deduplication.
+pub const MAX_DENY_RULES: usize = 512;
+/// The longest single deny rule, in characters.
+pub const MAX_DENY_RULE_CHARS: usize = 512;
+/// Most deny rules a dry run prints. The rest are counted.
+pub const DRY_RUN_DENY_RULES_SHOWN: usize = 100;
+/// The longest deny rule a dry run prints, in characters.
+pub const DRY_RUN_DENY_RULE_CHARS: usize = 200;
+
 /// How long the `--version` probe may run.
 pub const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the Codex MCP discovery probe may run.

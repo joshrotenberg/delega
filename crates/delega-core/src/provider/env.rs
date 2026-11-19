@@ -134,6 +134,13 @@ impl ResolvedEnv {
             .collect()
     }
 
+    /// The value the worker will receive for `name`, when it gets one.
+    pub(super) fn value(&self, name: &str) -> Option<&std::ffi::OsStr> {
+        self.vars
+            .get(std::ffi::OsStr::new(name))
+            .map(OsString::as_os_str)
+    }
+
     /// The names by reason, and the count of withheld variables.
     pub fn report(&self) -> &EnvReport {
         &self.report

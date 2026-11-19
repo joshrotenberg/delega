@@ -5,12 +5,30 @@ use serde::Serialize;
 use crate::contract::request::{Provider, Request};
 
 use super::codex::MCP_PLACEHOLDER;
+use super::deny::DenyFile;
 use super::env::EnvReport;
-use super::limits::MIN_CLAUDE_HOOK_VERSION;
+use super::limits::{DRY_RUN_DENY_RULE_CHARS, DRY_RUN_DENY_RULES_SHOWN, MIN_CLAUDE_HOOK_VERSION};
 use super::options::ProviderOptions;
 use super::permissions::Mapping;
 use super::plan;
-use super::refusal::Refusal;
+use super::refusal::{Refusal, clip};
+
+/// The deny rules a Claude run would take from the user's and the project's
+/// settings files. Nothing else from those files is in a dry run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DenyReport {
+    /// The settings files that exist and were read, with their rule counts.
+    pub files: Vec<DenyFile>,
+    /// How many rules would be passed after anchoring and deduplication.
+    pub applied: usize,
+    /// The rules themselves: the user's own permission patterns, as they would
+    /// be passed, at most [`DRY_RUN_DENY_RULES_SHOWN`] of them and each at most
+    /// [`DRY_RUN_DENY_RULE_CHARS`] characters. They are the only settings text
+    /// in a dry run; the launch arguments show a count in their place.
+    pub user_deny_rules: Vec<String>,
+    /// How many applied rules are not listed in `user_deny_rules`.
+    pub omitted: usize,
+}
 
 /// What a run would start. It holds environment variable names and never
 /// values, and the assignment text is not in it: the prompt goes to the
@@ -39,6 +57,9 @@ pub struct DryRun {
     pub stdin_bytes: usize,
     /// How the permissions map onto the provider.
     pub mapping: Mapping,
+    /// The user's deny rules a Claude run would apply. Empty for Codex, which
+    /// reads none.
+    pub deny_rules: DenyReport,
     /// Where the provider would not do what the request asks. The result of
     /// a real run carries the same notes.
     pub notes: Vec<String>,
@@ -59,6 +80,25 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
     }
     if let Some(index) = plan.mcp_index {
         args[index] = MCP_PLACEHOLDER.to_string();
+    }
+    let deny_rules = DenyReport {
+        files: plan.deny.files.clone(),
+        applied: plan.deny.rules.len(),
+        user_deny_rules: plan
+            .deny
+            .rules
+            .iter()
+            .take(DRY_RUN_DENY_RULES_SHOWN)
+            .map(|rule| clip(rule, DRY_RUN_DENY_RULE_CHARS))
+            .collect(),
+        omitted: plan
+            .deny
+            .rules
+            .len()
+            .saturating_sub(DRY_RUN_DENY_RULES_SHOWN),
+    };
+    if !plan.deny.rules.is_empty() {
+        hide_deny_rules(&mut args, plan.deny.rules.len());
     }
     let program = plan.program.display().to_string();
     let mut before_start = vec![format!(
@@ -86,7 +126,25 @@ pub fn dry_run(request: &Request, options: &ProviderOptions) -> Result<DryRun, R
         time_limit_secs: plan.time_limit.as_secs(),
         stdin_bytes: plan.stdin.len(),
         mapping: plan.mapping,
+        deny_rules,
         notes: plan.notes,
         before_start,
     })
+}
+
+/// Replace the deny rules in the `--settings` argument by their count, so the
+/// rules appear in a dry run only under their own heading.
+fn hide_deny_rules(args: &mut [String], count: usize) {
+    let Some(at) = args.iter().position(|a| a == "--settings") else {
+        return;
+    };
+    let Some(arg) = args.get_mut(at + 1) else {
+        return;
+    };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(arg) else {
+        return;
+    };
+    settings["permissions"] =
+        serde_json::json!({ "deny": [format!("<{count} deny rules, listed under deny_rules>")] });
+    *arg = settings.to_string();
 }

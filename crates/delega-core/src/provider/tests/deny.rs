@@ -1,0 +1,953 @@
+//! The deny rules of the user's and the project's Claude Code settings: where
+//! they are read from, what is taken from the files, how rules are anchored and
+//! bounded, what a run and a dry run report, and enforcement through the fake
+//! Claude Code, which models assumed CLI behaviour.
+//!
+//! Every test writes its own settings files under a temporary home, a
+//! temporary configuration directory and a temporary working directory.
+
+use std::ffi::OsString;
+use std::path::Path;
+
+use serde_json::{Value, json};
+
+use super::{Rig, run_checked};
+use crate::contract::outcome::Outcome;
+use crate::contract::permissions::Mode;
+use crate::contract::request::Provider;
+use crate::contract::result::RunResult;
+use crate::provider::limits::{
+    DRY_RUN_DENY_RULE_CHARS, DRY_RUN_DENY_RULES_SHOWN, MAX_DENY_RULE_CHARS, MAX_DENY_RULES,
+    MAX_DENY_RULES_PER_FILE, SETTINGS_FILE_BYTES,
+};
+use crate::provider::{DryRun, dry_run};
+
+/// Write `content` to `path`, creating the directory above it.
+fn put(path: &Path, content: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+fn deny_file(rules: &[&str]) -> String {
+    json!({ "permissions": { "deny": rules } }).to_string()
+}
+
+fn user_file(rig: &Rig) -> std::path::PathBuf {
+    rig.config.join("settings.json")
+}
+
+fn project_file(rig: &Rig, name: &str) -> std::path::PathBuf {
+    rig.work.join(".claude").join(name)
+}
+
+fn dry(rig: &Rig) -> DryRun {
+    dry_run(
+        &rig.request(Provider::Claude, "p"),
+        &rig.options(Provider::Claude),
+    )
+    .expect("dry run")
+}
+
+fn settings_arg(args: &[String]) -> Value {
+    let at = args.iter().position(|a| a == "--settings").unwrap();
+    serde_json::from_str(&args[at + 1]).unwrap()
+}
+
+/// The notes that mention deny rules.
+fn deny_notes(notes: &[String]) -> Vec<&String> {
+    notes.iter().filter(|n| n.contains("deny rules")).collect()
+}
+
+// ---- location ----
+
+#[test]
+fn the_user_file_is_read_from_the_config_dir_the_worker_will_get_and_not_from_home() {
+    let rig = Rig::new();
+    put(&user_file(&rig), &deny_file(&["Bash(from-config-dir)"]));
+    // This one would be the user file only if the config dir were not set.
+    put(
+        &rig.home.join(".claude/settings.json"),
+        &deny_file(&["Bash(from-home)"]),
+    );
+    let plan = dry(&rig);
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(from-config-dir)"]);
+    assert_eq!(plan.deny_rules.files.len(), 1);
+    assert_eq!(
+        plan.deny_rules.files[0].path,
+        user_file(&rig).display().to_string()
+    );
+}
+
+#[test]
+fn without_a_config_dir_the_user_file_is_dot_claude_under_the_workers_home() {
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    options.env_set.retain(|(n, _)| n != "CLAUDE_CONFIG_DIR");
+    put(
+        &rig.home.join(".claude/settings.json"),
+        &deny_file(&["Bash(from-home)"]),
+    );
+    put(&user_file(&rig), &deny_file(&["Bash(from-config-dir)"]));
+    let plan = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap();
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(from-home)"]);
+}
+
+#[test]
+fn a_config_dir_in_the_parent_environment_counts_because_the_worker_receives_it() {
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    options.env_set.retain(|(n, _)| n != "CLAUDE_CONFIG_DIR");
+    options.parent_env.as_mut().unwrap().push((
+        OsString::from("CLAUDE_CONFIG_DIR"),
+        rig.config.clone().into(),
+    ));
+    put(&user_file(&rig), &deny_file(&["Bash(parent-config)"]));
+    let plan = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap();
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(parent-config)"]);
+}
+
+#[test]
+fn the_home_comes_from_the_workers_environment_not_from_the_test_process() {
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    options.env_set.retain(|(n, _)| n != "CLAUDE_CONFIG_DIR");
+    // A parent environment without HOME: no user file can be located, whatever
+    // HOME this process has.
+    options
+        .parent_env
+        .as_mut()
+        .unwrap()
+        .retain(|(n, _)| n != "HOME");
+    let plan = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap();
+    assert!(plan.deny_rules.files.is_empty());
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("neither CLAUDE_CONFIG_DIR nor HOME")),
+        "{:?}",
+        plan.notes
+    );
+}
+
+#[test]
+fn project_and_local_project_files_are_read_from_the_working_directory_in_order() {
+    let rig = Rig::new();
+    put(&user_file(&rig), &deny_file(&["Bash(u)"]));
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Bash(p)"]),
+    );
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Bash(l)"]),
+    );
+    // A settings file in the parent of the working directory is not read.
+    put(
+        &rig.work.parent().unwrap().join(".claude/settings.json"),
+        &deny_file(&["Bash(parent)"]),
+    );
+    let plan = dry(&rig);
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        ["Bash(u)", "Bash(p)", "Bash(l)"]
+    );
+    let paths: Vec<&str> = plan
+        .deny_rules
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            user_file(&rig).to_str().unwrap(),
+            project_file(&rig, "settings.json").to_str().unwrap(),
+            project_file(&rig, "settings.local.json").to_str().unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn a_symlinked_user_file_to_a_regular_file_is_followed() {
+    let rig = Rig::new();
+    let real = rig.home.join("dotfiles/claude-settings.json");
+    put(&real, &deny_file(&["Bash(via-link)"]));
+    std::os::unix::fs::symlink(&real, user_file(&rig)).unwrap();
+    assert_eq!(dry(&rig).deny_rules.user_deny_rules, ["Bash(via-link)"]);
+}
+
+// ---- no files ----
+
+#[test]
+fn with_no_settings_files_nothing_is_added_and_the_note_says_none_were_found() {
+    let rig = Rig::new();
+    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+        let mut request = rig.request(Provider::Claude, "p");
+        request.permissions.mode = mode;
+        let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+        assert!(plan.deny_rules.files.is_empty());
+        assert_eq!(plan.deny_rules.applied, 0);
+        assert!(settings_arg(&plan.args).get("permissions").is_none());
+        assert!(plan.mapping.settings.contains(&"denyRules=0".to_string()));
+        let notes = deny_notes(&plan.notes);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("no deny rules were found") && n.contains("none were applied")),
+            "{notes:?}"
+        );
+    }
+}
+
+// ---- parsing ----
+
+#[test]
+fn only_the_deny_list_is_taken_and_a_missing_key_gives_no_rules() {
+    let rig = Rig::new();
+    for body in [
+        "{}",
+        r#"{"permissions":{}}"#,
+        r#"{"permissions":{"allow":["Bash(x)"],"ask":["Bash(y)"]}}"#,
+        r#"{"model":"x","hooks":{}}"#,
+    ] {
+        put(&user_file(&rig), body);
+        let plan = dry(&rig);
+        assert_eq!(plan.deny_rules.applied, 0, "{body}");
+        assert_eq!(plan.deny_rules.files.len(), 1, "{body}");
+        assert_eq!(plan.deny_rules.files[0].rules, 0);
+    }
+}
+
+#[test]
+fn a_file_that_exists_and_cannot_be_used_refuses_naming_the_file_and_not_its_content() {
+    const CANARY: &str = "CANARY-SETTINGS-CONTENT";
+    let rig = Rig::new();
+    let bad: Vec<(String, &str)> = vec![
+        (format!("{{ {CANARY}"), "not valid JSON"),
+        (String::new(), "not valid JSON"),
+        (format!("[\"{CANARY}\"]"), "top level"),
+        (
+            format!(r#"{{"permissions":"{CANARY}"}}"#),
+            "`permissions` is not an object",
+        ),
+        (
+            format!(r#"{{"permissions":["{CANARY}"]}}"#),
+            "`permissions` is not an object",
+        ),
+        (
+            format!(r#"{{"permissions":{{"deny":"{CANARY}"}}}}"#),
+            "`permissions.deny` is not a list",
+        ),
+        (
+            format!(r#"{{"permissions":{{"deny":null,"x":"{CANARY}"}}}}"#),
+            "`permissions.deny` is not a list",
+        ),
+        (
+            format!(r#"{{"permissions":{{"deny":["Bash(x)",7,"{CANARY}"]}}}}"#),
+            "entry 2 is not a string",
+        ),
+        (
+            format!(r#"{{"permissions":{{"deny":["  ","{CANARY}"]}}}}"#),
+            "entry 1 is empty",
+        ),
+        (
+            format!("{{\"permissions\":{{\"deny\":[\"a\\nb{CANARY}\"]}}}}"),
+            "control character",
+        ),
+    ];
+    for (body, reason) in &bad {
+        for path in [
+            user_file(&rig),
+            project_file(&rig, "settings.json"),
+            project_file(&rig, "settings.local.json"),
+        ] {
+            put(&path, body);
+            let error = dry_run(
+                &rig.request(Provider::Claude, "p"),
+                &rig.options(Provider::Claude),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, "settings_unreadable", "{body:?}");
+            assert!(
+                error.message.contains(path.to_str().unwrap()),
+                "{}",
+                error.message
+            );
+            assert!(
+                error.message.contains(reason),
+                "{reason}: {}",
+                error.message
+            );
+            assert!(!error.message.contains(CANARY), "{}", error.message);
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_settings_file_that_is_not_a_regular_file_is_refused_before_it_is_opened() {
+    let rig = Rig::new();
+    // A directory stands in for a device or pipe, which are refused by the same
+    // check and would block or never end if opened.
+    std::fs::create_dir_all(project_file(&rig, "settings.json")).unwrap();
+    let error = dry_run(
+        &rig.request(Provider::Claude, "p"),
+        &rig.options(Provider::Claude),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(error.message.contains("not a regular file"), "{error}");
+}
+
+#[test]
+fn a_settings_file_over_the_size_limit_is_refused_and_one_at_the_limit_is_read() {
+    let rig = Rig::new();
+    let path = user_file(&rig);
+    let pad = |total: usize| {
+        let head = r#"{"permissions":{"deny":["Bash(x)"]},"pad":""#;
+        let tail = r#""}"#;
+        format!(
+            "{head}{}{tail}",
+            " ".repeat(total - head.len() - tail.len())
+        )
+    };
+    put(&path, &pad(SETTINGS_FILE_BYTES));
+    assert_eq!(dry(&rig).deny_rules.user_deny_rules, ["Bash(x)"]);
+    put(&path, &pad(SETTINGS_FILE_BYTES + 1));
+    let error = dry_run(
+        &rig.request(Provider::Claude, "p"),
+        &rig.options(Provider::Claude),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(
+        error.message.contains(&SETTINGS_FILE_BYTES.to_string()),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_settings_file_refuses_the_run_before_the_provider_starts() {
+    let rig = Rig::new();
+    put(&project_file(&rig, "settings.json"), "{ not json");
+    let result = run_checked(
+        rig.request(Provider::Claude, "success"),
+        rig.options(Provider::Claude),
+    )
+    .await;
+    assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "settings_unreadable");
+    assert!(result.timing.started_at.is_none());
+    assert!(rig.pid("pid").is_none(), "the provider must not start");
+}
+
+// ---- anchoring, deduplication, limits ----
+
+#[test]
+fn a_user_rule_is_anchored_to_home_and_a_project_rule_to_the_working_directory() {
+    let rig = Rig::new();
+    let sub = rig.work.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    put(
+        &user_file(&rig),
+        &deny_file(&["Read(private/**)", "Edit(~/x)", "Bash(rm -rf private)"]),
+    );
+    put(
+        &sub.join(".claude/settings.json"),
+        &deny_file(&["Read(./secret.txt)", "Edit(/rooted/file)", "Read(//abs/**)"]),
+    );
+    let mut request = rig.request(Provider::Claude, "p");
+    request.cwd = Some(sub.clone());
+    let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+    let home = rig.home.display();
+    let sub = sub.display();
+    // The user file here is under the config dir, whose relative rules mean the
+    // home directory the worker gets.
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        [
+            format!("Read(/{home}/**/private/**)"),
+            "Edit(~/x)".to_string(),
+            "Bash(rm -rf private)".to_string(),
+            format!("Read(/{sub}/**/secret.txt)"),
+            format!("Edit(/{sub}/rooted/file)"),
+            "Read(//abs/**)".to_string(),
+        ]
+    );
+    // `/{home}` starts with a slash, so the rule path starts with two.
+    assert!(plan.deny_rules.user_deny_rules[0].starts_with("Read(//"));
+}
+
+#[test]
+fn duplicate_rules_across_and_within_files_are_passed_once() {
+    let rig = Rig::new();
+    put(
+        &user_file(&rig),
+        &deny_file(&["Bash(a)", "Bash(a)", "Bash(b)"]),
+    );
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Bash(b)", "Bash(c)"]),
+    );
+    let plan = dry(&rig);
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        ["Bash(a)", "Bash(b)", "Bash(c)"]
+    );
+    assert_eq!(plan.deny_rules.applied, 3);
+    // The file counts are what the files hold.
+    assert_eq!(plan.deny_rules.files[0].rules, 3);
+    assert_eq!(plan.deny_rules.files[1].rules, 2);
+}
+
+#[test]
+fn counts_and_lengths_over_a_bound_refuse_instead_of_truncating() {
+    let rig = Rig::new();
+    let many = |n: usize, tag: &str| -> String {
+        let rules: Vec<String> = (0..n).map(|i| format!("Bash({tag}{i})")).collect();
+        json!({ "permissions": { "deny": rules } }).to_string()
+    };
+    let refuse = |rig: &Rig| {
+        dry_run(
+            &rig.request(Provider::Claude, "p"),
+            &rig.options(Provider::Claude),
+        )
+        .unwrap_err()
+    };
+
+    put(&user_file(&rig), &many(MAX_DENY_RULES_PER_FILE, "u"));
+    assert_eq!(dry(&rig).deny_rules.applied, MAX_DENY_RULES_PER_FILE);
+    put(&user_file(&rig), &many(MAX_DENY_RULES_PER_FILE + 1, "u"));
+    let error = refuse(&rig);
+    assert_eq!(error.kind, "deny_rules_over_limit");
+    assert!(
+        error
+            .message
+            .contains(&user_file(&rig).display().to_string())
+    );
+
+    // Three files under the per-file bound that together pass the total.
+    let each = MAX_DENY_RULES / 3 + 1;
+    put(&user_file(&rig), &many(each, "u"));
+    put(&project_file(&rig, "settings.json"), &many(each, "p"));
+    put(&project_file(&rig, "settings.local.json"), &many(each, "l"));
+    let error = refuse(&rig);
+    assert_eq!(error.kind, "deny_rules_over_limit");
+    assert!(
+        error.message.contains(&MAX_DENY_RULES.to_string()),
+        "{error}"
+    );
+
+    // The same lists with duplicates are under the total, so they are accepted.
+    put(&project_file(&rig, "settings.json"), &many(each, "u"));
+    put(&project_file(&rig, "settings.local.json"), &many(each, "u"));
+    assert_eq!(dry(&rig).deny_rules.applied, each);
+    for path in [
+        project_file(&rig, "settings.json"),
+        project_file(&rig, "settings.local.json"),
+    ] {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // One rule at the length bound is fine and one character more is refused.
+    let rule = |len: usize| format!("Bash({})", "x".repeat(len - "Bash()".len()));
+    put(
+        &user_file(&rig),
+        &json!({ "permissions": { "deny": [rule(MAX_DENY_RULE_CHARS)] } }).to_string(),
+    );
+    assert_eq!(dry(&rig).deny_rules.applied, 1);
+    put(
+        &user_file(&rig),
+        &json!({ "permissions": { "deny": [rule(MAX_DENY_RULE_CHARS + 1)] } }).to_string(),
+    );
+    let error = refuse(&rig);
+    assert_eq!(error.kind, "deny_rules_over_limit");
+    assert!(!error.message.contains("xxxx"), "{error}");
+}
+
+// ---- notes and dry run ----
+
+#[test]
+fn notes_name_the_files_and_counts_and_say_what_else_is_not_loaded() {
+    let rig = Rig::new();
+    put(&user_file(&rig), &deny_file(&["Bash(a)", "Read(b)"]));
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Bash(c)"]),
+    );
+    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+        let mut request = rig.request(Provider::Claude, "p");
+        request.permissions.mode = mode;
+        let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
+        let other = plan
+            .notes
+            .iter()
+            .find(|n| n.contains("other than their deny rules were not applied"))
+            .expect("the not-loaded note");
+        for what in [
+            "hooks",
+            "env",
+            "apiKeyHelper",
+            "plugins",
+            "skills",
+            "MCP servers",
+            "instructions",
+        ] {
+            assert!(other.contains(what), "{what}: {other}");
+        }
+        let applied = plan
+            .notes
+            .iter()
+            .find(|n| n.starts_with("3 deny rules from the user's and the project's"))
+            .unwrap_or_else(|| panic!("{:?}", plan.notes));
+        assert!(applied.contains(&format!("{} (2)", user_file(&rig).display())));
+        assert!(applied.contains(&format!(
+            "{} (1)",
+            project_file(&rig, "settings.json").display()
+        )));
+        // The note names paths and counts, never a rule.
+        for rule in ["Bash(a)", "Read(b)", "Bash(c)"] {
+            assert!(!applied.contains(rule), "{applied}");
+        }
+        assert!(
+            !plan
+                .notes
+                .iter()
+                .any(|n| n.contains("including their deny rules, were not applied"))
+        );
+    }
+}
+
+#[test]
+fn a_dry_run_lists_files_counts_and_the_rules_only_under_their_own_field() {
+    let rig = Rig::new();
+    put(&user_file(&rig), &deny_file(&["Bash(secret-looking-rule)"]));
+    put(&project_file(&rig, "settings.json"), &deny_file(&[]));
+    let plan = dry(&rig);
+    assert_eq!(plan.deny_rules.applied, 1);
+    assert_eq!(plan.deny_rules.omitted, 0);
+    assert_eq!(plan.deny_rules.files.len(), 2);
+    assert_eq!(plan.deny_rules.files[1].rules, 0);
+    assert_eq!(
+        plan.deny_rules.user_deny_rules,
+        ["Bash(secret-looking-rule)"]
+    );
+
+    // The rule is not in the arguments, the notes or the mapping: the settings
+    // argument carries a count in its place.
+    let settings = settings_arg(&plan.args);
+    assert_eq!(
+        settings["permissions"]["deny"],
+        json!(["<1 deny rules, listed under deny_rules>"])
+    );
+    for text in [
+        plan.args.join("\n"),
+        plan.notes.join("\n"),
+        plan.mapping.settings.join("\n"),
+        plan.before_start.join("\n"),
+    ] {
+        assert!(!text.contains("secret-looking-rule"), "{text}");
+    }
+    // And in the JSON of the report it appears once, under the deny field.
+    let json = serde_json::to_string(&plan).unwrap();
+    assert_eq!(json.matches("secret-looking-rule").count(), 1, "{json}");
+}
+
+#[test]
+fn a_dry_run_bounds_how_many_rules_and_how_long_each_one_it_prints() {
+    let rig = Rig::new();
+    let total = DRY_RUN_DENY_RULES_SHOWN + 5;
+    let mut rules: Vec<String> = (0..total).map(|i| format!("Bash(r{i})")).collect();
+    rules[0] = format!("Bash({})", "y".repeat(DRY_RUN_DENY_RULE_CHARS + 50));
+    put(
+        &user_file(&rig),
+        &json!({ "permissions": { "deny": rules } }).to_string(),
+    );
+    let plan = dry(&rig);
+    assert_eq!(plan.deny_rules.applied, total);
+    assert_eq!(
+        plan.deny_rules.user_deny_rules.len(),
+        DRY_RUN_DENY_RULES_SHOWN
+    );
+    assert_eq!(plan.deny_rules.omitted, 5);
+    let first = &plan.deny_rules.user_deny_rules[0];
+    assert_eq!(
+        first.chars().count(),
+        DRY_RUN_DENY_RULE_CHARS + 3,
+        "{first}"
+    );
+    assert!(first.ends_with("..."));
+    // The real launch still carries every rule in full.
+    let launch_rules = settings_arg(&plan.args)["permissions"]["deny"].clone();
+    assert_eq!(launch_rules.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn codex_reads_no_settings_and_reports_no_deny_rules() {
+    let rig = Rig::new();
+    // A file Claude would refuse the run for. Codex must not look at it.
+    put(&user_file(&rig), "{ not json");
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Bash(x)"]),
+    );
+    let plan = dry_run(
+        &rig.request(Provider::Codex, "p"),
+        &rig.options(Provider::Codex),
+    )
+    .unwrap();
+    assert!(plan.deny_rules.files.is_empty());
+    assert_eq!(plan.deny_rules.applied, 0);
+    assert!(deny_notes(&plan.notes).is_empty(), "{:?}", plan.notes);
+    assert!(!plan.args.iter().any(|a| a.contains("Bash(x)")));
+}
+
+// ---- nothing else from the files leaves them ----
+
+#[tokio::test]
+async fn nothing_but_deny_rules_from_a_settings_file_reaches_any_output() {
+    const MARKS: [&str; 9] = [
+        "CANARY-ENV-VALUE",
+        "CANARY-HOOK-COMMAND",
+        "CANARY-API-KEY-HELPER",
+        "CANARY-ALLOW-RULE",
+        "CANARY-ASK-RULE",
+        "CANARY-MCP-SERVER",
+        "CANARY-INSTRUCTIONS",
+        "CANARY-PLUGIN",
+        "CANARY-MODEL",
+    ];
+    let body = json!({
+        "env": { "SOME_VARIABLE": MARKS[0] },
+        "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+            { "type": "command", "command": MARKS[1] } ] } ] },
+        "apiKeyHelper": MARKS[2],
+        "permissions": {
+            "allow": [ format!("Bash({})", MARKS[3]) ],
+            "ask": [ format!("Bash({})", MARKS[4]) ],
+            "deny": [ "Bash(denied-thing)" ],
+            "additionalDirectories": [ MARKS[3] ],
+            "defaultMode": "bypassPermissions"
+        },
+        "mcpServers": { "s": { "command": MARKS[5] } },
+        "systemPrompt": MARKS[6],
+        "enabledPlugins": { MARKS[7]: true },
+        "model": MARKS[8],
+    })
+    .to_string();
+    let rig = Rig::new();
+    put(&user_file(&rig), &body);
+    put(&project_file(&rig, "settings.json"), &body);
+    put(&project_file(&rig, "settings.local.json"), &body);
+
+    let mut request = rig.request(Provider::Claude, "success");
+    request.permissions.commands = vec!["make".into()];
+    let mut options = rig.options(Provider::Claude);
+    options.hook = Some(Rig::guard_hook());
+    let plan = dry_run(&request, &options).unwrap();
+    let result: RunResult = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+
+    let mut seen = vec![
+        serde_json::to_string(&plan).unwrap(),
+        format!("{plan:?}"),
+        serde_json::to_string(&result).unwrap(),
+        format!("{result:?}"),
+        rig.argv().join("\n"),
+        rig.stdin(),
+        rig.env_names().join("\n"),
+    ];
+    seen.push(String::from_utf8_lossy(&std::fs::read(rig.record.join("argv")).unwrap()).into());
+    for mark in MARKS {
+        for text in &seen {
+            assert!(!text.contains(mark), "{mark} leaked into: {text}");
+        }
+    }
+    // The one rule was applied once, from three files.
+    assert_eq!(plan.deny_rules.user_deny_rules, ["Bash(denied-thing)"]);
+    assert!(rig.argv().iter().any(|a| a.contains("denied-thing")));
+    assert_eq!(
+        settings_arg(&rig.argv())["permissions"],
+        json!({ "deny": ["Bash(denied-thing)"] })
+    );
+}
+
+// ---- enforcement through the fake ----
+
+async fn claude(
+    rig: &Rig,
+    mode: Mode,
+    scenario: String,
+    edit: impl FnOnce(&mut crate::contract::request::Request),
+) -> RunResult {
+    let mut request = rig.request(Provider::Claude, &scenario);
+    request.permissions.mode = mode;
+    edit(&mut request);
+    let mut options = rig.options(Provider::Claude);
+    options.hook = Some(Rig::guard_hook());
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    result
+}
+
+fn denied(result: &RunResult) -> Vec<&str> {
+    result
+        .permissions
+        .denied
+        .iter()
+        .map(|d| d.request.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_denied_file_inside_the_working_directory_is_denied_and_recorded_in_read_mode() {
+    let rig = Rig::new();
+    let secret = rig.work.join("secret.txt");
+    let other = rig.work.join("other.txt");
+
+    // Without a settings file the read is allowed.
+    let result = claude(
+        &rig,
+        Mode::Read,
+        format!("tool-read:{}", secret.display()),
+        |_| {},
+    )
+    .await;
+    assert!(denied(&result).is_empty());
+
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Read(./secret.txt)"]),
+    );
+    let result = claude(
+        &rig,
+        Mode::Read,
+        format!("tool-read:{}", secret.display()),
+        |_| {},
+    )
+    .await;
+    assert_eq!(denied(&result), [format!("Read: {}", secret.display())]);
+    let result = claude(
+        &rig,
+        Mode::Read,
+        format!("tool-read:{}", other.display()),
+        |_| {},
+    )
+    .await;
+    assert!(denied(&result).is_empty(), "{:?}", denied(&result));
+    // A search is a read too.
+    let result = claude(
+        &rig,
+        Mode::Read,
+        format!("tool-grep:{}", secret.display()),
+        |_| {},
+    )
+    .await;
+    assert_eq!(denied(&result), [format!("Grep: {}", secret.display())]);
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_deny_rule_narrows_write_and_full_modes_too() {
+    let rig = Rig::new();
+    let target = rig.work.join("keep.txt");
+    let free = rig.work.join("free.txt");
+    put(
+        &project_file(&rig, "settings.local.json"),
+        &deny_file(&["Edit(./keep.txt)", "Read(./keep.txt)"]),
+    );
+    for mode in [Mode::Write, Mode::Full] {
+        let result = claude(
+            &rig,
+            mode,
+            format!("tool-write:{}", target.display()),
+            |_| {},
+        )
+        .await;
+        assert!(!target.exists(), "{mode:?}: the write must not happen");
+        assert_eq!(denied(&result), [format!("Write: {}", target.display())]);
+        let result = claude(
+            &rig,
+            mode,
+            format!("tool-read:{}", target.display()),
+            |_| {},
+        )
+        .await;
+        assert_eq!(denied(&result), [format!("Read: {}", target.display())]);
+        let result = claude(&rig, mode, format!("tool-write:{}", free.display()), |_| {}).await;
+        assert!(free.exists(), "{mode:?}");
+        assert!(denied(&result).is_empty());
+        std::fs::remove_file(&free).unwrap();
+    }
+}
+
+/// A `make deploy` call with that command and `make test` both listed.
+async fn listed_bash(rig: &Rig, command: &str) -> RunResult {
+    let listed = command.to_string();
+    claude(rig, Mode::Read, format!("tool-bash:{command}"), move |r| {
+        r.permissions.commands = vec![listed, "make test".into()];
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_denied_command_is_denied_even_when_allow_command_lists_it() {
+    let rig = Rig::new();
+    // Allowed without a deny rule.
+    let result = listed_bash(&rig, "make deploy").await;
+    assert!(denied(&result).is_empty(), "{:?}", denied(&result));
+    assert_eq!(result.text, "ran: make deploy", "{result:#?}");
+
+    put(&user_file(&rig), &deny_file(&["Bash(make deploy)"]));
+    let result = listed_bash(&rig, "make deploy").await;
+    assert_eq!(denied(&result), ["Bash: make deploy"]);
+    // Another listed command is still allowed.
+    let result = claude(&rig, Mode::Read, "tool-bash:make test".into(), |r| {
+        r.permissions.commands = vec!["make deploy".into(), "make test".into()];
+    })
+    .await;
+    assert!(denied(&result).is_empty());
+
+    // In full mode every command is allowed except the denied one.
+    let result = claude(&rig, Mode::Full, "tool-bash:make deploy".into(), |_| {}).await;
+    assert_eq!(denied(&result), ["Bash: make deploy"]);
+    let result = claude(&rig, Mode::Full, "tool-bash:make clean".into(), |_| {}).await;
+    assert!(denied(&result).is_empty());
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_user_rule_and_a_project_rule_both_apply() {
+    let rig = Rig::new();
+    let user_secret = rig.work.join("user-secret.txt");
+    let project_secret = rig.work.join("project-secret.txt");
+    let fine = rig.work.join("fine.txt");
+    put(
+        &user_file(&rig),
+        &deny_file(&[&format!("Read(/{})", user_secret.display())]),
+    );
+    put(
+        &project_file(&rig, "settings.json"),
+        &deny_file(&["Read(./project-secret.txt)"]),
+    );
+    for (path, want_denied) in [
+        (&user_secret, true),
+        (&project_secret, true),
+        (&fine, false),
+    ] {
+        let result = claude(
+            &rig,
+            Mode::Read,
+            format!("tool-read:{}", path.display()),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            !denied(&result).is_empty(),
+            want_denied,
+            "{}: {:?}",
+            path.display(),
+            denied(&result)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_relative_rule_keeps_its_meaning_when_the_working_directory_is_a_subdirectory() {
+    let rig = Rig::new();
+    let sub = rig.work.join("sub");
+    let deeper = sub.join("deeper");
+    std::fs::create_dir_all(&deeper).unwrap();
+    put(
+        &sub.join(".claude/settings.json"),
+        &deny_file(&["Read(./secret.txt)"]),
+    );
+    // The rule is in the subdirectory's settings, so it means the subdirectory.
+    for (path, want_denied) in [
+        (sub.join("secret.txt"), true),
+        (deeper.join("secret.txt"), true),
+        (sub.join("ok.txt"), false),
+    ] {
+        let result = claude(
+            &rig,
+            Mode::Read,
+            format!("tool-read:{}", path.display()),
+            |r| {
+                r.cwd = Some(sub.clone());
+            },
+        )
+        .await;
+        assert_eq!(
+            !denied(&result).is_empty(),
+            want_denied,
+            "{}",
+            path.display()
+        );
+    }
+    // A settings file in the parent is not the project's.
+    put(
+        &rig.work.join(".claude/settings.json"),
+        &deny_file(&["Read(./other.txt)"]),
+    );
+    let result = claude(
+        &rig,
+        Mode::Read,
+        format!("tool-read:{}", sub.join("other.txt").display()),
+        |r| r.cwd = Some(sub.clone()),
+    )
+    .await;
+    assert!(denied(&result).is_empty());
+
+    // A user rule is anchored to home and not to the working directory.
+    std::fs::remove_file(sub.join(".claude/settings.json")).unwrap();
+    put(&user_file(&rig), &deny_file(&["Read(private/**)"]));
+    let in_home = rig.home.join("private/x");
+    let in_work = sub.join("private/x");
+    let result = claude(
+        &rig,
+        Mode::Full,
+        format!("tool-read:{}", in_home.display()),
+        |r| {
+            r.cwd = Some(sub.clone());
+        },
+    )
+    .await;
+    assert_eq!(denied(&result).len(), 1, "home path must be denied");
+    let result = claude(
+        &rig,
+        Mode::Full,
+        format!("tool-read:{}", in_work.display()),
+        |r| {
+            r.cwd = Some(sub.clone());
+        },
+    )
+    .await;
+    assert!(
+        denied(&result).is_empty(),
+        "a user rule must not apply under the working directory: {:?}",
+        denied(&result)
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn deny_rules_with_commas_brackets_quotes_and_spaces_reach_the_provider_intact() {
+    let rig = Rig::new();
+    let rules = [
+        "Bash(echo \"a, b\")",
+        "Bash(x],[y)",
+        "Bash(deny me,Edit,Write)",
+    ];
+    put(&user_file(&rig), &deny_file(&rules));
+    let result = claude(&rig, Mode::Full, "success".into(), |_| {}).await;
+    // The fake records exactly what it received.
+    let received = settings_arg(&rig.argv());
+    assert_eq!(received["permissions"]["deny"], json!(rules));
+    // The allow list holds only delega's own rules.
+    let argv = rig.argv();
+    let at = argv.iter().position(|a| a == "--allowedTools").unwrap();
+    assert!(!argv[at + 1].contains("deny me"));
+    assert!(!argv[at + 1].contains("x],[y"));
+    assert!(denied(&result).is_empty());
+}
