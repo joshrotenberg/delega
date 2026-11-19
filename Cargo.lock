@@ -231,6 +231,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "delega-acceptance"
+version = "0.1.0-dev"
+dependencies = [
+ "clap",
+ "delega-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "delega-core"
 version = "0.1.0-dev"
 dependencies = [

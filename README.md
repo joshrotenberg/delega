@@ -63,6 +63,7 @@ Out of scope:
 | `schemas` | JSON Schemas for the request and result, generated from the core types. |
 | `crates/delega-mcp` | The MCP adapter over the core. |
 | `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
+| `acceptance` | `delega-acceptance`, the acceptance test for criteria 1 and 2: it drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. Results are in `acceptance/RESULTS.md`. |
 | `docs/api.md` | The agreed design for the CLI and MCP surface. |
 | `docs/providers.md` | How each provider is started: command shape, permission mapping, `native_args` allowlist, environment policy, and what is unverified against the real CLIs. |
 
@@ -73,6 +74,17 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+The acceptance harness runs the whole matrix on demand; `cargo test --workspace`
+runs only a handful of its rows:
+
+```sh
+cargo run --release -p delega-acceptance -- --all
+```
+
+It takes about 75 seconds and writes `acceptance/results.jsonl`. See
+[acceptance/README.md](acceptance/README.md) for the options, the matrix and how
+to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
 
 ## The API
 

@@ -1,0 +1,177 @@
+# delega acceptance harness
+
+`delega-acceptance` measures the first two acceptance criteria of the
+repository README against the built `delega` binary:
+
+1. Every run ends in exactly one stated outcome. Never a hang and never silence.
+2. After any outcome, the provider process and its descendants are gone, or the
+   result says cleanup could not be confirmed and what remains.
+
+It drives `delega run --output json` as a black box, for both providers, over a
+matrix of fake-provider behaviours crossed with caller actions, and records for
+each row what was reported and what was really left running. It adapts the
+matrix of the outcome spike (`delega-dot-spike-outcomes`, commit `7f4da23`),
+which drove counterpart's and due's libraries, so the results can be compared:
+[COMPARISON.md](COMPARISON.md).
+
+Results: [RESULTS.md](RESULTS.md) (summary and expected failures),
+`results.jsonl` (one row per case), `repeats.jsonl` (three more full runs, for
+variation).
+
+## Run
+
+From the repository root:
+
+```sh
+cargo run --release -p delega-acceptance -- --all          # the whole matrix, about 75 s
+cargo run --release -p delega-acceptance -- --all --repeat 3 --out /tmp/repeats.jsonl
+cargo run -p delega-acceptance -- --smoke                  # the rows `cargo test` runs
+cargo run -p delega-acceptance -- --filter codex-d-       # rows whose id contains the text
+cargo run -p delega-acceptance -- --list                   # row ids
+cargo run -p delega-acceptance -- --report                 # regenerate RESULTS.md and COMPARISON.md
+cargo run -p delega-acceptance -- --sweep                  # kill leftovers of an interrupted harness run
+```
+
+`--all` writes `acceptance/results.jsonl` and `results.meta.json`; use `--out`
+to write elsewhere. `--jobs N` sets how many cases run at once (default 8) and
+`--repeat N` runs the whole matrix N times, to expose flakiness. Use `--release`
+for timings: the harness builds `delega` with the profile it was built with.
+`--delega PATH` measures a binary that is already built.
+
+The run exits non-zero when a row that is expected to pass fails, when an
+expected failure passes (the expectations table is then out of date), or when a
+process of the run is alive at the end. After a run the harness kills what is
+left and prints how many processes carried its marker; `ps` shows none.
+
+`cargo test --workspace` runs `tests/smoke.rs`, which runs nine rows (both
+providers; a normal run, an error, a timeout with a child, a signal, a crash,
+output with no final answer, a closed stdout, and a SIGKILL of `delega` whose
+worker the harness must clean up) in a few seconds. It never runs the matrix.
+
+After a new full run, regenerate the documents:
+
+```sh
+cargo run --release -p delega-acceptance -- --all
+cargo run --release -p delega-acceptance -- --all --repeat 3 --out acceptance/repeats.jsonl
+cargo run -p delega-acceptance -- --report
+```
+
+`--report` reads `results.jsonl`, `results.meta.json`, `repeats.jsonl` and
+`spike-numbers.jsonl` and rewrites `RESULTS.md` and `COMPARISON.md`.
+`spike-numbers.jsonl` holds the numbers copied from the spike's committed
+results; `scripts/extract-spike-numbers.py` produced it.
+
+## Safety
+
+Everything runs against fake provider scripts. Each case gets a temporary
+directory with its own `HOME`, the fakes as `DELEGA_CLAUDE_BIN` and
+`DELEGA_CODEX_BIN`, and a cleared environment (`PATH=/usr/bin:/bin` and the few
+variables set by the harness). Nothing reads real provider state, a shell
+profile or the network, and no real `claude` or `codex` is started. `delega`
+runs in a process group of its own, so no signal the harness sends reaches the
+harness. The harness kills every process it finds by marker after each case,
+including the cases that are designed to leave strays, and sweeps again at the
+end.
+
+## The matrix
+
+A row id is `<provider>-<case>-<variant>`, for example `codex-d-setsid`. A case
+is a provider behaviour and a caller action; a variant is what the provider
+leaves running beside itself. Case letters and variant names of the spike are
+kept where a row carries over.
+
+| Case | Provider behaviour | Caller action | Expected |
+| --- | --- | --- | --- |
+| `a` | finishes normally | wait | `completed`, exit 0 |
+| `b` | exits 3 with an error | wait | `failed`, exit 1 |
+| `c` | output every 0.2 s, never finishes | `--timeout 2s` | `timed_out`, exit 124 |
+| `d` | as `c`, no timeout | SIGINT at 1 s | `interrupted`, exit 130 |
+| `dt` | as `d` | SIGTERM at 1 s | `interrupted`, exit 130 |
+| `dh` | as `d` | SIGHUP at 1 s | `interrupted`, exit 130 |
+| `e` | SIGKILLs itself 0.5 s in | wait | `failed`, exit 1 |
+| `ed` | as `e` | `--timeout 3s` | `failed`, exit 1 |
+| `fd` | hangs, no output | `--timeout 3s` | `timed_out`, exit 124 |
+| `hd` | closes stdout, stays alive | `--timeout 3s` | `timed_out`, exit 124 |
+| `i` | output ends with no final answer, exit 0 | wait | `failed`, exit 1 |
+| `id` | as `i` | `--timeout 3s` | `failed`, exit 1 |
+| `fl` | output at full speed, never finishes | `--timeout 3s` | `timed_out`, exit 124 |
+| `fli` | as `fl`, no timeout | SIGINT at 1 s | `interrupted`, exit 130 |
+| `dc` | as `c` | reader closes stdout at 1 s | exit 124, nothing to read |
+| `dca` | finishes after 1.5 s | reader closes stdout at 0.3 s | exit 0, nothing to read |
+| `k` | hangs, no output | SIGKILL of `delega` at 1 s | killed by signal 9, no output |
+
+Variants: `plain` (nothing), `child` (one child in the provider's group),
+`setsid` (a child in the group that starts a grandchild in a session of its
+own), `ignore` (a child that ignores TERM and INT), `stubborn` (the provider
+ignores TERM and INT itself), `pipe` (a child that keeps the provider's stdio),
+`orphan` (a child that starts a `setsid` grandchild and exits at once),
+`orphan-late` (as `orphan`, after 1.3 s), `relay` (a fork relay: each process
+ignores TERM, leads a group of its own, lives a few milliseconds and forks its
+successor). Each case runs the variants listed for it in `src/matrix.rs`; the
+whole matrix is 152 rows.
+
+Actions that start at 1 s wait until the fake has recorded every process the
+variant starts, so the action lands with the descendants running.
+
+### Spike rows not carried over
+
+| Spike case | Why |
+| --- | --- |
+| `f` | Hang with no output and no deadline. `delega run` defaults to a 600 s limit, so the row would take ten minutes. `fd`, `d` and `k` cover the hang. |
+| `h` | Closes stdout, stays alive, no deadline. Same 600 s default; `hd` covers it. |
+| `g`, `gd`, `gr` | A permission asked and nobody answers. `delega run` answers every request no at once; there is no live request to leave unanswered. |
+| `j` | The `wait` future is dropped. The CLI has no future; `dc` and `k` are the nearest. |
+| `j2` | The handle is dropped. The CLI has no handle; `k` is the nearest. |
+
+Cases `dt`, `dh`, `fl`, `fli`, `dc`, `dca` and `k`, the `relay` variant, and `a`
+with every variant are new.
+
+## Fake providers
+
+The harness reuses the stream-accurate fakes the unit tests use
+(`crates/delega-core/src/provider/tests/fakes/fake-claude.sh` and
+`fake-codex.sh`). They gained one mode each, `acc:<behaviour>:<variant>`, which
+sources `acc-lib.sh` and starts descendants through `acc-child.sh`. No existing
+mode changed, and no unit test uses the new ones. The prompt of a case is the
+mode, because the fakes read their behaviour from the first line of standard
+input.
+
+Descendants start through `perl` (`setsid` and default signal handling), so rows
+whose variant needs it are skipped, visibly, when `perl` is missing from
+`/usr/bin:/bin`.
+
+## Measuring what is left
+
+The harness copies the fakes and their helper scripts into a directory whose
+name is unique to the case, `accmk-<run>-<n>`. Every process the fakes start
+runs a script from that directory, so the name is in its command line. After
+`delega` exits the harness looks in the process table (`ps -axww`) for the
+marker, whatever `delega` reported; the relay is also detected by a heartbeat
+file it touches, because a relay process lives too briefly to be listed
+reliably. It samples at exit and again 1 s later, records the second set as the
+survivors, then kills everything, stops the relay through a file it checks, and
+checks the table until it is empty.
+
+Per row the results file records the provider, behaviour, action, exit status,
+the number of JSON documents on standard output and whether the one validates
+as a `RunResult`, the outcome, `cleanup.confirmed`, the survivors, whether the
+report was honest (survivors exist only when cleanup is not confirmed), the
+latency from the action to the exit, and the expectation and verdict.
+
+## Expectations
+
+`src/matrix.rs` holds them: per case the expected outcome, exit status and
+standard output, and a list of expected failures (`GAPS`), each with a class and
+a reason:
+
+- **documented gap**: the process module's docs list it as known (a descendant
+  that calls `setsid` unseen, a fast fork relay, SIGKILL of `delega`).
+- **defect**: a failure this harness found that is not documented.
+
+A row's verdict is `pass`, `expected_failure` (it failed criterion 2 as the
+table says), `unexpected_pass` (an expected failure passed, so the table is
+out of date) or `fail`. A wrong outcome, a wrong exit status, a missing or
+duplicate document, or a hang is always `fail`; only criterion 2 can be an
+expected failure.
+
+`delega`'s behaviour is never changed to make a row pass.

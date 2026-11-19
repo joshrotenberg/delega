@@ -1,0 +1,28 @@
+[package]
+name = "delega-acceptance"
+description = "Black-box acceptance measurement of the built delega binary against fake providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "delega_acceptance"
+path = "src/lib.rs"
+
+[[bin]]
+name = "delega-acceptance"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+delega-core.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
