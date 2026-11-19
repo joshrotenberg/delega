@@ -169,8 +169,9 @@ async fn a_natural_exit_with_a_held_listing_signals_after_the_real_exit_budget_a
 {
     // The child exits at once and leaves a descendant in its group. The listing
     // before the first signal is held, so the signal that stops the descendant
-    // is the one that follows the exit budget. This also fails if the stop and
-    // exit budgets are swapped, since a stop budget would signal 2.6 s sooner.
+    // is the one that follows the exit budget: it cannot come sooner than the
+    // budget after the start. This also fails if the stop and exit budgets are
+    // swapped, since a stop budget would signal 2.6 s sooner.
     let s = Scratch::new();
     let held = Held::new(true);
     let mut spec = sh(
@@ -181,22 +182,22 @@ async fn a_natural_exit_with_a_held_listing_signals_after_the_real_exit_budget_a
     .with_lister(held.lister());
     spec.capture_interval = Some(Duration::from_secs(3600));
     spec.timings = Timings::production();
+    // The child exits right after it writes `gc`, and the test may read it
+    // late, so the bounds are from before the child could have started.
+    let before_start_at = SystemTime::now();
+    let before_start = Instant::now();
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
-    // The child exits after it wrote this, so every bound below is from before
-    // the exit.
-    let before_exit_at = SystemTime::now();
-    let before_exit = Instant::now();
     wait_gone_while_held("descendant after a natural exit", gc).await;
-    let waited = before_exit.elapsed();
+    let waited = before_start.elapsed();
     held.release();
     let report = handle.wait().await;
     assert!(
         waited >= EXIT_LISTING_BUDGET,
-        "the descendant was gone {waited:?} after the exit, before the {EXIT_LISTING_BUDGET:?} budget"
+        "the descendant was gone {waited:?} after the start, before the {EXIT_LISTING_BUDGET:?} exit budget"
     );
-    assert!(first_signal_at(&report) >= before_exit_at + EXIT_LISTING_BUDGET);
+    assert!(first_signal_at(&report) >= before_start_at + EXIT_LISTING_BUDGET);
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert!(is_late_listing_only(&report.cleanup), "{report:#?}");
 }

@@ -402,7 +402,7 @@ async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
     let mut spec = sh(
         &s,
         "echo $$ > leader; sh -c 'trap \"\" TERM; echo $$ > gc; while :; do sleep 1; done' & \
-         sleep 0.3; exit 0",
+         while [ ! -e gc ]; do sleep 0.02; done; exit 0",
         LONG,
     )
     .with_lister(lister);
