@@ -23,7 +23,7 @@
 //!     .wait(WaitTargets { runs: vec![started.run.clone()], workers: vec![] }, Some(120), None)
 //!     .await
 //!     .expect("wait");
-//! let read = supervisor.read(Target::Run(started.run), Detail::Compact, None).await;
+//! let read = supervisor.read(Target::Run(started.run), Detail::Compact, None, None).await;
 //! # let _ = (waited, read);
 //! supervisor.shutdown().await;
 //! # }

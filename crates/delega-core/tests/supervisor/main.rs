@@ -339,12 +339,24 @@ pub(crate) async fn finished(supervisor: &Supervisor, runs: &[&str]) -> WaitResp
 
 /// Wait for one run to finish and return its whole result, checked.
 pub(crate) async fn result_of(supervisor: &Supervisor, run: &str) -> RunResult {
-    loop {
-        let waited = finished(supervisor, &[run]).await;
+    // A wait may time out, since a test can set a short wait ceiling and a
+    // loaded machine can be slow; it is repeated until the run is finished.
+    let targets = WaitTargets {
+        runs: vec![run.to_string()],
+        workers: Vec::new(),
+    };
+    let mut done = false;
+    for _ in 0..240 {
+        let waited = supervisor
+            .wait(targets.clone(), Some(30), None)
+            .await
+            .expect("wait answers");
         if waited.runs.iter().all(|r| r.outcome.is_some()) {
+            done = true;
             break;
         }
     }
+    assert!(done, "run {run} did not finish in time");
     let read = read_full(supervisor, run).await;
     let Some(ResultView::Full(result)) = read.result else {
         panic!("run {run} has no full result: {read:#?}");
