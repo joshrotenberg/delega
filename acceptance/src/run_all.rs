@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::matrix::Row;
-use crate::runner::{Context, Measured, run_case};
+use crate::runner::{Context, Measured, cleanup_mismatch, run_case};
 
 /// Run every row `repeat` times on `jobs` threads. The result is in row order,
 /// then repeat order.
@@ -54,10 +54,6 @@ pub fn run_all(
 /// Runs of one row, at most, when the only fault is a late process listing.
 const LISTING_ATTEMPTS: u32 = 5;
 
-/// What `judge` says when the only difference from the expectation is that
-/// cleanup was `Unconfirmed` where `Confirmed` was expected.
-const CONFIRMED_MISMATCH: &str = "cleanup.confirmed is Some(false) where Some(true) was expected";
-
 /// Run one case. When it fails because `delega` could not take the process
 /// listing that precedes its first signal in time (its budget is 500 ms for a
 /// requested stop and 3.1 s after a natural exit, and `ps` takes longer on a
@@ -88,7 +84,7 @@ pub fn only_a_late_listing(m: &Measured) -> bool {
     m.verdict == "fail"
         && m.cleanup_late_listing_only
         && m.expected_confirmed == Some(true)
-        && m.problems == [CONFIRMED_MISMATCH]
+        && m.problems == [cleanup_mismatch(Some(false), Some(true))]
 }
 
 #[cfg(test)]
@@ -108,9 +104,13 @@ mod tests {
             "expected_exit":{"Code":130},"expected_confirmed":true,
             "expected_survivors":[],"expected_leak":"none","expected_reason":null,
             "verdict":"fail",
-            "problems":["cleanup.confirmed is Some(false) where Some(true) was expected"],
+            "problems":[],
             "stderr_first":null}"#,
         )
+        .map(|mut m: Measured| {
+            m.problems = vec![cleanup_mismatch(Some(false), Some(true))];
+            m
+        })
         .expect("a measurement")
     }
 

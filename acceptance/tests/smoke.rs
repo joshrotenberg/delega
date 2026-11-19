@@ -17,6 +17,14 @@ fn the_smoke_rows_meet_their_expectations_and_leave_nothing_running() {
 
     let measured = run_all(&ctx, &rows, 4, 1, true);
 
+    // Visible with `--nocapture`: how many rows a late listing made repeat.
+    let retried = measured.iter().filter(|m| m.attempts > 1).count();
+    let attempts: u32 = measured.iter().map(|m| m.attempts).sum();
+    eprintln!(
+        "{retried} of {} smoke rows retried after a late process listing; {attempts} runs in total",
+        measured.len()
+    );
+
     let bad: Vec<String> = measured
         .iter()
         .filter(|m| !matches!(m.verdict.as_str(), "pass" | "expected_failure"))
