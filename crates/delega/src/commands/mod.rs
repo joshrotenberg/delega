@@ -6,9 +6,11 @@ mod hook;
 mod init;
 mod mcp;
 pub(crate) mod output;
+mod plugin;
 mod run;
 mod schema;
 mod skill;
+mod uninstall;
 mod version;
 
 use std::process::ExitCode;
@@ -34,8 +36,10 @@ pub enum Command {
     Run(Box<run::Args>),
     /// Serve the MCP tools over stdio
     Mcp(mcp::Args),
-    /// Install the plugin and skill into Claude Code, Codex or both
+    /// Install the plugin and skills into Claude Code, Codex or both
     Init(init::Args),
+    /// Remove what `init` installed
+    Uninstall(uninstall::Args),
     /// Print the request or result schema built into this executable
     Schema(schema::Args),
     /// List or print the skills built into this executable
@@ -56,6 +60,7 @@ impl Command {
             Command::Run(a) => run::run(*a),
             Command::Mcp(a) => mcp::run(a),
             Command::Init(a) => init::run(a),
+            Command::Uninstall(a) => uninstall::run(a),
             Command::Schema(a) => schema::run(a),
             Command::Skill(a) => skill::run(a),
             Command::Doctor(a) => doctor::run(a),
@@ -88,10 +93,4 @@ pub(crate) fn apply_env(options: &mut delega_core::provider::ProviderOptions, gi
             None => options.env_pass.push(given.clone()),
         }
     }
-}
-
-/// Report that a planned subcommand is not built yet.
-pub(super) fn not_implemented(name: &str) -> ExitCode {
-    eprintln!("delega {name}: not implemented yet");
-    ExitCode::from(EXIT_REFUSED)
 }

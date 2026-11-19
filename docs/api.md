@@ -1,9 +1,9 @@
 # The delega API: a proposal
 
 Status: agreed design. The request and result contract, the CLI commands
-`run`, `mcp`, `schema`, `skill`, `doctor` and `version`, the provider layer behind `run`,
-the library `Supervisor` ([supervisor.md](supervisor.md)) and the MCP server over
-it are built; `init` is not. Josh settled
+`run`, `mcp`, `init`, `uninstall`, `doctor`, `schema`, `skill` and `version`,
+the provider layer behind `run`, the library `Supervisor`
+([supervisor.md](supervisor.md)) and the MCP server over it are built. Josh settled
 the open questions on 2026-11-18; the decisions and what was deferred are listed
 at the end. Parts marked **Later** are not in the first version.
 
@@ -157,7 +157,8 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 | --- | --- |
 | `delega run` | Run one assignment and print the answer, or the result as JSON. |
 | `delega mcp` | Serve the MCP tools over stdio, with `-e/--env NAME[=VALUE]` (repeatable) as for `run`. See [MCP](#mcp). |
-| `delega init` | Install the plugin and skill into Claude Code, Codex or both, through the hosts' own commands. `--dry-run` shows what it would do. |
+| `delega init` | Install the plugin and skills into Claude Code, Codex or both, through the hosts' own commands. `--dry-run` shows what it would do. See [Install and uninstall](#install-and-uninstall). |
+| `delega uninstall` | Remove what `init` installed, from the hosts and from disk. |
 | `delega schema request\|result` | Print the contracts built into this executable. |
 | `delega skill list\|show NAME` | List the skills built into this executable, or print one. See [Skills](#skills). |
 | `delega doctor` | Report providers found, their versions, limits in force and anything that would stop a run; `--output text\|json`. See [Doctor](#doctor). |
@@ -415,6 +416,152 @@ problem for that provider and does not by itself make the exit 1 when the other
 provider is ready; read `problems` for it. A problem that blocks only
 `command_grants` does not change the exit status either.
 
+### Install and uninstall
+
+`delega init` installs a plugin that carries the delega skills and registers
+`delega mcp` as the plugin's MCP server, into Claude Code, Codex or both.
+`delega uninstall` removes it. Neither starts a server or calls a model, and
+neither edits a host's configuration files: a host is registered and unregistered
+only by running its own CLI.
+
+```sh
+delega init --dry-run          # print the files and the host commands
+delega init                    # every host found
+delega init --host claude      # Claude Code only
+delega uninstall --host codex  # remove from Codex, keep the directory for Claude Code
+delega uninstall               # remove from every recorded host, then the directory
+```
+
+Options, for both commands: `--host claude|codex` (repeatable),
+`--install-dir DIR`, `--dry-run` and `--output text|json`.
+
+- **Managed directory.** `--install-dir DIR`, else `DELEGA_INSTALL_HOME`, else
+  `$HOME/.local/share/delega`. It must be an absolute path. An existing
+  directory is reused only if an earlier `init` created it (it holds a valid
+  marker) or it is empty; any other non-empty directory is refused and left
+  untouched.
+- **Hosts.** The executables are found as `delega run` finds the providers:
+  `DELEGA_CLAUDE_BIN` and `DELEGA_CODEX_BIN` (an absolute path), else `claude` and
+  `codex` on the absolute entries of `PATH`. With `--host`, every named host must
+  be found, or `init` stops before writing anything. Without it, a host that is
+  not found is reported and skipped, and at least one must be found.
+- **Files written.** Under the managed directory:
+
+  | Path | Content |
+  | --- | --- |
+  | `plugin/delega/bin/delega` | A copy of the running executable, mode 0755. |
+  | `plugin/delega/skills/<name>/SKILL.md` | One per embedded skill, the bytes of `delega skill show NAME`. |
+  | `plugin/delega/IDENTITY.json` | The document `delega version --output json` prints. |
+  | `plugin/delega/.claude-plugin/plugin.json`, `plugin/delega/.mcp.json` | The Claude Code plugin and MCP manifests. The server is `${CLAUDE_PLUGIN_ROOT}/bin/delega` with the argument `mcp`, and no `cwd`. |
+  | `plugin/delega/plugin.json`, `plugin/delega/mcp.json` | The Codex plugin and MCP manifests. The server is `./bin/delega` with the argument `mcp`, and no `cwd`. |
+  | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | The local marketplace `delega-local`, one file per host. |
+  | `.delega-install.json` | The ownership marker. |
+
+- **Plugin version.** The delega version, a plus sign and the SHA-256 of the copied
+  executable, for example `0.1.0-dev+3f9c...`. The digest is semver build
+  metadata, so the version stays valid semver at a release. A host caches a plugin by version,
+  so a changed executable, even another build of the same source revision, gets
+  a new version and a refreshed cache. Running `init` again with identical bytes
+  gives the same version.
+- **Marker.** `.delega-install.json`, format version 1: `format_version`,
+  `managed_by` (`delega`), `version`, `revision`, `plugin_version`, `files` (every
+  file written, relative to the directory, the marker itself excepted) and
+  `hosts` (every host registered, `claude` and `codex`). Both commands refuse a
+  marker that is not valid format 1: wrong `managed_by` or version, a host that
+  is not `claude` or `codex` or is repeated, a file path that is absolute, has a
+  `..` component or is repeated. `files` and `hosts` accumulate across repeated
+  runs of `init`.
+
+Host commands, run from `/` with no input, each limited to 300 s (listings 30 s).
+`ID` is `delega@delega-local` and `DIR` the managed directory.
+
+| Host | `init` | `uninstall` |
+| --- | --- | --- |
+| Claude Code | `claude plugin marketplace add DIR`, `claude plugin install ID`, `claude plugin update ID --scope user` | `claude plugin uninstall ID --scope user`, `claude plugin marketplace remove delega-local --scope user` |
+| Codex | `codex plugin marketplace add DIR`, `codex plugin add ID` | `codex plugin remove ID`, `codex plugin marketplace remove delega-local` |
+
+`init` runs the whole sequence on every run. `plugin update` refreshes Claude
+Code's cached copy, which an install alone leaves stale; Codex's `plugin add`
+copies the plugin into its cache each time. If a command fails, the rest of that
+host's sequence is not run, the other host is still installed, the files stay in
+place, and the status is 1; fix the error and run `init` again. No host cache is
+deleted by delega.
+
+`uninstall` first reads each selected host's registrations with
+`plugin marketplace list --json` and `plugin list --json`, from `/`, for every
+host before it changes any. It removes the plugin and then the marketplace only
+when both point at the managed directory, and stops, keeping every file, on:
+an unmanaged directory, an invalid marker, `delega-local` registered from
+another directory, a `delega@delega-local` registration that is not the
+managed directory's, another plugin installed from `delega-local`, a listing
+that failed, wrote diagnostics, was not the expected JSON or was ambiguous, or
+a recorded host whose CLI cannot be found. Claude Code removal is limited to user
+scope. A plugin or marketplace the host no longer has is not removed again. If a
+removal command fails, the files are kept and the marker keeps that host. Without
+`--host`, every host in the marker is removed. With `--host`, only the named
+hosts are, and the directory is kept while the marker still lists another host.
+The managed directory is removed only when no host remains in the marker, and
+only the files the marker lists, so anything else in it keeps the directory. A
+directory that does not exist is nothing to do and runs no host command.
+
+`--dry-run` prints the files and the host commands and writes nothing and runs
+nothing. For `uninstall` it does not read the listings, so it does not verify
+ownership.
+
+The manifests set no `cwd`. A host decides the server's working directory: the
+Agent Plugins specification makes it the plugin root when `cwd` is omitted, so on
+Codex the server starts in the plugin's directory, and Claude Code does not
+document it for plugin MCP servers. A `start` without `cwd` runs the worker in
+the server's working directory, which is whatever directory the host gave the
+server, so here it could be the plugin's directory. A caller should pass `cwd`
+explicitly, always for a `write` worker.
+
+Claude Code puts an enabled plugin's `bin/` directory on the Bash tool's `PATH`,
+so `delega` becomes a bare command in Claude Code sessions. Claude.ai and Cowork
+refuse to install a plugin that has a top-level `bin/`, and this plugin has one
+(`plugin/delega/bin/`), so it cannot be installed there.
+
+The installed plugin starts `delega mcp` with only the argument `mcp`, so its
+workers get only the fixed environment allowlist and no `--env` names or values.
+
+Cleanup and limits:
+
+- **Removal by hand.** If the managed directory was deleted by hand, `uninstall`
+  reports it absent and runs no host command, because without the marker it cannot
+  tell whose registration it would remove. Remove the registrations with the
+  hosts' own commands, from a neutral directory: `claude plugin uninstall
+  delega@delega-local --scope user` and `claude plugin marketplace remove
+  delega-local --scope user`; `codex plugin remove delega@delega-local` and
+  `codex plugin marketplace remove delega-local`.
+- **Empty directory.** `uninstall` removes the managed directory when it ends up
+  empty, including an empty one chosen with `--install-dir`. It deletes only the
+  files the marker lists, so other files keep the directory.
+- **Marker paths.** A marker that names a path `init` of this build cannot write
+  (anything outside the marketplaces, the executable, the plugin's manifests,
+  `IDENTITY.json` and `skills/<name>/SKILL.md` with a name of `a-z`, `0-9` and
+  `-`) is refused as invalid, not deleted.
+- **No lock.** Do not run `init` or `uninstall` concurrently on one directory;
+  it is not supported.
+
+After `init`, each host needs a reload to start the new server: in Claude Code,
+start a new session or reconnect `plugin:delega:delega` from `/mcp`
+(`/reload-plugins` re-reads the skills but does not restart the running
+server); in Codex, start a new session. Then read `delega://identity` and check it
+against `plugin/delega/IDENTITY.json`.
+
+`--output json` prints one document, also for every exit-1 failure, and is validated against
+[`schemas/init.schema.json`](../schemas/init.schema.json) and
+[`schemas/uninstall.schema.json`](../schemas/uninstall.schema.json), which are
+committed. Both have `ok`, `dry_run`, `install_dir`, `hosts` (each with its
+`status`, the `commands` run and the `reload` step) and `error`; the document is
+printed also when the command fails.
+
+Exit status: 0 on success, including a dry run; 1 when a host command failed or
+something was refused (a host not found, a foreign directory, an invalid marker,
+a foreign registration); 2 for a usage error, including a relative directory and
+no `HOME` without `--install-dir` or `DELEGA_INSTALL_HOME`. Standard error says
+what was refused.
+
 ## MCP
 
 The MCP server is for a caller that supervises several workers at once: start
@@ -505,7 +652,9 @@ Rules that hold for every tool:
   other argument replaces the matching field, with the same code `delega run`
   uses (`delega_core::profile`): lists replace, `resume` and `ephemeral`
   exclude each other, a relative path resolves against the server's working
-  directory. A request that has a provider and a prompt but fails the contract
+  directory. A `start` without `cwd` runs the worker in the server's working
+  directory, which is whatever directory the host gave the server, so a caller
+  should pass `cwd` explicitly, always for a `write` worker. A request that has a provider and a prompt but fails the contract
   (a blank prompt, for example) is a refused run, not a tool error. The input
   schema states the request schema's ranges and lengths (`timeout_secs`
   between 1 and 86400, the list limits) from the same refinements, so a value
@@ -598,7 +747,8 @@ There is one source and three doors.
   version, revision, features and the name, URI and SHA-256 digest of each
   skill; `delega version --output json` prints the same document.
 - **Plugin.** `delega init` installs the same files as a plugin into Claude Code
-  and Codex, for hosts that load skills from disk.
+  and Codex, for hosts that load skills from disk
+  ([Install and uninstall](#install-and-uninstall)).
 
 Rules:
 

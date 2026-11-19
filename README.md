@@ -8,8 +8,9 @@ definite result. It is reached from a command line, from Rust, and over MCP.
 This repository is new. The request and result contract, the process layer, the
 provider layer, the supervisor (several workers at once, as a library) and the
 MCP server over it exist so far. `delega run`, `delega mcp`,
-`delega schema request|result`, `delega skill list|show NAME`,
-`delega doctor` and `delega version` work, and `init` prints "not implemented yet".
+`delega init`, `delega uninstall`, `delega schema request|result`,
+`delega skill list|show NAME`, `delega doctor` and `delega version` work.
+`init` and `uninstall` have been tested against fake host CLIs only.
 `delega mcp` serves seven tools (`start`, `follow_up`, `wait`, `read`, `list`,
 `interrupt`, `close`) over standard input and output, and has been tested
 against fake providers only. `delega run` runs one assignment on a

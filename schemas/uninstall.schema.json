@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "delega uninstall output",
+  "description": "The document printed by `delega uninstall --output json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "ok",
+    "dry_run",
+    "install_dir",
+    "plugin_id",
+    "directory",
+    "files",
+    "hosts",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "operation": {
+      "const": "uninstall"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "False when something was refused or a host command failed; the exit status is then 1."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "install_dir": {
+      "type": "string"
+    },
+    "plugin_id": {
+      "const": "delega@delega-local"
+    },
+    "directory": {
+      "enum": [
+        "removed",
+        "files_removed",
+        "kept",
+        "absent",
+        "would_remove",
+        "would_keep"
+      ],
+      "description": "What became of the managed directory. files_removed: other files kept the directory itself."
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Paths relative to install_dir that were removed, or would be in a dry run. Empty when the directory was kept."
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/host"
+      }
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "args",
+        "status",
+        "output"
+      ],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The arguments passed to the host executable."
+        },
+        "status": {
+          "enum": [
+            "ran",
+            "would_run",
+            "failed",
+            "already_absent",
+            "not_run"
+          ]
+        },
+        "output": {
+          "type": "string",
+          "description": "The host's output, trimmed and bounded."
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "program",
+        "status",
+        "note",
+        "commands",
+        "reload"
+      ],
+      "properties": {
+        "host": {
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "program": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The host executable used, or null when it was not found."
+        },
+        "status": {
+          "enum": [
+            "not_run",
+            "not_registered",
+            "refused",
+            "removed",
+            "would_remove",
+            "failed"
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "reload": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the user does so a running host picks up the plugin."
+        }
+      }
+    }
+  }
+}

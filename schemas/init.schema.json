@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "delega init output",
+  "description": "The document printed by `delega init --output json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "ok",
+    "dry_run",
+    "install_dir",
+    "plugin_id",
+    "plugin_version",
+    "executable",
+    "files",
+    "hosts",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "operation": {
+      "const": "init"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "False when something was refused or a host command failed; the exit status is then 1."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "install_dir": {
+      "type": "string"
+    },
+    "plugin_id": {
+      "const": "delega@delega-local"
+    },
+    "plugin_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The plugin version: the delega version, a dot and the SHA-256 of the copied executable. Null when init stopped before it was computed."
+    },
+    "executable": {
+      "type": "string",
+      "description": "The executable that is copied."
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Paths relative to install_dir that were written, or would be in a dry run. Empty when init stopped before writing."
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/host"
+      }
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "args",
+        "status",
+        "output"
+      ],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The arguments passed to the host executable."
+        },
+        "status": {
+          "enum": [
+            "ran",
+            "would_run",
+            "failed",
+            "already_absent",
+            "not_run"
+          ]
+        },
+        "output": {
+          "type": "string",
+          "description": "The host's output, trimmed and bounded."
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "program",
+        "status",
+        "note",
+        "commands",
+        "reload"
+      ],
+      "properties": {
+        "host": {
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "program": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The host executable used, or null when it was not found."
+        },
+        "status": {
+          "enum": [
+            "skipped",
+            "not_run",
+            "installed",
+            "would_install",
+            "failed"
+          ]
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "reload": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the user does so a running host picks up the plugin."
+        }
+      }
+    }
+  }
+}
