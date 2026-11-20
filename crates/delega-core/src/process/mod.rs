@@ -188,11 +188,11 @@
 //! that run from reading end of input until the holder exits, which a provider
 //! that reads its prompt to end of file never does on its own (#104). Every
 //! child of this module, the `ps` listing included, is therefore spawned while
-//! holding one process-wide lock (`spawn.rs`), and clippy's
-//! `disallowed_methods` rejects a direct `tokio::process::Command::spawn`
-//! elsewhere. The lock is held only across the spawn call. It covers spawns
-//! made elsewhere in the program only if they take it too, with
-//! [`spawn_guard`]; a program that spawns on its own threads without it can
+//! holding one process-wide lock (`spawn.rs`). The delega CLI's plugin
+//! commands and this crate's tests take it too, through [`spawn_guard`], and
+//! clippy's `disallowed_methods` (`clippy.toml`) rejects an unguarded spawn in
+//! this crate. The lock is held only across the spawn call. A program that
+//! embeds this crate and spawns on its own threads without [`spawn_guard`] can
 //! still leak descriptors into these children and receive theirs.
 //!
 //! # Why the owner never signals a foreign process

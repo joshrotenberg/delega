@@ -1,0 +1,14 @@
+# Every child process this crate starts, in its code and in its tests, holds
+# the process layer's spawn lock, so concurrent spawns cannot inherit each
+# other's pipes on macOS (#104). The code spawns through `process::spawn`, and
+# tests through the guarded helpers (`src/test_spawn.rs`, and a local helper
+# in each test binary). `output` and `status` spawn too. This file replaces
+# the workspace `clippy.toml` for this crate, so it repeats the tokio entries.
+disallowed-methods = [
+  { path = "tokio::process::Command::spawn", reason = "spawn through process::spawn, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::output", reason = "spawn through process::spawn, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::status", reason = "spawn through process::spawn, which holds the spawn lock (#104)" },
+  { path = "std::process::Command::spawn", reason = "hold process::spawn_guard() across the spawn; tests use test_spawn::Guarded (#104)" },
+  { path = "std::process::Command::output", reason = "hold process::spawn_guard() across the spawn; tests use test_spawn::Guarded (#104)" },
+  { path = "std::process::Command::status", reason = "hold process::spawn_guard() across the spawn; tests use test_spawn::Guarded (#104)" },
+]

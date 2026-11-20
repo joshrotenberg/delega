@@ -22,6 +22,9 @@ pub mod skills;
 
 pub mod supervisor;
 
+#[cfg(test)]
+mod test_spawn;
+
 /// The version of this build, as set in the workspace manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

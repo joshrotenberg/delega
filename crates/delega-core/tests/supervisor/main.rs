@@ -98,6 +98,22 @@ pub(crate) struct Rig {
 /// A run held open until the test lets it go.
 pub(crate) struct Gate(PathBuf);
 
+/// `output` while holding the process layer's spawn lock for the spawn (#104).
+/// This binary runs supervisors in the same process; an unguarded `ps` could
+/// hand a gated provider its output pipe, or take a provider's standard input.
+fn guarded_output(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    let child = {
+        let _held = delega_core::process::spawn_guard();
+        #[allow(clippy::disallowed_methods)]
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    }?;
+    child.wait_with_output()
+}
+
 impl Gate {
     /// The prompt that holds a run on this gate.
     pub fn prompt(&self) -> String {
@@ -262,10 +278,12 @@ impl Rig {
 
     /// Processes whose command line carries this rig's directory.
     fn survivors(&self) -> Vec<String> {
-        let out = std::process::Command::new("/bin/ps")
-            .args(["-axww", "-o", "pid=,command="])
-            .output()
-            .expect("run ps");
+        let out = guarded_output(std::process::Command::new("/bin/ps").args([
+            "-axww",
+            "-o",
+            "pid=,command=",
+        ]))
+        .expect("run ps");
         let marker = self.root.to_string_lossy().into_owned();
         String::from_utf8_lossy(&out.stdout)
             .lines()

@@ -34,6 +34,9 @@ const AT_ONCE: usize = 8;
 /// it waits before it takes the guard again, so the runs are not starved.
 const HELD: Duration = Duration::from_millis(2);
 const RELEASED: Duration = Duration::from_millis(1);
+/// A bound on the rounds, far above the second or so they take, so a run that
+/// waits on the lock forever fails here instead of hanging the suite.
+const BOUND: Duration = Duration::from_secs(120);
 
 /// A process-layer child that lists its own open descriptors. Its standard
 /// input is a pipe, as a provider's is.
@@ -84,33 +87,44 @@ async fn a_child_never_inherits_a_pipe_opened_under_the_spawn_guard() {
         }
     });
 
+    let before = opened.load(Ordering::Relaxed);
     let mut wrong = Vec::new();
-    for round in 0..ROUNDS {
-        let barrier = Arc::new(tokio::sync::Barrier::new(AT_ONCE));
-        let children: Vec<_> = (0..AT_ONCE)
-            .map(|_| {
-                let spec = lister(dir.path());
-                let barrier = barrier.clone();
-                tokio::spawn(async move {
-                    barrier.wait().await;
-                    run(spec).await
+    let rounds = async {
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(tokio::sync::Barrier::new(AT_ONCE));
+            let children: Vec<_> = (0..AT_ONCE)
+                .map(|_| {
+                    let spec = lister(dir.path());
+                    let barrier = barrier.clone();
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        run(spec).await
+                    })
                 })
-            })
-            .collect();
-        for child in children {
-            let report = child.await.expect("the task that ran the child");
-            let listed = descriptors(&report);
-            if listed != expected {
-                wrong.push((round, listed));
+                .collect();
+            for child in children {
+                let report = child.await.expect("the task that ran the child");
+                let listed = descriptors(&report);
+                if listed != expected {
+                    wrong.push((round, listed));
+                }
             }
         }
-    }
+    };
+    let finished = tokio::time::timeout(BOUND, rounds).await;
+    let during = opened.load(Ordering::Relaxed) - before;
 
     stop.store(true, Ordering::Relaxed);
     other.join().expect("the thread that opened pipes");
     assert!(
-        opened.load(Ordering::Relaxed) > 0,
-        "the other thread never opened a pipe"
+        finished.is_ok(),
+        "the rounds did not finish within {BOUND:?}"
+    );
+    // The pipe was opened and closed many times while the children started,
+    // so a spawn that skipped the lock had many chances to inherit it.
+    assert!(
+        during >= ROUNDS,
+        "the other thread opened a pipe only {during} times during the rounds"
     );
     assert!(
         wrong.is_empty(),

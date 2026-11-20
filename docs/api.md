@@ -1206,7 +1206,10 @@ spawn calls. On macOS std marks a child's pipes close-on-exec only after
 creating them, so without the guard a child of the program can inherit a
 worker's pipes, or a worker the program's, and a worker that holds another's
 standard input keeps it from ever reading end of input. delega takes the same
-lock for every process it starts.
+lock for every process it starts in-process: providers, version probes, `ps`
+listings and the host commands of `init` and `uninstall`. Hold the guard only
+across the spawn call, never while calling into delega or across an `.await`:
+every run waits for it.
 
 ## Not in this surface
 

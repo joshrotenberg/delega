@@ -28,8 +28,14 @@ pub struct SpawnGuard {
 /// A program that embeds delega and starts processes of its own on other
 /// threads can hold this guard across each of its spawn calls, so that neither
 /// its children nor the processes delega starts inherit the other's pipes on
-/// macOS. Hold it only across the spawn call: every run waits for it before
-/// its provider starts.
+/// macOS.
+///
+/// Hold it only across the spawn call itself, then drop it before waiting for
+/// the child or reading its output. Every process delega starts waits for it,
+/// so a guard held while calling into delega, or held across an `.await` on a
+/// runtime thread that a run needs (a `LocalSet`, or a current-thread
+/// runtime), deadlocks that run. A spawn that blocks in the kernel holds up
+/// every other spawn for as long, and a run's time limit cannot interrupt it.
 pub fn spawn_guard() -> SpawnGuard {
     SpawnGuard {
         // A panic while the lock was held leaves nothing to repair: the lock
