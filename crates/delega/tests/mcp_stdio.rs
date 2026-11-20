@@ -763,8 +763,8 @@ fn unconfirmed_cleanup_after_a_signal_exits_1_not_130() {
 #[test]
 fn an_unconfirmed_run_replaced_as_the_latest_by_a_refused_follow_up_still_exits_1() {
     // The first run ends with cleanup unconfirmed: process inspection is off,
-    // and the provider starts a child and exits 3 before it writes anything, so
-    // it never reports a session. A follow-up is therefore refused when it is
+    // and the provider starts a child and exits 3 without writing to standard
+    // output, so it never reports a session. A follow-up is therefore refused when it is
     // dispatched (`no_session`), with a confirmed cleanup, and becomes the
     // worker's latest run. The exit status must still count the earlier run.
     // (Interrupting a hanging provider instead raced its session id: when delega
