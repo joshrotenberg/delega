@@ -4,7 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use delega_core::contract::result::Cleanup;
-use delega_core::supervisor::{Detail, ResultView, ShutdownReport, Supervisor, Target};
+use delega_core::supervisor::{ShutdownReport, Supervisor};
 use tower_mcp::{McpRouter, StdioTransport};
 
 /// Most requests handled at once.
@@ -41,8 +41,10 @@ pub struct Served {
     /// What stopping the workers found. The report says whether every run
     /// stopped and whether the supervisor itself had failed.
     pub shutdown: ShutdownReport,
-    /// The latest run of each worker whose cleanup was not confirmed, with what
-    /// the result says could not be confirmed. Read after the workers were
+    /// Every run on the connection whose cleanup was not confirmed, with what
+    /// the result says could not be confirmed. A run counts when it settled, so
+    /// it stays listed after a later run on its worker replaced it as the latest
+    /// and after retention dropped its result. Read after the workers were
     /// stopped: a run stopped by the shutdown that the process layer could not
     /// confirm gone is listed here, though the shutdown itself settled.
     pub unconfirmed: Vec<(String, Cleanup)>,
@@ -110,33 +112,7 @@ pub async fn serve(
     Served {
         ended,
         shutdown: report,
-        unconfirmed: unconfirmed(supervisor).await,
+        unconfirmed: supervisor.unconfirmed().await.unwrap_or_default(),
         transport_error,
     }
-}
-
-/// The latest run of every worker whose result did not confirm cleanup. Reads
-/// still work after a shutdown.
-async fn unconfirmed(supervisor: &Supervisor) -> Vec<(String, Cleanup)> {
-    let Ok(listed) = supervisor.list().await else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for worker in listed.workers {
-        let Some(run) = worker.brief.last_run else {
-            continue;
-        };
-        let Ok(read) = supervisor
-            .read(Target::Run(run.clone()), Detail::Compact, None, None)
-            .await
-        else {
-            continue;
-        };
-        if let Some(ResultView::Compact(result)) = read.result
-            && result.cleanup != Cleanup::Confirmed
-        {
-            found.push((run, result.cleanup));
-        }
-    }
-    found
 }

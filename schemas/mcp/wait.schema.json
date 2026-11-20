@@ -48,7 +48,7 @@
   "outputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "WaitResponse",
-    "description": "The answer to `wait`. A timeout is not an error: `timed_out` is true and\nthe states are current.",
+    "description": "The answer to `wait`. A timeout is not an error: `timed_out` is true and\nthe states are current. A wait that shutdown released says\n`released_by_shutdown`.",
     "type": "object",
     "properties": {
       "cursor": {
@@ -59,6 +59,10 @@
       },
       "timed_out": {
         "description": "True when the time passed and nothing named had finished.",
+        "type": "boolean"
+      },
+      "released_by_shutdown": {
+        "description": "True when shutdown released the wait. Nothing named need have finished:\na run can still be `running` while it is stopped, so `timed_out: false`\ndoes not mean something finished. Absent otherwise.",
         "type": "boolean"
       },
       "timeout_secs": {

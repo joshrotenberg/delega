@@ -25,7 +25,7 @@ An argument a tool does not have is rejected.
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides | At once: `worker`, `run` and `state`, `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new `run`. It queues behind a running run. |
-| `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When any named run finishes, or on timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. |
+| `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When any named run finishes, or on timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. |
 | `read` | `run` or `worker`, `detail`, `after` (a cursor), `text_offset` | The `result` if finished; otherwise `state`, partial text and recent activity. |
 | `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: the `result`, with the outcome `interrupted`. |

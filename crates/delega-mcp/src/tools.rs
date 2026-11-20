@@ -45,7 +45,8 @@ const FOLLOW_UP: &str = "Give an existing worker another assignment that continu
 const WAIT: &str = "Wait until any named run finishes, or the current run of any named worker \
     does, or the time passes (default 30 s unless the server's configuration file sets another, \
     capped by the server; list reports both). A timeout is not an error: \
-    timed_out is true and the states are current. Pass the cursor back as after to be told only \
+    timed_out is true and the states are current. A wait that the server's shutdown released \
+    answers released_by_shutdown true, and a run it names can still be running. Pass the cursor back as after to be told only \
     of what finishes later, instead of waiting long. Next, read a run that finished.";
 
 const READ: &str = "Read a run, or a worker's current run: the result if it has finished, \

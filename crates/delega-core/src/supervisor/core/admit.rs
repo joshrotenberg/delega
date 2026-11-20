@@ -194,6 +194,7 @@ impl Core {
         let seq = self.next_cursor();
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
+        self.note_cleanup(&id, &result);
         run.bytes = super::retention::weigh(&result, &run.activity);
         self.retained_bytes += run.bytes;
         run.result = Some(result);
