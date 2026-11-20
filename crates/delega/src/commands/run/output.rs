@@ -24,7 +24,7 @@ use serde_json::json;
 use super::log::Log;
 use super::request::{Facts, Failure};
 use crate::commands::OutputFormat;
-use crate::commands::output::{Written, write};
+use crate::commands::output::{Stop, Written, write, write_unless_stopped};
 
 /// The outcome as the contract spells it.
 pub fn outcome_name(outcome: Outcome) -> &'static str {
@@ -106,7 +106,19 @@ fn with_applied(mut result: RunResult, facts: &Facts) -> RunResult {
 /// through the log and the exit status accounts for it; nothing here waits on
 /// standard error.
 fn emit(log: &Log, text: &str) -> bool {
-    match write(text.as_bytes()) {
+    delivered(log, write(text.as_bytes()))
+}
+
+/// [`emit`], unless `stop` is requested first. A stopped write is not
+/// delivered; `stop` records it, and the caller's exit status gives way to the
+/// status for a result that was cut short.
+fn emit_unless_stopped(log: &Log, text: &str, stop: &Stop) -> bool {
+    write_unless_stopped(text.as_bytes(), stop).is_some_and(|written| delivered(log, written))
+}
+
+/// Whether a write counts as delivered. A failure is reported through the log.
+fn delivered(log: &Log, written: Written) -> bool {
+    match written {
         Written::Done | Written::Closed => true,
         Written::Failed(message) => {
             log.line(format!("delega run: {message}"));
@@ -292,13 +304,15 @@ fn dry_run_text(plan: &DryRun) -> String {
     out
 }
 
-/// Print a run's result as the format asks and return the exit status.
-pub fn print_result(format: OutputFormat, result: &RunResult, log: &Log) -> ExitCode {
+/// Print a run's result as the format asks and return the exit status. The
+/// write to standard output stops when `stop` is requested; `stop` then records
+/// that the result was not delivered.
+pub fn print_result(format: OutputFormat, result: &RunResult, log: &Log, stop: &Stop) -> ExitCode {
     let written = match format {
-        OutputFormat::Json => emit(log, &json_document(result)),
+        OutputFormat::Json => emit_unless_stopped(log, &json_document(result), stop),
         OutputFormat::Text => {
             summarize(result, log);
-            emit(log, &answer_text(result))
+            emit_unless_stopped(log, &answer_text(result), stop)
         }
     };
     status(result.outcome, written)

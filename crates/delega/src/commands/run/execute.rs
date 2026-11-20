@@ -14,6 +14,7 @@ use super::log::Log;
 use super::output::refused_result;
 use super::request::Facts;
 use super::signals::{Signals, exit_status_when_cut_short, follow};
+use crate::commands::output::Stop;
 
 /// How long dropping the runtime waits for blocking helper threads. The run
 /// has already ended by then, so this only bounds a stuck helper.
@@ -23,11 +24,12 @@ const RUNTIME_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// reader that never reads would otherwise hold `delega` with no signal left
 /// to end it.
 const WRITE_WAIT_AFTER_SIGNAL: Duration = Duration::from_secs(3);
-/// How long a signal or the write deadline waits for the print thread to
-/// report before exiting. A write already under way when the signal came may
-/// finish in that time, and its result is then delivered, so the status must
-/// follow it. A write held by a reader that does not read is given up on.
-const PRINT_REPORT_GRACE: Duration = Duration::from_millis(250);
+/// How long a signal or the write deadline waits, after asking the write to
+/// stop, for the print thread to say how it ended. A write in progress stops
+/// within one poll interval and one piece (see
+/// [`write_unless_stopped`](crate::commands::output::write_unless_stopped));
+/// the rest of the bound covers building the document before the write begins.
+const PRINT_STOP_WAIT: Duration = Duration::from_secs(1);
 /// Stands for "no limit" when no signal has been received: a year.
 const WRITE_WAIT_UNLIMITED: Duration = Duration::from_secs(365 * 24 * 3600);
 
@@ -35,15 +37,17 @@ const WRITE_WAIT_UNLIMITED: Duration = Duration::from_secs(365 * 24 * 3600);
 ///
 /// `print` runs on a thread of its own, while the signal handlers stay
 /// installed, because writing the result waits on whoever reads standard
-/// output. A signal during that wait, or the end of the write deadline, ends
-/// `delega` within [`PRINT_REPORT_GRACE`]; the worker is already gone by then.
-/// The exit status is the one `print` returned when `print` returns within
-/// that grace or had already returned, because the result was then written and
-/// a status must not contradict it. Otherwise it is the outcome's status, or
-/// 130 for a completed run, because the result was not delivered. A failure to
-/// set up the runtime or the
-/// signal handlers is a refused result: nothing was started, and starting a
-/// worker `delega` could not stop would be worse.
+/// output. It writes through the [`Stop`] it is given. A signal during that
+/// wait, or the end of the write deadline, asks the write to stop and waits up
+/// to [`PRINT_STOP_WAIT`] for the print thread to say how it ended; the worker
+/// is already gone by then. The status is decided from what happened, not from
+/// timing: a write that finished, the whole result accepted by the kernel,
+/// exits with the status `print` returned; a write that stopped with bytes left
+/// unwritten exits with the outcome's status, or 130 for a completed run,
+/// because the result was not delivered. Standard output may then hold the
+/// first part of the document. A failure to set up the runtime or the signal
+/// handlers is a refused result: nothing was started, and starting a worker
+/// `delega` could not stop would be worse.
 pub fn run<F>(
     request: Request,
     options: ProviderOptions,
@@ -52,39 +56,45 @@ pub fn run<F>(
     print: F,
 ) -> ExitCode
 where
-    F: FnOnce(RunResult) -> ExitCode + Send + 'static,
+    F: FnOnce(RunResult, &Stop) -> ExitCode + Send + 'static,
 {
     let runtime = match Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(err) => {
-            return print(refused_result(
-                facts,
-                "runtime_unavailable",
-                &format!("cannot start the async runtime: {err}"),
-            ));
+            return print(
+                refused_result(
+                    facts,
+                    "runtime_unavailable",
+                    &format!("cannot start the async runtime: {err}"),
+                ),
+                &Stop::default(),
+            );
         }
     };
     let code = runtime.block_on(async {
         let mut signals = match Signals::install() {
             Ok(signals) => signals,
             Err(err) => {
-                return print(refused_result(
-                    facts,
-                    "signals_unavailable",
-                    &format!("cannot install the signal handlers that stop the worker: {err}"),
-                ));
+                return print(
+                    refused_result(
+                        facts,
+                        "signals_unavailable",
+                        &format!("cannot install the signal handlers that stop the worker: {err}"),
+                    ),
+                    &Stop::default(),
+                );
             }
         };
         let (result, signalled) = follow(start(request, options), &mut signals, log).await;
         let outcome_status = result.outcome.exit_status();
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        // Set by the print thread once `print` has returned, so before it sends
-        // the same code: from then on the result has been written, and that is
-        // the status to exit with, whatever else happens first.
+        let stop = Arc::new(Stop::default());
+        // Set by the print thread once `print` has returned, before it sends the
+        // same code, so the code is known even if the send is late.
         let printed: Arc<OnceLock<ExitCode>> = Arc::new(OnceLock::new());
-        let printer = Arc::clone(&printed);
+        let (writer_stop, printer) = (Arc::clone(&stop), Arc::clone(&printed));
         std::thread::spawn(move || {
-            let code = print(result);
+            let code = print(result, &writer_stop);
             let _ = printer.set(code);
             hold_after_print();
             let _ = sender.send(code);
@@ -95,52 +105,61 @@ where
         } else {
             WRITE_WAIT_UNLIMITED
         };
-        tokio::select! {
+        let ended = tokio::select! {
             // A print result that is ready wins over a signal ready at once.
             biased;
-            code = &mut receiver => code.unwrap_or(ExitCode::from(1)),
+            // A print thread that panicked delivered nothing it could vouch for.
+            code = &mut receiver => Some(code.unwrap_or(ExitCode::from(1))),
             () = tokio::time::sleep(patience) => {
                 log.line("delega run: the result could not be written in time after the signal; exiting");
-                cut_short(receiver, &printed, outcome_status).await
+                stop_writing(receiver, &stop, &printed).await
             }
             // A handler that stopped delivering leaves only the first branch.
             Some(()) = signals.next() => {
                 log.line("delega run: signal received while writing the result; exiting");
-                cut_short(receiver, &printed, outcome_status).await
+                stop_writing(receiver, &stop, &printed).await
             }
+        };
+        match ended {
+            Some(code) if !stop.stopped() => code,
+            // The write stopped with bytes left unwritten, or the print thread
+            // did not say how it ended in time (it never returned from `print`).
+            _ => ExitCode::from(exit_status_when_cut_short(outcome_status)),
         }
     });
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_WAIT);
     code
 }
 
-/// The status to exit with when a signal or the write deadline ends the wait
-/// for the print thread. The print thread's own status when it reports within
-/// [`PRINT_REPORT_GRACE`] or had already returned from `print`, because the
-/// result was then written. Otherwise the cut-short status, because the result
-/// was not delivered.
-async fn cut_short(
+/// Ask the write to stop and wait, up to [`PRINT_STOP_WAIT`], for the code
+/// `print` returned. `None` when `print` has not returned by then. Whether the
+/// write finished or stopped is then in `stop`.
+async fn stop_writing(
     receiver: std::pin::Pin<&mut tokio::sync::oneshot::Receiver<ExitCode>>,
+    stop: &Stop,
     printed: &OnceLock<ExitCode>,
-    outcome_status: u8,
-) -> ExitCode {
-    if let Ok(Ok(code)) = tokio::time::timeout(PRINT_REPORT_GRACE, receiver).await {
-        return code;
+) -> Option<ExitCode> {
+    stop.request();
+    match tokio::time::timeout(PRINT_STOP_WAIT, receiver).await {
+        Ok(Ok(code)) => Some(code),
+        _ => printed.get().copied(),
     }
-    printed
-        .get()
-        .copied()
-        .unwrap_or_else(|| ExitCode::from(exit_status_when_cut_short(outcome_status)))
 }
 
 /// Test seam, in debug builds only: with `DELEGA_TEST_HOLD_AFTER_PRINT` naming a
-/// file, the print thread creates that file once the result is written and then
-/// waits up to 30 seconds before reporting its exit code. A test can signal
-/// `delega` inside that window without depending on timing.
+/// file that does not exist, the print thread creates it once the result is
+/// written and then waits up to 30 seconds before reporting its exit code. A
+/// test can signal `delega` inside that window without depending on timing.
+/// The file is created new, so an existing path, a FIFO included, is never
+/// opened and cannot block the thread.
 #[cfg(debug_assertions)]
 fn hold_after_print() {
     if let Some(path) = std::env::var_os("DELEGA_TEST_HOLD_AFTER_PRINT")
-        && std::fs::write(&path, b"").is_ok()
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .is_ok()
     {
         std::thread::sleep(Duration::from_secs(30));
     }
