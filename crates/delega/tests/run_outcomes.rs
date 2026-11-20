@@ -359,7 +359,23 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
         let out = wait_bounded(child);
         match out.status.code() {
             Some(0) => assert_eq!(result_of(&out).outcome, Outcome::Completed, "{delay_ms}"),
-            Some(130) => assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}"),
+            // 130 is either an interrupted run that printed its result, or a
+            // result whose write the signal stopped: then standard output holds
+            // less than a whole document (possibly nothing), which says the
+            // result was not delivered, and delega says why on stderr.
+            Some(130) => {
+                if serde_json::from_slice::<serde_json::Value>(&out.stdout).is_ok() {
+                    assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}");
+                } else {
+                    assert!(
+                        text(&out.stderr).contains("signal received while writing the result"),
+                        "{delay_ms}: exit 130 with an incomplete result and no word of a stopped \
+                         write: stdout {:?}, stderr {}",
+                        text(&out.stdout),
+                        text(&out.stderr)
+                    );
+                }
+            }
             // The signal came before delega could handle it: nothing had started.
             // The signal came before delega had installed its handlers, which
             // happens before any worker is started. A worker that exists here
