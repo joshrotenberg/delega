@@ -761,6 +761,56 @@ fn unconfirmed_cleanup_after_a_signal_exits_1_not_130() {
 }
 
 #[test]
+fn an_unconfirmed_run_replaced_as_the_latest_by_a_refused_follow_up_still_exits_1() {
+    // The first run ends with cleanup unconfirmed (process inspection is off and
+    // the run is interrupted). It left no session, so a follow-up is refused at
+    // once, with a confirmed cleanup, and becomes the worker's latest run. The
+    // exit status must still count the earlier run.
+    let rig = Rig::new();
+    let mut session = rig.start_with(&[], &[("DELEGA_TEST_NO_PROCESS_LISTING", "1")]);
+    session.initialize();
+    let started = session.call(
+        "start",
+        json!({"provider": "codex", "prompt": "acc:hang:child", "cwd": rig.work}),
+    );
+    let began = Instant::now();
+    while rig.recorded("provider") < 1 || rig.recorded("child") < 1 {
+        assert!(began.elapsed() < EVENTUALLY, "the worker did not start");
+        std::thread::sleep(POLL);
+    }
+    session.call("interrupt", json!({"run": started["run"]}));
+    let first = finished_result(&mut session, &started["run"]);
+    assert_eq!(first["cleanup"]["confirmed"], json!(false), "{first}");
+
+    let followed = session.call(
+        "follow_up",
+        json!({"worker": started["worker"], "prompt": "more"}),
+    );
+    let second = finished_result(&mut session, &followed["run"]);
+    assert_eq!(second["outcome"], "refused", "{second}");
+    assert_eq!(second["cleanup"]["confirmed"], json!(true), "{second}");
+    let listed = session.call("list", json!({}));
+    assert_eq!(
+        listed["workers"][0]["last_run"], followed["run"],
+        "the refused follow-up is the worker's latest run: {listed}"
+    );
+
+    session.close_stdin();
+    let status = session.exit();
+    assert_eq!(status.code(), Some(1), "stderr: {}", session.stderr());
+    assert!(
+        session.stderr().contains(&format!(
+            "cleanup not confirmed for run {}",
+            started["run"].as_str().expect("run id")
+        )),
+        "{}",
+        session.stderr()
+    );
+    rig.assert_nothing_left();
+    session.assert_only_json_rpc();
+}
+
+#[test]
 fn the_skills_and_the_identity_over_stdio_are_what_the_cli_prints() {
     let rig = Rig::new();
     let mut session = rig.start(&[]);
