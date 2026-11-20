@@ -220,8 +220,11 @@ claude -p --output-format stream-json --verbose
   [native_args]
 ```
 
-Environment set by the adapter: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and,
-when the command guard is installed, `DELEGA_EXACT_BASH_GRANTS` (a JSON array of
+Environment set by the adapter: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`,
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` (no
+`CLAUDE.md` file and no auto memory reach the worker; `--setting-sources ""`
+alone keeps `CLAUDE.md` out but not the auto-memory index, measured with Claude
+Code 2.1.329 on #86) and, when the command guard is installed, `DELEGA_EXACT_BASH_GRANTS` (a JSON array of
 the allowed commands). `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` is not
 set: a directory listed in `permissions.directories` is for reading and does not
 contribute instruction files.
@@ -690,6 +693,7 @@ adapter's own variables. Everything else is withheld, whatever its name.
    calling-session or `DELEGA_*` name is `refused`, and a secret-looking name
    gets a note. Prefer `NAME` (group 4) for secrets on the command line, since a
    value there is visible in the process table and shell history. The adapter's variables (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`,
+   `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`,
    `DELEGA_EXACT_BASH_GRANTS`) cannot be overridden.
 
 Never passed, even when named: `DELEGA_*`, and the variables that describe the

@@ -200,8 +200,8 @@ the text of a deny rule. Keys are in sorted order.
     "timeout_secs": "default"
   },
   "env": {
-    "passed": {"total": 14, "base": 11, "network": 0, "provider": 0,
-               "named_by_caller": 1, "set_by_caller": 1, "set_by_delega": 1},
+    "passed": {"total": 16, "base": 11, "network": 0, "provider": 0,
+               "named_by_caller": 1, "set_by_caller": 1, "set_by_delega": 3},
     "withheld": {"total": 31, "never_passed": 2, "not_allowlisted": 29},
     "named": ["AWS_REGION", "TOOLCHAIN_HOME"]
   },
@@ -220,7 +220,7 @@ the text of a deny rule. Keys are in sorted order.
 | `sources` | For each request field that ended up set, the layer that set it: `default`, `config` (the file's `[defaults]`), `profile`, `flag` (`delega run`) or `argument` (an MCP tool argument). | The caller did not say, as when a library caller starts a run without `ProviderOptions::origin`. It is present, with the fields known so far, on a refusal that happens after the request was merged. |
 | `env` | `passed` counts the variables the worker received, in total and by reason; `withheld` counts the caller's variables that were not passed, in total, those that can never be passed (calling-session variables and every `DELEGA_*`) and the rest; `named` lists the names given with `--env` or in the file's `[env]`, whether or not the variable was set. | The run was refused before it was prepared (see below). |
 | `deny_rules` | The settings files read with their rule counts (`files`), the ones ignored with the reason (`skipped`), and the number of rules passed (`applied`). | Codex runs, which read none, and a refusal before the settings files were read. |
-| `context` | `settings`: how Claude Code's settings reached the worker, `deny_rules` being the only mode today (the deny rules and nothing else); `instructions`: whether delega loaded instruction files, `false` today. Whether Claude Code itself reads the working directory's own `CLAUDE.md` is not controlled and is stated in a `provider_notes` entry. | Codex runs, which have no such mode to report, and a refusal before it was decided. |
+| `context` | `settings`: how Claude Code's settings reached the worker, `deny_rules` being the only mode today (the deny rules and nothing else); `instructions`: whether instruction files reach the worker, `false` today: delega sets `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, so no `CLAUDE.md` file (the user's, the project's or a reference directory's) and no auto memory reach a Claude worker, as a `provider_notes` entry says. | Codex runs, which have no such mode to report, and a refusal before it was decided. |
 
 `env`, `deny_rules` and `context` are filled in together, when the run has been
 prepared: the request validated, the working directory and executable found, the
@@ -302,7 +302,9 @@ Behavior:
   usage error.
 - **Claude Code settings.** A Claude worker starts with settings sources off, so
   it inherits no hooks, `env`, `apiKeyHelper`, plugins, skills, MCP servers or
-  instructions from the user's or the project's Claude Code settings. It does get
+  instructions from the user's or the project's Claude Code settings, and with
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, so
+  no `CLAUDE.md` file and no auto memory from the user's home directory reach it. It does get
   their `permissions.deny` rules: delega reads the user's settings file
   (`settings.json` in the worker's `CLAUDE_CONFIG_DIR`, else
   `.claude/settings.json` under the worker's `HOME`) and the working directory's

@@ -304,6 +304,18 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
 }
 
 /// Build the launch for a request.
+/// Variables delega sets for every Claude worker, which a caller cannot pass or
+/// set (`forbidden_env_name`). Background tasks would outlive the run. The two
+/// memory switches, both documented by Claude Code, keep the user's
+/// `CLAUDE.md` files and auto memory (`~/.claude/projects/<project>/memory/`)
+/// out of the worker: `--setting-sources ""` keeps `CLAUDE.md` out but not
+/// auto memory (#106).
+pub(super) const OWNED_ENV: [(&str, &str); 3] = [
+    ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+    ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+];
+
 pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let request = inputs.request;
     let scope = inputs.scope;
@@ -369,10 +381,10 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     args.push(inputs.system.to_string());
     args.extend(inputs.native.iter().cloned());
 
-    let mut env = vec![(
-        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_string(),
-        "1".to_string(),
-    )];
+    let mut env: Vec<(String, String)> = OWNED_ENV
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect();
     if g.guard.is_some() {
         env.push((
             GRANTS_ENV.to_string(),
@@ -389,10 +401,11 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     );
     notes.extend(inputs.deny.notes());
     notes.push(
-        "reference directories do not contribute CLAUDE.md files (the variable that would load \
-         them is not set); whether Claude Code reads the working directory's own CLAUDE.md when \
-         settings sources are empty is the provider's behaviour and is not controlled or \
-         verified by delega"
+        "no CLAUDE.md file and no auto memory reach the worker: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
+         keeps the user's, the project's and reference directories' CLAUDE.md files and the \
+         auto-memory index out of its context, and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 turns \
+         Claude Code's auto memory off, so the worker does not read or write the user's memory \
+         directory through it"
             .to_string(),
     );
     let mut mapping = vec![
