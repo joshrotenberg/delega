@@ -110,9 +110,7 @@ impl Preflight {
             got = tokio::time::timeout_at(deadline, acquire) => match got {
                 Ok(Ok(permit)) => permit,
                 Ok(Err(_)) => return Some(internal("checking the request failed unexpectedly")),
-                Err(_) => return Some(self.timed_out(
-                    "request checks are not completing, so none was free",
-                )),
+                Err(_) => return Some(self.timed_out("no request check slot was free")),
             },
         };
         let (request, options, check) = (request.clone(), options.clone(), self.check.clone());

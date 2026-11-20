@@ -605,7 +605,15 @@ async fn outstanding_request_checks_are_capped_and_a_start_beyond_the_cap_waits_
     let error = over.error.as_ref().expect("error");
     assert_eq!(error.kind, "preflight_timeout", "{error:?}");
     assert!(
-        error.message.contains("request checks are not completing"),
+        error.message.starts_with("no request check slot was free"),
+        "{error:?}"
+    );
+    assert_eq!(
+        error
+            .message
+            .matches("request checks are not completing")
+            .count(),
+        1,
         "{error:?}"
     );
     let list = supervisor.list().await.expect("list");
