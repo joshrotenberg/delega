@@ -531,10 +531,19 @@ fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
         assert_eq!(out.status.code(), Some(0), "{provider}");
         assert_eq!(out.stdout, quiet.stdout, "{provider}");
         let err = text(&out.stderr);
-        let lines: Vec<&str> = err.lines().collect();
+        // A completed run can still print an unconfirmed cleanup summary.
+        // The listing retry covers only one reason for that verdict.
+        let is_cleanup_summary =
+            |line: &str| line.starts_with("delega run: cleanup not confirmed: ");
+        let lines: Vec<_> = err
+            .lines()
+            .filter(|line| !is_cleanup_summary(line))
+            .collect();
         assert!(lines.iter().all(|l| l.starts_with("progress: ")), "{err}");
         assert!(
-            lines[0].starts_with(&format!("progress: started {provider} (")),
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with(&format!("progress: started {provider} ("))),
             "{err}"
         );
         assert_eq!(
@@ -549,7 +558,8 @@ fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
             "progress: turn.completed"
         };
         assert!(lines.contains(&last_event), "{err}");
-        assert_eq!(text(&quiet.stderr), "");
+        let quiet_err = text(&quiet.stderr);
+        assert!(quiet_err.lines().all(is_cleanup_summary), "{quiet_err}");
         rig.assert_nothing_left();
         progress_rig.assert_nothing_left();
     }
