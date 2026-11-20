@@ -145,16 +145,16 @@ starts; a refusal there ends that run `refused` and leaves the worker.
 `timeout_secs` if given, so permissions, working directory, model, instructions
 and answer schema are the same. The run is queued behind the worker's running
 and queued runs and runs when its turn comes. The session to continue is the
-latest `session_id` any run of the worker reported, read when the run starts, so
-a follow-up queued behind a run that has not finished still resumes what that
-run reports. It is passed as `session.resume`.
+worker's session, read when the run starts, so a follow-up queued behind a run
+that has not finished still resumes the session that run reports if the worker
+had none. It is passed as `session.resume`.
 
-A run that ends with kind `session_mismatch` (the provider continued another
-session than the one asked for, see
-[providers.md](providers.md#outcomes)) does not replace the worker's session,
-so the next follow-up asks again for the conversation the worker had. A run
-that ends `session_not_found` leaves the worker's session as it was: Claude Code
-reports the requested id and Codex reports none.
+A worker never switches session. Its session is the one it was started to
+resume, or else the first `session_id` any of its runs reported. Once it has
+one, a run that reports a different id does not replace it, whatever that
+run's outcome (`session_mismatch`, `timed_out`, `interrupted` or another
+failure, see [providers.md](providers.md#outcomes)), so the next follow-up asks
+again for the conversation the worker had.
 
 A follow-up is refused as a finished run, not an error, when:
 

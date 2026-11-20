@@ -109,7 +109,7 @@ chunks the tap never received, and the result's `provider_notes` says so too.
 | Outcome | When |
 | --- | --- |
 | `completed` | The provider reported success, exited with code 0, and gave answer text. With `answer_schema`, the text parsed as JSON. A denial that did not stop the run is listed in `permissions.denied`. |
-| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run whose stream reported another session than `session.resume` (`session_mismatch`), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
+| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run that would otherwise have completed but whose stream reported another session than `session.resume` (`session_mismatch`; any other outcome stands with a note), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
 | `timed_out` | The time limit passed. `text` holds any partial answer. |
 | `interrupted` | `interrupt()` was called, or the handle or future was dropped. |
 | `refused` before start | See steps 1 and 2 above. `timing.started_at` is absent. |
@@ -144,20 +144,27 @@ says a second one was seen, so a failure followed by a success is not a
 completion. Output bytes that are not valid UTF-8 are decoded with replacement
 characters and a note says how many lines were affected.
 
-**Resumed sessions.** When `session.resume` is set, the session id the stream
-reports is compared with it. A run that would have completed but reported
-another id is `failed` with kind `session_mismatch`: the message names both
-ids, `text` keeps the answer as partial text, and `session_id` is the id the
-provider reported. A run that already timed out, was interrupted or failed for
-another reason keeps that outcome, and a note names both ids. A run that reports
-no session id is not a mismatch, and an `ephemeral` run is not checked.
+**Resumed sessions.** When `session.resume` is set, every session id the stream
+reports is compared with it; any other id is a mismatch, including when the
+stream reports the requested id and another one. `session_mismatch` replaces
+only an outcome that would otherwise be `completed`: such a run is `failed`
+with kind `session_mismatch`, the message names both ids, `text` keeps the
+answer as partial text, and `session_id` is the latest id the provider
+reported. Every other outcome stands (for example `timed_out`, `interrupted`,
+`answer_not_json` or `provider_error`), and a note names both ids. Both the
+message and the note are redacted like other provider text (see
+[Text from the provider](#text-from-the-provider)). A run that reports no
+session id is not a mismatch, and an `ephemeral` run is not checked. A run
+without `session.resume` whose stream reports more than one session id gets a
+note naming them.
 
 A resumed run that failed because the provider could not find the session has
 kind `session_not_found` instead of `provider_error` or `provider_exit`, with
 the same message: for Claude Code, a failed result whose error text starts
-`No conversation found with session ID`; for Codex, a run with no terminal event
-whose standard error contains `no rollout found for thread id`. Neither is
-matched when `session.resume` is not set.
+`No conversation found with session ID`; for Codex, a run that exited with
+code 1, reported no thread and no terminal event, and whose standard error
+contains `no rollout found for thread id`. Neither is matched when
+`session.resume` is not set.
 
 ### Error kinds
 

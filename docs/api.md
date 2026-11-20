@@ -75,7 +75,7 @@ arguments, and the library from a struct. A partial request saved as a file is a
 | `timeout_secs` | integer | Limit for the run in whole seconds, 1 to 86400. Default 600 (10 minutes). The limit applied is stated in the result as `timing.timeout_secs`. |
 | `permissions` | object | See below. |
 | `answer_schema` | JSON Schema | Ask for a structured answer and validate it. An object or a boolean, at most 256 KiB as compact JSON; one that does not compile is refused `invalid_answer_schema`. |
-| `session` | object | `ephemeral: bool`, or `resume: <provider session id>` (at most 256 bytes) to continue saved history in a new worker. Not both. A resumed run that reports another session fails with `session_mismatch`, and one whose session the provider cannot find fails with `session_not_found` ([providers.md](providers.md#outcomes)). |
+| `session` | object | `ephemeral: bool`, or `resume: <provider session id>` (at most 256 bytes) to continue saved history in a new worker. Not both. A resumed run that reports another session fails with `session_mismatch` only when it would otherwise have completed; any other outcome stands and a note names both ids. One whose session the provider cannot find fails with `session_not_found` ([providers.md](providers.md#outcomes)). |
 | `native_args` | list of strings | Provider options passed through, restricted by an allowlist; a rejected option is refused `native_arg_rejected`. At most 64 entries. The escape hatch. |
 
 Every length and count bound is a constant in
