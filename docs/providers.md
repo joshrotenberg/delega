@@ -217,8 +217,10 @@ provider's events are read is in its Stream section ([Claude Code](#stream),
 
 Provider standard error and provider error messages can echo what the provider
 was given. Before they go into an error message, standard error is cut to its
-last 8 KiB (when that cut falls inside the output, the partial first word is
-dropped, as it may be the end of a credential), joined to one line, and cut
+last 8 KiB (when that cut falls inside the output, everything up to and
+including the first newline in it is dropped, or only the partial first word
+when it holds no newline, as the cut may fall inside a credential or just after
+`Bearer`), joined to one line, and cut
 again to its last 300 characters. A provider error message is kept whole and
 cut to its first 500 characters only after redaction, so a credential across
 that point is still removed whole. Two kinds of text are replaced with
@@ -726,7 +728,8 @@ events are kept: they fail the run only if no terminal event follows.
 
 The [provider failure kind](#provider-failure-kinds) comes from the
 `turn.failed` event, or from the last `error` event when no terminal event
-follows. A structured `codex_error_info` (on the event or its `error`; a string,
+follows. An `error` event or `turn.failed` with a `codex_error_info` and no
+message counts, with the message `Codex reported <name>`. A structured `codex_error_info` (on the event or its `error`; a string,
 or an object with one key) decides first: `usage_limit_exceeded` is
 `provider_usage_limit` and `context_window_exceeded` is
 `provider_context_exhausted`. Next, a message that is a JSON error document is
@@ -740,7 +743,7 @@ read by `error.code` (`insufficient_quota`, `context_length_exceeded`,
 - `provider_auth`: "unexpected status 401" or "unexpected status 403".
 - `provider_model_unavailable`: "model is not supported", "model_not_found",
   or ``model `name` does not exist`` with the name in backticks, single or
-  double quotes directly after "model".
+  double quotes directly after "model", where "model" starts a word.
 - `provider_context_exhausted`: "context window".
 - `provider_capacity`: "unexpected status 429", "503" or "529", "rate limit",
   "overloaded" or "at capacity".

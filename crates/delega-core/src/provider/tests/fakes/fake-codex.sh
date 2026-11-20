@@ -57,6 +57,11 @@
 #                    sk-ant- key that runs across the 500-character clip point
 #   secret-at-clip-error-only  the same message on an error event, with no
 #                    terminal event
+#   usage-limit-info-no-message  an error event with codex_error_info
+#                    usage_limit_exceeded and no message, and no terminal event
+#   denied-refused-secret  a declined command, then a turn.failed whose
+#                    message is "Bash", 480 "a" and an sk-ant- key across the
+#                    500-character clip point
 #   capacity         a turn.failed with "unexpected status 503 Service
 #                    Unavailable: the server is at capacity" (not recorded)
 
@@ -288,6 +293,17 @@ case "$mode" in
     pad=$(head -c 485 /dev/zero | tr '\0' a)
     emit "{\"type\":\"error\",\"message\":\"$pad sk-ant-abcdefghijklmnopqrstuvwx tail\"}"
     exit 1
+    ;;
+  usage-limit-info-no-message)
+    init
+    emit '{"type":"error","codex_error_info":"usage_limit_exceeded"}'
+    exit 1
+    ;;
+  denied-refused-secret)
+    init
+    pad=$(head -c 480 /dev/zero | tr '\0' a)
+    emit '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"make install","status":"declined"}}'
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"Bash $pad sk-ant-abcdefghijklmnopqrstuvwx tail\"}}"
     ;;
   capacity)
     init

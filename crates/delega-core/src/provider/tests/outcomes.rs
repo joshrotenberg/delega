@@ -1087,3 +1087,59 @@ async fn claude_stderr_excerpt_drops_a_credential_cut_by_the_scan_window() {
     assert!(!error.message.contains("uvwx"), "{}", error.message);
     assert!(error.message.ends_with("end"), "{}", error.message);
 }
+
+#[tokio::test]
+async fn claude_stderr_excerpt_drops_a_bearer_token_cut_by_the_scan_window_and_keeps_later_lines() {
+    let error = failure_of(Provider::Claude, "stderr-bearer-at-scan").await;
+    assert_eq!(error.kind, "provider_exit");
+    // The window opens at the space after "Bearer", so the token stands
+    // alone; its whole line is dropped and the next full line stays.
+    assert!(
+        !error.message.contains("abcdefghijklmnop123"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.ends_with("complete line survives"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_stderr_excerpt_without_a_newline_drops_only_the_cut_word() {
+    let error = failure_of(Provider::Claude, "stderr-secret-at-scan-one-line").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(!error.message.contains("uvwx"), "{}", error.message);
+    assert!(error.message.ends_with("end"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn codex_error_event_with_only_codex_error_info_is_provider_usage_limit() {
+    let error = failure_of(Provider::Codex, "usage-limit-info-no-message").await;
+    assert_eq!(error.kind, "provider_usage_limit");
+    assert!(
+        error
+            .message
+            .starts_with("Codex reported usage_limit_exceeded"),
+        "{}",
+        error.message
+    );
+}
+
+async fn denied_refused_secret(provider: Provider) {
+    let rig = Rig::new();
+    let request = rig.request(provider, "denied-refused-secret");
+    let result = run_checked(request, rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "permission_denied");
+    // Clipped first, the message would keep "sk-ant-abcdefg".
+    assert!(!error.message.contains("sk-ant"), "{}", error.message);
+    assert!(error.message.contains("[redacted]"), "{}", error.message);
+    rig.assert_nothing_left().await;
+}
+both!(
+    redacts_a_credential_across_the_clip_point_in_a_denial_stop_message,
+    denied_refused_secret
+);

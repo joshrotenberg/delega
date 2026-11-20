@@ -122,14 +122,19 @@ fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String>
     let bytes = &report.stderr.bytes;
     let start = bytes.len().saturating_sub(STDERR_SCAN_BYTES);
     let mut tail = &bytes[start..];
-    // When the scan starts inside the output, its first word may be the end
-    // of a credential whose start the redactor would need; drop it.
+    // When the scan starts inside the output, its first line may hold the
+    // end of a credential whose start (or whose `Bearer`) the redactor would
+    // need; drop up to and including the first newline. A window with no
+    // newline drops only its partial first word.
     if start > 0 {
-        let word_end = tail
-            .iter()
-            .position(u8::is_ascii_whitespace)
-            .unwrap_or(tail.len());
-        tail = &tail[word_end..];
+        let cut = match tail.iter().position(|b| *b == b'\n') {
+            Some(newline) => newline + 1,
+            None => tail
+                .iter()
+                .position(u8::is_ascii_whitespace)
+                .unwrap_or(tail.len()),
+        };
+        tail = &tail[cut..];
     }
     let text = redactor.apply(&String::from_utf8_lossy(tail));
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");

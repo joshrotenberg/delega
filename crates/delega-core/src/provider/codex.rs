@@ -209,14 +209,9 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
     (!empty).then_some(usage)
 }
 
-/// The error kind a `codex_error_info` value names, when it is one delega
-/// knows. The value is a string, or an object whose one key is the name.
-fn info_kind(info: &Value) -> Option<&'static str> {
-    let name = match info {
-        Value::String(s) => s.as_str(),
-        Value::Object(map) if map.len() == 1 => map.keys().next()?.as_str(),
-        _ => return None,
-    };
+/// The error kind a `codex_error_info` name (see [`info_name`]) stands for,
+/// when it is one delega knows.
+fn info_kind(name: &str) -> Option<&'static str> {
     match name {
         "usage_limit_exceeded" => Some("provider_usage_limit"),
         "context_window_exceeded" => Some("provider_context_exhausted"),
@@ -262,6 +257,14 @@ fn document_kind(message: &str) -> Option<&'static str> {
 /// after it.
 fn names_missing_model(lower: &str) -> bool {
     lower.match_indices("model ").any(|(at, word)| {
+        // "model" must start a word, so "submodel" does not count.
+        let starts_word = lower[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if !starts_word {
+            return false;
+        }
         let rest = &lower[at + word.len()..];
         let Some(quote) = rest
             .chars()
@@ -309,15 +312,25 @@ fn text_kind(message: &str) -> Option<&'static str> {
     }
 }
 
+/// The name in a `codex_error_info` on the event or its `error`, when it is a
+/// string or an object with one key.
+fn info_name(event: &Map<String, Value>) -> Option<&str> {
+    let info = event
+        .get("codex_error_info")
+        .or_else(|| event.get("error").and_then(|e| e.get("codex_error_info")))?;
+    match info {
+        Value::String(s) if !s.is_empty() => Some(s.as_str()),
+        Value::Object(map) if map.len() == 1 => map.keys().next().map(String::as_str),
+        _ => None,
+    }
+}
+
 /// The error kind of a failed turn or an error event: a structured
 /// `codex_error_info` on the event or its `error` first, then a message that
 /// is a JSON error document, then the message's words. `None` keeps
 /// `provider_error`.
 fn failure_kind(event: &Map<String, Value>, message: &str) -> Option<&'static str> {
-    let error = event.get("error");
-    event
-        .get("codex_error_info")
-        .or_else(|| error.and_then(|e| e.get("codex_error_info")))
+    info_name(event)
         .and_then(info_kind)
         .or_else(|| document_kind(message))
         .or_else(|| text_kind(message))
@@ -382,21 +395,33 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 parsed.usage = usage(event);
             }
             "turn.failed" => {
-                let message = event
+                let text = event
                     .get("error")
                     .and_then(|e| e.get("message"))
                     .and_then(Value::as_str)
-                    .unwrap_or("Codex turn failed");
+                    .filter(|m| !m.is_empty());
+                let message = match (text, info_name(event)) {
+                    (Some(text), _) => text.to_string(),
+                    (None, Some(name)) => format!("Codex reported {name}"),
+                    (None, None) => "Codex turn failed".to_string(),
+                };
                 parsed.terminal = Terminal::Failure {
-                    message: message.to_string(),
-                    code: failure_kind(event, message),
+                    code: failure_kind(event, &message),
+                    message,
                 };
                 parsed.usage = usage(event);
             }
             "error" => {
-                if let Some(message) = str_field(event, "message") {
-                    parsed.error_code = failure_kind(event, message);
-                    parsed.saw_error(message);
+                // An event with only a structured `codex_error_info` counts
+                // too, with a message naming it.
+                let message = match (str_field(event, "message"), info_name(event)) {
+                    (Some(text), _) => Some(text.to_string()),
+                    (None, Some(name)) => Some(format!("Codex reported {name}")),
+                    (None, None) => None,
+                };
+                if let Some(message) = message {
+                    parsed.error_code = failure_kind(event, &message);
+                    parsed.saw_error(&message);
                     parsed.stopped_by_denial = false;
                 }
             }

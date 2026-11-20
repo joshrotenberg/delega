@@ -84,6 +84,15 @@
 #   stderr-secret-at-scan  standard error whose last 8 KiB start 10 bytes
 #                    before the end of an sk-ant- key: the key, 8178 newlines
 #                    and "end", then exit 3
+#   stderr-secret-at-scan-one-line  the same, but with 8179 spaces in place
+#                    of the newlines, so the window holds no newline
+#   stderr-bearer-at-scan  standard error whose last 8 KiB start at the space
+#                    after "Authorization: Bearer", so the window opens with the
+#                    token alone, then the token's line end, 8148 newlines and
+#                    the line "complete line survives", then exit 3
+#   denied-refused-secret  the denied-refused result, its error naming Bash and
+#                    then, after 480 "a", an sk-ant- key across the
+#                    500-character clip point
 #   secret-at-clip   a failed result whose text is 485 "a", a space, then an
 #                    sk-ant- key that runs across the 500-character clip point
 
@@ -456,6 +465,21 @@ case "$mode" in
     init
     { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8178 /dev/zero | tr '\0' '\n'; printf 'end\n'; } >&2
     exit 3
+    ;;
+  stderr-secret-at-scan-one-line)
+    init
+    { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8179 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-bearer-at-scan)
+    init
+    { printf 'Authorization: Bearer abcdefghijklmnop123\n'; head -c 8148 /dev/zero | tr '\0' '\n'; printf 'complete line survives\n'; } >&2
+    exit 3
+    ;;
+  denied-refused-secret)
+    init
+    pad=$(head -c 480 /dev/zero | tr '\0' a)
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$sid\",\"errors\":[\"Bash $pad sk-ant-abcdefghijklmnopqrstuvwx tail\"],\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\",\"tool_input\":{\"command\":\"make install\"}}]}"
     ;;
   secret-at-clip)
     init

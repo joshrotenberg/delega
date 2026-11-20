@@ -360,6 +360,7 @@ fn codex_words_that_only_mention_a_model_or_a_quota_name_no_kind() {
         "Local disk quota exceeded while saving the transcript",
         "The model output file does not exist",
         "model '' does not exist",
+        "The submodel 'helper' does not exist",
     ] {
         let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
         let parsed = codex::parse(line.to_string().as_bytes());
@@ -395,4 +396,18 @@ fn codex_words_follow_the_documented_precedence() {
         let parsed = codex::parse(line.to_string().as_bytes());
         assert_eq!(failure_code(&parsed), Some(kind), "{message}");
     }
+}
+
+#[test]
+fn codex_turn_failed_with_only_codex_error_info_names_the_kind_and_says_so() {
+    let parsed = codex::parse(
+        br#"{"type":"turn.failed","error":{"codex_error_info":"context_window_exceeded"}}"#,
+    );
+    assert_eq!(
+        parsed.terminal,
+        Terminal::Failure {
+            message: "Codex reported context_window_exceeded".into(),
+            code: Some("provider_context_exhausted"),
+        }
+    );
 }
