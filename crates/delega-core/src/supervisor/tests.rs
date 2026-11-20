@@ -755,40 +755,129 @@ async fn a_start_after_the_checks_are_closed_is_shut_down_and_starts_nothing() {
     dir.assert_nothing_left().await;
 }
 
+/// Wait for `count` checks to report that they have entered, each named by
+/// its prompt, and return the prompts. The deadline only ends a test that would
+/// otherwise hang: an entry takes one thread spawn, so a minute is many times
+/// what a loaded machine needs, and a check that never enters is a failure.
+async fn entered(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    count: usize,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut prompts = Vec::new();
+    while prompts.len() < count {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(prompt)) => prompts.push(prompt),
+            Ok(None) => panic!("the checks went away after {prompts:?}"),
+            Err(_) => panic!(
+                "only {} of {count} checks entered within a minute: {prompts:?}",
+                prompts.len()
+            ),
+        }
+    }
+    prompts
+}
+
+/// Starts that stop waiting for a check slot, before one frees and after their
+/// slot has been handed to them, give every slot back: afterwards all of them
+/// can be held at once. The order of holders and waiters comes from events:
+/// each check reports when it has entered, and each waiter is polled until it
+/// is queued for a slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
     use super::limits::MAX_PENDING_PREFLIGHTS;
+    use super::preflight::Preflight;
+    use std::future::Future;
     use std::sync::atomic::AtomicBool;
+    use std::task::Poll;
 
     let dir = Dir::new();
-    let released = Arc::new(AtomicBool::new(false));
-    let _release = Release(released.clone());
-    let supervisor = holding_supervisor(&dir, &released, Duration::from_secs(3600));
+    let first = Arc::new(AtomicBool::new(false));
+    let second = Arc::new(AtomicBool::new(false));
+    let never = Arc::new(AtomicBool::new(false));
+    let (_first, _second, _never) = (
+        Release(first.clone()),
+        Release(second.clone()),
+        Release(never.clone()),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let check = {
+        let (first, second, never) = (first.clone(), second.clone(), never.clone());
+        Arc::new(move |request: &Request, _: &ProviderOptions| {
+            let gate = match request.prompt.split(' ').next() {
+                Some("first") => &first,
+                Some("second") => &second,
+                Some("waiter") => &never,
+                _ => return None,
+            };
+            let _ = tx.send(request.prompt.clone());
+            while !gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    let mut config = dir.config();
+    config.limits.max_live_workers = 64;
+    let supervisor = Supervisor::with_hooks(
+        config,
+        super::runner::provider_launch(),
+        Preflight::with(check, Duration::from_secs(3600)),
+    );
+
+    // Every slot is held.
     let mut holders = tokio::task::JoinSet::new();
     for n in 0..MAX_PENDING_PREFLIGHTS {
-        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold {n}")));
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("first {n}")));
         holders.spawn(async move { supervisor.start(request).await });
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let mut waiters = tokio::task::JoinSet::new();
-    for n in 0..4 {
-        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold w{n}")));
-        waiters.spawn(async move { supervisor.start(request).await });
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    waiters.abort_all();
-    while waiters.join_next().await.is_some() {}
+    entered(&mut rx, MAX_PENDING_PREFLIGHTS).await;
 
-    released.store(true, Ordering::SeqCst);
+    // Eight starts queue for a slot. A start's first poll runs straight to the
+    // wait for a slot, so one poll that returns pending leaves it queued.
+    let mut waiters: Vec<_> = (0..8)
+        .map(|n| Box::pin(supervisor.start(dir.request(&format!("waiter {n}")))))
+        .collect();
+    for waiter in &mut waiters {
+        let queued =
+            std::future::poll_fn(|cx| Poll::Ready(waiter.as_mut().poll(cx).is_pending())).await;
+        assert!(queued, "a start went ahead while every slot was held");
+    }
+    // Half stop waiting before any slot frees.
+    let late_waiters = waiters.split_off(4);
+    drop(waiters);
+
+    // The holders end. A check frees its slot before it answers, so once all
+    // have answered every slot has been freed, and the first four went to the
+    // queued waiters, which are never polled again.
+    first.store(true, Ordering::SeqCst);
     while let Some(joined) = holders.join_next().await {
         let started = joined.expect("task").expect("start");
         assert_eq!(started.error, None, "{started:#?}");
     }
-    let later = supervisor
-        .start(dir.request("echo:later"))
-        .await
-        .expect("start");
-    assert_eq!(later.error, None, "{later:#?}");
+    // The other half stop waiting holding the slot handed to them.
+    drop(late_waiters);
+
+    // All slots are free: as many checks as there are slots are held at once.
+    let mut second_holders = tokio::task::JoinSet::new();
+    for n in 0..MAX_PENDING_PREFLIGHTS {
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("second {n}")));
+        second_holders.spawn(async move { supervisor.start(request).await });
+    }
+    let prompts = entered(&mut rx, MAX_PENDING_PREFLIGHTS).await;
+    assert!(
+        prompts.iter().all(|p| p.starts_with("second ")),
+        "a start that stopped waiting ran its check: {prompts:?}"
+    );
+    second.store(true, Ordering::SeqCst);
+    while let Some(joined) = second_holders.join_next().await {
+        let started = joined.expect("task").expect("start");
+        assert_eq!(started.error, None, "{started:#?}");
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "a start that stopped waiting ran its check"
+    );
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
