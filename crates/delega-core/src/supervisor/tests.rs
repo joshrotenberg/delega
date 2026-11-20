@@ -1157,6 +1157,47 @@ async fn a_follow_up_reports_its_prompt_as_an_argument_whatever_layer_set_the_st
     dir.assert_nothing_left().await;
 }
 
+#[tokio::test]
+async fn a_follow_up_that_continued_another_session_does_not_replace_the_workers_session() {
+    let dir = Dir::new();
+    let mut config = dir.config();
+    // Every resumed run reports this session instead of the one it asked for.
+    config
+        .provider
+        .env_set
+        .push(("FAKE_RESUMED_SESSION_ID".into(), "stray-session".into()));
+    let supervisor = Supervisor::new(config);
+    let started = supervisor
+        .start(dir.request("echo:one"))
+        .await
+        .expect("start");
+    let first = finished_result(&supervisor, &started.run).await;
+    assert_eq!(first.outcome, Outcome::Completed, "{first:#?}");
+    assert_eq!(first.session_id.as_deref(), Some("fake-claude-session-1"));
+    let worker = started.worker.expect("worker");
+
+    for prompt in ["echo:two", "echo:three"] {
+        let followed = supervisor
+            .follow_up(&worker, prompt, None)
+            .await
+            .expect("follow up");
+        let result = finished_result(&supervisor, &followed.run).await;
+        let error = result.error.as_ref().expect("error");
+        assert_eq!(error.kind, "session_mismatch", "{prompt}: {result:#?}");
+        // Each follow-up asked for the session the worker started with, not the
+        // one the previous follow-up reported.
+        assert!(
+            error
+                .message
+                .contains("resume session fake-claude-session-1 "),
+            "{prompt}: {}",
+            error.message
+        );
+    }
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
 fn provider_event(kind: &str, summary: &str) -> ProgressEvent {
     ProgressEvent::Provider {
         kind: kind.to_string(),

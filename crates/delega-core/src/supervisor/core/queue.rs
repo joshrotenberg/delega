@@ -248,7 +248,18 @@ impl Core {
         run.in_ready = false;
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
-        let session = result.session_id.clone();
+        // A run that continued another session than the one it asked for does
+        // not replace the worker's session, so the next follow-up asks for the
+        // conversation the worker had.
+        let mismatched = result
+            .error
+            .as_ref()
+            .is_some_and(|e| e.kind == "session_mismatch");
+        let session = if mismatched {
+            None
+        } else {
+            result.session_id.clone()
+        };
         self.note_cleanup(id, &result);
         let Some(run) = self.runs.get_mut(id) else {
             return;

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::contract::request::{Provider, Request};
+use crate::contract::request::{Provider, Request, Session};
 use crate::contract::result::{Cleanup, ErrorDetail, RunResult};
 use crate::process::{CaptureSpec, Ending, Keep, ProcessHandle, ProcessReport, ProcessSpec};
 
@@ -170,12 +170,12 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
         Ok(plan) => {
             facts.provenance.provider_executable = Some(plan.program.display().to_string());
             facts.applied = plan.applied.clone();
-            let ephemeral = request.session.ephemeral;
+            let session = request.session.clone();
             let join = tokio::spawn(execute(
                 plan,
                 facts.clone(),
                 cancel.clone(),
-                ephemeral,
+                session,
                 progress,
             ));
             RunHandle {
@@ -291,10 +291,10 @@ async fn execute(
     plan: Plan,
     facts: Facts,
     cancel: CancellationToken,
-    ephemeral: bool,
+    session: Session,
     progress: Progress,
 ) -> RunResult {
-    let mut result = execute_steps(plan, facts, cancel, ephemeral, &progress).await;
+    let mut result = execute_steps(plan, facts, cancel, &session, &progress).await;
     progress.finished(&mut result);
     result
 }
@@ -303,7 +303,7 @@ async fn execute_steps(
     plan: Plan,
     mut facts: Facts,
     cancel: CancellationToken,
-    ephemeral: bool,
+    session: &Session,
     progress: &Progress,
 ) -> RunResult {
     let began = Instant::now();
@@ -428,7 +428,8 @@ async fn execute_steps(
         Settle {
             facts: &facts,
             validator: plan.validator.as_ref(),
-            ephemeral,
+            ephemeral: session.ephemeral,
+            resume: session.resume.as_deref(),
             notes,
             max_output_bytes: plan.max_output_bytes,
             redactor: &plan.redactor,

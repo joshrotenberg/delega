@@ -363,6 +363,143 @@ async fn session_id_reported(provider: Provider) {
 }
 both!(reports_the_provider_session_id, session_id_reported);
 
+/// Options whose fake reports `reported` as the session of a resumed run.
+fn resumed_as(rig: &Rig, provider: Provider, reported: &str) -> crate::provider::ProviderOptions {
+    let mut options = rig.options(provider);
+    options
+        .env_set
+        .push(("FAKE_RESUMED_SESSION_ID".into(), reported.into()));
+    options
+}
+
+async fn session_mismatch(provider: Provider) {
+    let rig = Rig::new();
+    let mut request = rig.request(provider, "success");
+    request.session.resume = Some("asked-session".into());
+    let result = run_checked(request, resumed_as(&rig, provider, "other-session")).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "session_mismatch");
+    assert!(
+        error.message.contains("asked-session") && error.message.contains("other-session"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        result.text, "fake final answer",
+        "the answer is kept as partial text"
+    );
+    assert_eq!(result.session_id.as_deref(), Some("other-session"));
+    rig.assert_nothing_left().await;
+}
+both!(
+    fails_a_resumed_run_that_reports_another_session,
+    session_mismatch
+);
+
+async fn mismatch_after_timeout(provider: Provider) {
+    let rig = Rig::new();
+    let mut request = rig.request(provider, "hang");
+    request.session.resume = Some("asked-session".into());
+    request.timeout_secs = 1;
+    let result = run_checked(request, resumed_as(&rig, provider, "other-session")).await;
+    assert_eq!(result.outcome, Outcome::TimedOut, "{result:#?}");
+    assert_eq!(result.error.expect("error").kind, "timed_out");
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("asked-session") && n.contains("other-session")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+both!(
+    keeps_a_timeout_and_notes_the_mismatch_of_a_resumed_run,
+    mismatch_after_timeout
+);
+
+async fn no_reported_session(provider: Provider) {
+    let rig = Rig::new();
+    let mut request = rig.request(provider, "no-session-id");
+    request.session.resume = Some("asked-session".into());
+    let result = run_checked(request, rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert_eq!(result.session_id, None);
+    assert!(
+        !result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("asked-session")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+both!(
+    completes_a_resumed_run_that_reports_no_session,
+    no_reported_session
+);
+
+async fn start_unaffected(provider: Provider) {
+    let rig = Rig::new();
+    let request = rig.request(provider, "success");
+    let result = run_checked(request, resumed_as(&rig, provider, "other-session")).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    let expected = match provider {
+        Provider::Claude => "fake-claude-session-1",
+        Provider::Codex => "fake-codex-thread-1",
+    };
+    assert_eq!(result.session_id.as_deref(), Some(expected));
+    rig.assert_nothing_left().await;
+}
+both!(
+    does_not_check_the_session_of_a_run_that_resumes_none,
+    start_unaffected
+);
+
+async fn session_not_found(provider: Provider) {
+    let rig = Rig::new();
+    let mut request = rig.request(provider, "unknown-session");
+    request.session.resume = Some("missing-session".into());
+    let result = run_checked(request, rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "session_not_found");
+    assert_eq!(error.provider_exit_code, Some(1));
+    let expected = match provider {
+        Provider::Claude => "No conversation found with session ID: missing-session",
+        Provider::Codex => "no rollout found for thread id missing-session",
+    };
+    assert!(error.message.contains(expected), "{}", error.message);
+    rig.assert_nothing_left().await;
+}
+both!(
+    names_a_missing_session_to_resume_session_not_found,
+    session_not_found
+);
+
+async fn unknown_session_without_resume(provider: Provider) {
+    let rig = Rig::new();
+    let result = run_checked(
+        rig.request(provider, "unknown-session"),
+        rig.options(provider),
+    )
+    .await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let expected = match provider {
+        Provider::Claude => "provider_error",
+        Provider::Codex => "provider_exit",
+    };
+    assert_eq!(result.error.expect("error").kind, expected);
+    rig.assert_nothing_left().await;
+}
+both!(
+    keeps_the_generic_kind_for_a_missing_session_when_nothing_was_resumed,
+    unknown_session_without_resume
+);
+
 async fn ephemeral(provider: Provider) {
     let rig = Rig::new();
     let mut request = rig.request(provider, "success");

@@ -11,6 +11,17 @@
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
 #   FAKE_MCP         ok (default), bad-json, failure, odd-transport, hang
+#   FAKE_SESSION_ID  the thread id reported when the run is not resuming one
+#   FAKE_RESUMED_SESSION_ID  the thread id reported when the run is resuming
+#                    one, instead of the id it was asked to resume
+#
+# Modes about sessions:
+#   unknown-session  what Codex 0.170.0 does when `resume` names a thread that
+#                    does not exist: nothing on standard output, the line
+#                    "Error: thread/resume: thread/resume failed: no rollout
+#                    found for thread id <id> (code -32600)" on standard error,
+#                    then exit 1
+#   no-session-id    a successful run with no thread.started event
 
 for arg in "$@"; do
   case "$arg" in
@@ -65,7 +76,8 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
-sid="${resume:-${FAKE_SESSION_ID:-fake-codex-thread-1}}"
+sid="${FAKE_SESSION_ID:-fake-codex-thread-1}"
+[ -n "$resume" ] && sid="${FAKE_RESUMED_SESSION_ID:-$resume}"
 
 IFS= read -r mode || true
 rest=$(cat)
@@ -186,6 +198,15 @@ case "$mode" in
     init
     printf 'fake provider crashed\n' >&2
     exit 3
+    ;;
+  unknown-session)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  no-session-id)
+    emit '{"type":"turn.started"}'
+    final '"fake final answer"'
+    done_ok
     ;;
   success-then-exit-nonzero)
     init

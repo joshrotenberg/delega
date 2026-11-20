@@ -15,6 +15,8 @@ use std::fmt;
 /// `provider_error` (the provider reported failure), `provider_turn_limit` and
 /// `provider_budget_limit` (Claude Code reported a turn or budget limit),
 /// `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
+/// `session_mismatch` (a resumed run reported another session),
+/// `session_not_found` (the session to resume does not exist),
 /// `provider_preparation_failed`, `permission_denied` (refused after start),
 /// `spawn_failed`, `process_signaled`, `wait_failed` and `internal_error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
