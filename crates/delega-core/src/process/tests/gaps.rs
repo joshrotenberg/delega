@@ -12,8 +12,13 @@
 //! What remains are descendants no process table can follow: one whose parent
 //! exits before any listing saw it (its parent was the leader itself, or a
 //! member that exited at once), and a fast fork relay, which is never in a
-//! listing for long enough to be signalled. The last three tests state the
-//! wanted behaviour and are ignored because they fail. Run them with
+//! listing for long enough to be signalled. Three tests state the wanted
+//! behaviour and are ignored because they fail. The first two of them start
+//! their descendant after the early listings (`CAPTURE_RAMP`), which see a
+//! descendant started sooner, and end the leader before the first periodic
+//! listing. Two regression tests cover what the ramp closed: a `setsid`
+//! descendant started just after spawn whose leader crashes before the first
+//! periodic listing, and the schedule of the ramp itself. Run them with
 //! `cargo test -- --ignored`. They leave one process running when they fail,
 //! so each stops it itself.
 
@@ -45,6 +50,12 @@ pub(super) fn marking_lister(marker: std::path::PathBuf) -> Lister {
 }
 
 const WAIT_FOR_SCAN: &str = "while [ ! -e scanned ]; do sleep 0.02; done;";
+
+/// Waits until the last listing of `CAPTURE_RAMP` (200 ms after spawn) has
+/// passed, so a descendant started after it can only be seen by the periodic
+/// listing, 500 ms after the ramp ends. The first listing ends just after
+/// spawn, so 0.3 s from there is after 200 ms with room to spare.
+const AFTER_RAMP: &str = "sleep 0.3;";
 
 /// The wanted behaviour: when a descendant is left running, the result must not
 /// claim cleanup is confirmed.
@@ -85,13 +96,105 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
     super::fixtures::assert_gone("descendant", &pids).await;
 }
 
+/// Pins the schedule itself, not one timing. A lister records when each
+/// listing starts and ends. The child lives 1 s, so the first periodic listing
+/// is not the one under test. Each of the three ramp listings must start
+/// promptly once it is due: no later than its offset from spawn (50, 100, 200
+/// ms) or the end of the listing before it, whichever is later, plus a margin
+/// for scheduling. Without that step the next listing would come one periodic
+/// interval (500 ms) after the previous one ended, far past the margin. Timing
+/// each start from the previous end, and not from spawn, keeps the test honest
+/// when `ps` is slow under load and the ramp listings run back to back. A ramp
+/// listing is never early, so each also starts no sooner than its offset.
+#[tokio::test]
+async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing() {
+    use crate::process::ProcessHandle;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// Far below the 500 ms a missing ramp step would cost, and far above
+    /// ordinary task scheduling delay.
+    const MARGIN: Duration = Duration::from_millis(250);
+
+    let s = Scratch::new();
+    let spans: Arc<Mutex<Vec<(Instant, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = spans.clone();
+    let lister: Lister = Arc::new(move || {
+        let recorder = recorder.clone();
+        Box::pin(async move {
+            let started = Instant::now();
+            let listing = list_processes().await;
+            recorder
+                .lock()
+                .expect("lock spans")
+                .push((started, Instant::now()));
+            listing
+        })
+    });
+    let spec = sh(&s, "sleep 1", LONG).with_lister(lister);
+    let spawned = Instant::now();
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    let mut spans = spans.lock().expect("lock spans").clone();
+    spans.sort_by_key(|(started, _)| *started);
+    let offsets: Vec<(Duration, Duration)> = spans
+        .iter()
+        .map(|(a, b)| {
+            (
+                a.saturating_duration_since(spawned),
+                b.saturating_duration_since(spawned),
+            )
+        })
+        .collect();
+    assert!(offsets.len() >= 4, "fewer than four listings: {offsets:?}");
+    // Listing 0 is the one at spawn. The offsets are written out here, not
+    // read from `CAPTURE_RAMP`, so that shortening the ramp fails the test.
+    for (step, due_ms) in [50u64, 100, 200].into_iter().enumerate() {
+        let due = Duration::from_millis(due_ms);
+        let (start, _) = offsets[step + 1];
+        let (_, previous_end) = offsets[step];
+        let ready = due.max(previous_end);
+        assert!(
+            start + Duration::from_millis(5) >= due,
+            "ramp listing {step} started at {start:?}, before its offset {due:?}: {offsets:?}"
+        );
+        assert!(
+            start <= ready + MARGIN,
+            "ramp listing {step} started at {start:?}, more than {MARGIN:?} after it was due at \
+             {ready:?}: {offsets:?}"
+        );
+    }
+}
+
+/// The periodic interval is the default here, so the listings are the one at
+/// spawn, the early ramp (`CAPTURE_RAMP`) and then the 500 ms interval. The
+/// descendant calls `setsid` straight after the first listing and the leader
+/// crashes about 0.2 s later, long before the first periodic listing. Only a
+/// ramp listing can see the descendant while the leader is its parent. Without
+/// the ramp the descendant outlives the run, and the result says Confirmed.
+#[tokio::test]
+async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_leader_crashes_before_the_first_periodic_listing()
+ {
+    require_perl!();
+    let s = Scratch::new();
+    let script = format!(
+        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+         sleep 0.2; kill -KILL $$; sleep 5"
+    );
+    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_no_false_confirmation(pids[0], &report.cleanup);
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("descendant", &pids).await;
+}
+
 #[tokio::test]
 #[ignore = "known gap: the parent was the leader, orphaned before any listing"]
 async fn a_setsid_grandchild_whose_parent_exits_at_once_is_not_reported_as_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
     );
     let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
@@ -105,8 +208,8 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_not_rep
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
-         sleep 0.2; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+         sleep 0.15; kill -KILL $$; sleep 5"
     );
     let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;

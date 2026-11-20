@@ -116,7 +116,7 @@ kept where a row carries over.
 | `d` | as `c`, no timeout | SIGINT at 1 s | `interrupted`, exit 130 |
 | `dt` | as `d` | SIGTERM at 1 s | `interrupted`, exit 130 |
 | `dh` | as `d` | SIGHUP at 1 s | `interrupted`, exit 130 |
-| `e` | SIGKILLs itself 0.5 s in | wait | `failed`, exit 1 |
+| `e` | SIGKILLs itself 0.5 s in (1.5 s with the `bare` variant) | wait | `failed`, exit 1 |
 | `ed` | as `e` | `--timeout 25s` | `failed`, exit 1 |
 | `fd` | hangs, no output | `--timeout 3s` | `timed_out`, exit 124 |
 | `hd` | closes stdout, stays alive | `--timeout 3s` | `timed_out`, exit 124 |
@@ -135,11 +135,11 @@ Variants: `plain` (nothing), `child` (one child in the provider's group),
 `setsid` (a child in the group that starts a grandchild in a session of its
 own), `ignore` (a child that ignores TERM and INT), `stubborn` (the provider
 ignores TERM and INT itself), `pipe` (a child that keeps the provider's stdio),
-`orphan` (a child that starts a `setsid` grandchild and exits at once),
+`orphan` (a child that starts a `setsid` grandchild and exits at once; these rows are timing-dependent),
 `orphan-late` (as `orphan`, after 1.3 s), `relay` (a fork relay: each process
 ignores TERM, leads a group of its own, lives a few milliseconds and forks its
 successor), `bare` (a `sleep 300` in a session of its own whose command line
-does not carry the marker, found through the fake's pid ledger instead). Each case runs the variants listed for it in `src/matrix.rs`; the
+does not carry the marker, found through the fake's pid ledger instead). With `e` the provider waits 1.5 s after the `sleep` has left the session before it crashes, so several listings (`delega` lists at spawn, at 50, 100 and 200 ms, then every 500 ms) have run while the provider is its parent; the shorter 0.5 s lost that race under heavy load (delega issue 79). With `a` (and `u`) the provider waits 0.3 s before it starts the `sleep` and then ends at once, so the child appears between the early listings and the first periodic one; started at once, the listing at 50 or 100 ms adopts it and the documented gap does not show. Each case runs the variants listed for it in `src/matrix.rs`; the
 whole matrix is 188 rows.
 
 Actions that start at 1 s wait until the fake has recorded every process the

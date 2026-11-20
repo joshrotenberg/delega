@@ -130,13 +130,26 @@
 //!
 //! - A descendant that calls `setsid` and whose parent exited before any
 //!   listing saw the two together. The parent is the child itself (it exits, or
-//!   crashes, within one scan interval of the descendant calling `setsid`) or a
-//!   member of the session that exits at once. A process whose parent exits is
-//!   a child of init from that moment, in a session of its own, so no later
-//!   listing can tie it to the child, and nothing in the process table says who
-//!   its parent was. The scan runs every 500 ms and once more, within a budget,
-//!   before every stop and before the signals that follow a natural exit; it
-//!   cannot run earlier than the exit itself.
+//!   crashes, between two listings with the descendant calling `setsid` after
+//!   the earlier one) or a member of the session that exits at once. A process
+//!   whose parent exits is a child of init from that moment, in a session of
+//!   its own, so no later listing can tie it to the child, and nothing in the
+//!   process table says who its parent was. Listings are taken at spawn, then
+//!   at 50, 100 and 200 ms after it (`CAPTURE_RAMP`), then every 500 ms
+//!   (`CAPTURE_INTERVAL`), and once more, within a budget, before every stop and
+//!   before the signals that follow a natural exit; the last cannot run earlier
+//!   than the exit itself. The window is therefore the time between two
+//!   neighbouring listings: 50 to 100 ms in the first 200 ms of a run and 500
+//!   ms after it (the first periodic listing is 500 ms after the ramp ends, at
+//!   700 ms). Under load, a listing that is late widens it. Each extra listing
+//!   costs one run of `ps`. Measured on macOS arm64 with `ps -axo
+//!   pid=,ppid=,pgid=,stat=,lstart=` run 60 times in a row from a script, 822
+//!   processes, load about 10: median 12.3 ms, p90 13.0 ms (an earlier set of
+//!   50 runs at 785 processes gave a median of 11.4 ms). The ramp applies to
+//!   every process-layer run, the provider version probe and Codex's MCP probe
+//!   included, and each run that lasts past 50, 100 or 200 ms gets the
+//!   listings of the steps it outlives, so one `delega` run can take more than
+//!   three extra `ps` runs.
 //!   [`Diagnostics::capture_gap_observed`] says when a scan is known to have
 //!   missed its budget or failed, which widens that window. A descendant whose
 //!   parent is still alive in the session when the child exits is not part of

@@ -21,7 +21,19 @@ pub const DEFAULT_STDOUT_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 /// Bytes kept from standard error when a spec does not set a bound.
 pub const DEFAULT_STDERR_CAPTURE_BYTES: usize = 256 * 1024;
 
-/// Interval between descendant scans while the child runs.
+/// Offsets from the spawn of the child at which the owner takes extra
+/// descendant listings, after the one at spawn and before it settles at
+/// `CAPTURE_INTERVAL`. A child that starts a descendant in a session of its
+/// own and ends within the first scan interval is otherwise seen by no
+/// listing together with that descendant. A listing that is late is taken as
+/// soon as the previous one is done, not skipped.
+pub const CAPTURE_RAMP: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+];
+/// Interval between descendant scans while the child runs, once the ramp
+/// (`CAPTURE_RAMP`) is over.
 pub const CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the first signal after a natural exit of the child waits for one
 /// descendant listing taken after the exit. The leader is gone, so nothing is
