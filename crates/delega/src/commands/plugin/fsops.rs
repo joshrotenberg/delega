@@ -41,7 +41,7 @@ pub fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
-/// An existing directory is reused only when an earlier `init` wrote it (a
+/// An existing directory is reused only when an earlier `delega plugin install` wrote it (a
 /// valid marker) or it is empty. Anything else is someone's data.
 pub fn check_dir(dir: &Path) -> Result<(), String> {
     match fs::read_dir(dir) {
@@ -52,7 +52,7 @@ pub fn check_dir(dir: &Path) -> Result<(), String> {
                 Ok(())
             } else {
                 Err(format!(
-                    "{} exists and was not created by delega init; choose another --install-dir",
+                    "{} exists and was not created by delega plugin install; choose another --install-dir",
                     dir.display()
                 ))
             }

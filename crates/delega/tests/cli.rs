@@ -320,14 +320,7 @@ fn help_lists_every_planned_subcommand() {
     assert_eq!(out.status.code(), Some(0));
     let help = text(&out.stdout);
     for name in [
-        "run",
-        "mcp",
-        "init",
-        "uninstall",
-        "schema",
-        "skill",
-        "doctor",
-        "version",
+        "run", "mcp", "plugin", "schema", "skill", "doctor", "version",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(name)),

@@ -1,8 +1,8 @@
 //! The ownership marker, `.delega-install.json`, format version 1.
 //!
-//! It names every file `init` wrote (relative to the managed directory, the
+//! It names every file `delega plugin install` wrote (relative to the managed directory, the
 //! marker itself excepted) and every host the plugin was registered with.
-//! `init` reuses a directory only if it holds a valid marker, and `uninstall`
+//! `delega plugin install` reuses a directory only if it holds a valid marker, and `delega plugin uninstall`
 //! acts only on one.
 
 use std::io::Read;
@@ -69,7 +69,7 @@ fn plain_relative(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-/// Whether `init` of this build can write `path`: the marketplaces, the
+/// Whether `delega plugin install` of this build can write `path`: the marketplaces, the
 /// executable and the plugin's manifests, identity and skills. Anything else a
 /// marker names is not ours to delete.
 ///

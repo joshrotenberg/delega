@@ -1,22 +1,42 @@
-//! What `delega init` and `delega uninstall` share: the managed directory, the
+//! What `delega plugin install` and `delega plugin uninstall` share: the managed directory, the
 //! plugin payload, the ownership marker, the host commands and how a host is
 //! found.
 //!
 //! The hosts own their configuration. Nothing here edits it: a host is
 //! registered and unregistered only by running its own CLI.
 
-pub(super) mod exec;
-pub(super) mod files;
-pub(super) mod fsops;
-pub(super) mod marker;
-pub(super) mod registration;
-pub(super) mod report;
+mod exec;
+mod files;
+mod fsops;
+mod install;
+mod marker;
+mod registration;
+mod report;
+mod uninstall;
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
-use clap::ValueEnum;
+use clap::{Subcommand, ValueEnum};
 use delega_core::contract::request::Provider;
 use delega_core::provider::program::{default_name, override_variable};
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Install the plugin and skills into Claude Code, Codex or both. Run it again to refresh an existing install
+    Install(install::Args),
+    /// Remove the delega plugin from the hosts and from disk
+    Uninstall(uninstall::Args),
+}
+
+impl Command {
+    pub(super) fn run(self) -> ExitCode {
+        match self {
+            Self::Install(args) => install::run(args),
+            Self::Uninstall(args) => uninstall::run(args),
+        }
+    }
+}
 
 /// The local marketplace both hosts register.
 pub const MARKETPLACE: &str = "delega-local";
@@ -31,7 +51,7 @@ pub const EXECUTABLE: &str = "plugin/delega/bin/delega";
 /// The ownership marker, relative to the managed directory.
 pub const MARKER: &str = ".delega-install.json";
 
-/// A host `delega init` can install into.
+/// A host `delega plugin install` can install into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Host {
     /// Claude Code
@@ -81,7 +101,7 @@ impl Host {
     ///
     /// Claude Code's `plugin update` refreshes a cached copy that a repeated
     /// install leaves stale; Codex's `plugin add` copies the plugin into its
-    /// cache every time, so it runs on every init.
+    /// cache every time, so it runs on every install.
     pub fn install_commands(self, root: &str) -> Vec<Vec<String>> {
         let args = |parts: &[&str]| parts.iter().map(|part| part.to_string()).collect();
         match self {

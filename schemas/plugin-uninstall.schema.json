@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "delega init output",
-  "description": "The document printed by `delega init --output json`.",
+  "title": "delega plugin uninstall output",
+  "description": "The document printed by `delega plugin uninstall --output json`.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,8 +11,7 @@
     "dry_run",
     "install_dir",
     "plugin_id",
-    "plugin_version",
-    "executable",
+    "directory",
     "files",
     "hosts",
     "error"
@@ -22,7 +21,7 @@
       "const": 1
     },
     "operation": {
-      "const": "init"
+      "const": "uninstall"
     },
     "ok": {
       "type": "boolean",
@@ -37,23 +36,23 @@
     "plugin_id": {
       "const": "delega@delega-local"
     },
-    "plugin_version": {
-      "type": [
-        "string",
-        "null"
+    "directory": {
+      "enum": [
+        "removed",
+        "files_removed",
+        "kept",
+        "absent",
+        "would_remove",
+        "would_keep"
       ],
-      "description": "The plugin version: the delega version, a dot and the SHA-256 of the copied executable. Null when init stopped before it was computed."
-    },
-    "executable": {
-      "type": "string",
-      "description": "The executable that is copied."
+      "description": "What became of the managed directory. files_removed: other files kept the directory itself."
     },
     "files": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "Paths relative to install_dir that were written, or would be in a dry run. Empty when init stopped before writing."
+      "description": "Paths relative to install_dir that were removed, or would be in a dry run. Empty when the directory was kept."
     },
     "hosts": {
       "type": "array",
@@ -127,10 +126,11 @@
         },
         "status": {
           "enum": [
-            "skipped",
             "not_run",
-            "installed",
-            "would_install",
+            "not_registered",
+            "refused",
+            "removed",
+            "would_remove",
             "failed"
           ]
         },
