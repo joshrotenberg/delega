@@ -522,19 +522,82 @@ fn the_command_guard_is_hidden_from_help() {
     assert!(!text(&out.stdout).contains("command-guard"));
 }
 
+// The provider merges cleanup reasons from its subprocesses with "; ".
+fn strip_load_cleanup_reason(reason: &str) -> Option<&str> {
+    use delega_core::process::LATE_LISTING_REASON;
+
+    if let Some(rest) = reason.strip_prefix(LATE_LISTING_REASON) {
+        return Some(rest);
+    }
+    if let Some(reason) = reason.strip_prefix("process inspection was unavailable (") {
+        let (error, rest) = reason.split_once(
+            "); only the child's process group was checked with kill(-pgid, 0): \
+             no process has the child's group id. Descendants outside the group and session \
+             could not be checked.",
+        )?;
+        return (error == "process listing timed out"
+            || error
+                .strip_prefix("ps could not be started (")
+                .and_then(|detail| detail.strip_suffix(')'))
+                .is_some_and(|detail| !detail.is_empty()))
+        .then_some(rest);
+    }
+    // The final cleanup pass can extend the deadline. The owner prints the
+    // actual duration with one decimal place.
+    let (seconds, rest) = reason
+        .strip_prefix("stopping was not confirmed within ")?
+        .split_once(" s: ")?;
+    let (whole, tenth) = seconds.split_once('.')?;
+    if whole.is_empty()
+        || !whole.bytes().all(|digit| digit.is_ascii_digit())
+        || tenth.len() != 1
+        || !tenth.bytes().all(|digit| digit.is_ascii_digit())
+    {
+        return None;
+    }
+    rest.strip_prefix("the child had not exited or the sweeps were not yet clean")
+}
+
+fn log_load_cleanup_summary(line: &str) -> bool {
+    let Some(mut reason) = line
+        .strip_prefix("delega run: cleanup not confirmed: ")
+        .and_then(|rest| rest.strip_suffix(" (pids [], process groups [])"))
+    else {
+        return false;
+    };
+    while let Some(rest) = strip_load_cleanup_reason(reason) {
+        if rest.is_empty() {
+            eprintln!("{line}");
+            return true;
+        }
+        let Some(next) = rest.strip_prefix("; ") else {
+            break;
+        };
+        reason = next;
+    }
+    false
+}
+
 #[test]
 fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
     for provider in PROVIDERS {
-        let (rig, quiet) = Rig::run_with_timely_listing(provider, "success", &[]);
-        let (progress_rig, out) =
-            Rig::run_with_timely_listing(provider, "success", &["--progress"]);
+        let rig = Rig::new();
+        let quiet = rig.run(provider, "success", &[]);
+        let progress_rig = Rig::new();
+        let out = progress_rig.run(provider, "success", &["--progress"]);
+        assert_eq!(quiet.status.code(), Some(0), "{provider}");
         assert_eq!(out.status.code(), Some(0), "{provider}");
         assert_eq!(out.stdout, quiet.stdout, "{provider}");
         let err = text(&out.stderr);
-        let lines: Vec<&str> = err.lines().collect();
+        let lines: Vec<_> = err
+            .lines()
+            .filter(|line| !log_load_cleanup_summary(line))
+            .collect();
         assert!(lines.iter().all(|l| l.starts_with("progress: ")), "{err}");
         assert!(
-            lines[0].starts_with(&format!("progress: started {provider} (")),
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with(&format!("progress: started {provider} ("))),
             "{err}"
         );
         assert_eq!(
@@ -549,7 +612,11 @@ fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
             "progress: turn.completed"
         };
         assert!(lines.contains(&last_event), "{err}");
-        assert_eq!(text(&quiet.stderr), "");
+        let quiet_err = text(&quiet.stderr);
+        assert!(
+            quiet_err.lines().all(log_load_cleanup_summary),
+            "{quiet_err}"
+        );
         rig.assert_nothing_left();
         progress_rig.assert_nothing_left();
     }
