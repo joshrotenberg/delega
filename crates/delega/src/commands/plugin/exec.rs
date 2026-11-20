@@ -67,15 +67,22 @@ fn drain<R: Read + Send + 'static>(
 /// Run `program` with `args` in `/` and wait for it. An error is a command
 /// that could not start, timed out (it is killed) or left its output open.
 pub fn run(program: &Path, args: &[String], limit: Duration, max: usize) -> Result<Ran, String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir("/")
         .env("PWD", "/")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("cannot start {}: {err}", program.display()))?;
+        .stderr(Stdio::piped());
+    // Under the process layer's spawn lock, like every process delega starts,
+    // so a worker started at the same moment in the same program cannot
+    // inherit these pipes, nor this command a worker's (#104).
+    let mut child = {
+        let _held = delega_core::process::spawn_guard();
+        command.spawn()
+    }
+    .map_err(|err| format!("cannot start {}: {err}", program.display()))?;
     let (tx, rx) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
         drain(out, max, false, tx.clone());

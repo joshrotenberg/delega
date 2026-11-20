@@ -32,6 +32,7 @@ use super::fixtures::{
 use crate::contract::result::Cleanup;
 use crate::process::Ending;
 use crate::process::tree::{Lister, list_processes};
+use crate::test_spawn::Guarded;
 
 const LONG: Duration = Duration::from_secs(60);
 
@@ -289,9 +290,7 @@ fn foreign(kind: &str) -> i32 {
     // `kind` is a shell line that prints the pid of the process it leaves.
     let out = std::process::Command::new("/bin/sh")
         .args(["-c", kind])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
+        .guarded_output()
         .expect("start a foreign process");
     String::from_utf8_lossy(&out.stdout)
         .trim()
@@ -321,7 +320,7 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .guarded_spawn()
         .expect("start a child of the test");
     let child_of_test = i32::try_from(own_child.id()).expect("a pid");
     let foreigners = vec![

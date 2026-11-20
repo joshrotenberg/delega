@@ -1,0 +1,9 @@
+# Every child process delega starts holds the process layer's spawn lock, so
+# concurrent spawns cannot inherit each other's pipes on macOS (#104). The
+# process layer spawns through `process::spawn` in delega-core, which has a
+# stricter `clippy.toml` of its own. `output` and `status` spawn too.
+disallowed-methods = [
+  { path = "tokio::process::Command::spawn", reason = "spawn through delega-core's process layer, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::output", reason = "spawn through delega-core's process layer, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::status", reason = "spawn through delega-core's process layer, which holds the spawn lock (#104)" },
+]

@@ -21,6 +21,7 @@ use crate::provider::limits::{
     MAX_DENY_RULES_PER_FILE, SETTINGS_FILE_BYTES,
 };
 use crate::provider::{DryRun, dry_run};
+use crate::test_spawn::Guarded;
 
 /// Write `content` to `path`, creating the directory above it.
 fn put(path: &Path, content: &str) {
@@ -1089,7 +1090,7 @@ fn a_named_pipe_is_refused_without_blocking() {
     let fifo = user_file(&rig);
     let status = std::process::Command::new("/usr/bin/mkfifo")
         .arg(&fifo)
-        .status()
+        .guarded_status()
         .expect("run mkfifo");
     assert!(status.success());
     let error = dry_run(
@@ -1751,7 +1752,7 @@ fn a_link_to_a_pipe_or_a_device_does_not_hang_and_is_handled_like_the_plain_file
     assert!(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(&fifo)
-            .status()
+            .guarded_status()
             .unwrap()
             .success()
     );
@@ -1782,7 +1783,7 @@ fn what_someone_else_owns_is_skipped_whatever_its_kind_or_mode() {
     assert!(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(rig.file())
-            .status()
+            .guarded_status()
             .unwrap()
             .success()
     );

@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use crate::process::sys::{self, Signal};
 use crate::process::tree::{Lister, list_processes};
 use crate::process::{EnvPolicy, ProcessHandle, ProcessReport, ProcessSpec};
+use crate::test_spawn::Guarded;
 
 /// How long a fixture waits for an event it does not control (a pid file, a
 /// marker, a process state). The wait costs nothing when the event arrives, so
@@ -117,7 +118,7 @@ pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpe
 pub(super) fn is_running(pid: i32) -> bool {
     let out = std::process::Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
+        .guarded_output()
         .expect("run ps");
     let stat = String::from_utf8_lossy(&out.stdout);
     let stat = stat.trim();
@@ -173,7 +174,7 @@ pub(super) fn perl_available() -> bool {
     std::process::Command::new("perl")
         .arg("-e")
         .arg("1")
-        .output()
+        .guarded_output()
         .is_ok_and(|out| out.status.success())
 }
 
@@ -207,7 +208,7 @@ pub(super) async fn wait_own_group(pid: i32) {
         let own = tokio::task::spawn_blocking(move || {
             let out = std::process::Command::new("/bin/ps")
                 .args(["-o", "pgid=", "-p", &pid.to_string()])
-                .output()
+                .guarded_output()
                 .expect("run ps");
             String::from_utf8_lossy(&out.stdout).trim() == pid.to_string()
         })

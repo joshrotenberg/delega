@@ -15,6 +15,7 @@ use crate::contract::outcome::Outcome;
 use crate::contract::request::{Provider, Request};
 use crate::contract::result::Cleanup;
 use crate::provider::{self, ProgressEvent, ProviderOptions};
+use crate::test_spawn::Guarded;
 
 use super::activity::Activity;
 use super::limits::{COMPACT_ACTIVITY, MAX_ACTIVITY, MAX_PARTIAL_TEXT_CHARS};
@@ -99,7 +100,7 @@ impl Dir {
         for _ in 0..1000 {
             let out = std::process::Command::new("/bin/ps")
                 .args(["-axww", "-o", "pid=,command="])
-                .output()
+                .guarded_output()
                 .expect("run ps");
             left = String::from_utf8_lossy(&out.stdout)
                 .lines()

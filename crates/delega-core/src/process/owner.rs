@@ -417,7 +417,7 @@ impl OwnedProcess {
         // session id and the process group id, and it has no controlling
         // terminal.
         sys::new_session(command);
-        let child = command.spawn()?;
+        let child = super::spawn::spawn(command)?;
         let pid = child
             .id()
             .and_then(|id| i32::try_from(id).ok())

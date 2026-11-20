@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::contract::request::Provider;
+use crate::test_spawn::Guarded;
 
 /// A value no message, report or debug text may repeat.
 const SECRET: &str = "distinctive-value-5521";
@@ -737,7 +738,9 @@ fn a_directory_or_a_pipe_is_refused_without_blocking() {
     assert!(refusal.message.contains("not a regular file"), "{refusal}");
 
     let fifo = area.root.join("pipe.toml");
-    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .guarded_status();
     if made.is_ok_and(|s| s.success()) {
         let refusal = area.read(&fifo).into_config().expect_err("refused");
         assert!(refusal.message.contains("not a regular file"), "{refusal}");
