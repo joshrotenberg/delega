@@ -1011,7 +1011,10 @@ Rules that hold for every tool:
   (`structured_omitted`, `structured_bytes`). For a run that has not finished, a
   compact read returns the last 2000 characters of partial text and the last 10
   activity entries; the supervisor keeps at most 16384 characters and 200
-  entries per run. Page a long answer by run id. A `read` by worker
+  entries per run. Consecutive provider `system` events with the same summary
+  are one entry, replaced by each new one with a new cursor, its summary ending
+  in ` (N in a row)` from the second on, such as `thinking_tokens (37 in a
+  row)`; `activity_total` counts every event. Page a long answer by run id. A `read` by worker
   returns the worker's latest run, and a follow-up that finishes between two
   pages makes the next page come from the new run; the response names the run, so
   take the run id from the first page and pass it on the later ones, and treat a
