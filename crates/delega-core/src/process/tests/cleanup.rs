@@ -11,6 +11,7 @@ use crate::contract::result::Cleanup;
 use crate::process::sys::{self, Signal};
 use crate::process::tree::{InspectError, Lister, lister_for};
 use crate::process::{Ending, PIPE_WARNING, ProcessHandle, ProcessReport, run};
+use crate::test_spawn::Guarded;
 
 const LONG: Duration = Duration::from_secs(60);
 /// The stop and cleanup must beat the one-minute child lifetime or grace.
@@ -649,7 +650,7 @@ async fn churn_of_short_lived_orphans_does_not_keep_a_plain_run_from_being_confi
                 while !stop.load(Ordering::SeqCst) {
                     let ok = std::process::Command::new("/bin/sh")
                         .args(["-c", "(/usr/bin/true &)"])
-                        .status()
+                        .guarded_status()
                         .is_ok_and(|s| s.success());
                     if ok {
                         spawned.fetch_add(1, Ordering::SeqCst);

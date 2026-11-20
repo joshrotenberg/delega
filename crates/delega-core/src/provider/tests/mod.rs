@@ -15,6 +15,7 @@ use tempfile::TempDir;
 use crate::contract::request::{Provider, Request};
 use crate::contract::result::RunResult;
 use crate::provider::{ProviderOptions, run};
+use crate::test_spawn::Guarded;
 
 mod applied;
 mod deny;
@@ -202,7 +203,7 @@ fn split_nul(bytes: &[u8]) -> Vec<String> {
 pub(super) fn is_running(pid: i32) -> bool {
     let out = std::process::Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
+        .guarded_output()
         .expect("run ps");
     let stat = String::from_utf8_lossy(&out.stdout);
     let stat = stat.trim();

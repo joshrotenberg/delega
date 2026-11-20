@@ -10,6 +10,7 @@ use super::fixtures::{
 use crate::process::sys::{self, Signal};
 use crate::process::tree::Lister;
 use crate::process::{Ending, ProcessHandle, ProcessSpec, run};
+use crate::test_spawn::Guarded;
 
 const LONG: Duration = Duration::from_secs(60);
 /// A bound for a stop that must not wait out a grace or a limit of a minute or
@@ -92,7 +93,7 @@ async fn the_child_leads_a_new_session_and_has_no_controlling_terminal() {
     assert_ne!(sys::session_of(std::process::id() as i32), Some(leader));
     let tty = std::process::Command::new("/bin/ps")
         .args(["-o", "tty=", "-p", &leader.to_string()])
-        .output()
+        .guarded_output()
         .expect("run ps");
     let tty = String::from_utf8_lossy(&tty.stdout);
     assert!(tty.trim().starts_with('?'), "controlling terminal: {tty:?}");
