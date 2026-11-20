@@ -113,27 +113,32 @@ acc_orphaned() {
   [ "$acc_parent" != "$acc_mid" ]
 }
 
-# Return right after one of delega's process listings has ended, so what the
-# caller starts next has a whole listing interval before the next one. delega
-# lists processes by running `ps` as its own child, and delega is this
-# provider's parent. Its listings run at spawn and 50, 100 and 200 ms after it
-# (CAPTURE_RAMP), then 500 ms after the previous one ends. Waiting 0.3 s first
-# leaves the ramp behind, so the listing seen is the ramp's last or a periodic
-# one, and the next is about 500 ms away whatever the machine's speed. A poll
-# (one pgrep, about 12 ms, far longer on a loaded machine) can miss a short
-# listing; it then catches a later one, so the wait can last a second or more.
-# Bounded at 150 polls, after which it goes ahead, as before #112.
+# Wait, best effort, until one of delega's process listings has just ended,
+# so what the caller starts next is likely to have a listing interval before
+# the next one. delega lists processes by running `ps` as its own child, and
+# delega is this provider's parent. Its listings run at spawn and 50, 100 and
+# 200 ms after it (CAPTURE_RAMP), then 500 ms after the previous one ends.
+# Waiting 0.3 s first usually leaves the ramp behind, so the listing seen is
+# the ramp's last or a periodic one. It is a heuristic: a ramp listing running
+# late can end after 0.3 s with the next one due at once, and polling and
+# scheduling use part of the interval. A poll (one pgrep, about 12 ms, far
+# longer on a loaded machine) can miss a short listing and then catches a later
+# one. It goes ahead after 0.3 s alone when the harness has turned listing off
+# (ACC_NO_LISTING) or pgrep is missing, and after about 3 s of polling
+# otherwise (a deadline in whole seconds, checked every poll), which keeps a
+# row far inside the harness's 30 s limit.
 acc_after_listing() {
   sleep 0.3
+  [ -z "$ACC_NO_LISTING" ] || return 0
+  command -v pgrep >/dev/null 2>&1 || return 0
   acc_seen=0
-  acc_n=0
-  while [ $acc_n -lt 150 ]; do
+  acc_deadline=$(( $(date +%s) + 3 ))
+  while [ "$(date +%s)" -lt "$acc_deadline" ]; do
     if pgrep -P "$PPID" -x ps >/dev/null 2>&1; then
       acc_seen=1
     elif [ $acc_seen = 1 ]; then
-      return
+      return 0
     fi
-    acc_n=$((acc_n + 1))
   done
 }
 
@@ -153,8 +158,9 @@ acc_run() {
   # - bare, with success: the detached child must start and the provider
   #   finish between two listings. A fixed delay ran past the first periodic
   #   listing on a slow CI runner and the row closed its gap in all three
-  #   repeats (#112), so it starts right after one of delega's listings. A
-  #   successful provider has no time limit, so the wait costs nothing.
+  #   repeats (#112), so it starts right after one of delega's listings, best
+  #   effort. The case has no time limit of its own (delega's default is 600 s
+  #   and the harness allows 30 s), so a wait of a few seconds is harmless.
   # - orphan: the grandchild must not be seen before its setsid or beside its
   #   parent. It starts after the ramp (#110). Waiting for a listing does not
   #   suit it: several of its cases have a time limit or a signal at 1 s, and
