@@ -139,6 +139,13 @@ impl Preflight {
         }
     }
 
+    /// The slots, shared with every clone, so a test can take and free them
+    /// itself and decide exactly when a waiting `start` gets one.
+    #[cfg(test)]
+    pub(super) fn slots(&self) -> Arc<Semaphore> {
+        self.slots.clone()
+    }
+
     fn timed_out(&self, what: &str) -> Refusal {
         (
             "preflight_timeout".to_string(),

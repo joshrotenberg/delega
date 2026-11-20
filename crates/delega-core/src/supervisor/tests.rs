@@ -793,6 +793,73 @@ async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
     dir.assert_nothing_left().await;
 }
 
+/// A start that waits most of its bound for a check slot and then meets a check
+/// that does not answer is refused when the one bound, measured from the start
+/// of the call, has passed: not after the wait plus a fresh bound. Time is
+/// paused, so the clock moves only when every task is waiting on a timer, and
+/// the timing does not depend on how loaded the machine is.
+#[tokio::test(start_paused = true)]
+async fn a_start_that_waited_for_a_check_slot_has_only_the_rest_of_its_bound_for_the_check() {
+    use super::limits::MAX_PENDING_PREFLIGHTS;
+    use super::preflight::Preflight;
+    use std::sync::atomic::AtomicBool;
+    use tokio::time::Instant;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    const SLOT_WAIT: Duration = Duration::from_secs(8);
+    // The timer rounds a deadline up to the next millisecond, so the refusal
+    // may come up to 1 ms after the bound. A fresh bound for the check would
+    // make it SLOT_WAIT later, 8 s.
+    const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
+
+    let dir = Dir::new();
+    let released = Arc::new(AtomicBool::new(false));
+    let _release = Release(released.clone());
+    let check = {
+        let released = released.clone();
+        Arc::new(move |_: &Request, _: &ProviderOptions| {
+            while !released.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    let preflight = Preflight::with(check, BOUND);
+    // The test holds every slot itself, so it alone decides when one frees.
+    let taken = preflight
+        .slots()
+        .acquire_many_owned(u32::try_from(MAX_PENDING_PREFLIGHTS).expect("slot count"))
+        .await
+        .expect("take every slot");
+    let supervisor =
+        Supervisor::with_hooks(dir.config(), super::runner::provider_launch(), preflight);
+    let freer = tokio::spawn(async move {
+        tokio::time::sleep(SLOT_WAIT).await;
+        drop(taken);
+    });
+
+    let begun = Instant::now();
+    let refused = supervisor.start(dir.request("held")).await.expect("start");
+    let took = begun.elapsed();
+    freer.await.expect("the task that frees the slots");
+
+    assert_eq!(refused.outcome, Some(Outcome::Refused), "{refused:#?}");
+    let error = refused.error.as_ref().expect("error");
+    assert_eq!(error.kind, "preflight_timeout", "{error:?}");
+    // It got a slot and timed out waiting for the check, not for the slot.
+    assert!(
+        error.message.starts_with("the check did not finish"),
+        "{error:?}"
+    );
+    assert!(took >= SLOT_WAIT, "refused before a slot freed: {took:?}");
+    assert!(
+        took <= BOUND + TIMER_RESOLUTION,
+        "refused {took:?} after the start, past its bound of {BOUND:?}"
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
 /// An origin as a caller that merged layers would build it.
 fn origin() -> crate::contract::applied::Applied {
     use crate::contract::applied::{Applied, AppliedConfig, Layer};
