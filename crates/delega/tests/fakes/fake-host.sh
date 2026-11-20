@@ -1,5 +1,5 @@
 #!/bin/sh
-# A fake host CLI for the `delega init` and `delega uninstall` tests. The test
+# A fake host CLI for the `delega plugin install` and `delega plugin uninstall` tests. The test
 # copies this script to a directory as `claude` or `codex`; the name selects
 # which host it imitates. It never touches anything outside its own directory
 # (or $FAKE_DIR), so no real host configuration is read or written.

@@ -1,4 +1,4 @@
-//! What `init` and `uninstall` report: one record per host command and per
+//! What `delega plugin install` and `delega plugin uninstall` report: one record per host command and per
 //! host, as text or as JSON.
 
 use std::path::PathBuf;

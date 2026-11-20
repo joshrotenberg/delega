@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "delega init output",
-  "description": "The document printed by `delega init --output json`.",
+  "title": "delega plugin install output",
+  "description": "The document printed by `delega plugin install --output json`.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,7 +22,7 @@
       "const": 1
     },
     "operation": {
-      "const": "init"
+      "const": "install"
     },
     "ok": {
       "type": "boolean",
@@ -42,7 +42,7 @@
         "string",
         "null"
       ],
-      "description": "The plugin version: the delega version, a dot and the SHA-256 of the copied executable. Null when init stopped before it was computed."
+      "description": "The plugin version: the delega version, a dot and the SHA-256 of the copied executable. Null when installation stopped before it was computed."
     },
     "executable": {
       "type": "string",
@@ -53,7 +53,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Paths relative to install_dir that were written, or would be in a dry run. Empty when init stopped before writing."
+      "description": "Paths relative to install_dir that were written, or would be in a dry run. Empty when installation stopped before writing."
     },
     "hosts": {
       "type": "array",

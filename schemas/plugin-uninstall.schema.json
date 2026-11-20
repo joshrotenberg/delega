@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "delega uninstall output",
-  "description": "The document printed by `delega uninstall --output json`.",
+  "title": "delega plugin uninstall output",
+  "description": "The document printed by `delega plugin uninstall --output json`.",
   "type": "object",
   "additionalProperties": false,
   "required": [

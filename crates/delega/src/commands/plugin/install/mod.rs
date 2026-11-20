@@ -1,4 +1,4 @@
-//! `delega init`: install a plugin that carries the delega skills and
+//! `delega plugin install`: install a plugin that carries the delega skills and
 //! registers `delega mcp` as its MCP server, into Claude Code, Codex or both.
 //!
 //! The plugin lives in a managed directory (default
@@ -20,11 +20,9 @@ use delega_core::canonical::sorted;
 use delega_core::contract::SCHEMA_VERSION;
 use serde_json::json;
 
-use super::OutputFormat;
-use super::plugin::report::{CommandRecord, HostRecord};
-use super::plugin::{
-    self, EXECUTABLE, Host, MARKER, PLUGIN_DIR, PLUGIN_ID, exec, files, fsops, marker,
-};
+use super::report::{CommandRecord, HostRecord};
+use super::{EXECUTABLE, Host, MARKER, PLUGIN_DIR, PLUGIN_ID, exec, files, fsops, marker};
+use crate::commands::{OutputFormat, output};
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -34,7 +32,7 @@ pub struct Args {
     hosts: Vec<Host>,
     /// The managed directory [default: $DELEGA_INSTALL_HOME, then
     /// $HOME/.local/share/delega]
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, visible_alias = "dir", value_name = "DIR")]
     install_dir: Option<PathBuf>,
     /// Print the files and host commands without writing or running anything
     #[arg(long)]
@@ -80,7 +78,7 @@ impl Report {
             "{}\n",
             sorted(json!({
                 "schema_version": SCHEMA_VERSION,
-                "operation": "init",
+                "operation": "install",
                 "ok": self.error.is_none(),
                 "dry_run": self.dry_run,
                 "install_dir": self.dir.display().to_string(),
@@ -137,10 +135,10 @@ impl Report {
 }
 
 pub fn run(args: Args) -> ExitCode {
-    let configured = match plugin::configured_dir(args.install_dir) {
+    let configured = match super::configured_dir(args.install_dir) {
         Ok(dir) => dir,
         Err(error) => {
-            eprintln!("delega init: {error}");
+            eprintln!("delega plugin install: {error}");
             return ExitCode::from(2);
         }
     };
@@ -167,7 +165,7 @@ pub fn run(args: Args) -> ExitCode {
             explicit,
             hosts: wanted
                 .into_iter()
-                .map(|host| (host, plugin::find_host(host)))
+                .map(|host| (host, super::find_host(host)))
                 .collect(),
             executable,
             dry_run: args.dry_run,
@@ -188,11 +186,11 @@ pub fn run(args: Args) -> ExitCode {
         OutputFormat::Text => report.text(),
         OutputFormat::Json => report.json(),
     };
-    let wrote = super::output::emit("init", text.as_bytes());
+    let wrote = output::emit("plugin install", text.as_bytes());
     match &report.error {
         None => wrote,
         Some(error) => {
-            super::output::report(&format!("delega init: {error}"));
+            output::report(&format!("delega plugin install: {error}"));
             ExitCode::from(1)
         }
     }
@@ -321,7 +319,7 @@ pub(super) fn install(request: &Request) -> Report {
     }
     if !failed.is_empty() {
         return report.failed(format!(
-            "installation did not complete for {}; the plugin files are in place, so fix the error above and run init again",
+            "installation did not complete for {}; the plugin files are in place, so fix the error above and run `delega plugin install` again",
             failed.join(" and ")
         ));
     }
@@ -346,7 +344,7 @@ fn write_files(
         fsops::refuse_symlinks(dir, relative)?;
     }
     // The marker goes first and lists earlier files too, so a failure partway
-    // leaves a directory that init and uninstall still recognise.
+    // leaves a directory that both plugin commands still recognise.
     let mut claimed = owned.to_vec();
     claimed.extend(previous.iter().filter(|p| !owned.contains(p)).cloned());
     let existed = dir.exists();

@@ -1,4 +1,4 @@
-//! `delega uninstall`: remove the plugin from the hosts `init` registered it
+//! `delega plugin uninstall`: remove the plugin from the hosts `delega plugin install` registered it
 //! with, and then the managed directory.
 //!
 //! Every selected host's registrations are read through its JSON listing
@@ -15,9 +15,9 @@ use delega_core::canonical::sorted;
 use delega_core::contract::SCHEMA_VERSION;
 use serde_json::json;
 
-use super::OutputFormat;
-use super::plugin::report::{CommandRecord, HostRecord};
-use super::plugin::{self, Host, MARKER, PLUGIN_ID, exec, fsops, marker, registration};
+use super::report::{CommandRecord, HostRecord};
+use super::{Host, MARKER, PLUGIN_ID, exec, fsops, marker, registration};
+use crate::commands::{OutputFormat, output};
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -27,7 +27,7 @@ pub struct Args {
     hosts: Vec<Host>,
     /// The managed directory [default: $DELEGA_INSTALL_HOME, then
     /// $HOME/.local/share/delega]
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, visible_alias = "dir", value_name = "DIR")]
     install_dir: Option<PathBuf>,
     /// Print what would be removed without removing or running anything
     #[arg(long)]
@@ -98,7 +98,7 @@ impl Report {
             "absent" => format!("{dir} does not exist; no host command ran.\n"),
             "would_keep" => format!("Would keep {dir} for the other host.\n"),
             _ if self.error.is_none() => format!(
-                "Kept {dir} for the other host; run uninstall without --host to remove it.\n"
+                "Kept {dir} for the other host; run `delega plugin uninstall` without --host to remove it.\n"
             ),
             _ => format!("Kept {dir} and its files.\n"),
         };
@@ -111,10 +111,10 @@ impl Report {
 }
 
 pub fn run(args: Args) -> ExitCode {
-    let configured = match plugin::configured_dir(args.install_dir) {
+    let configured = match super::configured_dir(args.install_dir) {
         Ok(dir) => dir,
         Err(error) => {
-            eprintln!("delega uninstall: {error}");
+            eprintln!("delega plugin uninstall: {error}");
             return ExitCode::from(2);
         }
     };
@@ -130,7 +130,7 @@ pub fn run(args: Args) -> ExitCode {
             named,
             programs: Host::ALL
                 .into_iter()
-                .map(|host| (host, plugin::find_host(host)))
+                .map(|host| (host, super::find_host(host)))
                 .collect(),
             dry_run: args.dry_run,
         }),
@@ -149,11 +149,11 @@ pub fn run(args: Args) -> ExitCode {
         OutputFormat::Text => report.text(),
         OutputFormat::Json => report.json(),
     };
-    let wrote = super::output::emit("uninstall", text.as_bytes());
+    let wrote = output::emit("plugin uninstall", text.as_bytes());
     match &report.error {
         None => wrote,
         Some(error) => {
-            super::output::report(&format!("delega uninstall: {error}"));
+            output::report(&format!("delega plugin uninstall: {error}"));
             ExitCode::from(1)
         }
     }
@@ -187,7 +187,7 @@ pub(super) fn uninstall(request: &Request) -> Report {
         }
         Ok(None) => {
             return report.failed(format!(
-                "{} was not created by delega init; registrations and files were left in place",
+                "{} was not created by delega plugin install; registrations and files were left in place",
                 dir.display()
             ));
         }
@@ -219,7 +219,7 @@ pub(super) fn uninstall(request: &Request) -> Report {
                 row.note = Some(format!("not found: {reason}"));
                 report.hosts.push(row);
                 return report.failed(format!(
-                    "{} was registered by init but its CLI was not found, so its registration cannot be removed; the files in {} were kept",
+                    "{} was registered by delega plugin install but its CLI was not found, so its registration cannot be removed; the files in {} were kept",
                     host.label(),
                     dir.display()
                 ));
@@ -321,7 +321,7 @@ pub(super) fn uninstall(request: &Request) -> Report {
     // would leave the host with a plugin it cannot start.
     if !unresolved.is_empty() {
         return report.failed(format!(
-            "removal failed for {}; the files in {} were kept so the registration still works, so fix the error above and run uninstall again",
+            "removal failed for {}; the files in {} were kept so the registration still works, so fix the error above and run `delega plugin uninstall` again",
             unresolved.join(" and "),
             dir.display()
         ));
