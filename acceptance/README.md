@@ -135,7 +135,7 @@ Variants: `plain` (nothing), `child` (one child in the provider's group),
 `setsid` (a child in the group that starts a grandchild in a session of its
 own), `ignore` (a child that ignores TERM and INT), `stubborn` (the provider
 ignores TERM and INT itself), `pipe` (a child that keeps the provider's stdio),
-`orphan` (a child that starts a `setsid` grandchild and exits at once; an early listing can still adopt the grandchild, so these rows are timing-dependent),
+`orphan` (a child that starts a `setsid` grandchild and exits at once; these rows are timing-dependent),
 `orphan-late` (as `orphan`, after 1.3 s), `relay` (a fork relay: each process
 ignores TERM, leads a group of its own, lives a few milliseconds and forks its
 successor), `bare` (a `sleep 300` in a session of its own whose command line
