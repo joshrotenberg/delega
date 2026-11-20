@@ -359,7 +359,39 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
         let out = wait_bounded(child);
         match out.status.code() {
             Some(0) => assert_eq!(result_of(&out).outcome, Outcome::Completed, "{delay_ms}"),
-            Some(130) => assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}"),
+            // 130 is either an interrupted run that printed its whole result, or
+            // a result whose write the signal stopped. A stopped write leaves
+            // less than the whole: nothing or a document cut off (an
+            // end-of-input parse error, not any parse error; the document is
+            // pretty-printed, so a cut can fall after one of its own newlines),
+            // or a complete document whose closing newline was the part not
+            // written. delega then says why on stderr. A complete document with
+            // its newline is a whole result and must be interrupted.
+            Some(130) => {
+                let stopped =
+                    text(&out.stderr).contains("signal received while writing the result");
+                match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    Err(err) => assert!(
+                        err.is_eof() && stopped,
+                        "{delay_ms}: exit 130 with stdout that is neither a result nor a cut-off \
+                         one from a stopped write: {err}: stdout {:?}, stderr {}",
+                        text(&out.stdout),
+                        text(&out.stderr)
+                    ),
+                    Ok(_) => {
+                        let result = result_of(&out);
+                        if out.stdout.ends_with(b"\n") {
+                            assert_eq!(result.outcome, Outcome::Interrupted, "{delay_ms}");
+                        } else {
+                            assert!(
+                                stopped,
+                                "{delay_ms}: a result without its newline and no stopped write: {}",
+                                text(&out.stderr)
+                            );
+                        }
+                    }
+                }
+            }
             // The signal came before delega could handle it: nothing had started.
             // The signal came before delega had installed its handlers, which
             // happens before any worker is started. A worker that exists here
@@ -371,6 +403,181 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
             other => panic!(
                 "{delay_ms}: unexpected status {other:?}: {}",
                 text(&out.stderr)
+            ),
+        }
+        rig.assert_nothing_left();
+    }
+}
+
+// Uses the print thread's hold, which exists only in debug builds.
+#[cfg(debug_assertions)]
+#[test]
+fn a_signal_after_the_result_is_written_keeps_the_outcome_exit_status() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let marker = rig.path("printed");
+        // The print thread creates the marker once the whole result is written,
+        // then holds before reporting its exit code: the signal lands in that
+        // window every time.
+        let mut child = Reaped(Some(
+            rig.command()
+                .args(rig.run_args(provider, "success", &["--output", "json"]))
+                .env("DELEGA_TEST_HOLD_AFTER_PRINT", &marker)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn delega"),
+        ));
+        let began = std::time::Instant::now();
+        while !marker.exists() {
+            assert!(
+                began.elapsed() < Duration::from_secs(120),
+                "{provider}: the result was never written"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        signal(child.id(), "TERM");
+        let out = wait_bounded(child.take());
+        assert_eq!(result_of(&out).outcome, Outcome::Completed, "{provider}");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: a written completed result must exit 0: {}",
+            text(&out.stderr)
+        );
+        rig.assert_nothing_left();
+    }
+}
+
+/// A child that is killed and reaped when the test fails before it was waited
+/// for, so a failed assertion leaves no `delega` behind.
+struct Reaped(Option<std::process::Child>);
+
+impl Reaped {
+    fn take(&mut self) -> std::process::Child {
+        self.0.take().expect("the child was already taken")
+    }
+}
+
+impl std::ops::Deref for Reaped {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("the child was already taken")
+    }
+}
+
+impl std::ops::DerefMut for Reaped {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("the child was already taken")
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Fill `pipe` until it takes no more, without assuming its capacity (Linux
+/// gives a pipe only two pages once the per-user pipe buffer soft limit is
+/// exceeded). The write end is the test's own, so it is made non-blocking and
+/// written until `EAGAIN`: first in pages, then a byte at a time to use up any
+/// partly filled page. A macOS pipe grows when a write does not fit, until it
+/// reaches its size limit; a non-blocking write grows it too, so `EAGAIN` comes
+/// only once it can grow no more and a short line from `delega` cannot fit. The
+/// write end is made blocking again before a child inherits it, so the child's
+/// writes block rather than fail.
+fn fill(pipe: &std::io::PipeWriter) {
+    use rustix::io::{Errno, ioctl_fionbio, write};
+    ioctl_fionbio(pipe, true).expect("make the pipe non-blocking");
+    for piece in [&[b'.'; 4096][..], b"."] {
+        loop {
+            match write(pipe, piece) {
+                Ok(_) | Err(Errno::INTR) => {}
+                Err(Errno::AGAIN) => break,
+                Err(err) => panic!("fill the pipe: {err}"),
+            }
+        }
+    }
+    ioctl_fionbio(pipe, false).expect("make the pipe blocking again");
+}
+
+/// Wait until `pipe` has something to read, failing the test past `limit`.
+fn wait_readable(pipe: &impl std::os::fd::AsFd, limit: Duration) {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let step = Timespec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000,
+    };
+    let began = std::time::Instant::now();
+    loop {
+        let mut fds = [PollFd::new(pipe, PollFlags::IN)];
+        match poll(&mut fds, Some(&step)) {
+            Ok(n) if n > 0 => return,
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(err) => panic!("poll the pipe: {err}"),
+        }
+        assert!(
+            began.elapsed() < limit,
+            "nothing was written within {limit:?}"
+        );
+    }
+}
+
+#[test]
+fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_not_delivered() {
+    // The case from the review: nobody reads standard output while delega
+    // writes a large result, standard error is full so delega stays alive a
+    // while after deciding its status, a signal arrives, and standard output is
+    // drained later. Whatever the reader ends up with must agree with the exit
+    // status: a whole `completed` result with 0, anything less with 130.
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let (stderr_reader, stderr_writer) = std::io::pipe().expect("a pipe");
+        fill(&stderr_writer);
+        let mut child = Reaped(Some(
+            rig.command()
+                .args(rig.run_args(provider, "large", &["--output", "json"]))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(stderr_writer))
+                .spawn()
+                .expect("spawn delega"),
+        ));
+        let stdout = child.stdout.take().expect("stdout");
+        // The result is written only once the worker is gone, so delega is now
+        // writing it, and blocks once the pipe is full.
+        wait_readable(&stdout, Duration::from_secs(120));
+        signal(child.id(), "TERM");
+        // Long enough for delega to have taken the signal; the reader then
+        // drains while delega is still alive, held by its full standard error.
+        std::thread::sleep(Duration::from_millis(450));
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut { stdout }, &mut bytes);
+            bytes
+        });
+        let status = wait_exit_only(&mut child, Duration::from_secs(90));
+        let delivered = reader.join().expect("stdout reader");
+        drop(child);
+        let stderr = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut { stderr_reader }, &mut bytes);
+            bytes
+        });
+        let stderr = stderr.join().expect("stderr reader");
+        let result: Option<delega_core::contract::result::RunResult> =
+            serde_json::from_slice(&delivered).ok();
+        match (status.code(), result) {
+            (Some(0), Some(result)) => assert_eq!(result.outcome, Outcome::Completed, "{provider}"),
+            (Some(130), None) => {}
+            (code, result) => panic!(
+                "{provider}: exit {code:?} with {} bytes, a whole result: {}; stderr ends: {}",
+                delivered.len(),
+                result.is_some(),
+                text(&stderr[stderr.len().saturating_sub(500)..]).trim_start_matches('.')
             ),
         }
         rig.assert_nothing_left();

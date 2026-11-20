@@ -164,7 +164,7 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
         options.progress = Some(log.progress_sink());
     }
     let writer_log = log.clone();
-    execute::run(request, options, &facts, log, move |result| {
-        output::print_result(format, &result, &writer_log)
+    execute::run(request, options, &facts, log, move |result, stop| {
+        output::print_result(format, &result, &writer_log, stop)
     })
 }
