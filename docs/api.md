@@ -426,12 +426,15 @@ Behavior:
   `delega` writes the result to standard output on a thread of its own, and that
   write waits for whoever reads standard output; a large result and a reader that
   does not read can hold it indefinitely. The signal handlers stay installed
-  during the write, and a SIGINT, SIGTERM, SIGHUP or SIGQUIT ends `delega` at
-  once, with the outcome's exit status, or 130 when the outcome was `completed`
-  because its result was not delivered. The worker is already gone by then.
-  If a signal had already been received during the run (it was used to stop
-  the worker), the write is given 3 seconds and `delega` then exits the same
-  way.
+  during the write, and a SIGINT, SIGTERM, SIGHUP or SIGQUIT ends `delega`
+  within 250 ms. The worker is already gone by then. If the result is fully
+  written by then (it already was, or a write under way finishes), the exit
+  status is the one the written result calls for (0 for `completed`), so a
+  status never contradicts a result that was delivered. Otherwise the exit
+  status is the outcome's, or 130 when the outcome was `completed`, because its
+  result was not delivered. If a signal had already been received during the run (it
+  was used to stop the worker), the write is given 3 seconds and `delega` then
+  exits the same way.
 - **Standard error never holds up the run.** Everything `delega run` writes to
   standard error (progress, summaries, problems, signal acknowledgements) goes
   through one writer thread fed by a bounded queue (1024 lines). A line that
