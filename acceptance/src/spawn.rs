@@ -67,14 +67,20 @@ mod tests {
 
     #[test]
     fn a_timed_spawn_takes_its_start_instant_after_waiting_for_the_spawn_lock() {
+        // The holder takes the lock, says so, and keeps it long enough for
+        // the test thread to be waiting on it. Its last act while holding the
+        // lock is to record the instant, so any instant taken under the lock
+        // afterwards is not earlier, however the threads are scheduled.
         let (held, is_held) = channel();
         let holder = std::thread::spawn(move || {
-            let _guard = delega_core::process::spawn_guard();
+            let guard = delega_core::process::spawn_guard();
             held.send(()).expect("signal that the lock is held");
             std::thread::sleep(Duration::from_millis(200));
+            let released = Instant::now();
+            drop(guard);
+            released
         });
         is_held.recv().expect("the holder took the lock");
-        let began = Instant::now();
         let (mut child, started) = Command::new("/usr/bin/true")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -82,11 +88,11 @@ mod tests {
             .guarded_spawn_timed()
             .expect("spawn true");
         child.wait().expect("wait for true");
-        holder.join().expect("holder thread");
-        let queued = started.duration_since(began);
+        let released = holder.join().expect("holder thread");
         assert!(
-            queued >= Duration::from_millis(150),
-            "the start instant was taken {queued:?} after the call, before the lock was free"
+            started >= released,
+            "the start instant was taken {:?} before the holder released the lock",
+            released.duration_since(started)
         );
     }
 }
