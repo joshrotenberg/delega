@@ -73,9 +73,10 @@ async fn a_completed_claude_run_reports_every_part() {
     let env = applied.env.expect("env");
     assert_eq!(env.passed.total, dry.env_names.len());
     assert_eq!(env.passed.named_by_caller, 1, "PLANTED_PASS");
-    // The rig's own variables, the planted one and the one delega sets.
+    // The rig's own variables, the planted one and the three delega sets
+    // (background tasks and the two memory switches).
     assert_eq!(env.passed.set_by_caller, 5);
-    assert_eq!(env.passed.set_by_delega, 1);
+    assert_eq!(env.passed.set_by_delega, 3);
     assert_eq!(env.passed.base, 2, "PATH and HOME");
     assert_eq!(
         env.passed.total,
