@@ -449,49 +449,28 @@ impl Drop for Reaped {
     }
 }
 
-/// What a pipe holds at most on Linux (its default size) and on macOS (the
-/// size its buffer grows to on demand).
-const PIPE_LIMIT: usize = 64 * 1024;
-
-/// Fill `pipe` so a further write blocks. A thread writes into it until it
-/// blocks; the pipe is full once it holds [`PIPE_LIMIT`] bytes and `poll` says
-/// it is not writable. A macOS pipe starts smaller and grows when a write does
-/// not fit, so stopping at the first "not writable" would leave room. The
-/// thread finishes once the reader drains the pipe.
-fn fill(pipe: &std::io::PipeWriter) -> std::thread::JoinHandle<()> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use std::io::Write;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let written = Arc::new(AtomicUsize::new(0));
-    let mut writer = pipe.try_clone().expect("a second pipe writer");
-    let count = Arc::clone(&written);
-    let filler = std::thread::spawn(move || {
-        let chunk = [b'.'; 512];
-        for _ in 0..(4 * PIPE_LIMIT / chunk.len()) {
-            if writer.write_all(&chunk).is_err() {
-                return;
+/// Fill `pipe` until it takes no more, without assuming its capacity (Linux
+/// gives a pipe only two pages once the per-user pipe buffer soft limit is
+/// exceeded). The write end is the test's own, so it is made non-blocking and
+/// written until `EAGAIN`: first in pages, then a byte at a time to use up any
+/// partly filled page. A macOS pipe grows when a write does not fit, until it
+/// reaches its size limit; a non-blocking write grows it too, so `EAGAIN` comes
+/// only once it can grow no more and a short line from `delega` cannot fit. The
+/// write end is made blocking again before a child inherits it, so the child's
+/// writes block rather than fail.
+fn fill(pipe: &std::io::PipeWriter) {
+    use rustix::io::{Errno, ioctl_fionbio, write};
+    ioctl_fionbio(pipe, true).expect("make the pipe non-blocking");
+    for piece in [&[b'.'; 4096][..], b"."] {
+        loop {
+            match write(pipe, piece) {
+                Ok(_) | Err(Errno::INTR) => {}
+                Err(Errno::AGAIN) => break,
+                Err(err) => panic!("fill the pipe: {err}"),
             }
-            count.fetch_add(chunk.len(), Ordering::SeqCst);
         }
-    });
-    let now = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let began = std::time::Instant::now();
-    loop {
-        let mut fds = [PollFd::new(pipe, PollFlags::OUT)];
-        let writable = poll(&mut fds, Some(&now)).expect("poll the pipe") > 0;
-        if written.load(Ordering::SeqCst) >= PIPE_LIMIT && !writable {
-            return filler;
-        }
-        assert!(
-            began.elapsed() < Duration::from_secs(30),
-            "the pipe never filled"
-        );
-        std::thread::sleep(Duration::from_millis(5));
     }
+    ioctl_fionbio(pipe, false).expect("make the pipe blocking again");
 }
 
 /// Wait until `pipe` has something to read, failing the test past `limit`.
@@ -526,7 +505,7 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
     for provider in PROVIDERS {
         let rig = Rig::new();
         let (stderr_reader, stderr_writer) = std::io::pipe().expect("a pipe");
-        let filler = fill(&stderr_writer);
+        fill(&stderr_writer);
         let mut child = Reaped(Some(
             rig.command()
                 .args(rig.run_args(provider, "large", &["--output", "json"]))
@@ -557,7 +536,6 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
             bytes
         });
         let stderr = stderr.join().expect("stderr reader");
-        filler.join().expect("filler");
         let result: Option<delega_core::contract::result::RunResult> =
             serde_json::from_slice(&delivered).ok();
         match (status.code(), result) {
