@@ -762,25 +762,23 @@ fn unconfirmed_cleanup_after_a_signal_exits_1_not_130() {
 
 #[test]
 fn an_unconfirmed_run_replaced_as_the_latest_by_a_refused_follow_up_still_exits_1() {
-    // The first run ends with cleanup unconfirmed (process inspection is off and
-    // the run is interrupted). It left no session, so a follow-up is refused at
-    // once, with a confirmed cleanup, and becomes the worker's latest run. The
-    // exit status must still count the earlier run.
+    // The first run ends with cleanup unconfirmed: process inspection is off,
+    // and the provider starts a child and exits 3 without writing to standard
+    // output, so it never reports a session. A follow-up is therefore refused when it is
+    // dispatched (`no_session`), with a confirmed cleanup, and becomes the
+    // worker's latest run. The exit status must still count the earlier run.
+    // (Interrupting a hanging provider instead raced its session id: when delega
+    // had read it, the follow-up resumed the session and completed.)
     let rig = Rig::new();
     let mut session = rig.start_with(&[], &[("DELEGA_TEST_NO_PROCESS_LISTING", "1")]);
     session.initialize();
     let started = session.call(
         "start",
-        json!({"provider": "codex", "prompt": "acc:hang:child", "cwd": rig.work}),
+        json!({"provider": "codex", "prompt": "acc:exit3:child", "cwd": rig.work}),
     );
-    let began = Instant::now();
-    while rig.recorded("provider") < 1 || rig.recorded("child") < 1 {
-        assert!(began.elapsed() < EVENTUALLY, "the worker did not start");
-        std::thread::sleep(POLL);
-    }
-    session.call("interrupt", json!({"run": started["run"]}));
     let first = finished_result(&mut session, &started["run"]);
     assert_eq!(first["cleanup"]["confirmed"], json!(false), "{first}");
+    assert!(first.get("session_id").is_none(), "{first}");
 
     let followed = session.call(
         "follow_up",
@@ -788,6 +786,7 @@ fn an_unconfirmed_run_replaced_as_the_latest_by_a_refused_follow_up_still_exits_
     );
     let second = finished_result(&mut session, &followed["run"]);
     assert_eq!(second["outcome"], "refused", "{second}");
+    assert_eq!(second["error"]["kind"], "no_session", "{second}");
     assert_eq!(second["cleanup"]["confirmed"], json!(true), "{second}");
     let listed = session.call("list", json!({}));
     assert_eq!(
