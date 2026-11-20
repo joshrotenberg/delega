@@ -1,0 +1,8 @@
+# Every child process goes through `process::spawn::spawn`, which holds the
+# spawn lock so concurrent spawns cannot inherit each other's pipes on macOS
+# (#104). `output` and `status` spawn too.
+disallowed-methods = [
+  { path = "tokio::process::Command::spawn", reason = "spawn through process::spawn::spawn, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::output", reason = "spawn through process::spawn::spawn, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::status", reason = "spawn through process::spawn::spawn, which holds the spawn lock (#104)" },
+]

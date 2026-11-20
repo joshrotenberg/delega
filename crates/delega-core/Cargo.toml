@@ -26,5 +26,9 @@ rustix = { workspace = true, features = ["fs"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+# `pipe` for the spawn-lock test, which holds a pipe without close-on-exec.
+rustix = { workspace = true, features = ["pipe"] }
+
 [lints]
 workspace = true

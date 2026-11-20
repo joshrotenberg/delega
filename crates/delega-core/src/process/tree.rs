@@ -113,14 +113,14 @@ pub(crate) async fn list_processes_from(
     let mut spawned = None;
     let mut last_error = None;
     for program in programs {
-        match tokio::process::Command::new(program)
+        let mut command = tokio::process::Command::new(program);
+        command
             .args(["-axo", "pid=,ppid=,pgid=,stat=,lstart="])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-        {
+            .kill_on_drop(true);
+        match super::spawn::spawn(&mut command) {
             Ok(child) => {
                 spawned = Some(child);
                 break;

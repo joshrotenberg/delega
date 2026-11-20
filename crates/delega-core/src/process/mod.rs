@@ -179,6 +179,22 @@
 //! rejected: on a machine that starts daemons it would make ordinary runs
 //! unconfirmed.
 //!
+//! # Pipes when several children start at once
+//!
+//! On macOS std creates a child's pipes with `pipe()` and marks them
+//! close-on-exec only afterwards; Linux uses `pipe2` with `O_CLOEXEC`. A child
+//! forked by another thread in between inherits those pipe ends and keeps them
+//! through `exec`. A provider that holds another run's standard input keeps
+//! that run from reading end of input until the holder exits, which a provider
+//! that reads its prompt to end of file never does on its own (#104). Every
+//! child of this module, the `ps` listing included, is therefore spawned while
+//! holding one process-wide lock (`spawn.rs`), and clippy's
+//! `disallowed_methods` rejects a direct `tokio::process::Command::spawn`
+//! elsewhere. The lock is held only across the spawn call. It covers spawns
+//! made elsewhere in the program only if they take it too, with
+//! [`spawn_guard`]; a program that spawns on its own threads without it can
+//! still leak descriptors into these children and receive theirs.
+//!
 //! # Why the owner never signals a foreign process
 //!
 //! A process is signalled only if it is a live member of the child's group (the
@@ -261,6 +277,7 @@ pub mod limits;
 mod owner;
 mod report;
 mod run;
+mod spawn;
 mod spec;
 mod sys;
 mod tap;
@@ -277,6 +294,7 @@ pub use report::{
     Diagnostics, Ending, LeaderExit, ProcessReport, ProcessTiming, SignalRecord, SignalTarget,
 };
 pub use run::PIPE_WARNING;
+pub use spawn::{SpawnGuard, spawn_guard};
 pub use spec::{CaptureSpec, EnvPolicy, Keep, OutputTap, ProcessSpec};
 pub use timestamp::rfc3339_utc;
 pub use tree::{InspectionStats, check_inspection};

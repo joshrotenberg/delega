@@ -1200,6 +1200,14 @@ Anything both surfaces compute lives in the library. `delega run` uses the
 provider layer's `run` directly, for one assignment in the foreground; the
 supervisor is for several at once.
 
+A program that embeds the library and starts processes of its own on other
+threads should hold `delega_core::process::spawn_guard()` across each of its
+spawn calls. On macOS std marks a child's pipes close-on-exec only after
+creating them, so without the guard a child of the program can inherit a
+worker's pipes, or a worker the program's, and a worker that holds another's
+standard input keeps it from ever reading end of input. delega takes the same
+lock for every process it starts.
+
 ## Not in this surface
 
 - **Review.** An enforced independent review of a worker's change (counterpart's
