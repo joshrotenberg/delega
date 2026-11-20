@@ -13,7 +13,10 @@
 //! exits before any listing saw it (its parent was the leader itself, or a
 //! member that exited at once), and a fast fork relay, which is never in a
 //! listing for long enough to be signalled. The last three tests state the
-//! wanted behaviour and are ignored because they fail. Run them with
+//! wanted behaviour and are ignored because they fail. The first two start
+//! their descendant after the early listings (`CAPTURE_RAMP`), which see a
+//! descendant started sooner, and end the leader before the first periodic
+//! listing. Run them with
 //! `cargo test -- --ignored`. They leave one process running when they fail,
 //! so each stops it itself.
 
@@ -45,6 +48,12 @@ pub(super) fn marking_lister(marker: std::path::PathBuf) -> Lister {
 }
 
 const WAIT_FOR_SCAN: &str = "while [ ! -e scanned ]; do sleep 0.02; done;";
+
+/// Waits until the last listing of `CAPTURE_RAMP` (200 ms after spawn) has
+/// passed, so a descendant started after it can only be seen by the periodic
+/// listing, 500 ms after the ramp ends. The first listing ends just after
+/// spawn, so 0.3 s from there is after 200 ms with room to spare.
+const AFTER_RAMP: &str = "sleep 0.3;";
 
 /// The wanted behaviour: when a descendant is left running, the result must not
 /// claim cleanup is confirmed.
@@ -113,7 +122,7 @@ async fn a_setsid_grandchild_whose_parent_exits_at_once_is_not_reported_as_clean
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
     );
     let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
@@ -127,8 +136,8 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_not_rep
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
-         sleep 0.2; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+         sleep 0.15; kill -KILL $$; sleep 5"
     );
     let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
