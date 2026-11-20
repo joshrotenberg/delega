@@ -69,6 +69,14 @@ cargo run -p delega-acceptance -- --report
 
 `--report` reads `results.jsonl`, `results.meta.json`, `repeats.jsonl` and
 `spike-numbers.jsonl` and rewrites `RESULTS.md` and `COMPARISON.md`.
+
+`tests/committed_results.rs`, part of `cargo test --workspace`, keeps these
+files current. It fails when the committed results do not hold exactly the
+matrix's rows (one run each in `results.jsonl`, three in `repeats.jsonl`), when
+a row's expected outcome, leak class or reason text in them differs from
+`src/matrix.rs`, or when `RESULTS.md` or `COMPARISON.md` differs from what
+`--report` generates. A change to the matrix, a reason text or the report
+format therefore comes with regenerated results in the same pull request.
 `spike-numbers.jsonl` holds the numbers copied from the spike's committed
 results; `scripts/extract-spike-numbers.py` produced it.
 
