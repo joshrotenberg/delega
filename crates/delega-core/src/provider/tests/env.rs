@@ -444,11 +444,23 @@ fn a_refused_pass_stops_a_dry_run_with_the_refusal() {
         let error = dry_run(&rig.request(Provider::Codex, "p"), &options).unwrap_err();
         assert_eq!(error.kind, kind);
     }
+    // Every name delega owns for a Claude worker, the memory switches included
+    // (#106), in either form.
     let rig = Rig::new();
-    let mut options: ProviderOptions = rig.options(Provider::Claude);
-    options.env_set = vec![("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "0".into())];
-    let error = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap_err();
-    assert_eq!(error.kind, "forbidden_env_name");
+    for name in [
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+    ] {
+        let mut options: ProviderOptions = rig.options(Provider::Claude);
+        options.env_set = vec![(name.into(), "0".into())];
+        let error = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap_err();
+        assert_eq!(error.kind, "forbidden_env_name", "set {name}");
+        let mut options: ProviderOptions = rig.options(Provider::Claude);
+        options.env_pass = vec![name.into()];
+        let error = dry_run(&rig.request(Provider::Claude, "p"), &options).unwrap_err();
+        assert_eq!(error.kind, "forbidden_env_name", "pass {name}");
+    }
 }
 
 #[test]
@@ -664,7 +676,11 @@ async fn only_allowlisted_names_reach_the_child(provider: Provider) {
         "CODEX_HOME",
     ];
     if provider == Provider::Claude {
-        expected.push("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        expected.extend([
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+        ]);
     }
     expected.extend(allowed);
     let seen = child_names(&rig);
@@ -759,7 +775,11 @@ async fn only_the_policy_environment_is_visible(provider: Provider) {
         "XDG_CONFIG_HOME",
     ];
     if provider == Provider::Claude {
-        expected.push("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        expected.extend([
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+        ]);
     }
     expected.sort_unstable();
     assert_eq!(seen, expected);
