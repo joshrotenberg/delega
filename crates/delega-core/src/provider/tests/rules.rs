@@ -240,11 +240,9 @@ fn every_claude_run_says_settings_other_than_deny_rules_were_not_applied() {
                 .any(|n| n.contains("other than their deny rules were not applied")),
             "{mode:?}"
         );
-        assert!(
-            plan.notes
-                .iter()
-                .any(|n| n.contains("no CLAUDE.md file and no auto memory reach the worker"))
-        );
+        assert!(plan.notes.iter().any(|n| {
+            n.contains("loads no CLAUDE.md file and no auto memory into the worker's context")
+        }));
         assert!(
             !plan
                 .env_names

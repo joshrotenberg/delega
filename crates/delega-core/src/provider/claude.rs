@@ -306,10 +306,10 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
 /// Build the launch for a request.
 /// Variables delega sets for every Claude worker, which a caller cannot pass or
 /// set (`forbidden_env_name`). Background tasks would outlive the run. The two
-/// memory switches, both documented by Claude Code, keep the user's
+/// memory switches, both documented by Claude Code, stop it loading the user's
 /// `CLAUDE.md` files and auto memory (`~/.claude/projects/<project>/memory/`)
-/// out of the worker: `--setting-sources ""` keeps `CLAUDE.md` out but not
-/// auto memory (#106).
+/// into the worker's context and turn the auto-memory feature off:
+/// `--setting-sources ""` keeps `CLAUDE.md` out but not auto memory (#106).
 pub(super) const OWNED_ENV: [(&str, &str); 3] = [
     ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
@@ -401,11 +401,12 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     );
     notes.extend(inputs.deny.notes());
     notes.push(
-        "no CLAUDE.md file and no auto memory reach the worker: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
-         keeps the user's, the project's and reference directories' CLAUDE.md files and the \
-         auto-memory index out of its context, and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 turns \
-         Claude Code's auto memory off, so the worker does not read or write the user's memory \
-         directory through it"
+        "Claude Code loads no CLAUDE.md file and no auto memory into the worker's context by \
+         itself: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 stops it loading the user's, the project's \
+         and reference directories' CLAUDE.md files and the auto-memory index, and \
+         CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 turns its auto-memory feature off; the worker can \
+         still read such files with its tools, as the delegated preamble asks it to for \
+         repository instructions"
             .to_string(),
     );
     let mut mapping = vec![

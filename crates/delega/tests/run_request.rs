@@ -1404,7 +1404,9 @@ fn the_worker_receives_exactly_the_expected_names_and_no_others() {
             expected.extend([
                 "CLAUDE_CONFIG_DIR",
                 "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
             ]);
         } else {
             // Any CODEX_* name belongs to Codex; Claude Code gets none of them.

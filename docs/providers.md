@@ -221,8 +221,9 @@ claude -p --output-format stream-json --verbose
 ```
 
 Environment set by the adapter: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`,
-`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` (no
-`CLAUDE.md` file and no auto memory reach the worker; `--setting-sources ""`
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`
+(Claude Code loads no `CLAUDE.md` file and no auto memory into the worker's
+context by itself, and its auto-memory feature is off; `--setting-sources ""`
 alone keeps `CLAUDE.md` out but not the auto-memory index, measured with Claude
 Code 2.1.329 on #86) and, when the command guard is installed, `DELEGA_EXACT_BASH_GRANTS` (a JSON array of
 the allowed commands). `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` is not
@@ -486,10 +487,12 @@ ignores them.
   [Deny rules](#deny-rules)). Not applied: hooks, `env`, `apiKeyHelper`,
   plugins, skills, MCP servers and settings-defined instructions. Every Claude
   run carries a note saying so.
-- Which instruction files Claude Code still reads is not controlled by delega.
-  Reference directories contribute none (the variable that would load them is
-  not set). Whether the working directory's own `CLAUDE.md` is read with empty
-  settings sources is the provider's behaviour and is listed as unverified.
+- Claude Code loads no instruction file into the worker's context by itself:
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` stops it loading any `CLAUDE.md` (the
+  user's, the project's, a reference directory's) and the auto-memory index,
+  and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns auto memory off. The worker can
+  still read such a file with its tools; the delegated preamble asks it to read
+  applicable repository instructions. Every Claude run carries a note saying so.
 - A working directory of `/` or the home directory makes the working-directory
   rules cover everything below it. The run is not refused; a note warns.
 - `full` is the nine built-in tools. Sub-agents, MCP tools and background tasks
@@ -798,7 +801,7 @@ each.
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
-| With empty settings sources Claude Code still reads the working directory's own `CLAUDE.md` | Not controlled. A note on every run says what delega does and does not load. |
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` keep every `CLAUDE.md` and the auto-memory index out of the worker's context, as Claude Code documents | Checked live with Claude Code 2.1.329 (#86, #106). A note on every run says what is and is not loaded. |
 | A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
 | Codex words a usage or rate limit failure with "usage limit", "rate limit", "quota" or "context window", and Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
 | Claude Code names `error_max_turns` and `error_max_budget_usd` as result subtypes | They become the `provider_turn_limit` and `provider_budget_limit` error kinds. |
