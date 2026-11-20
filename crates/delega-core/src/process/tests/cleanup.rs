@@ -10,7 +10,7 @@ use super::fixtures::{
 use crate::contract::result::Cleanup;
 use crate::process::sys::{self, Signal};
 use crate::process::tree::{InspectError, Lister, lister_for};
-use crate::process::{Ending, PIPE_WARNING, ProcessHandle, run};
+use crate::process::{Ending, PIPE_WARNING, ProcessHandle, ProcessReport, run};
 
 const LONG: Duration = Duration::from_secs(60);
 /// The stop and cleanup must beat the one-minute child lifetime or grace.
@@ -19,6 +19,12 @@ const LONG: Duration = Duration::from_secs(60);
 /// one second at load 200 in issue 61, leaving over 29 seconds for scheduling
 /// and listing delays.
 const BOUND: Duration = Duration::from_secs(30);
+
+async fn wait_for_cleanup_report(handle: ProcessHandle, began: Instant) -> ProcessReport {
+    tokio::time::timeout_at(tokio::time::Instant::from_std(began + BOUND), handle.wait())
+        .await
+        .expect("the report was held by the detached descendant for 30 s")
+}
 
 async fn assert_stopped_in_time(what: &str, pids: &[i32], began: Instant) {
     let deadline = tokio::time::Instant::from_std(began + BOUND);
@@ -82,10 +88,9 @@ async fn a_crash_while_a_descendant_holds_the_output_pipe_does_not_hang() {
         matches!(report.ending, Ending::Signaled { signal: 9, .. }),
         "{report:#?}"
     );
-    assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
+    assert_stopped_in_time("leader and descendant", &pids, started).await;
     assert!(!report.diagnostics.pipes_closed_by_owner, "{report:#?}");
     assert_confirmed(&report);
-    assert_gone("leader and descendant", &pids).await;
 }
 
 #[tokio::test]
@@ -96,10 +101,11 @@ async fn a_grandchild_that_outlives_its_parent_in_the_same_group_is_cleaned_up()
         "echo $$ > leader; sleep 60 & echo $! > gc; exit 0",
         LONG,
     );
+    let started = Instant::now();
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 });
     assert_confirmed(&report);
-    assert_gone("grandchild", &pids).await;
+    assert_stopped_in_time("grandchild", &pids, started).await;
 }
 
 #[tokio::test]
@@ -113,9 +119,8 @@ async fn a_grandchild_that_ignores_terminate_is_killed_after_its_parent_exits() 
     let started = Instant::now();
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 });
-    assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
     assert_confirmed(&report);
-    assert_gone("grandchild", &pids).await;
+    assert_stopped_in_time("grandchild", &pids, started).await;
 }
 
 #[tokio::test]
@@ -145,13 +150,15 @@ async fn a_descendant_in_its_own_session_is_found_by_the_scan_and_cleaned_up() {
     let handle = ProcessHandle::start(sh(&s, &script, LONG));
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
+    wait_own_group(gc).await;
     wait_tracked(&handle, gc).await;
+    let stopped = Instant::now();
     std::fs::write(s.path("go"), "go").expect("write the go file");
-    let report = handle.wait().await;
+    let report = wait_for_cleanup_report(handle, stopped).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert_confirmed(&report);
     assert!(report.diagnostics.inspection.retained_descendant_identities >= 1);
-    assert_gone("descendant in its own session", &[gc]).await;
+    assert_stopped_in_time("descendant in its own session", &[gc], stopped).await;
 }
 
 #[tokio::test]
@@ -170,19 +177,15 @@ async fn interrupting_stops_a_tracked_descendant_that_holds_the_pipes_without_wa
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
+    wait_own_group(gc).await;
     // Let the periodic scan see the descendant.
     wait_tracked(&handle, gc).await;
     let stopped = Instant::now();
     handle.interrupt();
-    let report = handle.wait().await;
+    let report = wait_for_cleanup_report(handle, stopped).await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-    assert!(
-        stopped.elapsed() < BOUND,
-        "stopping took {:?}, which is the grace",
-        stopped.elapsed()
-    );
     assert_confirmed(&report);
-    assert_gone("tracked descendant", &[gc]).await;
+    assert_stopped_in_time("tracked descendant", &[gc], stopped).await;
 }
 
 #[tokio::test]
@@ -205,10 +208,16 @@ async fn a_descendant_in_its_own_session_started_just_before_an_interrupt_needs_
     let _reaper = Reaper(vec![gc]);
     // Without this the sweep could catch it before it has left the session.
     wait_own_group(gc).await;
+    let stopped = Instant::now();
     handle.interrupt();
-    let report = handle.wait().await;
+    let report = wait_for_cleanup_report(handle, stopped).await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-    assert_gone("descendant started just before the interrupt", &[gc]).await;
+    assert_stopped_in_time(
+        "descendant started just before the interrupt",
+        &[gc],
+        stopped,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -220,7 +229,8 @@ async fn an_own_group_descendant_started_just_before_an_interrupt_is_stopped_eve
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         let gc = s.pid("gc").await;
         let _reaper = Reaper(vec![gc]);
-        wait_own_group(gc).await;
+        // Interrupt as soon as the fork is recorded. The child may still
+        // be in the leader's group or may already have left it.
         let stopped = Instant::now();
         handle.interrupt();
         let report = handle.wait().await;
@@ -452,11 +462,6 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![gc]);
     let report = handle.wait().await;
-    assert!(
-        started.elapsed() < Duration::from_secs(60),
-        "took {:?}, which is the deadline",
-        started.elapsed()
-    );
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
             assert!(reason.contains("ps could not be started"), "{reason}");
@@ -467,7 +472,7 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
         }
         Cleanup::Confirmed => panic!("no inspection cannot confirm: {report:#?}"),
     }
-    assert_gone("same-group grandchild", &[gc]).await;
+    assert_stopped_in_time("same-group grandchild", &[gc], started).await;
 }
 
 /// A `ps` stand-in that prints `output` and exits 0, at a path in `s`.
@@ -533,13 +538,14 @@ async fn without_descendant_tracking_the_group_and_session_are_still_swept() {
         LONG,
     );
     spec.track_descendants = false;
+    let started = Instant::now();
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 });
     assert!(!report.diagnostics.tracking_enabled);
     assert!(report.diagnostics.capture_gap_observed);
     // The sweep found the group and session clean, which is what confirms.
     assert_confirmed(&report);
-    assert_gone("grandchild", &pids).await;
+    assert_stopped_in_time("grandchild", &pids, started).await;
 }
 
 #[tokio::test]
