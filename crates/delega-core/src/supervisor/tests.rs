@@ -397,6 +397,102 @@ async fn an_unconfirmed_run_stays_recorded_after_a_refused_follow_up_replaced_it
     dir.assert_nothing_left().await;
 }
 
+/// Start a gated run and a `wait` for it that times out at once and is held
+/// before it asks for its view. Returns the held wait and the gate that lets it
+/// go on.
+async fn wait_held_after_its_timeout(
+    dir: &Dir,
+    supervisor: &Supervisor,
+) -> (
+    tokio::task::JoinHandle<Result<super::WaitResponse, Error>>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let started = supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let (reached, release) = supervisor.pause_next_wait_before_view();
+    let waiting = {
+        let supervisor = supervisor.clone();
+        let targets = WaitTargets {
+            runs: vec![started.run],
+            workers: Vec::new(),
+        };
+        tokio::spawn(async move { supervisor.wait(targets, Some(0), None).await })
+    };
+    reached.await.expect("the wait reached its view");
+    (waiting, release)
+}
+
+#[tokio::test]
+async fn a_wait_whose_timeout_elapsed_as_shutdown_began_still_says_shutdown_released_it() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    let (waiting, release) = wait_held_after_its_timeout(&dir, &supervisor).await;
+    supervisor.shutdown().await;
+    release.send(()).expect("release the wait");
+    let response = waiting.await.expect("task").expect("wait");
+    assert!(!response.timed_out, "{response:#?}");
+    assert!(response.released_by_shutdown, "{response:#?}");
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_that_timed_out_stays_timed_out_when_another_command_runs_before_its_view() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    let (waiting, release) = wait_held_after_its_timeout(&dir, &supervisor).await;
+    // Any command wakes and prunes registrations; one whose receiver was
+    // dropped would be read as fired.
+    supervisor.list().await.expect("list");
+    release.send(()).expect("release the wait");
+    let response = waiting.await.expect("task").expect("wait");
+    assert!(response.timed_out, "{response:#?}");
+    assert!(!response.released_by_shutdown, "{response:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_on_a_queued_run_that_shutdown_discarded_is_not_marked_as_released_by_shutdown() {
+    let dir = Dir::new();
+    let supervisor = Supervisor::new(dir.config());
+    let started = supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let worker = started.worker.expect("worker");
+    let queued = supervisor
+        .follow_up(&worker, "echo:later", None)
+        .await
+        .expect("follow up");
+    assert_eq!(queued.state, RunState::Queued);
+    let waiting = {
+        let supervisor = supervisor.clone();
+        let targets = WaitTargets {
+            runs: vec![queued.run.clone()],
+            workers: Vec::new(),
+        };
+        tokio::spawn(async move { supervisor.wait(targets, Some(300), None).await })
+    };
+    // Round trips through the supervisor's one task let the wait register.
+    for _ in 0..20 {
+        supervisor.list().await.expect("list");
+        assert!(!waiting.is_finished(), "the wait returned before shutdown");
+    }
+    supervisor.shutdown().await;
+    let response = waiting.await.expect("task").expect("wait");
+    assert!(!response.timed_out, "{response:#?}");
+    assert_eq!(response.runs[0].state, RunState::Finished, "{response:#?}");
+    assert!(
+        !response.released_by_shutdown,
+        "the discarded run finishing released it, not the shutdown: {response:#?}"
+    );
+    dir.assert_nothing_left().await;
+}
+
 #[tokio::test]
 async fn a_result_that_fails_validation_is_replaced_in_every_build_and_the_supervisor_goes_on() {
     let dir = Dir::new();
