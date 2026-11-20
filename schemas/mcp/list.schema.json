@@ -191,14 +191,14 @@
             "$ref": "#/$defs/Provider"
           },
           "session_id": {
-            "description": "The provider's session id, once a run has reported one.",
+            "description": "The provider's session id: the one the worker was started to resume,\nor else the first a run reported. A later run that reports another id\ndoes not change it.",
             "type": [
               "string",
               "null"
             ]
           },
           "can_follow_up": {
-            "description": "Whether `follow_up` can continue this worker: it is not closed, was not\nstarted `ephemeral`, and has a session or a run that may still report\none. A worker whose runs ended without reporting a session cannot, and a\nfollow-up to it is refused.",
+            "description": "Whether `follow_up` can continue this worker: it is not closed, was not\nstarted `ephemeral`, and has a session or a run that may still report\none. A worker with no session (none given at start and none reported)\nand no run that may still report one cannot, and a follow-up to it is\nrefused.",
             "type": "boolean"
           },
           "runs": {

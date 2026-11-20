@@ -145,9 +145,16 @@ starts; a refusal there ends that run `refused` and leaves the worker.
 `timeout_secs` if given, so permissions, working directory, model, instructions
 and answer schema are the same. The run is queued behind the worker's running
 and queued runs and runs when its turn comes. The session to continue is the
-latest `session_id` any run of the worker reported, read when the run starts, so
-a follow-up queued behind a run that has not finished still resumes what that
-run reports. It is passed as `session.resume`.
+worker's session, read when the run starts, so a follow-up queued behind a run
+that has not finished still resumes the session that run reports if the worker
+had none. It is passed as `session.resume`.
+
+A worker never switches session. Its session is the one it was started to
+resume, or else the first `session_id` any of its runs reported. Once it has
+one, a run that reports a different id does not replace it, whatever that
+run's outcome (`session_mismatch`, `timed_out`, `interrupted` or another
+failure, see [providers.md](providers.md#outcomes)), so the next follow-up asks
+again for the conversation the worker had.
 
 A follow-up is refused as a finished run, not an error, when:
 
@@ -155,18 +162,22 @@ A follow-up is refused as a finished run, not an error, when:
 - its queue is full, kind `queue_full`;
 - the worker was started `ephemeral`, so there is no session to continue, kind
   `no_session`;
+- the worker is idle and has no session: none was given with `session.resume`
+  at start and no run reported one, kind `no_session`;
 - the prompt is not valid, kind `invalid_request`.
 
-A follow-up queued behind a run that ended without reporting a session is
-refused, kind `no_session`, when its turn comes. If the worker is idle when the
+A follow-up queued behind a run is refused, kind `no_session`, when its turn
+comes if the worker still has no session then. If the worker is idle when the
 follow-up is made, the refusal is immediate and the response says so: every
 response that says a run is `finished` carries its `outcome` and its `error`
 (kind and message). An unknown worker is an error.
 
-A worker whose first run ended without reporting a session, such as one whose
-provider failed before it started, cannot take a follow-up. `list` flags it:
-`can_follow_up` is false for a closed worker, an `ephemeral` one, and one that
-has no session and no run that might still report one.
+A worker that has no session, such as one started without `session.resume`
+whose provider failed before it reported one, cannot take a follow-up. A worker
+started with `session.resume` keeps that id even if its first run reported
+none, and can. `list` flags it: `can_follow_up` is false for a closed worker,
+an `ephemeral` one, and one that has no session and no run that might still
+report one.
 
 ## Waiting and cursors
 

@@ -271,7 +271,11 @@ impl Core {
                 worker.queue.retain(|r| r != id);
                 worker.last_run = Some(id.to_string());
                 worker.last_finish_seq = seq;
-                if session.is_some() {
+                // A worker never switches session: once it has one, a run that
+                // reports another id, whatever its outcome, does not replace
+                // it, so the next follow-up asks for the worker's own
+                // conversation. A worker with none takes the first reported.
+                if worker.session_id.is_none() {
                     worker.session_id = session;
                 }
             }

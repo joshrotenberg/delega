@@ -75,7 +75,7 @@ arguments, and the library from a struct. A partial request saved as a file is a
 | `timeout_secs` | integer | Limit for the run in whole seconds, 1 to 86400. Default 600 (10 minutes). The limit applied is stated in the result as `timing.timeout_secs`. |
 | `permissions` | object | See below. |
 | `answer_schema` | JSON Schema | Ask for a structured answer and validate it. An object or a boolean, at most 256 KiB as compact JSON; one that does not compile is refused `invalid_answer_schema`. |
-| `session` | object | `ephemeral: bool`, or `resume: <provider session id>` (at most 256 bytes) to continue saved history in a new worker. Not both. |
+| `session` | object | `ephemeral: bool`, or `resume: <provider session id>` (at most 256 bytes) to continue saved history in a new worker. Not both. A resumed run that reports another session fails with `session_mismatch` only when it would otherwise have completed; any other outcome stands and a note names both ids. One whose session the provider cannot find fails with `session_not_found` ([providers.md](providers.md#outcomes)). |
 | `native_args` | list of strings | Provider options passed through, restricted by an allowlist; a rejected option is refused `native_arg_rejected`. At most 64 entries. The escape hatch. |
 
 Every length and count bound is a constant in
@@ -994,7 +994,8 @@ Rules that hold for every tool:
   the provider layer finds before start, or checks that did not finish in 10 s
   (`preflight_timeout`). A `follow_up` is refused when the worker is closed
   (`worker_closed`), its queue is full (`queue_full`), it was started
-  `ephemeral` or no earlier run reported a session (`no_session`), or the
+  `ephemeral` or has no session, because none was given with `session.resume`
+  and no run reported one (`no_session`), or the
   request is invalid (`invalid_request`). Once the server is stopping, `start`
   and `follow_up` are tool errors: "the supervisor was shut down and takes no
   new work". An id
@@ -1030,8 +1031,9 @@ Rules that hold for every tool:
   `discarded by close` (`discarded by shutdown` when the server stops).
 - **Follow-ups.** A follow-up runs with the worker's first request (provider,
   `cwd`, permissions, model, effort, instructions, `answer_schema`,
-  `native_args`), the new prompt, `timeout_secs` when given, and the session the
-  worker's latest run reported.
+  `native_args`), the new prompt, `timeout_secs` when given, and the worker's
+  session: the one given with `session.resume` at start, or else the first one a
+  run reported. A later run that reports another id does not replace it.
 - **Ownership.** Workers belong to the connection that started them and stop
   when it closes.
 - **History is data.** Text a worker returns is never an instruction to the
