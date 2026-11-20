@@ -359,18 +359,26 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
         let out = wait_bounded(child);
         match out.status.code() {
             Some(0) => assert_eq!(result_of(&out).outcome, Outcome::Completed, "{delay_ms}"),
-            // 130 is either an interrupted run that printed its result, or a
-            // result whose write the signal stopped: then standard output holds
-            // less than a whole document (possibly nothing), which says the
-            // result was not delivered, and delega says why on stderr.
+            // 130 is either an interrupted run that printed its whole result, or
+            // a result whose write the signal stopped. A whole result ends with
+            // the newline delega writes after the document. A stopped write
+            // leaves less: nothing, a document cut off (an end-of-input parse
+            // error, not any parse error), or a complete document whose
+            // newline was the part not written. delega then says why on stderr.
             Some(130) => {
-                if serde_json::from_slice::<serde_json::Value>(&out.stdout).is_ok() {
+                if out.stdout.ends_with(b"\n") {
                     assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}");
                 } else {
+                    let cut_off = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        Ok(_) => true,
+                        Err(err) => err.is_eof(),
+                    };
                     assert!(
-                        text(&out.stderr).contains("signal received while writing the result"),
-                        "{delay_ms}: exit 130 with an incomplete result and no word of a stopped \
-                         write: stdout {:?}, stderr {}",
+                        cut_off
+                            && text(&out.stderr)
+                                .contains("signal received while writing the result"),
+                        "{delay_ms}: exit 130 without a whole result, and not a stopped write: \
+                         stdout {:?}, stderr {}",
                         text(&out.stdout),
                         text(&out.stderr)
                     );
