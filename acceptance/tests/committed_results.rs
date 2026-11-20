@@ -71,29 +71,42 @@ fn the_committed_results_cover_exactly_the_matrix_rows_with_their_current_expect
             ids, expected,
             "acceptance/{name} does not hold the matrix's rows; {REGENERATE}"
         );
-        assert_eq!(
-            committed.len(),
-            matrix.len() * runs as usize,
-            "acceptance/{name} should hold {runs} run(s) of each row; {REGENERATE}"
-        );
+        // Each row exactly `runs` times, as repeats 1 to `runs`.
+        let mut repeats: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
         for m in &committed {
-            let row = &matrix[&m.id];
+            repeats.entry(m.id.as_str()).or_default().push(m.repeat);
+        }
+        let wanted: Vec<u32> = (1..=runs).collect();
+        for (id, mut seen) in repeats {
+            seen.sort_unstable();
             assert_eq!(
-                m.expected_outcome, row.expect.outcome,
-                "{name}: {} expected outcome changed; {REGENERATE}",
-                m.id
+                seen, wanted,
+                "acceptance/{name}: {id} should be run as repeats {wanted:?}; {REGENERATE}"
             );
-            assert_eq!(
-                m.expected_leak, row.expect.leak,
-                "{name}: {} expected leak class changed; {REGENERATE}",
-                m.id
-            );
-            assert_eq!(
-                m.expected_reason.as_deref(),
-                row.expect.reason,
-                "{name}: {} reason text changed; {REGENERATE}",
-                m.id
-            );
+        }
+        // Every expectation a committed row records is the matrix's current one.
+        for m in &committed {
+            let expect = &matrix[&m.id].expect;
+            let survivors: Vec<&str> = m.expected_survivors.iter().map(String::as_str).collect();
+            let fields = [
+                ("outcome", m.expected_outcome == expect.outcome),
+                ("exit", m.expected_exit == expect.exit),
+                ("cleanup verdict", m.expected_confirmed == expect.confirmed),
+                ("survivors", survivors == expect.survivors),
+                ("leak class", m.expected_leak == expect.leak),
+                (
+                    "timing dependence",
+                    m.timing_dependent == expect.timing_dependent,
+                ),
+                ("reason text", m.expected_reason.as_deref() == expect.reason),
+            ];
+            for (field, same) in fields {
+                assert!(
+                    same,
+                    "acceptance/{name}: {} expected {field} differs from src/matrix.rs; {REGENERATE}",
+                    m.id
+                );
+            }
         }
     }
 }

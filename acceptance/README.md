@@ -70,15 +70,23 @@ cargo run -p delega-acceptance -- --report
 `--report` reads `results.jsonl`, `results.meta.json`, `repeats.jsonl` and
 `spike-numbers.jsonl` and rewrites `RESULTS.md` and `COMPARISON.md`.
 
-`tests/committed_results.rs`, part of `cargo test --workspace`, keeps these
-files current. It fails when the committed results do not hold exactly the
-matrix's rows (one run each in `results.jsonl`, three in `repeats.jsonl`), when
-a row's expected outcome, leak class or reason text in them differs from
-`src/matrix.rs`, or when `RESULTS.md` or `COMPARISON.md` differs from what
-`--report` generates. A change to the matrix, a reason text or the report
-format therefore comes with regenerated results in the same pull request.
 `spike-numbers.jsonl` holds the numbers copied from the spike's committed
 results; `scripts/extract-spike-numbers.py` produced it.
+
+`tests/committed_results.rs`, part of `cargo test --workspace`, keeps these
+files current. It fails when the committed results do not hold exactly the
+matrix's rows (each row once in `results.jsonl`, as repeats 1 to 3 in
+`repeats.jsonl`), when any expectation a committed row records (outcome, exit,
+cleanup verdict, survivors, leak class, timing dependence, reason text) differs
+from `src/matrix.rs`, or when `RESULTS.md` or `COMPARISON.md` differs from what
+`--report` generates. What a change costs to bring them back in step:
+
+- A change to the report format only: `--report`, a few seconds.
+- A change to the matrix (a row, an expectation or a reason text): the three
+  commands above on a quiet machine, about 80 s for `--all` and 240 s for the
+  repeats on an Apple M4 Pro (2026-11-19), then `--report`.
+
+Either way the regenerated files go in the same pull request as the change.
 
 ## Retries after a late process listing
 
