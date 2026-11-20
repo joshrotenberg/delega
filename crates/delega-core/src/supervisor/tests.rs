@@ -76,9 +76,15 @@ impl Dir {
         self.root().join("gate")
     }
 
+    /// Wait until the fake has begun the run held on the gate. The fake marks
+    /// that by writing a file, so the wait ends on that event; the deadline only
+    /// ends a test that would otherwise hang, and is generous for the same
+    /// reason as the integration tests' `Gate::started`: on a loaded machine a
+    /// version probe and start can take well over the 15 s this used to allow.
     async fn gate_started(&self) {
         let marker = self.root().join("gate.started");
-        for _ in 0..1500 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if marker.exists() {
                 return;
             }
@@ -605,7 +611,15 @@ async fn outstanding_request_checks_are_capped_and_a_start_beyond_the_cap_waits_
     let error = over.error.as_ref().expect("error");
     assert_eq!(error.kind, "preflight_timeout", "{error:?}");
     assert!(
-        error.message.contains("request checks are not completing"),
+        error.message.starts_with("no request check slot was free"),
+        "{error:?}"
+    );
+    assert_eq!(
+        error
+            .message
+            .matches("request checks are not completing")
+            .count(),
+        1,
         "{error:?}"
     );
     let list = supervisor.list().await.expect("list");
@@ -747,40 +761,222 @@ async fn a_start_after_the_checks_are_closed_is_shut_down_and_starts_nothing() {
     dir.assert_nothing_left().await;
 }
 
+/// Wait for `count` checks to report that they have entered, each named by
+/// its prompt, and return the prompts. The deadline only ends a test that would
+/// otherwise hang: an entry takes one thread spawn, so a minute is many times
+/// what a loaded machine needs, and a check that never enters is a failure.
+async fn entered(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    count: usize,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut prompts = Vec::new();
+    while prompts.len() < count {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(prompt)) => prompts.push(prompt),
+            Ok(None) => panic!("the checks went away after {prompts:?}"),
+            Err(_) => panic!(
+                "only {} of {count} checks entered within a minute: {prompts:?}",
+                prompts.len()
+            ),
+        }
+    }
+    prompts
+}
+
+/// Starts that stop waiting for a check slot, before one frees and after their
+/// slot has been handed to them, give every slot back: afterwards all of them
+/// can be held at once. The order of holders and waiters comes from events:
+/// each check reports when it has entered, and each waiter is polled until it
+/// is queued for a slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
     use super::limits::MAX_PENDING_PREFLIGHTS;
+    use super::preflight::Preflight;
+    use std::future::Future;
     use std::sync::atomic::AtomicBool;
+    use std::task::Poll;
 
     let dir = Dir::new();
-    let released = Arc::new(AtomicBool::new(false));
-    let _release = Release(released.clone());
-    let supervisor = holding_supervisor(&dir, &released, Duration::from_secs(3600));
+    let first = Arc::new(AtomicBool::new(false));
+    let second = Arc::new(AtomicBool::new(false));
+    let never = Arc::new(AtomicBool::new(false));
+    let (_first, _second, _never) = (
+        Release(first.clone()),
+        Release(second.clone()),
+        Release(never.clone()),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let check = {
+        let (first, second, never) = (first.clone(), second.clone(), never.clone());
+        Arc::new(move |request: &Request, _: &ProviderOptions| {
+            let gate = match request.prompt.split(' ').next() {
+                Some("first") => &first,
+                Some("second") => &second,
+                Some("waiter") => &never,
+                _ => return None,
+            };
+            let _ = tx.send(request.prompt.clone());
+            while !gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    let mut config = dir.config();
+    config.limits.max_live_workers = 64;
+    let supervisor = Supervisor::with_hooks(
+        config,
+        super::runner::provider_launch(),
+        Preflight::with(check, Duration::from_secs(3600)),
+    );
+
+    // Every slot is held.
     let mut holders = tokio::task::JoinSet::new();
     for n in 0..MAX_PENDING_PREFLIGHTS {
-        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold {n}")));
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("first {n}")));
         holders.spawn(async move { supervisor.start(request).await });
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let mut waiters = tokio::task::JoinSet::new();
-    for n in 0..4 {
-        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("hold w{n}")));
-        waiters.spawn(async move { supervisor.start(request).await });
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    waiters.abort_all();
-    while waiters.join_next().await.is_some() {}
+    entered(&mut rx, MAX_PENDING_PREFLIGHTS).await;
 
-    released.store(true, Ordering::SeqCst);
+    // Eight starts queue for a slot. A start's first poll runs straight to the
+    // wait for a slot, so one poll that returns pending leaves it queued.
+    let mut waiters: Vec<_> = (0..8)
+        .map(|n| Box::pin(supervisor.start(dir.request(&format!("waiter {n}")))))
+        .collect();
+    for waiter in &mut waiters {
+        let queued =
+            std::future::poll_fn(|cx| Poll::Ready(waiter.as_mut().poll(cx).is_pending())).await;
+        assert!(queued, "a start went ahead while every slot was held");
+    }
+    // Half stop waiting before any slot frees.
+    let late_waiters = waiters.split_off(4);
+    drop(waiters);
+
+    // The holders end. A check frees its slot before it answers, so once all
+    // have answered every slot has been freed, and the first four went to the
+    // queued waiters, which are never polled again.
+    first.store(true, Ordering::SeqCst);
     while let Some(joined) = holders.join_next().await {
         let started = joined.expect("task").expect("start");
         assert_eq!(started.error, None, "{started:#?}");
     }
-    let later = supervisor
-        .start(dir.request("echo:later"))
+    // The other half stop waiting holding the slot handed to them.
+    drop(late_waiters);
+
+    // All slots are free: as many checks as there are slots are held at once.
+    let mut second_holders = tokio::task::JoinSet::new();
+    for n in 0..MAX_PENDING_PREFLIGHTS {
+        let (supervisor, request) = (supervisor.clone(), dir.request(&format!("second {n}")));
+        second_holders.spawn(async move { supervisor.start(request).await });
+    }
+    let prompts = entered(&mut rx, MAX_PENDING_PREFLIGHTS).await;
+    assert!(
+        prompts.iter().all(|p| p.starts_with("second ")),
+        "a start that stopped waiting ran its check: {prompts:?}"
+    );
+    second.store(true, Ordering::SeqCst);
+    while let Some(joined) = second_holders.join_next().await {
+        let started = joined.expect("task").expect("start");
+        assert_eq!(started.error, None, "{started:#?}");
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "a start that stopped waiting ran its check"
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// A start that waits most of its bound for a check slot and then meets a check
+/// that does not answer is refused when the one bound, measured from the start
+/// of the call, has passed: not after the wait plus a fresh bound, and not
+/// before. Time is paused, so the clock moves only when no task can run, and the
+/// timing does not depend on how loaded the machine is.
+#[tokio::test(start_paused = true)]
+async fn a_start_that_waited_for_a_check_slot_has_only_the_rest_of_its_bound_for_the_check() {
+    use super::limits::MAX_PENDING_PREFLIGHTS;
+    use super::preflight::Preflight;
+    use std::sync::atomic::AtomicBool;
+    use tokio::time::Instant;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    const SLOT_WAIT: Duration = Duration::from_secs(8);
+    // The timer rounds a deadline up to the next millisecond, so the refusal
+    // comes at the bound or up to 1 ms after it. A fresh bound for the check
+    // would make it SLOT_WAIT later, 8 s; an earlier deadline makes it early.
+    const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
+
+    let dir = Dir::new();
+    let released = Arc::new(AtomicBool::new(false));
+    let _release = Release(released.clone());
+    let entered = Arc::new(AtomicBool::new(false));
+    let check = {
+        let (released, entered) = (released.clone(), entered.clone());
+        Arc::new(move |_: &Request, _: &ProviderOptions| {
+            entered.store(true, Ordering::SeqCst);
+            while !released.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    let preflight = Preflight::with(check, BOUND);
+    // The test holds every slot itself, so it alone decides when one frees.
+    let taken = preflight
+        .slots()
+        .acquire_many_owned(u32::try_from(MAX_PENDING_PREFLIGHTS).expect("slot count"))
         .await
-        .expect("start");
-    assert_eq!(later.error, None, "{later:#?}");
+        .expect("take every slot");
+    let supervisor =
+        Supervisor::with_hooks(dir.config(), super::runner::provider_launch(), preflight);
+    let freer = {
+        let entered = entered.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SLOT_WAIT).await;
+            let freed_at = Instant::now();
+            drop(taken);
+            // Paused time jumps to the next timer as soon as no task can run,
+            // which would let the start time out while the check's thread is
+            // still waiting to be scheduled. This task stays runnable by
+            // yielding until the check reports it has entered, so the clock
+            // cannot move first. The real-time limit only ends a check that
+            // never enters; one thread spawn needs far less than a minute.
+            let limit = std::time::Instant::now() + Duration::from_secs(60);
+            while !entered.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < limit,
+                    "the check never entered after its slot freed"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                Instant::now(),
+                freed_at,
+                "time moved before the check entered"
+            );
+        })
+    };
+
+    let begun = Instant::now();
+    let refused = supervisor.start(dir.request("held")).await.expect("start");
+    let took = begun.elapsed();
+    freer
+        .await
+        .expect("the slot freed and the check entered before time moved on");
+
+    assert_eq!(refused.outcome, Some(Outcome::Refused), "{refused:#?}");
+    let error = refused.error.as_ref().expect("error");
+    assert_eq!(error.kind, "preflight_timeout", "{error:?}");
+    // It got a slot and timed out waiting for the check, not for the slot.
+    assert!(
+        error.message.starts_with("the check did not finish"),
+        "{error:?}"
+    );
+    assert!(
+        took >= BOUND && took <= BOUND + TIMER_RESOLUTION,
+        "refused {took:?} after the start, not at its bound of {BOUND:?}"
+    );
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
