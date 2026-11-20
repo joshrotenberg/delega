@@ -149,6 +149,13 @@ latest `session_id` any run of the worker reported, read when the run starts, so
 a follow-up queued behind a run that has not finished still resumes what that
 run reports. It is passed as `session.resume`.
 
+A run that ends with kind `session_mismatch` (the provider continued another
+session than the one asked for, see
+[providers.md](providers.md#outcomes)) does not replace the worker's session,
+so the next follow-up asks again for the conversation the worker had. A run
+that ends `session_not_found` leaves the worker's session as it was: Claude Code
+reports the requested id and Codex reports none.
+
 A follow-up is refused as a finished run, not an error, when:
 
 - the worker is closed, kind `worker_closed`;
