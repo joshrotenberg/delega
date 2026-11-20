@@ -22,7 +22,7 @@ use crate::commands::{OutputFormat, output};
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Remove from this host only, and keep the directory for the other;
-    /// repeat for both. Without it, every host the install recorded
+    /// repeat for both. With no --host, remove from every host recorded in the marker.
     #[arg(long = "host", value_enum)]
     hosts: Vec<Host>,
     /// The managed directory [default: $DELEGA_INSTALL_HOME, then

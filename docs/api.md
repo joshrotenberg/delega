@@ -679,8 +679,8 @@ Options, for both commands: `--host claude|codex` (repeatable),
   | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | The local marketplace `delega-local`, one file per host. |
   | `.delega-install.json` | The ownership marker. |
 
-- **Plugin version.** The delega version, a plus sign and the SHA-256 of the copied
-  executable, for example `0.1.0-dev+3f9c...`. The digest is semver build
+- **Plugin version.** The delega version, a `+` and the lowercase hexadecimal SHA-256
+  digest of the copied executable, for example `0.1.0-dev+3f9c...`. The digest is semver build
   metadata, so the version stays valid semver at a release. A host caches a plugin by version,
   so a changed executable, even another build of the same source revision, gets
   a new version and a refreshed cache. Running `delega plugin install` again
@@ -703,11 +703,11 @@ Host commands, run from `/` with no input, each limited to 300 s (listings 30 s)
 | Codex | `codex plugin marketplace add DIR`, `codex plugin add ID` | `codex plugin remove ID`, `codex plugin marketplace remove delega-local` |
 
 `delega plugin install` runs the whole sequence every time. `plugin update`
-refreshes Claude Code's cached copy. Codex's `plugin add` copies the plugin
-into its cache each time. If a command fails, the rest of that host's sequence
-is skipped, the other host is still installed, the files stay in place, and
-the status is 1. Fix the error and run `delega plugin install` again. No host
-cache is deleted by delega.
+refreshes Claude Code's cached copy, which a repeated `plugin install` alone
+leaves stale. Codex's `plugin add` copies the plugin into its cache each time.
+If a command fails, the rest of that host's sequence is skipped, the other
+host is still installed, the files stay in place, and the status is 1. Fix the
+error and run `delega plugin install` again. No host cache is deleted by delega.
 
 `delega plugin uninstall` first reads each selected host's registrations with
 `plugin marketplace list --json` and `plugin list --json`, from `/`, for every

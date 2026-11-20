@@ -42,7 +42,7 @@
         "string",
         "null"
       ],
-      "description": "The plugin version: the delega version, a dot and the SHA-256 of the copied executable. Null when installation stopped before it was computed."
+      "description": "The delega version followed by a + and the lowercase hexadecimal SHA-256 digest of the copied executable as SemVer build metadata. Null when installation stopped before it was computed."
     },
     "executable": {
       "type": "string",
