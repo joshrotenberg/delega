@@ -1,4 +1,4 @@
-//! The files `delega init` writes besides the executable copy and the marker.
+//! The files `delega plugin install` writes besides the executable copy and the marker.
 
 use delega_core::canonical::sorted;
 use delega_core::skills;
@@ -61,7 +61,7 @@ pub fn payload(version: &str) -> Vec<(String, Vec<u8>)> {
             document(json!({
                 "name": MARKETPLACE,
                 "owner": {"name": PLUGIN},
-                "description": "The delega plugin installed by delega init",
+                "description": "The delega plugin installed by delega plugin install",
                 "plugins": [{
                     "name": PLUGIN,
                     "source": format!("./{PLUGIN_DIR}"),

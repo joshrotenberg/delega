@@ -1,4 +1,4 @@
-//! `delega init` and `delega uninstall` against fake host CLIs.
+//! `delega plugin install` and `delega plugin uninstall` against fake host CLIs.
 //!
 //! Every test runs the built binary with an empty environment plus a
 //! temporary HOME, a PATH holding only an empty directory, and
@@ -106,10 +106,10 @@ impl Rig {
         let out = self.run(&all);
         let doc: Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("not JSON ({e}): {}", text(&out.stdout)));
-        let schema = if args[0] == "init" {
-            include_str!("../../../schemas/init.schema.json")
+        let schema = if args[1] == "install" {
+            include_str!("../../../schemas/plugin-install.schema.json")
         } else {
-            include_str!("../../../schemas/uninstall.schema.json")
+            include_str!("../../../schemas/plugin-uninstall.schema.json")
         };
         let schema: Value = serde_json::from_str(schema).expect("schema");
         let validator = jsonschema::validator_for(&schema).expect("compile schema");
@@ -203,12 +203,12 @@ const CODEX_UNINSTALL: [&str; 2] = [
     "plugin marketplace remove delega-local",
 ];
 
-// ---- init ----
+// ---- Install ----
 
 #[test]
 fn dry_run_writes_nothing_and_runs_nothing() {
     let rig = Rig::new();
-    let out = rig.run(&["init", "--dry-run"]);
+    let out = rig.run(&["plugin", "install", "--dry-run"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let shown = text(&out.stdout);
     assert!(
@@ -224,7 +224,7 @@ fn dry_run_writes_nothing_and_runs_nothing() {
     assert!(!rig.home.join(".local").exists(), "a dry run wrote");
     rig.no_calls();
 
-    let (code, doc, _) = rig.run_json(&["init", "--dry-run"]);
+    let (code, doc, _) = rig.run_json(&["plugin", "install", "--dry-run"]);
     assert_eq!(code, 0);
     assert_eq!(doc["dry_run"], true);
     assert_eq!(doc["hosts"][0]["status"], "would_install");
@@ -236,7 +236,7 @@ fn dry_run_writes_nothing_and_runs_nothing() {
 #[test]
 fn install_for_claude_runs_the_claude_sequence_only() {
     let rig = Rig::new();
-    let out = rig.run(&["init", "--host", "claude"]);
+    let out = rig.run(&["plugin", "install", "--host", "claude"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(rig.log("claude", true), claude_install(&rig.dir()));
     assert!(!rig.hosts.join("codex.log").exists());
@@ -252,7 +252,7 @@ fn install_for_claude_runs_the_claude_sequence_only() {
 #[test]
 fn install_for_codex_runs_the_codex_sequence_only() {
     let rig = Rig::new();
-    let out = rig.run(&["init", "--host", "codex"]);
+    let out = rig.run(&["plugin", "install", "--host", "codex"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(rig.log("codex", true), codex_install(&rig.dir()));
     assert!(!rig.hosts.join("claude.log").exists());
@@ -263,7 +263,7 @@ fn install_for_codex_runs_the_codex_sequence_only() {
 #[test]
 fn install_for_both_runs_both_sequences() {
     let rig = Rig::new();
-    let (code, doc, err) = rig.run_json(&["init"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(rig.log("claude", true), claude_install(&rig.dir()));
     assert_eq!(rig.log("codex", true), codex_install(&rig.dir()));
@@ -286,7 +286,8 @@ fn install_dir_option_and_environment_choose_the_directory() {
     let mut rig = Rig::new();
     let chosen = rig.home.join("elsewhere");
     let out = rig.run(&[
-        "init",
+        "plugin",
+        "install",
         "--host",
         "codex",
         "--install-dir",
@@ -298,7 +299,7 @@ fn install_dir_option_and_environment_choose_the_directory() {
 
     let from_env = rig.home.join("from-env");
     rig.set("DELEGA_INSTALL_HOME", from_env.to_str().unwrap());
-    let out = rig.run(&["init", "--host", "codex"]);
+    let out = rig.run(&["plugin", "install", "--host", "codex"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(from_env.join(".delega-install.json").exists());
 }
@@ -306,7 +307,7 @@ fn install_dir_option_and_environment_choose_the_directory() {
 #[test]
 fn a_host_that_is_not_found_is_reported_and_skipped() {
     let rig = Rig::new().only(true, false);
-    let (code, doc, err) = rig.run_json(&["init"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["hosts"][1]["host"], "codex");
     assert_eq!(doc["hosts"][1]["status"], "skipped");
@@ -324,7 +325,8 @@ fn a_host_that_is_not_found_is_reported_and_skipped() {
 #[test]
 fn a_named_host_that_is_not_found_fails_and_writes_nothing() {
     let rig = Rig::new().only(true, false);
-    let (code, doc, err) = rig.run_json(&["init", "--host", "claude", "--host", "codex"]);
+    let (code, doc, err) =
+        rig.run_json(&["plugin", "install", "--host", "claude", "--host", "codex"]);
     assert_eq!(code, 1);
     assert!(
         err.contains("a host named with --host was not found"),
@@ -338,7 +340,7 @@ fn a_named_host_that_is_not_found_fails_and_writes_nothing() {
 #[test]
 fn no_host_found_fails_and_writes_nothing() {
     let rig = Rig::new().only(false, false);
-    let (code, _, err) = rig.run_json(&["init"]);
+    let (code, _, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 1);
     assert!(
         err.contains("neither Claude Code nor Codex was found"),
@@ -352,9 +354,12 @@ fn a_foreign_non_empty_directory_is_refused_untouched() {
     let rig = Rig::new();
     fs::create_dir_all(&rig.install).unwrap();
     fs::write(rig.install.join("mine.txt"), "keep").unwrap();
-    let (code, doc, err) = rig.run_json(&["init"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 1);
-    assert!(err.contains("was not created by delega init"), "{err}");
+    assert!(
+        err.contains("was not created by delega plugin install"),
+        "{err}"
+    );
     assert_eq!(doc["files"], serde_json::json!([]));
     let names: Vec<_> = fs::read_dir(&rig.install)
         .unwrap()
@@ -365,7 +370,7 @@ fn a_foreign_non_empty_directory_is_refused_untouched() {
 }
 
 #[test]
-fn an_invalid_marker_refuses_init() {
+fn an_invalid_marker_refuses_install() {
     let rig = Rig::new();
     fs::create_dir_all(&rig.install).unwrap();
     fs::write(
@@ -373,7 +378,7 @@ fn an_invalid_marker_refuses_init() {
         "{\"managed_by\":\"someone\"}",
     )
     .unwrap();
-    let (code, _, err) = rig.run_json(&["init"]);
+    let (code, _, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 1);
     assert!(err.contains("no valid delega ownership marker"), "{err}");
     rig.no_calls();
@@ -383,7 +388,7 @@ fn an_invalid_marker_refuses_init() {
 fn an_empty_existing_directory_is_reused() {
     let rig = Rig::new();
     fs::create_dir_all(&rig.install).unwrap();
-    let out = rig.run(&["init", "--host", "codex"]);
+    let out = rig.run(&["plugin", "install", "--host", "codex"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(rig.install.join("plugin/delega/bin/delega").exists());
 }
@@ -391,7 +396,7 @@ fn an_empty_existing_directory_is_reused() {
 #[test]
 fn the_managed_files_have_the_documented_bytes() {
     let rig = Rig::new();
-    let (code, doc, err) = rig.run_json(&["init"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 0, "{err}");
     let plugin = rig.install.join("plugin/delega");
 
@@ -496,10 +501,10 @@ fn the_managed_files_have_the_documented_bytes() {
 #[test]
 fn a_repeated_install_updates_files_and_repeats_the_commands() {
     let rig = Rig::new();
-    let (_, first, _) = rig.run_json(&["init", "--host", "claude"]);
+    let (_, first, _) = rig.run_json(&["plugin", "install", "--host", "claude"]);
     let skill = rig.install.join("plugin/delega/skills/run/SKILL.md");
     fs::write(&skill, "stale").unwrap();
-    let (code, second, err) = rig.run_json(&["init", "--host", "claude"]);
+    let (code, second, err) = rig.run_json(&["plugin", "install", "--host", "claude"]);
     assert_eq!(code, 0, "{err}");
     // The same executable gives the same plugin version, and the files are
     // written again.
@@ -511,8 +516,8 @@ fn a_repeated_install_updates_files_and_repeats_the_commands() {
     let mut expected = claude_install(&rig.dir());
     expected.extend(claude_install(&rig.dir()));
     assert_eq!(rig.log("claude", true), expected);
-    // A later init for the other host keeps the first recorded.
-    let out = rig.run(&["init", "--host", "codex"]);
+    // A later install for the other host keeps the first recorded.
+    let out = rig.run(&["plugin", "install", "--host", "codex"]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         rig.marker()["hosts"],
@@ -524,7 +529,7 @@ fn a_repeated_install_updates_files_and_repeats_the_commands() {
 fn a_failed_host_command_is_exit_one_and_stops_that_host() {
     let mut rig = Rig::new();
     rig.set("FAKE_FAIL", "update");
-    let (code, doc, err) = rig.run_json(&["init"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "install"]);
     assert_eq!(code, 1);
     assert!(
         err.contains("installation did not complete for Claude Code"),
@@ -548,7 +553,7 @@ fn a_failed_host_command_is_exit_one_and_stops_that_host() {
 fn a_failed_command_leaves_the_rest_of_that_host_unrun() {
     let mut rig = Rig::new();
     rig.set("FAKE_FAIL", "install");
-    let (code, doc, _) = rig.run_json(&["init", "--host", "claude"]);
+    let (code, doc, _) = rig.run_json(&["plugin", "install", "--host", "claude"]);
     assert_eq!(code, 1);
     assert_eq!(
         rig.log("claude", true),
@@ -558,14 +563,36 @@ fn a_failed_command_leaves_the_rest_of_that_host_unrun() {
 }
 
 #[test]
+fn former_top_level_plugin_commands_are_rejected_as_unknown() {
+    let rig = Rig::new();
+    for command in ["init", "uninstall"] {
+        let out = rig.run(&[command]);
+        assert_eq!(out.status.code(), Some(2), "{command}");
+        let err = text(&out.stderr);
+        assert!(
+            err.contains(&format!("unrecognized subcommand '{command}'")),
+            "{err}"
+        );
+    }
+    rig.no_calls();
+}
+
+#[test]
+fn plugin_install_help_describes_refreshing_an_existing_install() {
+    let out = Rig::new().run(&["plugin", "install", "--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stdout).contains("refresh an existing install"));
+}
+
+#[test]
 fn usage_errors_exit_two() {
     let rig = Rig::new();
     for args in [
-        &["init", "--host", "nope"][..],
-        &["init", "--install-dir", "relative/dir"],
-        &["uninstall", "--install-dir", "relative/dir"],
-        &["init", "--output", "xml"],
-        &["uninstall", "--bogus"],
+        &["plugin", "install", "--host", "nope"][..],
+        &["plugin", "install", "--install-dir", "relative/dir"],
+        &["plugin", "uninstall", "--install-dir", "relative/dir"],
+        &["plugin", "install", "--output", "xml"],
+        &["plugin", "uninstall", "--bogus"],
     ] {
         let out = rig.run(args);
         assert_eq!(
@@ -576,9 +603,9 @@ fn usage_errors_exit_two() {
         );
     }
     // No HOME and no directory given.
-    for command in ["init", "uninstall"] {
+    for command in ["install", "uninstall"] {
         let out = Command::new(env!("CARGO_BIN_EXE_delega"))
-            .arg(command)
+            .args(["plugin", command])
             .env_clear()
             .env("PATH", &rig.empty)
             .captured()
@@ -590,11 +617,11 @@ fn usage_errors_exit_two() {
     rig.no_calls();
 }
 
-// ---- uninstall ----
+// ---- Uninstall ----
 
 fn installed_for_both() -> Rig {
     let rig = Rig::new();
-    let out = rig.run(&["init"]);
+    let out = rig.run(&["plugin", "install"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     rig
 }
@@ -606,7 +633,7 @@ fn listing() -> Vec<String> {
 #[test]
 fn uninstall_removes_both_registrations_and_the_directory() {
     let rig = installed_for_both();
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 0, "{err}");
     let mut claude = claude_install(&rig.dir());
     claude.extend(listing());
@@ -631,7 +658,7 @@ fn uninstall_removes_both_registrations_and_the_directory() {
 fn uninstall_host_keeps_the_directory_for_the_other_host() {
     let rig = installed_for_both();
     let codex_before = rig.log("codex", true);
-    let (code, doc, err) = rig.run_json(&["uninstall", "--host", "claude"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall", "--host", "claude"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["directory"], "kept");
     assert!(rig.install.join("plugin/delega/bin/delega").exists());
@@ -640,7 +667,7 @@ fn uninstall_host_keeps_the_directory_for_the_other_host() {
     let claude = rig.log("claude", false);
     assert_eq!(claude[3..], CLAUDE_UNINSTALL.map(String::from));
     // Then the rest, which removes the directory.
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["directory"], "removed");
     assert!(!rig.install.exists());
@@ -654,8 +681,13 @@ fn uninstall_host_keeps_the_directory_for_the_other_host() {
 #[test]
 fn uninstall_host_for_the_only_host_removes_the_directory() {
     let rig = Rig::new();
-    assert_eq!(rig.run(&["init", "--host", "codex"]).status.code(), Some(0));
-    let (code, doc, err) = rig.run_json(&["uninstall", "--host", "codex"]);
+    assert_eq!(
+        rig.run(&["plugin", "install", "--host", "codex"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall", "--host", "codex"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["directory"], "removed");
     assert!(!rig.install.exists());
@@ -666,7 +698,7 @@ fn uninstall_stops_on_a_foreign_marketplace() {
     let rig = installed_for_both();
     fs::write(rig.state("claude", "marketplace"), "/elsewhere").unwrap();
     let before = rig.log("claude", true).len();
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 1);
     assert!(err.contains("another or unverified directory"), "{err}");
     assert_eq!(doc["hosts"][0]["status"], "refused");
@@ -694,7 +726,7 @@ fn uninstall_stops_on_a_foreign_marketplace() {
 fn uninstall_stops_on_a_foreign_plugin_registration() {
     let rig = installed_for_both();
     fs::write(rig.state("codex", "plugin"), "/elsewhere/plugin/delega").unwrap();
-    let (code, _, err) = rig.run_json(&["uninstall"]);
+    let (code, _, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 1);
     assert!(err.contains("cannot be attributed to"), "{err}");
     assert!(rig.install.join("plugin/delega/bin/delega").exists());
@@ -711,7 +743,7 @@ fn uninstall_stops_on_a_foreign_plugin_registration() {
 fn uninstall_stops_when_another_plugin_is_installed_from_the_marketplace() {
     let rig = installed_for_both();
     fs::write(rig.state("claude", "extra"), "").unwrap();
-    let (code, _, err) = rig.run_json(&["uninstall"]);
+    let (code, _, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 1);
     assert!(
         err.contains("another plugin installed from delega-local"),
@@ -730,7 +762,7 @@ fn uninstall_stops_on_a_failing_or_unreadable_listing() {
     for (name, value) in [("FAKE_FAIL", "list"), ("FAKE_GARBAGE", "yes")] {
         let mut rig = installed_for_both();
         rig.set(name, value);
-        let (code, _, err) = rig.run_json(&["uninstall"]);
+        let (code, _, err) = rig.run_json(&["plugin", "uninstall"]);
         assert_eq!(code, 1, "{name}");
         assert!(err.contains("cannot verify registration"), "{name}: {err}");
         assert!(rig.install.join(".delega-install.json").exists(), "{name}");
@@ -748,7 +780,7 @@ fn uninstall_stops_on_a_failing_or_unreadable_listing() {
 fn uninstall_keeps_files_when_a_removal_command_fails() {
     let mut rig = installed_for_both();
     rig.set("FAKE_FAIL", "uninstall");
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 1);
     assert!(err.contains("removal failed for Claude Code"), "{err}");
     assert!(rig.install.join("plugin/delega/bin/delega").exists());
@@ -778,7 +810,7 @@ fn an_invalid_marker_stops_uninstall() {
         bad[field] = value;
         fs::write(&marker, serde_json::to_vec(&bad).unwrap()).unwrap();
         let before = rig.log("claude", true).len();
-        let (code, _, err) = rig.run_json(&["uninstall"]);
+        let (code, _, err) = rig.run_json(&["plugin", "uninstall"]);
         assert_eq!(code, 1, "{field}");
         assert!(
             err.contains("no valid delega ownership marker"),
@@ -792,7 +824,7 @@ fn an_invalid_marker_stops_uninstall() {
         assert!(rig.install.join("plugin/delega/bin/delega").exists());
     }
     fs::write(&marker, "not json").unwrap();
-    assert_eq!(rig.run(&["uninstall"]).status.code(), Some(1));
+    assert_eq!(rig.run(&["plugin", "uninstall"]).status.code(), Some(1));
     assert!(rig.install.join("plugin/delega/bin/delega").exists());
 }
 
@@ -801,9 +833,12 @@ fn an_unmanaged_directory_stops_uninstall() {
     let rig = Rig::new();
     fs::create_dir_all(&rig.install).unwrap();
     fs::write(rig.install.join("mine.txt"), "keep").unwrap();
-    let (code, _, err) = rig.run_json(&["uninstall"]);
+    let (code, _, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 1);
-    assert!(err.contains("was not created by delega init"), "{err}");
+    assert!(
+        err.contains("was not created by delega plugin install"),
+        "{err}"
+    );
     assert!(rig.install.join("mine.txt").exists());
     rig.no_calls();
 }
@@ -811,7 +846,7 @@ fn an_unmanaged_directory_stops_uninstall() {
 #[test]
 fn a_missing_directory_is_nothing_to_do() {
     let rig = Rig::new();
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["directory"], "absent");
     rig.no_calls();
@@ -821,13 +856,13 @@ fn a_missing_directory_is_nothing_to_do() {
 fn uninstall_dry_run_changes_and_runs_nothing() {
     let rig = installed_for_both();
     let calls = (rig.log("claude", true), rig.log("codex", true));
-    let (code, doc, err) = rig.run_json(&["uninstall", "--dry-run"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall", "--dry-run"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["directory"], "would_remove");
     assert_eq!(doc["hosts"][0]["commands"][0]["status"], "would_run");
     assert_eq!((rig.log("claude", true), rig.log("codex", true)), calls);
     assert!(rig.install.join("plugin/delega/bin/delega").exists());
-    let out = rig.run(&["uninstall", "--dry-run", "--host", "claude"]);
+    let out = rig.run(&["plugin", "uninstall", "--dry-run", "--host", "claude"]);
     assert_eq!(out.status.code(), Some(0));
     assert!(
         text(&out.stdout).contains("Would keep"),
@@ -843,7 +878,7 @@ fn a_registration_a_host_no_longer_has_is_not_removed_again() {
         fs::remove_file(rig.state(host, "plugin")).unwrap();
         fs::remove_file(rig.state(host, "marketplace")).unwrap();
     }
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 0, "{err}");
     assert!(
         rig.log("claude", false)
@@ -859,10 +894,10 @@ fn a_recorded_host_that_cannot_be_found_keeps_everything() {
     let mut rig = installed_for_both();
     rig.codex = false;
     let before = rig.log("claude", true).len();
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 1);
     assert!(
-        err.contains("Codex was registered by init but its CLI was not found"),
+        err.contains("Codex was registered by delega plugin install but its CLI was not found"),
         "{err}"
     );
     assert_eq!(
@@ -901,7 +936,7 @@ fn a_linked_file_or_directory_in_the_managed_directory_is_refused() {
             symlink(&target, &file).unwrap();
         }
         let calls = host_calls(&rig);
-        for args in [&["init"][..], &["uninstall"]] {
+        for args in [&["plugin", "install"][..], &["plugin", "uninstall"]] {
             let (code, _, err) = rig.run_json(args);
             assert_eq!(code, 1, "{args:?} linked_directory={linked_directory}");
             assert!(err.contains("is a symbolic link"), "{args:?}: {err}");
@@ -921,7 +956,7 @@ fn claude_registrations_outside_user_scope_are_not_removed() {
     ] {
         let mut rig = installed_for_both();
         rig.set(variable, "project");
-        let (code, _, err) = rig.run_json(&["uninstall", "--host", "claude"]);
+        let (code, _, err) = rig.run_json(&["plugin", "uninstall", "--host", "claude"]);
         assert_eq!(code, 1, "{variable}");
         assert!(err.contains(expected), "{variable}: {err}");
         assert!(rig.state("claude", "plugin").exists(), "{variable}");
@@ -939,7 +974,12 @@ fn claude_registrations_outside_user_scope_are_not_removed() {
 #[test]
 fn an_upgrade_deletes_files_an_earlier_install_wrote_and_this_one_does_not() {
     let rig = Rig::new();
-    assert_eq!(rig.run(&["init", "--host", "codex"]).status.code(), Some(0));
+    assert_eq!(
+        rig.run(&["plugin", "install", "--host", "codex"])
+            .status
+            .code(),
+        Some(0)
+    );
     let stale = "plugin/delega/skills/retired/SKILL.md";
     fs::create_dir_all(rig.install.join("plugin/delega/skills/retired")).unwrap();
     fs::write(rig.install.join(stale), "old").unwrap();
@@ -950,7 +990,7 @@ fn an_upgrade_deletes_files_an_earlier_install_wrote_and_this_one_does_not() {
         serde_json::to_vec(&marker).unwrap(),
     )
     .unwrap();
-    let (code, _, err) = rig.run_json(&["init", "--host", "codex"]);
+    let (code, _, err) = rig.run_json(&["plugin", "install", "--host", "codex"]);
     assert_eq!(code, 0, "{err}");
     assert!(!rig.install.join(stale).exists());
     assert!(
@@ -969,7 +1009,7 @@ fn an_upgrade_deletes_files_an_earlier_install_wrote_and_this_one_does_not() {
 fn uninstall_removes_only_the_listed_files_and_reports_files_removed() {
     let rig = installed_for_both();
     fs::write(rig.install.join("extra.txt"), "mine").unwrap();
-    let (code, doc, err) = rig.run_json(&["uninstall"]);
+    let (code, doc, err) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(doc["directory"], "files_removed");
     assert!(rig.install.join("extra.txt").exists());
@@ -987,8 +1027,13 @@ fn uninstall_removes_only_the_listed_files_and_reports_files_removed() {
 fn uninstall_removes_an_empty_directory_the_user_chose() {
     let rig = Rig::new();
     fs::create_dir_all(&rig.install).unwrap();
-    assert_eq!(rig.run(&["init", "--host", "codex"]).status.code(), Some(0));
-    let (code, doc, _) = rig.run_json(&["uninstall"]);
+    assert_eq!(
+        rig.run(&["plugin", "install", "--host", "codex"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let (code, doc, _) = rig.run_json(&["plugin", "uninstall"]);
     assert_eq!(code, 0);
     assert_eq!(doc["directory"], "removed");
     assert!(!rig.install.exists());
@@ -1015,7 +1060,7 @@ fn a_marker_naming_a_path_this_delega_does_not_write_is_refused() {
         )
         .unwrap();
         let calls = host_calls(&rig);
-        for args in [&["uninstall"][..], &["init"]] {
+        for args in [&["plugin", "uninstall"][..], &["plugin", "install"]] {
             let (code, _, err) = rig.run_json(args);
             assert_eq!(code, 1, "{path} {args:?}");
             assert!(
@@ -1038,8 +1083,8 @@ fn a_marker_naming_a_path_this_delega_does_not_write_is_refused() {
 #[test]
 fn every_failure_prints_the_json_document() {
     let rig = Rig::new();
-    for command in ["init", "uninstall"] {
-        let (code, doc, err) = rig.run_json(&[command, "--install-dir", "/"]);
+    for command in ["install", "uninstall"] {
+        let (code, doc, err) = rig.run_json(&["plugin", command, "--install-dir", "/"]);
         assert_eq!(code, 1, "{command}");
         assert_eq!(doc["ok"], false);
         assert!(

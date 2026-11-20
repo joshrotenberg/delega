@@ -9,8 +9,8 @@ Use these tools when you want to start several workers, keep working, and
 collect results later. For one assignment in the foreground, use the `run` skill
 instead.
 
-To add these tools and skills to Claude Code or Codex, run `delega init`
-(`delega init --dry-run` first shows the files and host commands).
+To add these tools and skills to Claude Code or Codex, run `delega plugin install`
+(`delega plugin install --dry-run` first shows the files and host commands).
 
 A worker is one provider conversation and holds the provider's session. A run is
 one assignment given to a worker. A worker takes one assignment at a time. Each
