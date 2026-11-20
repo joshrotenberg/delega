@@ -360,28 +360,36 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
         match out.status.code() {
             Some(0) => assert_eq!(result_of(&out).outcome, Outcome::Completed, "{delay_ms}"),
             // 130 is either an interrupted run that printed its whole result, or
-            // a result whose write the signal stopped. A whole result ends with
-            // the newline delega writes after the document. A stopped write
-            // leaves less: nothing, a document cut off (an end-of-input parse
-            // error, not any parse error), or a complete document whose
-            // newline was the part not written. delega then says why on stderr.
+            // a result whose write the signal stopped. A stopped write leaves
+            // less than the whole: nothing or a document cut off (an
+            // end-of-input parse error, not any parse error; the document is
+            // pretty-printed, so a cut can fall after one of its own newlines),
+            // or a complete document whose closing newline was the part not
+            // written. delega then says why on stderr. A complete document with
+            // its newline is a whole result and must be interrupted.
             Some(130) => {
-                if out.stdout.ends_with(b"\n") {
-                    assert_eq!(result_of(&out).outcome, Outcome::Interrupted, "{delay_ms}");
-                } else {
-                    let cut_off = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        Ok(_) => true,
-                        Err(err) => err.is_eof(),
-                    };
-                    assert!(
-                        cut_off
-                            && text(&out.stderr)
-                                .contains("signal received while writing the result"),
-                        "{delay_ms}: exit 130 without a whole result, and not a stopped write: \
-                         stdout {:?}, stderr {}",
+                let stopped =
+                    text(&out.stderr).contains("signal received while writing the result");
+                match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    Err(err) => assert!(
+                        err.is_eof() && stopped,
+                        "{delay_ms}: exit 130 with stdout that is neither a result nor a cut-off \
+                         one from a stopped write: {err}: stdout {:?}, stderr {}",
                         text(&out.stdout),
                         text(&out.stderr)
-                    );
+                    ),
+                    Ok(_) => {
+                        let result = result_of(&out);
+                        if out.stdout.ends_with(b"\n") {
+                            assert_eq!(result.outcome, Outcome::Interrupted, "{delay_ms}");
+                        } else {
+                            assert!(
+                                stopped,
+                                "{delay_ms}: a result without its newline and no stopped write: {}",
+                                text(&out.stderr)
+                            );
+                        }
+                    }
                 }
             }
             // The signal came before delega could handle it: nothing had started.
