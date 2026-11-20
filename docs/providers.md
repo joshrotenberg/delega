@@ -546,8 +546,9 @@ and both can be passed as `native_args`.
 Events are one JSON object per line. The result's `session_id` is the latest
 `session_id` reported by an event up to the first terminal event. Ids on events
 with a non-null `parent_tool_use_id` (a sub-agent's) are ignored, and ids on
-events after the terminal event count only for the session mismatch check (see
-[Outcomes](#outcomes)). The
+events after the terminal event do not change it; they still count for the
+session checks (the mismatch on a resumed run and the several-ids note on a
+fresh one, see [Outcomes](#outcomes)). The
 `result` event gives the answer (`result`), success (`subtype == "success"` and
 `is_error` not true), errors, `usage` (`input_tokens` plus
 `cache_creation_input_tokens`, reported as `input_tokens`; `output_tokens`;
@@ -661,7 +662,8 @@ effect. A Codex `full` run is not refused: it asks for nothing confined.
 ### Stream
 
 `thread.started.thread_id` is the session id; a `thread.started` after the
-terminal event counts only for the session mismatch check. A message item that is not marked
+terminal event does not change it but still counts for the session checks (the
+mismatch on a resumed run and the several-ids note on a fresh one). A message item that is not marked
 `commentary` is the answer. `turn.completed` is success and carries `usage`
 (`input_tokens`, `output_tokens`, `cached_input_tokens`,
 `reasoning_output_tokens`); `turn.failed` is failure with its message. `error`
