@@ -1284,3 +1284,26 @@ fn the_activity_total_counts_every_event_of_a_coalesced_run() {
     assert_eq!(snapshot.total, 38);
     assert_eq!(snapshot.omitted, 0);
 }
+
+#[test]
+fn a_repeated_system_event_in_a_full_buffer_replaces_the_tail_and_evicts_nothing() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    for n in 0..MAX_ACTIVITY - 1 {
+        activity.record(provider_event("assistant", &format!("n={n}")), &cursor);
+    }
+    activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    let full = activity.snapshot();
+    assert_eq!(full.entries.len(), MAX_ACTIVITY);
+    assert_eq!(full.omitted, 0);
+
+    activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    let after = activity.snapshot();
+    assert_eq!(after.entries.len(), MAX_ACTIVITY, "the length is unchanged");
+    assert_eq!(after.omitted, 0, "nothing was evicted from the front");
+    assert_eq!(after.entries[0].summary, "n=0", "the oldest entry is kept");
+    let tail = after.entries.last().expect("a tail entry");
+    assert_eq!(tail.summary, "thinking_tokens (2 in a row)");
+    assert_eq!(tail.cursor, cursor.load(Ordering::SeqCst));
+    assert_eq!(after.total, MAX_ACTIVITY as u64 + 1);
+}

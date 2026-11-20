@@ -231,9 +231,12 @@ summary, such as Claude Code's `thinking_tokens`, reported about once a second.
 They are one entry: each new one replaces it with a new cursor and time, and
 from the second on its summary ends in ` (N in a row)`, for example
 `thinking_tokens (37 in a row)`. A reader holding the old entry's cursor gets
-the replacement from `after_cursor`. A different summary, any other provider
-event, or one of delega's own entries ends the run. Other events are never
-merged. `activity_total` counts every event reported, including each one of a
+the replacement from `after_cursor`. A run ends at the next event that adds an
+activity entry of its own: a `system` event with a different summary, a
+provider event of any other kind, or one of delega's own `started`, `denied`,
+`dropped` or `finished` entries. An agent message (`ProgressEvent::Message`)
+only adds to the partial text and adds no entry, so it does not end a run.
+Events other than `system` are never merged. `activity_total` counts every event reported, including each one of a
 run, and `activity_omitted` is the total less the entries returned.
 
 Full detail adds the whole kept history and diagnostics: provider, permission

@@ -105,12 +105,15 @@ impl Activity {
                 return;
             }
         };
-        // The sequence number is taken and the entry pushed under one lock. A
-        // reader that has seen a cursor and then takes this lock therefore finds
-        // every entry numbered at or below it: none can still be on its way in.
-        // A coalesced entry is replaced under the same lock with a cursor above
-        // every cursor already handed out, so a reader that saw the old one
-        // and passes it as `after` still receives the new one.
+        // The sequence number is taken and the buffer changed under one lock. A
+        // reader that has sampled a cursor and then takes this lock therefore
+        // knows that no write numbered at or below it is still pending: no
+        // entry at or below it can appear later. That does not mean every such
+        // entry is still there. One may have been evicted from the front, or
+        // replaced as part of a run of `system` events. A replacement is made
+        // under the same lock and always takes a fresh cursor above every
+        // cursor handed out before, so a reader that saw the old entry and
+        // passes its cursor as `after` still receives the one that replaced it.
         let mut inner = self.lock();
         inner.total += 1;
         let repeats = match &inner.system_run {
