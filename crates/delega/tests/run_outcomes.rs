@@ -377,6 +377,45 @@ fn a_signal_at_the_moment_a_run_completes_still_gives_one_consistent_result() {
     }
 }
 
+// Uses the print thread's hold, which exists only in debug builds.
+#[cfg(debug_assertions)]
+#[test]
+fn a_signal_after_the_result_is_written_keeps_the_outcome_exit_status() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let marker = rig.path("printed");
+        // The print thread creates the marker once the whole result is written,
+        // then holds before reporting its exit code: the signal lands in that
+        // window every time.
+        let child = rig
+            .command()
+            .args(rig.run_args(provider, "success", &["--output", "json"]))
+            .env("DELEGA_TEST_HOLD_AFTER_PRINT", &marker)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn delega");
+        let began = std::time::Instant::now();
+        while !marker.exists() {
+            assert!(
+                began.elapsed() < Duration::from_secs(120),
+                "{provider}: the result was never written"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        signal(child.id(), "TERM");
+        let out = wait_bounded(child);
+        assert_eq!(result_of(&out).outcome, Outcome::Completed, "{provider}");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: a written completed result must exit 0: {}",
+            text(&out.stderr)
+        );
+        rig.assert_nothing_left();
+    }
+}
+
 #[test]
 fn a_blocked_standard_error_does_not_delay_stopping_the_worker() {
     for provider in PROVIDERS {
