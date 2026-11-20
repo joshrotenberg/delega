@@ -18,10 +18,10 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::result::Cleanup;
 
 use super::limits::{
-    CAPTURE_INTERVAL, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN, CLEANUP_POLL_INTERVAL,
-    EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL, LEADER_EXIT_WAIT,
-    MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL, TERM_SWEEP_RETRY_MAX_PAUSE,
-    TERM_SWEEP_RETRY_PAUSE,
+    CAPTURE_INTERVAL, CAPTURE_RAMP, CLEAN_SWEEPS_AFTER_ACTIVITY, CLEAN_SWEEPS_PLAIN,
+    CLEANUP_POLL_INTERVAL, EXIT_POLL_INTERVAL, INSPECTION_FAILURE_LIMIT, KILL_REPEAT_INTERVAL,
+    LEADER_EXIT_WAIT, MAX_SIGNAL_RECORDS, MAX_SWEPT_RECORDS, PRE_STOP_POLL_INTERVAL,
+    TERM_SWEEP_RETRY_MAX_PAUSE, TERM_SWEEP_RETRY_PAUSE,
 };
 use super::report::{Diagnostics, LeaderExit, SignalRecord, SignalTarget};
 use super::spec::ProcessSpec;
@@ -472,7 +472,18 @@ impl OwnedProcess {
         let interval = CAPTURE_INTERVAL;
         #[cfg(test)]
         let interval = spec.capture_interval.unwrap_or(interval);
+        // A test that sets its own interval gets that interval alone.
+        #[cfg(test)]
+        let ramp: &[Duration] = if spec.capture_interval.is_some() {
+            &[]
+        } else {
+            &CAPTURE_RAMP
+        };
+        #[cfg(not(test))]
+        let ramp: &[Duration] = &CAPTURE_RAMP;
+        let spawned_at = Instant::now();
         owner.capture_task = Some(tokio::spawn(async move {
+            let mut listings = 0usize;
             loop {
                 let requested = shared.capture_requested.load(Ordering::SeqCst);
                 let outcome = shared.tree.lock().await.capture().await;
@@ -494,10 +505,17 @@ impl OwnedProcess {
                     }
                 }
                 shared.capture_completed.store(requested, Ordering::SeqCst);
+                // The listing at spawn is number 0; the ramp follows it, each
+                // step due at its offset from the spawn.
+                let next = match ramp.get(listings) {
+                    Some(offset) => spawned_at + *offset,
+                    None => Instant::now() + interval,
+                };
+                listings += 1;
                 tokio::select! {
                     _ = stop.cancelled() => break,
                     _ = shared.capture_notify.notified() => {},
-                    _ = tokio::time::sleep(interval) => {},
+                    _ = tokio::time::sleep_until(next) => {},
                 }
             }
         }));

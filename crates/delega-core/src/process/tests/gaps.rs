@@ -85,6 +85,28 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
     super::fixtures::assert_gone("descendant", &pids).await;
 }
 
+/// The periodic interval is the default here, so the listings are the one at
+/// spawn, the early ramp (`CAPTURE_RAMP`) and then the 500 ms interval. The
+/// descendant calls `setsid` straight after the first listing and the leader
+/// crashes about 0.2 s later, long before the first periodic listing. Only a
+/// ramp listing can see the descendant while the leader is its parent. Without
+/// the ramp the descendant outlives the run, and the result says Confirmed.
+#[tokio::test]
+async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_leader_crashes_before_the_first_periodic_listing()
+ {
+    require_perl!();
+    let s = Scratch::new();
+    let script = format!(
+        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+         sleep 0.2; kill -KILL $$; sleep 5"
+    );
+    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_no_false_confirmation(pids[0], &report.cleanup);
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("descendant", &pids).await;
+}
+
 #[tokio::test]
 #[ignore = "known gap: the parent was the leader, orphaned before any listing"]
 async fn a_setsid_grandchild_whose_parent_exits_at_once_is_not_reported_as_cleaned_up() {
