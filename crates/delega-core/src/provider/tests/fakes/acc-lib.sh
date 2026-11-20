@@ -15,7 +15,8 @@
 #   success   finish normally
 #   exit3     print to standard error and exit 3
 #   busy      one line of output every 0.2 s, never finishes
-#   crash     SIGKILL itself after 0.5 s
+#   crash     SIGKILL itself after 0.5 s (1.5 s with the bare variant, see
+#             below)
 #   hang      no output, never finishes
 #   closeout  close standard output, then never finish
 #   nofinal   output ends without a final answer, exit 0
@@ -122,6 +123,11 @@ acc_run() {
   else
     trap 'exit 130' INT TERM
   fi
+  # A provider that detaches a child and finishes at once is seen by the early
+  # listings delega takes in the first 200 ms of a run (CAPTURE_RAMP), so the
+  # gap the bare variant documents would not show. Starting it after the ramp
+  # puts the child between that listing and the first periodic one.
+  if [ "$acc_variant" = bare ] && [ "$acc_behaviour" = success ]; then sleep 0.3; fi
   acc_start_variant "$acc_variant"
   acc_wait_ready "$acc_variant"
   case "$acc_behaviour" in
@@ -136,7 +142,12 @@ acc_run() {
       ;;
     crash)
       acc_init
-      sleep 0.5
+      # The bare variant is a direct child of the provider that left the
+      # session, which delega adopts only if a listing sees it while the
+      # provider is alive. 1.5 s leaves room for the early listings and
+      # several periodic ones, so a machine that delays one listing does not
+      # turn the row into the gap it does not mean to test.
+      if [ "$acc_variant" = bare ]; then sleep 1.5; else sleep 0.5; fi
       kill -9 $$
       ;;
     hang)

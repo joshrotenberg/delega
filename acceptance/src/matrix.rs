@@ -478,7 +478,7 @@ struct Gap {
 
 const SIGKILL_REASON: &str = "SIGKILL of delega cannot be handled, so the worker keeps running with nothing enforcing its time limit (docs/api.md, process module docs). Documented gap.";
 const ORPHAN_REASON: &str = "The descendant called setsid and its parent, a child of the provider, exited at once, so the descendant was a child of init in a session of its own before any scan or the listing at the provider's end could see it with a parent that was ours. No process table link ties it to the worker, so cleanup reports confirmed while it runs (process module gap 1).";
-const BARE_REASON: &str = "The process is a direct child of the provider that called setsid within one scan interval of the provider ending by itself. When the provider exits, its children become children of init at once, so no listing taken afterwards ties the process to the worker, and no scan ran while the provider was its parent. Cleanup reports confirmed while it runs (process module gap 1).";
+const BARE_REASON: &str = "The process is a direct child of the provider that called setsid and the provider ended by itself between two listings, which are 50 to 100 ms apart in the first 200 ms of a run and 500 ms apart after it. When the provider exits, its children become children of init at once, so no listing taken afterwards ties the process to the worker, and no scan ran while the provider was its parent. Cleanup reports confirmed while it runs (process module gap 1).";
 const RELAY_REASON: &str = "A fast fork relay is never in a process listing for long enough to be a member, so cleanup reports confirmed while it runs (process module gap 2, delega issue 1).";
 
 const PROVIDER_ONLY: &[&str] = &["provider"];
