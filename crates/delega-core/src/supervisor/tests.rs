@@ -76,9 +76,15 @@ impl Dir {
         self.root().join("gate")
     }
 
+    /// Wait until the fake has begun the run held on the gate. The fake marks
+    /// that by writing a file, so the wait ends on that event; the deadline only
+    /// ends a test that would otherwise hang, and is generous for the same
+    /// reason as the integration tests' `Gate::started`: on a loaded machine a
+    /// version probe and start can take well over the 15 s this used to allow.
     async fn gate_started(&self) {
         let marker = self.root().join("gate.started");
-        for _ in 0..1500 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if marker.exists() {
                 return;
             }
