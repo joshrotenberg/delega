@@ -12,11 +12,13 @@
 //! What remains are descendants no process table can follow: one whose parent
 //! exits before any listing saw it (its parent was the leader itself, or a
 //! member that exited at once), and a fast fork relay, which is never in a
-//! listing for long enough to be signalled. The last three tests state the
-//! wanted behaviour and are ignored because they fail. The first two start
+//! listing for long enough to be signalled. Three tests state the wanted
+//! behaviour and are ignored because they fail. The first two of them start
 //! their descendant after the early listings (`CAPTURE_RAMP`), which see a
 //! descendant started sooner, and end the leader before the first periodic
-//! listing. Run them with
+//! listing. Two regression tests cover what the ramp closed: a `setsid`
+//! descendant started just after spawn whose leader crashes before the first
+//! periodic listing, and the schedule of the ramp itself. Run them with
 //! `cargo test -- --ignored`. They leave one process running when they fail,
 //! so each stops it itself.
 
@@ -92,6 +94,56 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     super::fixtures::assert_gone("descendant", &pids).await;
+}
+
+/// Pins the schedule itself, not one timing. A lister records when each
+/// listing starts. The child lives 1 s, so the first periodic listing (500 ms
+/// after the ramp ends) is not the one under test. At least four listings must
+/// start before 500 ms after spawn: the one at spawn and the three of
+/// `CAPTURE_RAMP`. A ramp cut to its first step gives two, no ramp gives one,
+/// and the early listings in `a_setsid_descendant_started_just_after_spawn...`
+/// then depend on luck. A ramp listing is never early: each is due at its
+/// offset from spawn, so the later ones start no sooner than that.
+#[tokio::test]
+async fn the_listings_at_spawn_and_on_the_ramp_start_before_the_first_periodic_listing() {
+    use crate::process::ProcessHandle;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    let s = Scratch::new();
+    let starts: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = starts.clone();
+    let lister: Lister = Arc::new(move || {
+        let recorder = recorder.clone();
+        Box::pin(async move {
+            recorder.lock().expect("lock starts").push(Instant::now());
+            list_processes().await
+        })
+    });
+    let spec = sh(&s, "sleep 1", LONG).with_lister(lister);
+    let spawned = Instant::now();
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    let starts = starts.lock().expect("lock starts").clone();
+    let offsets: Vec<Duration> = starts.iter().map(|at| at.duration_since(spawned)).collect();
+    let early = offsets
+        .iter()
+        .filter(|at| **at < Duration::from_millis(500))
+        .count();
+    assert!(
+        early >= 4,
+        "only {early} listings started before 500 ms after spawn: {offsets:?}"
+    );
+    // Listing 0 is the one at spawn. The offsets are written out here, not
+    // read from `CAPTURE_RAMP`, so that shortening the ramp fails the test.
+    for (step, due_ms) in [50u64, 100, 200].into_iter().enumerate() {
+        let due = Duration::from_millis(due_ms);
+        assert!(
+            offsets[step + 1] + Duration::from_millis(5) >= due,
+            "ramp listing {step} started at {:?}, before its offset {due:?}: {offsets:?}",
+            offsets[step + 1]
+        );
+    }
 }
 
 /// The periodic interval is the default here, so the listings are the one at
