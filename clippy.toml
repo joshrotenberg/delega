@@ -1,9 +1,17 @@
-# Every child process delega starts holds the process layer's spawn lock, so
-# concurrent spawns cannot inherit each other's pipes on macOS (#104). The
-# process layer spawns through `process::spawn` in delega-core, which has a
-# stricter `clippy.toml` of its own. `output` and `status` spawn too.
+# Every child process the workspace starts, in its code, its tests and the
+# acceptance harness, is spawned while holding delega-core's spawn lock, so
+# concurrent spawns cannot inherit each other's pipes on macOS (#104, #107).
+# The process layer spawns through `process::spawn`; everything else holds
+# `delega_core::process::spawn_guard()` across the spawn call only, usually
+# through a `Guarded` helper. `output` and `status` spawn too. A pipe made with
+# `std::io::pipe` has the same window and is made under the guard as well.
+# This is the only `clippy.toml`; a crate-level one would replace it.
 disallowed-methods = [
-  { path = "tokio::process::Command::spawn", reason = "spawn through delega-core's process layer, which holds the spawn lock (#104)" },
-  { path = "tokio::process::Command::output", reason = "spawn through delega-core's process layer, which holds the spawn lock (#104)" },
-  { path = "tokio::process::Command::status", reason = "spawn through delega-core's process layer, which holds the spawn lock (#104)" },
+  { path = "tokio::process::Command::spawn", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },
+  { path = "tokio::process::Command::output", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },
+  { path = "tokio::process::Command::status", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },
+  { path = "std::process::Command::spawn", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },
+  { path = "std::process::Command::output", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },
+  { path = "std::process::Command::status", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },
+  { path = "std::io::pipe", reason = "hold delega_core::process::spawn_guard() while creating the pipe (#107)" },
 ]

@@ -7,8 +7,8 @@ use delega_core::contract::result::Cleanup;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{
-    Guarded, PROVIDERS, Rig, assert_stop_cleanup, result_of, signal, text, wait_bounded,
-    wait_exit_only,
+    Guarded, PROVIDERS, Rig, assert_stop_cleanup, guarded_pipe, result_of, signal, text,
+    wait_bounded, wait_exit_only,
 };
 
 #[test]
@@ -269,7 +269,7 @@ fn a_closed_stdout_pipe_does_not_panic_and_keeps_the_outcome_status() {
     for format in ["text", "json"] {
         for provider in PROVIDERS {
             let rig = Rig::new();
-            let (reader, writer) = std::io::pipe().expect("pipe");
+            let (reader, writer) = guarded_pipe().expect("pipe");
             drop(reader);
             let out = rig
                 .command()
@@ -538,7 +538,7 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
     // status: a whole `completed` result with 0, anything less with 130.
     for provider in PROVIDERS {
         let rig = Rig::new();
-        let (stderr_reader, stderr_writer) = std::io::pipe().expect("a pipe");
+        let (stderr_reader, stderr_writer) = guarded_pipe().expect("a pipe");
         fill(&stderr_writer);
         let mut child = Reaped(Some(
             rig.command()

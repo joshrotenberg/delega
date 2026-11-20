@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::matrix::{Action, Docs, Exit, LeakClass, Row as Case, Sig, needs_perl, roles_of};
 use crate::procs;
+use crate::spawn::Guarded;
 
 /// Prefix of every case marker. `--sweep` looks for it.
 pub const MARKER_PREFIX: &str = "accmk-";
@@ -155,7 +156,7 @@ pub fn perl_available() -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .guarded_status()
         .is_ok_and(|s| s.success())
 }
 
@@ -367,7 +368,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
     };
 
     let started = Instant::now();
-    let mut child: Child = match fixture.command(ctx, case).spawn() {
+    let mut child: Child = match fixture.command(ctx, case).guarded_spawn() {
         Ok(c) => c,
         Err(err) => {
             m.verdict = "fail".to_string();

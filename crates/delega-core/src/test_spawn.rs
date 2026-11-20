@@ -6,8 +6,8 @@
 //! macOS, hand a gated fake provider the write end of its output pipe (so the
 //! fixture waits until that provider exits) or give its own child a provider's
 //! standard input (so that run waits for the fixture's child). clippy's
-//! `disallowed_methods` (`clippy.toml` in this crate) sends every test spawn
-//! through here.
+//! `disallowed_methods` (the workspace `clippy.toml`) rejects a direct
+//! `spawn`, `output` or `status` call, so test spawns use these methods.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};

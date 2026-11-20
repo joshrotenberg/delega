@@ -33,6 +33,18 @@ mod applied;
 mod resources;
 mod tools;
 
+/// Start `command` while holding delega's spawn lock, for the spawn call only
+/// (#107). The supervisors of these tests start providers in this process, and
+/// on macOS a child forked while another spawn's pipes still lack close-on-exec
+/// inherits them. The lock covers the pipes std creates during this call; it is
+/// dropped before the caller waits or reads output. The streams are left as
+/// the caller set them.
+#[allow(clippy::disallowed_methods)]
+fn guarded_spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    let _held = delega_core::process::spawn_guard();
+    command.spawn()
+}
+
 /// How many of these tests may run at once. Each starts shell processes and
 /// polls them, and the machine running them is often busy.
 const CONCURRENT_TESTS: usize = 3;
@@ -301,10 +313,16 @@ impl Rig {
 
     /// Processes whose command line carries this rig's directory.
     fn survivors(&self) -> Vec<String> {
-        let out = std::process::Command::new("/bin/ps")
-            .args(["-axww", "-o", "pid=,command="])
-            .output()
-            .expect("run ps");
+        // The streams `output` defaulted to: no input, both outputs captured.
+        let out = guarded_spawn(
+            std::process::Command::new("/bin/ps")
+                .args(["-axww", "-o", "pid=,command="])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run ps");
         let marker = self.root.to_string_lossy().into_owned();
         String::from_utf8_lossy(&out.stdout)
             .lines()

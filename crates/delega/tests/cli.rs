@@ -4,7 +4,7 @@ mod support;
 
 use std::process::{Command, Output};
 
-use support::Guarded;
+use support::{Guarded, guarded_pipe};
 
 fn delega(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_delega"))
@@ -251,7 +251,7 @@ fn printing_commands_into_a_closed_pipe_exit_zero_without_panicking() {
     ] {
         // The reader end is closed before the command starts, so every write
         // fails with a broken pipe.
-        let (reader, writer) = std::io::pipe().expect("pipe");
+        let (reader, writer) = guarded_pipe().expect("pipe");
         drop(reader);
         let out = Command::new(env!("CARGO_BIN_EXE_delega"))
             .args(args)

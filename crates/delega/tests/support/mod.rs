@@ -25,21 +25,22 @@ use tempfile::TempDir;
 /// child's pipes and sets close-on-exec on them afterwards, so a child one
 /// test forks inside that window inherits another test's pipe ends: a
 /// `delega mcp` whose standard input is also held by an unrelated child never
-/// sees the end of its input. Each method holds
+/// sees the end of its input. Each spawning method holds
 /// `delega_core::process::spawn_guard()` for the spawn call only and drops it
 /// before waiting or reading output; held longer, it would serialize every
-/// test's subprocess for its whole life. clippy's `disallowed_methods`
-/// (`crates/delega/clippy.toml`) sends every spawn in these tests through
-/// here.
+/// test's subprocess for its whole life. The lock covers the pipes std creates
+/// during that call; a pipe a test creates itself is covered only if it is
+/// made through [`guarded_pipe`]. clippy's `disallowed_methods` (the workspace
+/// `clippy.toml`) rejects a direct `spawn`, `output` or `status` call.
 ///
 /// `guarded_output` never changes the standard streams. std's `output`
 /// defaults standard input to null and captures both outputs only where the
 /// caller set nothing, and std cannot tell which streams were set, so a helper
 /// that applied those defaults would overwrite the streams a test set on
 /// purpose (a closed pipe as standard output, say). Instead every command
-/// says what it wants: [`Rig::configure`] and [`Guarded::captured`] set what
-/// `output` would have defaulted to, and a test that wants something else sets
-/// it afterwards.
+/// says what it wants: [`Rig::configure`] and [`Guarded::captured`] (which
+/// only sets streams and spawns nothing) set what `output` would have
+/// defaulted to, and a test that wants something else sets it afterwards.
 pub trait Guarded {
     /// Set the streams `output` defaults to: standard input null, standard
     /// output and standard error captured.
@@ -73,6 +74,17 @@ impl Guarded for Command {
     fn guarded_status(&mut self) -> io::Result<ExitStatus> {
         self.guarded_spawn()?.wait()
     }
+}
+
+/// `std::io::pipe()` under the spawn lock (#107). std creates the pipe and
+/// sets close-on-exec afterwards on macOS, the same window a spawn has, so a
+/// child another test forks meanwhile could inherit an end: a reader would
+/// then wait for that unrelated child, or a pipe whose reader was dropped
+/// would not be closed.
+#[allow(clippy::disallowed_methods)]
+pub fn guarded_pipe() -> io::Result<(io::PipeReader, io::PipeWriter)> {
+    let _held = delega_core::process::spawn_guard();
+    io::pipe()
 }
 
 /// The provider names `--provider` accepts.

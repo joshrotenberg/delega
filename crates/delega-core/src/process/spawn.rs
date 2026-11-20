@@ -45,8 +45,8 @@ pub fn spawn_guard() -> SpawnGuard {
 }
 
 /// Start `command` while holding the spawn lock. Every spawn of the process
-/// layer goes through here; clippy's `disallowed_methods` (see `clippy.toml`)
-/// keeps a direct `spawn` from bypassing it.
+/// layer goes through here; clippy's `disallowed_methods` (the workspace
+/// `clippy.toml`) keeps a direct `spawn` from bypassing it.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn spawn(
     command: &mut tokio::process::Command,

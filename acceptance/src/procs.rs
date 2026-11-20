@@ -17,10 +17,12 @@
 //! different command line are all counted.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use rustix::process::{Pid, Signal, kill_process};
+
+use crate::spawn::Guarded;
 
 #[derive(Debug, Clone)]
 pub struct Proc {
@@ -33,7 +35,10 @@ pub struct Proc {
 pub fn ps() -> Vec<Proc> {
     let Ok(out) = Command::new("/bin/ps")
         .args(["-axww", "-o", "pid=,ppid=,stat=,command="])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .guarded_output()
     else {
         return Vec::new();
     };

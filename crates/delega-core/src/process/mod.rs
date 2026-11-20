@@ -189,9 +189,10 @@
 //! that reads its prompt to end of file never does on its own (#104). Every
 //! child of this module, the `ps` listing included, is therefore spawned while
 //! holding one process-wide lock (`spawn.rs`). The delega CLI's plugin
-//! commands and this crate's tests take it too, through [`spawn_guard`], and
-//! clippy's `disallowed_methods` (`clippy.toml`) rejects an unguarded spawn in
-//! this crate. The lock is held only across the spawn call. A program that
+//! commands and the workspace's tests and acceptance harness take it too,
+//! through [`spawn_guard`], and clippy's `disallowed_methods` (the workspace
+//! `clippy.toml`) rejects a direct `Command` spawn, `output` or `status` call
+//! anywhere in the workspace. The lock is held only across the spawn call. A program that
 //! embeds this crate and spawns on its own threads without [`spawn_guard`] can
 //! still leak descriptors into these children and receive theirs.
 //!
