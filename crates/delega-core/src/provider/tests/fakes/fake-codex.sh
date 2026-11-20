@@ -24,6 +24,12 @@
 #   unknown-session-exit-3        the same standard error, but exit 3
 #   unknown-session-after-thread  a thread.started event, then the same
 #                    standard error and exit 1
+#   unknown-session-long-stderr  the unknown-session standard error line
+#                    followed by 9 KiB of other standard error, then exit 1
+#   unknown-session-error-event  a JSON error event on standard output, then
+#                    the unknown-session standard error and exit 1
+#   stray-after-completed  a successful run followed, after turn.completed, by
+#                    a thread.started event for fake-codex-stray
 #   no-session-id    a successful run with no thread.started event
 
 for arg in "$@"; do
@@ -214,6 +220,23 @@ case "$mode" in
     emit "{\"type\":\"thread.started\",\"thread_id\":\"$sid\"}"
     printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
     exit 1
+    ;;
+  unknown-session-long-stderr)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    head -c 9216 /dev/zero | tr '\0' 'x' >&2
+    printf '\n' >&2
+    exit 1
+    ;;
+  unknown-session-error-event)
+    emit '{"type":"error","message":"thread/resume failed"}'
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  stray-after-completed)
+    init
+    final '"fake final answer"'
+    done_ok
+    emit '{"type":"thread.started","thread_id":"fake-codex-stray"}'
     ;;
   no-session-id)
     emit '{"type":"turn.started"}'

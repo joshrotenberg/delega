@@ -216,10 +216,16 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut declined_id: Option<String> = None;
     let stats = for_each_event(bytes, |event| {
         let kind = str_field(event, "type").unwrap_or_default();
-        // The first terminal event decides; later events are ignored.
+        // The first terminal event decides; later events only count for the
+        // session ids the stream reported.
         if parsed.terminal != Terminal::None {
             if matches!(kind, "turn.completed" | "turn.failed") {
                 parsed.note_second_terminal();
+            }
+            if kind == "thread.started"
+                && let Some(id) = str_field(event, "thread_id")
+            {
+                parsed.saw_late_session(id);
             }
             return;
         }

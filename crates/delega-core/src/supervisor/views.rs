@@ -481,8 +481,9 @@ pub struct WorkerView {
     pub session_id: Option<String>,
     /// Whether `follow_up` can continue this worker: it is not closed, was not
     /// started `ephemeral`, and has a session or a run that may still report
-    /// one. A worker whose runs ended without reporting a session cannot, and a
-    /// follow-up to it is refused.
+    /// one. A worker with no session (none given at start and none reported)
+    /// and no run that may still report one cannot, and a follow-up to it is
+    /// refused.
     pub can_follow_up: bool,
     /// Runs of this worker whose results are kept, plus unfinished ones.
     pub runs: usize,

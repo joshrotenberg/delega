@@ -198,7 +198,7 @@
             ]
           },
           "can_follow_up": {
-            "description": "Whether `follow_up` can continue this worker: it is not closed, was not\nstarted `ephemeral`, and has a session or a run that may still report\none. A worker whose runs ended without reporting a session cannot, and a\nfollow-up to it is refused.",
+            "description": "Whether `follow_up` can continue this worker: it is not closed, was not\nstarted `ephemeral`, and has a session or a run that may still report\none. A worker with no session (none given at start and none reported)\nand no run that may still report one cannot, and a follow-up to it is\nrefused.",
             "type": "boolean"
           },
           "runs": {

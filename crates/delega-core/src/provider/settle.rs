@@ -70,11 +70,12 @@ fn session_not_found(
             kind == "provider_error" && message.starts_with(CLAUDE_UNKNOWN_SESSION)
         }
         // Codex 0.170.0 exits 1 before it starts a thread, so nothing is on
-        // standard output.
+        // standard output. A JSON `error` event before the exit makes the kind
+        // `provider_error`. All of the captured standard error is searched; the
+        // capture is bounded.
         (Provider::Codex, Terminal::None) if code == 1 && parsed.session_ids.is_empty() => {
-            let bytes = &report.stderr.bytes;
-            let tail = &bytes[bytes.len().saturating_sub(STDERR_SCAN_BYTES)..];
-            kind == "provider_exit" && String::from_utf8_lossy(tail).contains(CODEX_UNKNOWN_SESSION)
+            matches!(kind, "provider_exit" | "provider_error")
+                && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
         }
         _ => false,
     }
@@ -215,10 +216,15 @@ pub(super) fn settle(
             notes.push(mismatch_text(s.redactor, asked, reported));
         }
     } else if s.resume.is_none() && !s.ephemeral && parsed.session_ids.len() > 1 {
-        notes.push(s.redactor.apply(&format!(
+        let mut note = format!(
             "the provider reported more than one session in this run: {}",
             parsed.session_ids.join(", ")
-        )));
+        );
+        let more = parsed.session_ids_omitted.len();
+        if more > 0 {
+            note.push_str(&format!(", and {more} more that are not listed"));
+        }
+        notes.push(s.redactor.apply(&note));
     }
     result.provider_notes = notes;
     result.applied = s.facts.result_applied();

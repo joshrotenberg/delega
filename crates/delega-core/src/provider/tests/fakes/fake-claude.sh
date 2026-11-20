@@ -35,8 +35,15 @@
 #                    "No conversation found with session ID: <id>" and the
 #                    requested id as session_id, then exit 1
 #   no-session-id    a successful run whose events carry no session_id
-#   two-sessions     a successful run whose init and assistant events carry
-#                    the usual id and whose result carries fake-claude-session-2
+#   two-sessions     a successful run whose first event carries
+#                    fake-claude-session-2 and whose later events, ending the
+#                    stream, carry the usual id
+#   many-sessions    a successful run that reports ten distinct session ids
+#                    (fake-claude-many-1 to -10) before the usual id
+#   stray-after-result  a successful run followed, after its result, by an
+#                    event carrying fake-claude-stray
+#   subagent-session  a successful run with a sub-agent message (one with
+#                    parent_tool_use_id) carrying fake-claude-subagent
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -321,8 +328,27 @@ case "$mode" in
     exit 1
     ;;
   two-sessions)
+    emit '{"type":"system","subtype":"status","session_id":"fake-claude-session-2"}'
     init
-    sid=fake-claude-session-2
+    success '"fake final answer"' '[]'
+    ;;
+  many-sessions)
+    n=1
+    while [ $n -le 10 ]; do
+      emit "{\"type\":\"system\",\"subtype\":\"status\",\"session_id\":\"fake-claude-many-$n\"}"
+      n=$((n+1))
+    done
+    init
+    success '"fake final answer"' '[]'
+    ;;
+  stray-after-result)
+    init
+    success '"fake final answer"' '[]'
+    emit '{"type":"system","subtype":"status","session_id":"fake-claude-stray"}'
+    ;;
+  subagent-session)
+    init
+    emit '{"type":"assistant","parent_tool_use_id":"t1","session_id":"fake-claude-subagent","message":{"id":"m2","content":[{"type":"text","text":"sub-agent text"}]}}'
     success '"fake final answer"' '[]'
     ;;
   no-session-id)

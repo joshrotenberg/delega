@@ -44,9 +44,11 @@ pub(super) struct LineStats {
 pub(super) struct Parsed {
     /// The provider's own session id: the latest one the stream reported.
     pub session_id: Option<String>,
-    /// Every distinct session id the stream reported, in order, bounded by
-    /// [`MAX_SESSION_IDS`].
+    /// Every distinct session id the whole stream reported, in order, bounded
+    /// by [`MAX_SESSION_IDS`]. Events after the first terminal event count.
     pub session_ids: Vec<String>,
+    /// Hashes of the distinct session ids past the bound, to count them.
+    pub session_ids_omitted: std::collections::HashSet<u64>,
     /// The final answer as the provider's terminal event reported it.
     pub final_text: Option<String>,
     /// The last assistant message seen, a fallback when the terminal event
@@ -73,11 +75,27 @@ pub(super) struct Parsed {
 }
 
 impl Parsed {
-    /// Record a session id the stream reported.
+    /// Record a session id the stream reported before its first terminal
+    /// event: it becomes the run's session id.
     pub fn saw_session(&mut self, id: &str) {
         self.session_id = Some(id.to_string());
-        if self.session_ids.len() < MAX_SESSION_IDS && !self.session_ids.iter().any(|s| s == id) {
+        self.saw_late_session(id);
+    }
+
+    /// Record a session id the stream reported after its first terminal
+    /// event. It counts towards the ids the stream reported but does not
+    /// change the run's session id, which the first terminal event decided.
+    pub fn saw_late_session(&mut self, id: &str) {
+        use std::hash::{Hash, Hasher};
+        if self.session_ids.iter().any(|s| s == id) {
+            return;
+        }
+        if self.session_ids.len() < MAX_SESSION_IDS {
             self.session_ids.push(id.to_string());
+        } else {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hasher);
+            self.session_ids_omitted.insert(hasher.finish());
         }
     }
 

@@ -552,6 +552,91 @@ async fn claude_fails_a_resumed_run_whose_stream_also_reports_another_session() 
     rig.assert_nothing_left().await;
 }
 
+async fn stray_after_terminal(provider: Provider) {
+    let rig = Rig::new();
+    let (mode, stray) = match provider {
+        Provider::Claude => ("stray-after-result", "fake-claude-stray"),
+        Provider::Codex => ("stray-after-completed", "fake-codex-stray"),
+    };
+    let mut request = rig.request(provider, mode);
+    request.session.resume = Some("asked-session".into());
+    let result = run_checked(request, rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "session_mismatch");
+    assert!(error.message.contains(stray), "{}", error.message);
+    assert_eq!(result.text, "fake final answer");
+    rig.assert_nothing_left().await;
+}
+both!(
+    fails_a_resumed_run_that_reports_another_session_after_its_result,
+    stray_after_terminal
+);
+
+#[tokio::test]
+async fn codex_finds_a_missing_rollout_behind_long_stderr_or_after_an_error_event() {
+    for mode in ["unknown-session-long-stderr", "unknown-session-error-event"] {
+        let rig = Rig::new();
+        let mut request = rig.request(Provider::Codex, mode);
+        request.session.resume = Some("missing-session".into());
+        let result = run_checked(request, rig.options(Provider::Codex)).await;
+        assert_eq!(result.outcome, Outcome::Failed, "{mode}: {result:#?}");
+        let error = result.error.expect("error");
+        assert_eq!(error.kind, "session_not_found", "{mode}: {}", error.message);
+        assert_eq!(error.provider_exit_code, Some(1), "{mode}");
+        rig.assert_nothing_left().await;
+    }
+}
+
+#[tokio::test]
+async fn claude_says_how_many_session_ids_past_the_bound_were_not_listed() {
+    let rig = Rig::new();
+    let result = run_checked(
+        rig.request(Provider::Claude, "many-sessions"),
+        rig.options(Provider::Claude),
+    )
+    .await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    let note = result
+        .provider_notes
+        .iter()
+        .find(|n| n.contains("more than one session"))
+        .expect("a note about the sessions");
+    assert!(note.contains("fake-claude-many-8"), "{note}");
+    assert!(!note.contains("fake-claude-many-9"), "{note}");
+    // Two more of the ten, and the usual id.
+    assert!(note.contains("and 3 more that are not listed"), "{note}");
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn claude_takes_no_session_id_from_a_sub_agent_message() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "subagent-session");
+    request.session.resume = Some("asked-session".into());
+    let resumed = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(resumed.outcome, Outcome::Completed, "{resumed:#?}");
+    assert_eq!(resumed.session_id.as_deref(), Some("asked-session"));
+    rig.assert_nothing_left().await;
+
+    let rig = Rig::new();
+    let fresh = run_checked(
+        rig.request(Provider::Claude, "subagent-session"),
+        rig.options(Provider::Claude),
+    )
+    .await;
+    assert_eq!(fresh.outcome, Outcome::Completed, "{fresh:#?}");
+    assert!(
+        !fresh
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("fake-claude-subagent")),
+        "{:?}",
+        fresh.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+
 #[tokio::test]
 async fn claude_notes_a_fresh_run_whose_stream_reports_two_sessions() {
     let rig = Rig::new();
