@@ -25,10 +25,11 @@ const RUNTIME_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// to end it.
 const WRITE_WAIT_AFTER_SIGNAL: Duration = Duration::from_secs(3);
 /// How long a signal or the write deadline waits, after asking the write to
-/// stop, for the print thread to say how it ended. A write in progress stops
-/// within one poll interval and one piece (see
+/// stop, for the print thread to say how it ended. When no piece blocks, a
+/// write in progress stops within one poll interval and one piece (see
 /// [`write_unless_stopped`](crate::commands::output::write_unless_stopped));
-/// the rest of the bound covers building the document before the write begins.
+/// the rest of the bound covers building the document before the write begins,
+/// and a piece that blocks after `poll`.
 const PRINT_STOP_WAIT: Duration = Duration::from_secs(1);
 /// Stands for "no limit" when no signal has been received: a year.
 const WRITE_WAIT_UNLIMITED: Duration = Duration::from_secs(365 * 24 * 3600);
@@ -40,14 +41,27 @@ const WRITE_WAIT_UNLIMITED: Duration = Duration::from_secs(365 * 24 * 3600);
 /// output. It writes through the [`Stop`] it is given. A signal during that
 /// wait, or the end of the write deadline, asks the write to stop and waits up
 /// to [`PRINT_STOP_WAIT`] for the print thread to say how it ended; the worker
-/// is already gone by then. The status is decided from what happened, not from
-/// timing: a write that finished, the whole result accepted by the kernel,
+/// is already gone by then. The status follows how the write ended, as the
+/// print thread reports it: a write that finished, the whole result accepted by the kernel,
 /// exits with the status `print` returned; a write that stopped with bytes left
 /// unwritten exits with the outcome's status, or 130 for a completed run,
 /// because the result was not delivered. Standard output may then hold the
-/// first part of the document. A failure to set up the runtime or the signal
-/// handlers is a refused result: nothing was started, and starting a worker
-/// `delega` could not stop would be worse.
+/// first part of the document. A print thread that does not answer within
+/// `PRINT_STOP_WAIT` also gets the cut-short status.
+///
+/// The status is exact except in two cases. The last piece can reach standard
+/// output before the print thread records that the write finished; if that
+/// thread is then not scheduled for longer than `PRINT_STOP_WAIT` (the
+/// process is stopped or paused, for example), a complete result is followed
+/// by the cut-short status. And a piece can block after `poll` reported
+/// standard output writable (see
+/// [`write_unless_stopped`](crate::commands::output::write_unless_stopped));
+/// the stop then waits `PRINT_STOP_WAIT` and gives the cut-short status, which
+/// is wrong only if that piece completes the result as `delega` exits.
+///
+/// A failure to set up the runtime or the signal handlers is a refused result:
+/// nothing was started, and starting a worker `delega` could not stop would be
+/// worse.
 pub fn run<F>(
     request: Request,
     options: ProviderOptions,

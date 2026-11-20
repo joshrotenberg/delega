@@ -431,33 +431,57 @@ Behavior:
   already gone by then.
   - **The exit status follows what was written.** The result goes out in pieces
     of at most `PIPE_BUF` bytes (512 on macOS, 4096 on Linux), each written
-    only once `poll` says standard output can take it, and a stop is checked
-    before each piece. If the whole result was written, the exit status is the
-    one it calls for (0 for `completed`), so a status never contradicts a
-    result that was delivered. If the write stopped with bytes left, the exit
-    status is the outcome's, or 130 when the outcome was `completed`, because
-    its result was not delivered; standard output then holds the start of the
-    document. Standard output stays in blocking mode, because its file
-    description can be shared with other processes. The decision is exact when
-    `delega` is the only process writing to that pipe; see the limit below.
-  - **How long it takes.** The write stops within 20 ms (one poll interval) and
-    one piece. `delega` waits at most 1 s for the print thread to answer (it may
-    still be building the document), then up to 1 s for standard error to take
-    its last lines. Shutting down the async runtime waits at most 5 s more, and
-    only for a helper thread that is stuck; none was in these measurements. Measured on macOS with the fake providers, from the signal
-    to the exit with standard output stalled by a full pipe: 30 to 48 ms when
-    standard error is read, 1.02 to 1.04 s when standard error is a full pipe
-    too (5 runs each).
+    only once `poll` says standard output is writable, and a stop is checked
+    before each piece. If the print thread reports that the whole result was
+    written, the exit status is the one the result calls for (0 for
+    `completed`). If it reports that the write stopped with bytes left, the
+    exit status is the outcome's, or 130 when the outcome was `completed`,
+    because its result was not delivered; standard output then holds the start
+    of the document. If it does not report within 1 s, the exit status is the
+    cut-short one. Standard output stays in blocking mode, because its file
+    description can be shared with other processes. An interrupted write
+    (`EINTR`) is retried, a reader that closed the pipe (`EPIPE`) counts as
+    delivered, and any other error, `EAGAIN` from a descriptor another process
+    set to non-blocking included, is a write failure.
+  - **Where the status can be wrong.** The status matches what was delivered
+    except in these cases, all of which end in the cut-short status after the
+    1 s wait:
+    - **No answer in time after a complete write.** The last piece can reach
+      standard output before the print thread records that the write finished.
+      If that thread is then not scheduled for more than 1 s (the process is
+      stopped or paused, for example), `delega` exits with the cut-short status
+      after a complete result. A review reproduced this with an added 1.5 s
+      delay at that point.
+    - **A piece that blocks after `poll`.** The 20 ms poll interval bounds only
+      the wait for standard output to become writable. A write after `poll`
+      reported it writable can still block: when another process writes to the
+      same pipe; on macOS when pipe memory is over its growth cap, because the
+      kernel's writability check counts the largest size a pipe may grow to,
+      which can exceed the buffer it has; on a terminal with flow control,
+      whose readiness does not promise room for a whole piece; and on a regular
+      file on a stalled filesystem. A stop then waits the 1 s and exits with
+      the cut-short status. A blocked piece of at most `PIPE_BUF` bytes goes
+      into a pipe whole or not at all, so the status is wrong only if that
+      piece completes the result as `delega` exits.
+  - **How long it takes.** When no piece blocks, the write stops within 20 ms
+    (one poll interval) and one piece. `delega` waits at most 1 s for the print
+    thread to answer (it may still be building the document, or be in one of
+    the cases above), then up to 1 s for standard error to take its last lines.
+    Shutting down the async runtime waits at most 5 s more, and only for a
+    helper thread that is stuck; none was in these measurements. Measured on
+    macOS with the fake providers, from the signal to the exit with standard
+    output stalled by a full pipe: 30 to 48 ms when standard error is read,
+    1.02 to 1.04 s when standard error is a full pipe too (5 runs each).
   - **After an earlier signal.** If a signal had already been received during
     the run (it was used to stop the worker), the write is given 3 s and is
     then stopped the same way. Measured from the start of the write: 3 s plus
     under 20 ms (5 runs: 4.64 to 4.66 s from the signal, of which 1.64 to 1.67 s
     stopping the worker).
-  - **Limit.** If another process writes to the same pipe between `delega`'s
-    `poll` and its write, the write of a piece can block. A blocked piece of at
-    most `PIPE_BUF` bytes goes into a pipe whole or not at all, so the exit
-    after the 1 s wait reports 130 for a result that is missing that piece,
-    unless the reader frees space at the moment `delega` exits.
+  - **Cost when nothing goes wrong.** Writing in pieces after `poll` costs time
+    on the normal path. Measured in a review on an Apple M4 Pro, release
+    builds, 20 alternated runs per revision, a result of about 3 MB drained
+    through a pipe, median time from the first to the last byte: 0.73 ms before
+    this write and 5.59 ms with it for Claude, 0.75 ms and 5.72 ms for Codex.
 - **Standard error never holds up the run.** Everything `delega run` writes to
   standard error (progress, summaries, problems, signal acknowledgements) goes
   through one writer thread fed by a bounded queue (1024 lines). A line that

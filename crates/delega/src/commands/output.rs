@@ -76,16 +76,32 @@ impl Stop {
 ///
 /// The bytes go out in pieces of at most `PIPE_BUF` bytes, each written only
 /// after `poll` reports standard output writable, and `stop` is checked before
-/// each piece. For a pipe, writable means a piece of that size fits (Linux:
-/// the pipe has a free page; macOS: at least `PIPE_BUF` bytes are free), so the
-/// write does not block when `delega` is the only writer, and the thread comes
-/// back to `stop` within one [`STOP_POLL`] and one piece. A regular file or a
-/// terminal is always or nearly always reported writable and does not hold the
-/// write indefinitely. Standard output stays in blocking mode: its file
-/// description may be shared with other processes, so `O_NONBLOCK` is not set.
+/// each piece. Standard output stays in blocking mode: its file description may
+/// be shared with other processes, so `O_NONBLOCK` is not set.
 ///
-/// The outcome is exact: `Some(Written::Done)` only once every byte was
+/// [`STOP_POLL`] bounds only the wait for readiness. When a pipe has `delega`
+/// as its only writer, a piece written after `POLLOUT` fits (Linux reports
+/// `POLLOUT` while the pipe has a free page), so the thread comes back to
+/// `stop` within one `STOP_POLL` and one piece. A write after `POLLOUT` can
+/// still block: when another writer shares the pipe; on macOS when pipe memory
+/// is over its growth cap, because XNU's `POLLOUT` check counts
+/// `MAX_PIPESIZE`, which can exceed the buffer the pipe has; on a terminal with
+/// flow control, whose readiness does not promise room for a whole piece; and
+/// on a regular file on a stalled filesystem. A stop then waits for the
+/// caller's fallback (`PRINT_STOP_WAIT` in `delega run`).
+///
+/// An interrupted write (`EINTR`) is retried after checking `stop`. A closed
+/// pipe (`EPIPE`) is [`Written::Closed`]. Any other error, `EAGAIN` from a
+/// descriptor another process set to non-blocking included, is
+/// [`Written::Failed`].
+///
+/// The value returned is exact: `Some(Written::Done)` only once every byte was
 /// accepted by the kernel, and `None` only when bytes remain unwritten.
+///
+/// Cost on the normal path, measured in a review on an Apple M4 Pro with
+/// release builds, 20 alternated runs per revision, about 3 MB drained through
+/// a pipe: the median time from the first to the last byte went from 0.73 ms
+/// to 5.59 ms for a Claude result and from 0.75 ms to 5.72 ms for a Codex one.
 pub fn write_unless_stopped(bytes: &[u8], stop: &Stop) -> Option<Written> {
     let owned = match std::io::stdout().as_fd().try_clone_to_owned() {
         Ok(owned) => owned,
