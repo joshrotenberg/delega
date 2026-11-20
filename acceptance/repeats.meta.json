@@ -2,14 +2,26 @@
   "delega_version": {
     "features": [],
     "name": "delega",
-    "revision": "489c14bfa268",
+    "revision": "2ddaca5f5aa5",
     "schema_version": 1,
+    "skills": [
+      {
+        "digest": "e535397b5db005c0d68fe070e70be7d4e8ce35957cfe6cad90e6fb55ed1ddc53",
+        "name": "delegate",
+        "uri": "skill://delega/delegate/SKILL.md"
+      },
+      {
+        "digest": "54d6af810da688f3ae38f6bcd9359608d8b09165804957f5760ee81aa58e8d66",
+        "name": "run",
+        "uri": "skill://delega/run/SKILL.md"
+      }
+    ],
     "version": "0.1.0-dev"
   },
-  "harness_commit": "489c14b",
+  "harness_commit": "2ddaca5",
   "jobs": 8,
   "os": "Darwin 27.2.0 arm64",
   "repeat": 3,
   "rows": 188,
-  "wall_secs": 297
+  "wall_secs": 241
 }
