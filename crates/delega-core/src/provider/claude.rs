@@ -554,23 +554,30 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let stats = for_each_event(bytes, |event| {
         seq += 1;
         let kind = str_field(event, "type");
-        // The first terminal event decides; later events are ignored.
+        // A sub-agent's events are not the worker's: neither their text nor
+        // their session id is used.
+        let subagent = event
+            .get("parent_tool_use_id")
+            .is_some_and(|v| !v.is_null());
+        let session = str_field(event, "session_id").filter(|_| !subagent);
+        // The first terminal event decides; later events only count for the
+        // session ids the stream reported.
         if parsed.terminal != Terminal::None {
             if kind == Some("result") {
                 parsed.note_second_terminal();
             }
+            if let Some(id) = session {
+                parsed.saw_late_session(id);
+            }
             return;
         }
-        if let Some(id) = str_field(event, "session_id") {
-            parsed.session_id = Some(id.to_string());
+        if let Some(id) = session {
+            parsed.saw_session(id);
         }
         match kind {
             Some("assistant") => {
                 // A sub-agent's messages are not the worker's answer.
-                if event
-                    .get("parent_tool_use_id")
-                    .is_some_and(|v| !v.is_null())
-                {
+                if subagent {
                     return;
                 }
                 if let Some(text) = assistant_text(event) {

@@ -762,3 +762,57 @@ fn dropped_progress_is_counted_in_a_final_line_and_in_the_result_notes() {
         rig.assert_nothing_left();
     }
 }
+
+#[test]
+fn a_resume_that_continues_another_session_fails_with_session_mismatch() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = rig
+            .command()
+            .env("FAKE_RESUMED_SESSION_ID", "other-session")
+            .args(rig.run_args(
+                provider,
+                "success",
+                &[
+                    "--resume",
+                    "asked-session",
+                    "--output",
+                    "json",
+                    "--env",
+                    "FAKE_RESUMED_SESSION_ID",
+                ],
+            ))
+            .guarded_output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(1), "{provider}");
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Failed, "{provider}");
+        assert_eq!(result.error.expect("error").kind, "session_mismatch");
+        assert_eq!(result.text, "fake final answer", "{provider}");
+        assert_eq!(result.session_id.as_deref(), Some("other-session"));
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn a_resume_of_a_session_the_provider_cannot_find_fails_with_session_not_found() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = rig.run(
+            provider,
+            "unknown-session",
+            &["--resume", "missing-session", "--output", "json"],
+        );
+        assert_eq!(out.status.code(), Some(1), "{provider}");
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Failed, "{provider}");
+        let error = result.error.expect("error");
+        assert_eq!(error.kind, "session_not_found", "{provider}");
+        assert!(
+            error.message.contains("missing-session"),
+            "{}",
+            error.message
+        );
+        rig.assert_nothing_left();
+    }
+}

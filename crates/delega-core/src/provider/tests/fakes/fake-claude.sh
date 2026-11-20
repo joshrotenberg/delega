@@ -25,6 +25,25 @@
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
 #   FAKE_SESSION_ID  the session id reported when the run is not resuming one
+#   FAKE_RESUMED_SESSION_ID  the session id reported when the run is resuming
+#                    one, instead of the id it was asked to resume
+#
+# Modes about sessions:
+#   unknown-session  what Claude Code 2.1.329 does when --resume names a
+#                    session that does not exist: one `result` event with
+#                    subtype error_during_execution, is_error true, the error
+#                    "No conversation found with session ID: <id>" and the
+#                    requested id as session_id, then exit 1
+#   no-session-id    a successful run whose events carry no session_id
+#   two-sessions     a successful run whose first event carries
+#                    fake-claude-session-2 and whose later events, ending the
+#                    stream, carry the usual id
+#   many-sessions    a successful run that reports ten distinct session ids
+#                    (fake-claude-many-1 to -10) before the usual id
+#   stray-after-result  a successful run followed, after its result, by an
+#                    event carrying fake-claude-stray
+#   subagent-session  a successful run with a sub-agent message (one with
+#                    parent_tool_use_id) carrying fake-claude-subagent
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -56,7 +75,8 @@ for arg in "$@"; do
   esac
   prev="$arg"
 done
-sid="${resume:-${FAKE_SESSION_ID:-fake-claude-session-1}}"
+sid="${FAKE_SESSION_ID:-fake-claude-session-1}"
+[ -n "$resume" ] && sid="${FAKE_RESUMED_SESSION_ID:-$resume}"
 
 # The strings of the `permissions.deny` array of the settings JSON, one per
 # line. The scan follows JSON strings, so a comma, bracket or escaped quote in a
@@ -302,6 +322,38 @@ case "$mode" in
     init
     printf 'fake provider crashed\n' >&2
     exit 3
+    ;;
+  unknown-session)
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
+    exit 1
+    ;;
+  two-sessions)
+    emit '{"type":"system","subtype":"status","session_id":"fake-claude-session-2"}'
+    init
+    success '"fake final answer"' '[]'
+    ;;
+  many-sessions)
+    n=1
+    while [ $n -le 10 ]; do
+      emit "{\"type\":\"system\",\"subtype\":\"status\",\"session_id\":\"fake-claude-many-$n\"}"
+      n=$((n+1))
+    done
+    init
+    success '"fake final answer"' '[]'
+    ;;
+  stray-after-result)
+    init
+    success '"fake final answer"' '[]'
+    emit '{"type":"system","subtype":"status","session_id":"fake-claude-stray"}'
+    ;;
+  subagent-session)
+    init
+    emit '{"type":"assistant","parent_tool_use_id":"t1","session_id":"fake-claude-subagent","message":{"id":"m2","content":[{"type":"text","text":"sub-agent text"}]}}'
+    success '"fake final answer"' '[]'
+    ;;
+  no-session-id)
+    emit '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"working"}]}}'
+    emit '{"type":"result","subtype":"success","is_error":false,"result":"fake final answer","permission_denials":[]}'
     ;;
   success-then-exit-nonzero)
     init

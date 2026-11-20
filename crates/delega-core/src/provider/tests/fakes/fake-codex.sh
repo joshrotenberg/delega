@@ -11,6 +11,29 @@
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
 #   FAKE_MCP         ok (default), bad-json, failure, odd-transport, hang
+#   FAKE_SESSION_ID  the thread id reported when the run is not resuming one
+#   FAKE_RESUMED_SESSION_ID  the thread id reported when the run is resuming
+#                    one, instead of the id it was asked to resume
+#
+# Modes about sessions:
+#   unknown-session  what Codex 0.170.0 does when `resume` names a thread that
+#                    does not exist: nothing on standard output, the line
+#                    "Error: thread/resume: thread/resume failed: no rollout
+#                    found for thread id <id> (code -32600)" on standard error,
+#                    then exit 1
+#   unknown-session-exit-3        the same standard error, but exit 3
+#   unknown-session-after-thread  a thread.started event, then the same
+#                    standard error and exit 1
+#   unknown-session-long-stderr  the unknown-session standard error line
+#                    followed by 9 KiB of other standard error, then exit 1
+#   unknown-session-error-event  a JSON error event on standard output, then
+#                    the unknown-session standard error and exit 1
+#   unknown-session-large-stdout  about 120 KiB of turn.started events on
+#                    standard output, then the unknown-session standard error
+#                    and exit 1
+#   stray-after-completed  a successful run followed, after turn.completed, by
+#                    a thread.started event for fake-codex-stray
+#   no-session-id    a successful run with no thread.started event
 
 for arg in "$@"; do
   case "$arg" in
@@ -65,7 +88,8 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
-sid="${resume:-${FAKE_SESSION_ID:-fake-codex-thread-1}}"
+sid="${FAKE_SESSION_ID:-fake-codex-thread-1}"
+[ -n "$resume" ] && sid="${FAKE_RESUMED_SESSION_ID:-$resume}"
 
 IFS= read -r mode || true
 rest=$(cat)
@@ -186,6 +210,50 @@ case "$mode" in
     init
     printf 'fake provider crashed\n' >&2
     exit 3
+    ;;
+  unknown-session)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  unknown-session-exit-3)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 3
+    ;;
+  unknown-session-after-thread)
+    emit "{\"type\":\"thread.started\",\"thread_id\":\"$sid\"}"
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  unknown-session-long-stderr)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    head -c 9216 /dev/zero | tr '\0' 'x' >&2
+    printf '\n' >&2
+    exit 1
+    ;;
+  unknown-session-error-event)
+    emit '{"type":"error","message":"thread/resume failed"}'
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  unknown-session-large-stdout)
+    i=0
+    while [ $i -lt 5000 ]; do
+      emit '{"type":"turn.started"}'
+      i=$((i+1))
+    done
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  stray-after-completed)
+    init
+    final '"fake final answer"'
+    done_ok
+    emit '{"type":"thread.started","thread_id":"fake-codex-stray"}'
+    ;;
+  no-session-id)
+    emit '{"type":"turn.started"}'
+    final '"fake final answer"'
+    done_ok
     ;;
   success-then-exit-nonzero)
     init

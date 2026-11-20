@@ -3,6 +3,8 @@
 use jsonschema::Validator;
 use serde_json::Value;
 
+use crate::contract::outcome::Outcome;
+use crate::contract::request::Provider;
 use crate::contract::result::{Cleanup, ErrorDetail, RunResult, Timing};
 use crate::process::{Ending, ProcessReport};
 
@@ -18,9 +20,68 @@ pub(super) struct Settle<'a> {
     pub facts: &'a Facts,
     pub validator: Option<&'a Validator>,
     pub ephemeral: bool,
+    /// The session the request asked to continue, if any.
+    pub resume: Option<&'a str>,
     pub notes: Vec<String>,
     pub max_output_bytes: usize,
     pub redactor: &'a Redactor,
+}
+
+/// The start of Claude Code's error text when the session to resume does not
+/// exist (seen with Claude Code 2.1.329).
+const CLAUDE_UNKNOWN_SESSION: &str = "No conversation found with session ID";
+
+/// What Codex writes to standard error when the thread to resume does not exist
+/// (seen with Codex 0.170.0).
+const CODEX_UNKNOWN_SESSION: &str = "no rollout found for thread id";
+
+/// The requested and the first other reported session, when a resumed run's
+/// stream reported any session other than the one it asked for.
+fn mismatch<'a>(s: &Settle<'a>, parsed: &'a Parsed) -> Option<(&'a str, &'a str)> {
+    if s.ephemeral {
+        return None;
+    }
+    let asked = s.resume?;
+    let reported = parsed.session_ids.iter().find(|id| *id != asked)?;
+    Some((asked, reported.as_str()))
+}
+
+/// The text of a mismatch, with secrets removed from both ids.
+fn mismatch_text(redactor: &Redactor, asked: &str, reported: &str) -> String {
+    redactor.apply(&format!(
+        "the run asked to resume session {asked} but the provider reported session {reported}"
+    ))
+}
+
+/// Whether a resumed run failed because the provider could not find the
+/// session it was asked to continue.
+fn session_not_found(
+    provider: Provider,
+    code: i32,
+    result: &RunResult,
+    report: &ProcessReport,
+    parsed: &Parsed,
+) -> bool {
+    let Some(kind) = result.error.as_ref().map(|e| e.kind.as_str()) else {
+        return false;
+    };
+    match (provider, &parsed.terminal) {
+        (Provider::Claude, Terminal::Failure { message, .. }) => {
+            kind == "provider_error" && message.starts_with(CLAUDE_UNKNOWN_SESSION)
+        }
+        // Codex 0.170.0 exits 1 before it starts a thread, so nothing is on
+        // standard output. A JSON `error` event before the exit makes the kind
+        // `provider_error`. All of the captured standard error is searched; the
+        // capture is bounded. Standard output cut at the capture limit may hide
+        // a thread or a terminal event, so it does not match.
+        (Provider::Codex, Terminal::None)
+            if code == 1 && parsed.session_ids.is_empty() && !report.stdout.truncated =>
+        {
+            matches!(kind, "provider_exit" | "provider_error")
+                && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
+        }
+        _ => false,
+    }
 }
 
 fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDetail {
@@ -135,8 +196,13 @@ pub(super) fn settle(
         }
         Ending::Exited { code } => {
             let mut result = exited(ctx, *code, report, parsed, &s, &mut notes);
+            let not_found = s.resume.is_some()
+                && session_not_found(s.facts.provider, *code, &result, report, parsed);
             if let Some(error) = result.error.as_mut() {
                 error.provider_exit_code.get_or_insert(*code);
+                if not_found {
+                    error.kind = "session_not_found".to_string();
+                }
             }
             result
         }
@@ -147,6 +213,22 @@ pub(super) fn settle(
             RunResult::failed(ctx, detail, partial)
         }
     };
+    if let Some((asked, reported)) = mismatch(&s, parsed) {
+        let kind = result.error.as_ref().map(|e| e.kind.as_str());
+        if kind != Some("session_mismatch") {
+            notes.push(mismatch_text(s.redactor, asked, reported));
+        }
+    } else if s.resume.is_none() && !s.ephemeral && parsed.session_ids.len() > 1 {
+        let mut note = format!(
+            "the provider reported more than one session in this run: {}",
+            parsed.session_ids.join(", ")
+        );
+        let more = parsed.session_ids_omitted.len();
+        if more > 0 {
+            note.push_str(&format!(", and {more} more that are not listed"));
+        }
+        notes.push(s.redactor.apply(&note));
+    }
     result.provider_notes = notes;
     result.applied = s.facts.result_applied();
     result.usage = parsed.usage.clone();
@@ -166,7 +248,25 @@ fn exited(
 ) -> RunResult {
     let partial = parsed.partial_text();
     match &parsed.terminal {
-        Terminal::Success if code == 0 => completed(ctx, parsed, s.validator, notes),
+        // A run that would have completed but continued another session than
+        // the one asked for did not do what was asked. Any other outcome of
+        // completing (such as `answer_not_json`) stands, and `settle` adds a
+        // note about the mismatch.
+        Terminal::Success if code == 0 => {
+            let done = completed(ctx.clone(), parsed, s.validator, notes);
+            match mismatch(s, parsed) {
+                Some((asked, reported)) if done.outcome == Outcome::Completed => RunResult::failed(
+                    ctx,
+                    error(
+                        "session_mismatch",
+                        mismatch_text(s.redactor, asked, reported),
+                        Some(code),
+                    ),
+                    done.text,
+                ),
+                _ => done,
+            }
+        }
         Terminal::Success => RunResult::failed(
             ctx,
             error(

@@ -474,13 +474,16 @@ pub struct WorkerView {
     pub name: Option<String>,
     /// The provider.
     pub provider: Provider,
-    /// The provider's session id, once a run has reported one.
+    /// The provider's session id: the one the worker was started to resume,
+    /// or else the first a run reported. A later run that reports another id
+    /// does not change it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Whether `follow_up` can continue this worker: it is not closed, was not
     /// started `ephemeral`, and has a session or a run that may still report
-    /// one. A worker whose runs ended without reporting a session cannot, and a
-    /// follow-up to it is refused.
+    /// one. A worker with no session (none given at start and none reported)
+    /// and no run that may still report one cannot, and a follow-up to it is
+    /// refused.
     pub can_follow_up: bool,
     /// Runs of this worker whose results are kept, plus unfinished ones.
     pub runs: usize,
