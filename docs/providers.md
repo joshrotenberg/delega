@@ -157,18 +157,22 @@ reported up to its first terminal event. Every other outcome stands (for example
 `answer_not_json` or `provider_error`), and a note names both ids. Both the
 message and the note are redacted like other provider text (see
 [Text from the provider](#text-from-the-provider)). A run that reports no
-session id is not a mismatch, and an `ephemeral` run is not checked. A run
-without `session.resume` whose stream reports more than one session id gets a
-note naming them: at most the first 8 distinct ids, with the number of further
-distinct ids that are not listed.
+session id is not a mismatch. An `ephemeral` run gets no session checks at all.
+A run that is neither resumed nor `ephemeral` and whose stream reports more than
+one session id gets a note naming them: at most the first 8 distinct ids, with
+the number of further distinct ids that are not listed.
+
+The session checks cover the captured output only. Standard output is kept from
+its start up to `max_output_bytes`; when it was cut at that limit (the run gets
+a note saying so), session ids past the limit are not checked.
 
 A resumed run that failed because the provider could not find the session has
 kind `session_not_found` instead of `provider_error` or `provider_exit`, with
 the same message: for Claude Code, a failed result whose error text starts
 `No conversation found with session ID`; for Codex, a run with kind
 `provider_exit`, or `provider_error` after a JSON `error` event, that exited
-with code 1, reported no thread and no terminal event, and whose captured
-standard error (its last 64 KiB) contains `no rollout found for thread id`
+with code 1, reported no thread and no terminal event, whose standard output
+was not cut at the capture limit, and whose captured standard error (its last 64 KiB) contains `no rollout found for thread id`
 anywhere. Neither is matched when
 `session.resume` is not set.
 
@@ -539,7 +543,11 @@ and both can be passed as `native_args`.
 
 ### Stream
 
-Events are one JSON object per line. `session_id` is taken from any event. The
+Events are one JSON object per line. The result's `session_id` is the latest
+`session_id` reported by an event up to the first terminal event. Ids on events
+with a non-null `parent_tool_use_id` (a sub-agent's) are ignored, and ids on
+events after the terminal event count only for the session mismatch check (see
+[Outcomes](#outcomes)). The
 `result` event gives the answer (`result`), success (`subtype == "success"` and
 `is_error` not true), errors, `usage` (`input_tokens` plus
 `cache_creation_input_tokens`, reported as `input_tokens`; `output_tokens`;
@@ -652,7 +660,8 @@ effect. A Codex `full` run is not refused: it asks for nothing confined.
 
 ### Stream
 
-`thread.started.thread_id` is the session id. A message item that is not marked
+`thread.started.thread_id` is the session id; a `thread.started` after the
+terminal event counts only for the session mismatch check. A message item that is not marked
 `commentary` is the answer. `turn.completed` is success and carries `usage`
 (`input_tokens`, `output_tokens`, `cached_input_tokens`,
 `reasoning_output_tokens`); `turn.failed` is failure with its message. `error`

@@ -72,8 +72,11 @@ fn session_not_found(
         // Codex 0.170.0 exits 1 before it starts a thread, so nothing is on
         // standard output. A JSON `error` event before the exit makes the kind
         // `provider_error`. All of the captured standard error is searched; the
-        // capture is bounded.
-        (Provider::Codex, Terminal::None) if code == 1 && parsed.session_ids.is_empty() => {
+        // capture is bounded. Standard output cut at the capture limit may hide
+        // a thread or a terminal event, so it does not match.
+        (Provider::Codex, Terminal::None)
+            if code == 1 && parsed.session_ids.is_empty() && !report.stdout.truncated =>
+        {
             matches!(kind, "provider_exit" | "provider_error")
                 && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
         }

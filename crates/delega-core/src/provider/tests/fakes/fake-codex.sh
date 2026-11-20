@@ -28,6 +28,9 @@
 #                    followed by 9 KiB of other standard error, then exit 1
 #   unknown-session-error-event  a JSON error event on standard output, then
 #                    the unknown-session standard error and exit 1
+#   unknown-session-large-stdout  about 120 KiB of turn.started events on
+#                    standard output, then the unknown-session standard error
+#                    and exit 1
 #   stray-after-completed  a successful run followed, after turn.completed, by
 #                    a thread.started event for fake-codex-stray
 #   no-session-id    a successful run with no thread.started event
@@ -229,6 +232,15 @@ case "$mode" in
     ;;
   unknown-session-error-event)
     emit '{"type":"error","message":"thread/resume failed"}'
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  unknown-session-large-stdout)
+    i=0
+    while [ $i -lt 5000 ]; do
+      emit '{"type":"turn.started"}'
+      i=$((i+1))
+    done
     printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
     exit 1
     ;;

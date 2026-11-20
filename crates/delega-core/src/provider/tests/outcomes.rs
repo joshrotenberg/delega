@@ -589,6 +589,27 @@ async fn codex_finds_a_missing_rollout_behind_long_stderr_or_after_an_error_even
 }
 
 #[tokio::test]
+async fn codex_keeps_provider_exit_for_a_missing_rollout_when_stdout_was_cut() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Codex, "unknown-session-large-stdout");
+    request.session.resume = Some("missing-session".into());
+    let mut options = rig.options(Provider::Codex);
+    options.max_output_bytes = Some(64 * 1024);
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    assert_eq!(result.error.expect("error").kind, "provider_exit");
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("went over 65536 bytes")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
 async fn claude_says_how_many_session_ids_past_the_bound_were_not_listed() {
     let rig = Rig::new();
     let result = run_checked(
