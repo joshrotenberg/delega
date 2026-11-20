@@ -21,8 +21,8 @@
 #![cfg(unix)]
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use delega_core::process::{EnvPolicy, ProcessReport, ProcessSpec, run, spawn_guard};
@@ -34,8 +34,12 @@ const AT_ONCE: usize = 8;
 /// it waits before it takes the guard again, so the runs are not starved.
 const HELD: Duration = Duration::from_millis(2);
 const RELEASED: Duration = Duration::from_millis(1);
-/// A bound on the rounds, far above the second or so they take, so a run that
-/// waits on the lock forever fails here instead of hanging the suite.
+/// A bound on the whole check, far above the second or so it takes. The check
+/// runs on a thread and runtime of its own and the test thread waits for it
+/// with this deadline, so a spawn stuck on the lock (which blocks a runtime
+/// worker, where no async timeout can reach it) fails the test instead of
+/// hanging it. The stuck thread is left behind; this binary holds no other
+/// test.
 const BOUND: Duration = Duration::from_secs(120);
 
 /// A process-layer child that lists its own open descriptors. Its standard
@@ -57,14 +61,16 @@ fn descriptors(report: &ProcessReport) -> BTreeSet<String> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_child_never_inherits_a_pipe_opened_under_the_spawn_guard() {
-    let dir = tempfile::tempdir().expect("scratch directory");
+/// The check itself: `Err` with what went wrong, or `Ok`.
+async fn check() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("scratch directory: {e}"))?;
     // The child alone: its standard streams plus the descriptor `ls` opens to
     // read the directory.
     let alone = run(lister(dir.path())).await;
     let expected = descriptors(&alone);
-    assert!(expected.contains("0"), "{alone:#?}");
+    if !expected.contains("0") {
+        return Err(format!("the child alone listed nothing usable: {alone:#?}"));
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let opened = Arc::new(AtomicUsize::new(0));
@@ -89,47 +95,72 @@ async fn a_child_never_inherits_a_pipe_opened_under_the_spawn_guard() {
 
     let before = opened.load(Ordering::Relaxed);
     let mut wrong = Vec::new();
-    let rounds = async {
-        for round in 0..ROUNDS {
-            let barrier = Arc::new(tokio::sync::Barrier::new(AT_ONCE));
-            let children: Vec<_> = (0..AT_ONCE)
-                .map(|_| {
-                    let spec = lister(dir.path());
-                    let barrier = barrier.clone();
-                    tokio::spawn(async move {
-                        barrier.wait().await;
-                        run(spec).await
-                    })
+    for round in 0..ROUNDS {
+        let barrier = Arc::new(tokio::sync::Barrier::new(AT_ONCE));
+        let children: Vec<_> = (0..AT_ONCE)
+            .map(|_| {
+                let spec = lister(dir.path());
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    run(spec).await
                 })
-                .collect();
-            for child in children {
-                let report = child.await.expect("the task that ran the child");
-                let listed = descriptors(&report);
-                if listed != expected {
-                    wrong.push((round, listed));
-                }
+            })
+            .collect();
+        for child in children {
+            let report = child
+                .await
+                .map_err(|e| format!("the task that ran a child: {e}"))?;
+            let listed = descriptors(&report);
+            if listed != expected {
+                wrong.push((round, listed));
             }
         }
-    };
-    let finished = tokio::time::timeout(BOUND, rounds).await;
+    }
     let during = opened.load(Ordering::Relaxed) - before;
-
     stop.store(true, Ordering::Relaxed);
-    other.join().expect("the thread that opened pipes");
-    assert!(
-        finished.is_ok(),
-        "the rounds did not finish within {BOUND:?}"
-    );
-    // The pipe was opened and closed many times while the children started,
-    // so a spawn that skipped the lock had many chances to inherit it.
-    assert!(
-        during >= ROUNDS,
-        "the other thread opened a pipe only {during} times during the rounds"
-    );
-    assert!(
-        wrong.is_empty(),
-        "{} of {} children listed descriptors beyond {expected:?}: {wrong:?}",
-        wrong.len(),
-        ROUNDS * AT_ONCE
-    );
+    other
+        .join()
+        .map_err(|_| "the thread that opened pipes panicked".to_string())?;
+
+    // A sanity check that the pipe holder ran while the children started, not
+    // proof that every spawn overlapped a held pipe. With the lock removed
+    // from the process layer, 30 to 34 of the 48 children inherited the pipe
+    // in the runs this was written with.
+    if during < ROUNDS {
+        return Err(format!(
+            "the other thread opened a pipe only {during} times during the rounds"
+        ));
+    }
+    if !wrong.is_empty() {
+        return Err(format!(
+            "{} of {} children listed descriptors beyond {expected:?}: {wrong:?}",
+            wrong.len(),
+            ROUNDS * AT_ONCE
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_child_never_inherits_a_pipe_opened_under_the_spawn_guard() {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(8)
+            .enable_all()
+            .build()
+            .expect("build a runtime");
+        let _ = tx.send(runtime.block_on(check()));
+    });
+    match rx.recv_timeout(BOUND) {
+        Ok(Ok(())) => {}
+        Ok(Err(problem)) => panic!("{problem}"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the check did not finish within {BOUND:?}: a spawn may be stuck on the lock")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the check's thread panicked; its message is above")
+        }
+    }
 }
