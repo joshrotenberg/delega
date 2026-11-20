@@ -4,6 +4,9 @@
 
 use std::process::Command;
 
+// A build script is a process of its own with no other thread spawning, so
+// there is no spawn for this one to race and no spawn lock to share (#107).
+#[allow(clippy::disallowed_methods)]
 fn git(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
     if !out.status.success() {

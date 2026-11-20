@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::Output;
 
 use serde_json::Value;
-use support::{Rig, text};
+use support::{Guarded, Rig, text};
 
 /// A value no output may contain.
 const SECRET: &str = "config-secret-value-4417";
@@ -37,7 +37,7 @@ fn run_json(rig: &Rig, args: &[&str]) -> Output {
     rig.command()
         .args(["run", "--output", "json", "--dry-run"])
         .args(args)
-        .output()
+        .guarded_output()
         .expect("run delega")
 }
 
@@ -142,7 +142,7 @@ fn an_absent_file_changes_nothing_and_a_file_with_only_its_version_is_the_same()
         .arg("-C")
         .arg(&rig.work)
         .args(["--env", "CONFIG_PASSED"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(nowhere.status.code(), Some(0), "{}", text(&nowhere.stderr));
 }
@@ -156,7 +156,7 @@ fn defaults_apply_when_nothing_else_says_otherwise() {
         .command()
         .args(["run", "--output", "json", "--dry-run", "-p", "hello", "-C"])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let plan = json_of(&out)["dry_run"].clone();
@@ -188,7 +188,7 @@ fn the_files_environment_is_added_to_the_flags_and_no_value_is_printed() {
         .arg("-C")
         .arg(&rig.work)
         .args(["--env", "FLAG_PASSED", "--env", "FLAG_SET=flag-value-1"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let plan = json_of(&out)["dry_run"].clone();
@@ -219,7 +219,7 @@ fn the_files_environment_is_added_to_the_flags_and_no_value_is_printed() {
             "-C",
         ])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(text_out.status.code(), Some(0));
     assert!(text(&text_out.stdout).contains("named by the caller: CONFIG_PASSED"));
@@ -234,7 +234,7 @@ fn a_real_run_hands_the_worker_the_files_variables_and_prints_no_value() {
         .command()
         .env("CONFIG_PASSED", SECRET)
         .args(rig.run_args("claude", "success", &["--output", "json"]))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let result = json_of(&out);
@@ -281,7 +281,7 @@ fn the_files_executable_is_used_unless_the_override_variable_is_set() {
             "-C",
         ])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
@@ -316,7 +316,7 @@ fn the_files_executable_is_used_unless_the_override_variable_is_set() {
             "-C",
         ])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2));
     let result = json_of(&out);
@@ -412,7 +412,7 @@ fn a_file_in_the_working_directory_or_the_repository_is_never_read() {
             "-p",
             "x",
         ])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let plan = json_of(&out)["dry_run"].clone();
@@ -447,7 +447,7 @@ fn delega_config_names_another_file() {
             "-C",
         ])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
@@ -468,7 +468,7 @@ fn delega_config_names_another_file() {
             "-p",
             "x",
         ])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(json_of(&out)["error"]["kind"], "config_unreadable");
@@ -530,7 +530,7 @@ fn an_invalid_file_is_refused_by_run_as_a_refused_result_before_anything_else() 
         let out = rig
             .command()
             .args(["run", "--output", "json"])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{what}: {}", text(&out.stderr));
         let result = json_of(&out);
@@ -546,7 +546,7 @@ fn an_invalid_file_is_refused_by_run_as_a_refused_result_before_anything_else() 
         let out = rig
             .command()
             .args(["run", "-p", "x", "--provider", "claude"])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{what}");
         assert!(out.stdout.is_empty(), "{what}");
@@ -611,7 +611,7 @@ fn a_progress_run_with_a_refused_file_ends_with_the_refused_line() {
     let out = rig
         .command()
         .args(["run", "--progress", "-p", "x", "--provider", "claude"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2));
     let err = text(&out.stderr);
@@ -628,7 +628,11 @@ fn mcp_refuses_to_start_on_a_file_it_cannot_use() {
     for (what, body, kind) in refused_files() {
         let rig = Rig::new();
         write_config(&rig, &body);
-        let out = rig.command().arg("mcp").output().expect("run delega mcp");
+        let out = rig
+            .command()
+            .arg("mcp")
+            .guarded_output()
+            .expect("run delega mcp");
         assert_eq!(out.status.code(), Some(2), "{what}");
         assert!(out.stdout.is_empty(), "{what}: nothing is served");
         let err = text(&out.stderr);
@@ -641,7 +645,11 @@ fn mcp_refuses_to_start_on_a_file_it_cannot_use() {
     let rig = Rig::new();
     let path = write_config(&rig, FULL);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
-    let out = rig.command().arg("mcp").output().expect("run delega mcp");
+    let out = rig
+        .command()
+        .arg("mcp")
+        .guarded_output()
+        .expect("run delega mcp");
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     assert!(text(&out.stderr).contains("delega mcp: refused: config_unreadable: "));
@@ -654,7 +662,7 @@ fn doctor(rig: &Rig) -> Output {
     rig.command()
         .args(["doctor", "--output", "json"])
         .current_dir(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega doctor")
 }
 
@@ -682,7 +690,7 @@ fn doctor_reports_the_file_it_read_and_applies_its_executables_environment_and_l
         .env_remove("DELEGA_CODEX_BIN")
         .args(["doctor", "--output", "json"])
         .current_dir(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     let report = json_of(&out);
     let config = &report["config"];
@@ -751,7 +759,7 @@ fn doctor_reports_the_file_it_read_and_applies_its_executables_environment_and_l
         .env_remove("DELEGA_CODEX_BIN")
         .args(["doctor"])
         .current_dir(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     let report = text(&out.stdout);
     for expected in [
@@ -784,7 +792,7 @@ fn doctor_without_a_file_says_so_and_changes_nothing_else() {
     let text_out = rig
         .command()
         .arg("doctor")
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     assert!(text(&text_out.stdout).contains("state: not found; nothing is configured"));
     // With no HOME and no variable, there is nowhere to look.
@@ -793,7 +801,7 @@ fn doctor_without_a_file_says_so_and_changes_nothing_else() {
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .args(["doctor", "--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     assert_eq!(json_of(&out)["config"]["path"], Value::Null);
 }
@@ -833,7 +841,7 @@ fn doctor_reports_a_refused_file_as_a_problem_that_stops_runs_and_keeps_reportin
         let text_out = rig
             .command()
             .arg("doctor")
-            .output()
+            .guarded_output()
             .expect("run delega doctor");
         assert_eq!(text_out.status.code(), Some(1), "{what}");
         let shown = text(&text_out.stdout);
@@ -860,7 +868,7 @@ fn doctor_reports_an_unsafe_file_and_applies_nothing_from_it() {
         .env_remove("DELEGA_CLAUDE_BIN")
         .args(["doctor", "--output", "json"])
         .current_dir(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     let report = json_of(&out);
     let kinds: Vec<&str> = report["problems"]

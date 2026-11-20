@@ -78,6 +78,8 @@ pub fn run(program: &Path, args: &[String], limit: Duration, max: usize) -> Resu
     // Under the process layer's spawn lock, like every process delega starts,
     // so a worker started at the same moment in the same program cannot
     // inherit these pipes, nor this command a worker's (#104).
+    // `clippy.toml` refuses an unguarded spawn; this one holds the guard (#107).
+    #[allow(clippy::disallowed_methods)]
     let mut child = {
         let _held = delega_core::process::spawn_guard();
         command.spawn()

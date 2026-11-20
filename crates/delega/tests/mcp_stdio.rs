@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use support::Guarded;
 use tempfile::TempDir;
 
 /// How long a test waits for an event that should happen eventually.
@@ -114,7 +115,7 @@ impl Rig {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .guarded_spawn()
             .expect("spawn delega mcp");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
@@ -178,7 +179,8 @@ impl Rig {
     fn survivors(&self) -> Vec<String> {
         let out = Command::new("/bin/ps")
             .args(["-axww", "-o", "pid=,command="])
-            .output()
+            .captured()
+            .guarded_output()
             .expect("run ps");
         let marker = self.root.to_string_lossy().into_owned();
         String::from_utf8_lossy(&out.stdout)
@@ -536,7 +538,7 @@ fn sigterm_stops_every_worker_and_exits_with_the_interrupted_status() {
     let _ = Command::new("/bin/kill")
         .args(["-TERM", &session.pid().to_string()])
         .stderr(Stdio::null())
-        .status();
+        .guarded_status();
     let status = session.exit();
     // By itself, with status 130, not killed by the second signal.
     assert!(status.code().is_some(), "killed by a signal: {status:?}");
@@ -610,7 +612,8 @@ fn an_env_name_the_policy_refuses_stops_the_server_before_it_serves_without_echo
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("DELEGA_CODEX_BIN", rig.fakes.join("fake-codex.sh"))
-            .output()
+            .captured()
+            .guarded_output()
             .expect("run delega");
         let result: Value = serde_json::from_slice(&run.stdout).expect("run result");
         assert_eq!(result["error"]["kind"], kind, "{given}");
@@ -826,7 +829,8 @@ fn the_skills_and_the_identity_over_stdio_are_what_the_cli_prints() {
     let cli = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_delega"))
             .args(args)
-            .output()
+            .captured()
+            .guarded_output()
             .expect("run delega")
     };
     let catalog: Value =

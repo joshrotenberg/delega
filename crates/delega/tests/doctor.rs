@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use serde_json::Value;
-use support::{Rig, text};
+use support::{Guarded, Rig, text};
 
 /// A value no output may contain: it is set in variables the allowlist passes.
 const SECRET: &str = "distinctive-value-7731";
@@ -41,7 +41,7 @@ fn doctor_with(rig: &Rig, args: &[&str], tweak: impl Fn(&mut Command)) -> Output
     for _ in 0..8 {
         let mut command = doctor_command(rig, args);
         tweak(&mut command);
-        let run = command.output().expect("run delega doctor");
+        let run = command.guarded_output().expect("run delega doctor");
         let failed = inspection_failed(&run);
         out = Some(run);
         if !failed {
@@ -416,7 +416,7 @@ fn unavailable_process_inspection_is_named_and_exits_one() {
         .current_dir(&rig.work)
         .env("DELEGA_TEST_NO_PROCESS_LISTING", "1")
         .args(["doctor", "--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let report = json_of(&out);
@@ -441,7 +441,7 @@ fn unavailable_process_inspection_is_named_and_exits_one() {
         .current_dir(&rig.work)
         .env("DELEGA_TEST_NO_PROCESS_LISTING", "1")
         .arg("doctor")
-        .output()
+        .guarded_output()
         .expect("run delega doctor");
     assert_eq!(shown.status.code(), Some(1));
     assert!(text(&shown.stdout).contains("process inspection: unavailable"));
@@ -471,7 +471,7 @@ fn doctor_cannot_run_without_a_usable_current_directory_and_exits_two() {
             gone.display(),
             env!("CARGO_BIN_EXE_delega")
         ))
-        .output()
+        .guarded_output()
         .expect("run sh");
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(out.stdout.is_empty());
@@ -526,7 +526,7 @@ fn an_executable_that_cannot_be_started_stops_every_run_with_it() {
             .command()
             .env(&variable, &broken)
             .args(rig.run_args(name, "success", &[]))
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_ne!(ran.status.code(), Some(0), "{name}");
     }

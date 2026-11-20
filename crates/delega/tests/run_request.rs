@@ -9,7 +9,7 @@ use delega_core::contract::request::Provider;
 use serde_json::Value;
 use std::io::Write;
 use std::process::Stdio;
-use support::{PROVIDERS, Rig, result_of, text, wait_bounded, wait_bounded_for};
+use support::{Guarded, PROVIDERS, Rig, result_of, text, wait_bounded, wait_bounded_for};
 
 fn profile(rig: &Rig, body: &str) -> String {
     rig.file("profile.json", body)
@@ -31,7 +31,7 @@ fn a_profile_supplies_the_request_and_flags_override_it_field_by_field() {
         .args(["run", "--request", &file, "-C"])
         .arg(&rig.work)
         .args(["--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let result = result_of(&out);
@@ -47,7 +47,7 @@ fn a_profile_supplies_the_request_and_flags_override_it_field_by_field() {
         .args(["-C"])
         .arg(&rig.work)
         .args(["--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let result = result_of(&out);
@@ -68,7 +68,7 @@ fn an_explicit_prompt_replaces_the_prompt_in_the_profile() {
         .command()
         .args(["run", "--request", &file, "-p", "success", "-C"])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "fake final answer\n");
@@ -247,7 +247,7 @@ fn an_invalid_profile_is_a_refused_result_in_json_and_problems_on_stderr_in_text
         let out = rig
             .command()
             .args(["run", "--request", &file, "--output", "json"])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{what}");
         let result = result_of(&out);
@@ -263,7 +263,7 @@ fn an_invalid_profile_is_a_refused_result_in_json_and_problems_on_stderr_in_text
         let out = rig
             .command()
             .args(["run", "--request", &file])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{what}");
         assert_eq!(text(&out.stdout), "", "{what}");
@@ -279,7 +279,7 @@ fn validation_problems_are_all_listed_in_one_refused_result() {
     let out = rig
         .command()
         .args(["run", "--timeout", "0", "--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2));
     let result = result_of(&out);
@@ -301,7 +301,7 @@ fn dry_run(rig: &Rig, provider: &str, extra: &[&str]) -> std::process::Output {
     command
         .args(rig.run_args(provider, "success", &["--dry-run"]))
         .args(extra)
-        .output()
+        .guarded_output()
         .expect("run delega")
 }
 
@@ -482,7 +482,7 @@ fn guard(rig: &Rig, grants: Option<&str>, event: &str) -> std::process::Output {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .expect("spawn delega");
     child
         .stdin
@@ -643,7 +643,7 @@ fn progress_reports_a_denial_and_never_a_command_or_an_environment_value() {
             "denied-completed",
             &["--progress", "--env", "MY_SERVICE_API_TOKEN"],
         ))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0));
     let err = text(&out.stderr);
@@ -680,7 +680,7 @@ fn dry_json(rig: &Rig, args: &[&str]) -> Value {
         .command()
         .args(["run", "--dry-run", "--output", "json"])
         .args(args)
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).expect("JSON")
@@ -706,7 +706,7 @@ fn a_relative_extra_directory_resolves_against_the_callers_directory() {
             "x",
         ])
         .args(["-C", "work", "--add-dir", "shared"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
@@ -734,7 +734,7 @@ fn run_without_cwd_uses_the_callers_current_directory() {
             "-p",
             "x",
         ])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
@@ -754,7 +754,7 @@ fn relative_paths_in_a_profile_resolve_against_the_callers_directory_too() {
         .command()
         .current_dir(rig.path(""))
         .args(["run", "--dry-run", "--output", "json", "--request", &file])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
@@ -786,7 +786,7 @@ fn a_relative_request_and_schema_path_are_read_from_the_callers_directory() {
             "work",
         ])
         .args(["--dry-run"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
@@ -834,7 +834,7 @@ fn resume_replaces_an_ephemeral_session_from_the_profile() {
         .args(["run", "--request", &file, "--resume", "sess-4", "-C"])
         .arg(&rig.work)
         .args(["--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // An ephemeral run reports no session id; this one reports the resumed id.
@@ -854,7 +854,7 @@ fn a_prompt_that_starts_with_a_hyphen_is_given_in_the_equals_form() {
             .args(["run", "--provider", "claude", form, "-C"])
             .arg(&rig.work)
             .args(["--env", "FAKE_RECORD_DIR"])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(0), "{form}: {}", text(&out.stderr));
         assert!(
@@ -872,7 +872,7 @@ fn a_prompt_flag_does_not_swallow_the_flag_after_it() {
         .command()
         .args(["run", "--provider", "claude", "-p", "--dry-run", "-C"])
         .arg(&rig.work)
-        .output()
+        .guarded_output()
         .expect("run delega");
     // A usage error, not a run whose assignment is "--dry-run".
     assert_eq!(out.status.code(), Some(2));
@@ -891,7 +891,7 @@ fn a_request_refused_while_it_is_built_ends_the_progress_with_a_finish_line() {
     let out = rig
         .command()
         .args(["run", "--progress"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2));
     let err = text(&out.stderr);
@@ -917,7 +917,7 @@ fn a_profile_or_schema_that_is_not_a_regular_file_or_too_large_is_refused_naming
                 "--output",
                 "json",
             ])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{flag}");
         let message = result_of(&out).error.expect("error").message;
@@ -941,7 +941,7 @@ fn a_profile_or_schema_that_is_not_a_regular_file_or_too_large_is_refused_naming
                 "--output",
                 "json",
             ])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{flag}");
         let message = result_of(&out).error.expect("error").message;
@@ -987,7 +987,7 @@ fn wait_bounded_reads_the_pipes_while_it_waits() {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .expect("spawn sh");
     let out = wait_bounded_for(child, std::time::Duration::from_secs(120));
     assert_eq!(out.stdout.len(), 300_000);
@@ -1001,7 +1001,7 @@ fn wait_bounded_kills_a_child_that_does_not_exit_and_fails_the_test() {
         .arg("30")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .expect("spawn sleep");
     let _ = wait_bounded_for(child, std::time::Duration::from_millis(200));
 }
@@ -1052,7 +1052,7 @@ fn only_the_allowlist_and_named_variables_reach_the_worker() {
                     "json",
                 ],
             ))
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(
             out.status.code(),
@@ -1123,7 +1123,7 @@ fn a_dry_run_groups_the_names_counts_the_withheld_and_prints_no_value() {
         );
         let out = canary_command(&rig)
             .args(&args)
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(
             out.status.code(),
@@ -1163,7 +1163,7 @@ fn a_dry_run_groups_the_names_counts_the_withheld_and_prints_no_value() {
         json_args.extend(["--output".into(), "json".into()]);
         let out = canary_command(&rig)
             .args(&json_args)
-            .output()
+            .guarded_output()
             .expect("run delega");
         let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
         let env = &value["dry_run"]["env"];
@@ -1197,7 +1197,7 @@ fn a_bad_env_name_is_refused_before_start_and_its_text_is_not_echoed() {
             let out = rig
                 .command()
                 .args(rig.run_args(provider, "success", &["--env", &value, "--output", "json"]))
-                .output()
+                .guarded_output()
                 .expect("run delega");
             assert_eq!(out.status.code(), Some(2), "{provider}");
             let result = result_of(&out);
@@ -1211,7 +1211,7 @@ fn a_bad_env_name_is_refused_before_start_and_its_text_is_not_echoed() {
         let out = rig
             .command()
             .args(rig.run_args(provider, "success", &["--env", "1ABC", "--dry-run"]))
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{provider}");
         assert!(text(&out.stderr).contains("invalid_env_name"));
@@ -1230,7 +1230,7 @@ fn env_refuses_a_calling_session_or_delega_variable_in_either_form() {
             let out = rig
                 .command()
                 .args(rig.run_args("claude", "success", &["--env", &given, "--output", "json"]))
-                .output()
+                .guarded_output()
                 .expect("run delega");
             assert_eq!(out.status.code(), Some(2), "{name}");
             let error = result_of(&out).error.expect("error");
@@ -1260,7 +1260,7 @@ fn the_help_documents_env_and_a_profile_does_not_carry_it() {
         .args(["run", "--request", &file, "-C"])
         .arg(&rig.work)
         .args(["--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     let message = result_of(&out).error.expect("error").message;
@@ -1289,7 +1289,7 @@ fn env_with_a_value_sets_it_for_the_worker_whatever_the_caller_has() {
                     "json",
                 ],
             ))
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(
             out.status.code(),
@@ -1324,7 +1324,7 @@ fn env_with_a_secret_looking_name_is_noted_in_both_forms_without_the_value() {
                 "json",
             ],
         ))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let notes = result_of(&out).provider_notes.join("\n");
@@ -1380,7 +1380,7 @@ fn the_worker_receives_exactly_the_expected_names_and_no_others() {
         let out = command
             .args(rig.run_args(provider, "success", &["-e", "NAMED_ONE", "-e", "SET_ONE=v"]))
             .env("NAMED_ONE", CANARY)
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(
             out.status.code(),
@@ -1433,7 +1433,7 @@ fn env_refuses_a_name_delega_sets_itself_instead_of_dropping_it() {
         let out = rig
             .command()
             .args(rig.run_args("claude", "success", &["-e", given, "--output", "json"]))
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{given}");
         let error = result_of(&out).error.expect("error");
@@ -1561,7 +1561,7 @@ fn a_profile_with_strict_merges_and_refuses() {
         .args(["run", "--request", &file, "-C"])
         .arg(&rig.work)
         .args(["--output", "json"])
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     let result = result_of(&out);
