@@ -563,24 +563,6 @@ fn a_failed_command_leaves_the_rest_of_that_host_unrun() {
 }
 
 #[test]
-fn dir_alias_selects_the_managed_directory_for_both_plugin_commands() {
-    let rig = Rig::new();
-    let chosen = rig.home.join("elsewhere");
-    for command in ["install", "uninstall"] {
-        let (code, doc, err) = rig.run_json(&[
-            "plugin",
-            command,
-            "--dir",
-            chosen.to_str().unwrap(),
-            "--dry-run",
-        ]);
-        assert_eq!(code, 0, "{command}: {err}");
-        assert_eq!(doc["install_dir"], chosen.to_str().unwrap());
-    }
-    rig.no_calls();
-}
-
-#[test]
 fn former_top_level_plugin_commands_are_rejected_as_unknown() {
     let rig = Rig::new();
     for command in ["init", "uninstall"] {

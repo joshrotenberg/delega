@@ -656,7 +656,7 @@ delega plugin uninstall                 # remove from every recorded host, then 
 ```
 
 Options, for both commands: `--host claude|codex` (repeatable),
-`--install-dir DIR` (also `--dir DIR`), `--dry-run` and `--output text|json`.
+`--install-dir DIR`, `--dry-run` and `--output text|json`.
 
 - **Managed directory.** `--install-dir DIR`, else `DELEGA_INSTALL_HOME`, else
   `$HOME/.local/share/delega`. It must be an absolute path. An existing

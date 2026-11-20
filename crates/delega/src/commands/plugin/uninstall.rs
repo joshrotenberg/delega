@@ -27,7 +27,7 @@ pub struct Args {
     hosts: Vec<Host>,
     /// The managed directory [default: $DELEGA_INSTALL_HOME, then
     /// $HOME/.local/share/delega]
-    #[arg(long, visible_alias = "dir", value_name = "DIR")]
+    #[arg(long, value_name = "DIR")]
     install_dir: Option<PathBuf>,
     /// Print what would be removed without removing or running anything
     #[arg(long)]
