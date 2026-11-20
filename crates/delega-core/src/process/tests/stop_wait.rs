@@ -10,7 +10,8 @@
 //! (seconds, far beyond what load adds), which fails the test; a stop that does
 //! not wait ends the child at once however slow the machine is.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::fixtures::{Held, Reaper, Scratch, await_event, is_running_async, sh};
@@ -318,54 +319,44 @@ async fn a_stop_whose_listing_never_completes_still_ends_at_the_grace_with_kill(
     super::fixtures::assert_gone("leader", &[leader]).await;
 }
 
-/// A lister that answers at once until armed, and then takes `delay` for every
-/// listing, which is longer than the sweep budget. It counts the listings
-/// started since it was armed.
-#[derive(Clone)]
-struct Slow {
-    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    started: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    delay: Duration,
-}
-
-impl Slow {
-    fn new(delay: Duration) -> Self {
-        Self {
-            armed: Default::default(),
-            started: Default::default(),
-            delay,
+/// The initial capture waits for the descendant to enter its own session.
+/// Count only listings from the owner, starting with its bounded TERM
+/// sweep. The capture task also takes the listing requested by the stop.
+fn slow_stop_lister(s: &Scratch, calls: Arc<AtomicU32>) -> crate::process::tree::Lister {
+    let ready = s.path("ready");
+    let capture_task = OnceLock::new();
+    Arc::new(move || {
+        let ready = ready.clone();
+        let task = tokio::task::id();
+        // The test waits for the initial capture to track the descendant
+        // before requesting the stop, so the first listing is from capture.
+        let initial_capture = capture_task.set(task).is_ok();
+        if capture_task.get() != Some(&task) {
+            calls.fetch_add(1, Ordering::SeqCst);
         }
-    }
-
-    fn lister(&self) -> crate::process::tree::Lister {
-        let slow = self.clone();
-        std::sync::Arc::new(move || {
-            let slow = slow.clone();
-            Box::pin(async move {
-                if slow.armed.load(Ordering::SeqCst) {
-                    slow.started.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(slow.delay).await;
-                }
-                crate::process::tree::list_processes().await
-            })
+        Box::pin(async move {
+            if initial_capture {
+                await_event("the descendant entering its own session", || ready.exists()).await;
+            } else {
+                // Longer than the stop listing and bounded sweep budgets.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            crate::process::tree::list_processes().await
         })
-    }
+    })
 }
 
-/// Start `script` with a listing that is slower than the sweep budget once
-/// armed, with a tracked descendant in its own session, and stop it.
-async fn stop_with_slow_listings(
-    script: &str,
-    grace: Duration,
-) -> (
-    ProcessReport,
-    i32,
-    std::sync::Arc<std::sync::atomic::AtomicU32>,
-) {
+/// Stop a leader whose tracked descendant began in its own session.
+async fn stop_with_slow_listings(term_handler: &str, grace: Duration) -> (ProcessReport, u32) {
     let s = Scratch::new();
-    let slow = Slow::new(Duration::from_millis(400));
-    let mut spec = sh(&s, script, LONG).with_lister(slow.lister());
-    spec.capture_interval = Some(Duration::from_millis(100));
+    let script = format!(
+        "echo $$ > leader; perl -e 'use POSIX; POSIX::setsid(); \
+         {term_handler} open my $ready, q(>), q(ready) or die $!; close $ready; \
+         exec q(sleep), q(60)' & echo $! > gc; wait"
+    );
+    let calls = Arc::new(AtomicU32::new(0));
+    let mut spec = sh(&s, &script, LONG).with_lister(slow_stop_lister(&s, calls.clone()));
+    spec.capture_interval = Some(Duration::from_secs(3600));
     spec.stop_grace = grace;
     spec.drain_bound = LONG;
     spec.cleanup_deadline = Duration::from_secs(180);
@@ -375,17 +366,17 @@ async fn stop_with_slow_listings(
     let leader = s.pid("leader").await;
     let gc = s.pid("gc").await;
     let _reaper = Reaper(vec![leader, gc]);
-    super::fixtures::wait_own_group(gc).await;
     super::fixtures::wait_tracked(&handle, gc).await;
-    slow.armed.store(true, Ordering::SeqCst);
-    // The periodic scan is not what is under test: let the stop's own listing
-    // be the next one that starts.
     handle.interrupt();
     let report = tokio::time::timeout(DEADLINE, handle.wait())
         .await
         .expect("the stop waited for the grace or for the descendant to end by itself");
     super::fixtures::assert_gone("descendant", &[gc]).await;
-    (report, gc, slow.started)
+    let after_first_sweep = calls
+        .load(Ordering::SeqCst)
+        .checked_sub(1)
+        .expect("the first TERM sweep started");
+    (report, after_first_sweep)
 }
 
 #[tokio::test]
@@ -399,7 +390,7 @@ async fn a_listing_always_slower_than_the_sweep_budget_still_gets_the_descendant
         eprintln!("skipped: perl is not available");
         return;
     }
-    let (report, _gc, started) = stop_with_slow_listings(SESSION_DESCENDANT, LONG).await;
+    let (report, started) = stop_with_slow_listings("", LONG).await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert_eq!(term_to_descendants(&report), 1, "{report:#?}");
     assert!(
@@ -410,8 +401,12 @@ async fn a_listing_always_slower_than_the_sweep_budget_still_gets_the_descendant
             .any(|record| record.signal == "SIGKILL"),
         "{report:#?}"
     );
-    let started = started.load(Ordering::SeqCst);
-    assert!(started <= 10, "{started} listings started during the stop");
+    // One TERM retry and two clean sweeps, with room for one sweep that
+    // still sees the descendant exiting.
+    assert!(
+        started <= 4,
+        "{started} listings after the first TERM sweep"
+    );
 }
 
 #[tokio::test]
@@ -423,9 +418,8 @@ async fn a_listing_always_slower_than_the_sweep_budget_still_kills_a_term_ignori
         eprintln!("skipped: perl is not available");
         return;
     }
-    let script = "echo $$ > leader; perl -e 'use POSIX; POSIX::setsid(); \
-                  $SIG{TERM} = q(IGNORE); exec q(sleep), q(60)' & echo $! > gc; wait";
-    let (report, _gc, started) = stop_with_slow_listings(script, Duration::from_secs(1)).await;
+    let (report, started) =
+        stop_with_slow_listings("$SIG{TERM} = q(IGNORE);", Duration::from_secs(1)).await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert!(
         report
@@ -439,6 +433,11 @@ async fn a_listing_always_slower_than_the_sweep_budget_still_kills_a_term_ignori
                 )),
         "{report:#?}"
     );
-    let started = started.load(Ordering::SeqCst);
-    assert!(started <= 20, "{started} listings started during the stop");
+    // The TERM retry, the bounded KILL sweep and its retry, the cleanup's
+    // bounded KILL sweep, and two clean sweeps. Allow one more sweep if it
+    // still sees the descendant exiting.
+    assert!(
+        started <= 7,
+        "{started} listings after the first TERM sweep"
+    );
 }

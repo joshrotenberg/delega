@@ -526,8 +526,9 @@ const HELD_LISTING: Duration = Duration::from_millis(1250);
 /// checks the test makes on the runtime thread are not blocking ones, so a run
 /// is never held past its deadline by another run's `ps`. The exit budget is
 /// [`FAST_EXIT_BUDGET`], not the real one (the real value is pinned in
-/// `budgets.rs`), so the whole test idles for about 1.5 s where the real
-/// budget made it about 4.5 s. Every fifth run has its listings after the first
+/// `budgets.rs`). A missed listing can leave a descendant holding both pipes,
+/// so the fixture lets the owner close them 100 ms after KILL instead of
+/// waiting the default 10 s. Every fifth run has its listings after the first
 /// held for [`HELD_LISTING`], a full second more than that budget, so the
 /// late-listing branch is reached every time whatever the load: those must end
 /// `Unconfirmed` for the late listing while their descendant is alive. The
@@ -542,6 +543,9 @@ async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
             let s = Scratch::new();
             let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
             spec.timings.exit_listing = FAST_EXIT_BUDGET;
+            // The assertion checks the verdict and descendant, so there is
+            // no output to preserve with a longer drain.
+            spec.drain_bound = Duration::from_millis(100);
             if delayed {
                 spec = spec.with_lister(delayed_lister(
                     s.path("scanned"),
