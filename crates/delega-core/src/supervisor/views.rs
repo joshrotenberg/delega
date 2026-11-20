@@ -366,10 +366,12 @@ pub struct ProgressView {
     /// Recent activity, oldest first. Compact returns the last few; full
     /// returns all that are kept.
     pub activity: Vec<ActivityEntry>,
-    /// Entries reported over the whole run.
+    /// Events reported over the whole run. A run of identical `system`
+    /// events shown as one entry counts each event.
     pub activity_total: u64,
-    /// Entries not in `activity`: dropped to stay in bounds, or older than the
-    /// compact window, or at or before `after_cursor`.
+    /// Events not in `activity` as their own entry: dropped to stay in bounds,
+    /// older than the compact window, at or before `after_cursor`, or folded
+    /// into a later entry of a run of identical `system` events.
     pub activity_omitted: u64,
     /// The supervisor's own facts about the run. Full detail only.
     #[serde(skip_serializing_if = "Option::is_none")]

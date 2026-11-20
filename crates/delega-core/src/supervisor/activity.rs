@@ -31,7 +31,10 @@ pub struct ActivityEntry {
     /// type such as `assistant` or `item.completed`.
     pub kind: String,
     /// A short description. An agent message is shown by its length, never its
-    /// text; the text is in the partial text.
+    /// text; the text is in the partial text. Consecutive provider `system`
+    /// events with the same summary are one entry, updated in place, whose
+    /// summary ends in ` (N in a row)` once N is 2 or more, for example
+    /// `thinking_tokens (37 in a row)`.
     pub summary: String,
 }
 
@@ -41,7 +44,8 @@ pub(super) struct Snapshot {
     pub text: String,
     pub text_truncated: bool,
     pub entries: Vec<ActivityEntry>,
-    /// Entries reported over the whole run.
+    /// Events reported over the whole run, counting each event of a
+    /// coalesced run of `system` events.
     pub total: u64,
     /// Entries dropped from the front to stay within [`MAX_ACTIVITY`].
     pub omitted: u64,
@@ -54,6 +58,9 @@ struct Inner {
     entries: VecDeque<ActivityEntry>,
     total: u64,
     omitted: u64,
+    /// When the last entry stands for a run of identical provider `system`
+    /// events: their summary as the provider reported it, and how many.
+    system_run: Option<(String, u64)>,
 }
 
 /// The bounded record of one run's progress.
@@ -66,13 +73,25 @@ impl Activity {
     }
 
     /// Record one provider event. `cursor` is the supervisor's shared counter.
+    ///
+    /// A provider `system` event with the same summary as the `system` event
+    /// just before it replaces that entry instead of adding one: Claude Code
+    /// reports `thinking_tokens` about once a second, and one entry each would
+    /// push tool use, tool results and messages out of the bounded window. The
+    /// replacement takes a new cursor and time, and its summary says how many
+    /// arrived in a row. Other provider events and delega's own entries are
+    /// never merged. `total` still counts every event.
     pub fn record(&self, event: ProgressEvent, cursor: &AtomicU64) {
+        let mut coalescible = false;
         let (kind, summary) = match event {
             ProgressEvent::Started { provider, program } => (
                 "started".to_string(),
                 format!("{} ({program})", provider_word(provider)),
             ),
-            ProgressEvent::Provider { kind, summary } => (kind, summary),
+            ProgressEvent::Provider { kind, summary } => {
+                coalescible = kind == "system";
+                (kind, summary)
+            }
             ProgressEvent::Denied { request } => ("denied".to_string(), request),
             ProgressEvent::Dropped { chunks } => (
                 "dropped".to_string(),
@@ -89,15 +108,30 @@ impl Activity {
         // The sequence number is taken and the entry pushed under one lock. A
         // reader that has seen a cursor and then takes this lock therefore finds
         // every entry numbered at or below it: none can still be on its way in.
+        // A coalesced entry is replaced under the same lock with a cursor above
+        // every cursor already handed out, so a reader that saw the old one
+        // and passes it as `after` still receives the new one.
         let mut inner = self.lock();
+        inner.total += 1;
+        let repeats = match &inner.system_run {
+            Some((last, count)) if coalescible && *last == summary => Some(count + 1),
+            _ => None,
+        };
+        let shown = match repeats {
+            Some(count) => format!("{summary} ({count} in a row)"),
+            None => summary.clone(),
+        };
         let entry = ActivityEntry {
             cursor: cursor.fetch_add(1, Ordering::SeqCst) + 1,
             at: rfc3339_utc(SystemTime::now()),
             kind,
-            summary,
+            summary: shown,
         };
-        inner.total += 1;
-        if inner.entries.len() >= MAX_ACTIVITY {
+        inner.system_run = coalescible.then(|| (summary, repeats.unwrap_or(1)));
+        if repeats.is_some() {
+            // The run's entry is the last one: replace it, keeping the length.
+            inner.entries.pop_back();
+        } else if inner.entries.len() >= MAX_ACTIVITY {
             inner.entries.pop_front();
             inner.omitted += 1;
         }

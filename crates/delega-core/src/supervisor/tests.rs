@@ -1155,3 +1155,132 @@ async fn a_follow_up_reports_its_prompt_as_an_argument_whatever_layer_set_the_st
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
+
+fn provider_event(kind: &str, summary: &str) -> ProgressEvent {
+    ProgressEvent::Provider {
+        kind: kind.to_string(),
+        summary: summary.to_string(),
+    }
+}
+
+fn kinds_and_summaries(activity: &Activity) -> Vec<(String, String)> {
+    activity
+        .snapshot()
+        .entries
+        .into_iter()
+        .map(|e| (e.kind, e.summary))
+        .collect()
+}
+
+#[test]
+fn a_run_of_thinking_tokens_between_two_tool_uses_is_one_entry_stating_the_count() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    activity.record(provider_event("assistant", "tool_use: Bash"), &cursor);
+    for _ in 0..100 {
+        activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    }
+    activity.record(provider_event("assistant", "tool_use: Read"), &cursor);
+    let pair = |k: &str, s: &str| (k.to_string(), s.to_string());
+    assert_eq!(
+        kinds_and_summaries(&activity),
+        vec![
+            pair("assistant", "tool_use: Bash"),
+            pair("system", "thinking_tokens (100 in a row)"),
+            pair("assistant", "tool_use: Read"),
+        ]
+    );
+    let snapshot = activity.snapshot();
+    assert_eq!(snapshot.omitted, 0, "nothing was dropped from the front");
+    let cursors: Vec<u64> = snapshot.entries.iter().map(|e| e.cursor).collect();
+    assert!(cursors.windows(2).all(|w| w[0] < w[1]), "cursors increase");
+}
+
+#[test]
+fn a_reader_with_a_cursor_from_before_or_during_a_run_of_system_events_gets_the_coalesced_entry() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    activity.record(provider_event("assistant", "tool_use: Bash"), &cursor);
+    let before_run = cursor.load(Ordering::SeqCst);
+    activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    // A reader that has already seen the run's first entry.
+    let during_run = cursor.load(Ordering::SeqCst);
+    for _ in 0..4 {
+        activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    }
+    let entries = activity.snapshot().entries;
+    for after in [before_run, during_run] {
+        let later: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.cursor > after)
+            .map(|e| e.summary.as_str())
+            .collect();
+        assert_eq!(
+            later,
+            vec!["thinking_tokens (5 in a row)"],
+            "after cursor {after}"
+        );
+    }
+    assert_eq!(
+        entries.last().map(|e| e.cursor),
+        Some(cursor.load(Ordering::SeqCst)),
+        "the coalesced entry carries the newest cursor"
+    );
+}
+
+#[test]
+fn two_different_system_subtypes_in_a_row_are_not_merged() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    activity.record(provider_event("system", "init"), &cursor);
+    activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    let summaries: Vec<String> = kinds_and_summaries(&activity)
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+    assert_eq!(
+        summaries,
+        vec!["thinking_tokens", "init", "thinking_tokens"]
+    );
+}
+
+#[test]
+fn identical_non_system_provider_events_and_delegas_own_entries_are_not_merged() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    activity.record(provider_event("assistant", "tool_use: Bash"), &cursor);
+    activity.record(provider_event("assistant", "tool_use: Bash"), &cursor);
+    for _ in 0..2 {
+        activity.record(
+            ProgressEvent::Denied {
+                request: "Bash(rm)".to_string(),
+            },
+            &cursor,
+        );
+    }
+    let pair = |k: &str, s: &str| (k.to_string(), s.to_string());
+    assert_eq!(
+        kinds_and_summaries(&activity),
+        vec![
+            pair("assistant", "tool_use: Bash"),
+            pair("assistant", "tool_use: Bash"),
+            pair("denied", "Bash(rm)"),
+            pair("denied", "Bash(rm)"),
+        ]
+    );
+}
+
+#[test]
+fn the_activity_total_counts_every_event_of_a_coalesced_run() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    activity.record(provider_event("assistant", "tool_use: Bash"), &cursor);
+    for _ in 0..37 {
+        activity.record(provider_event("system", "thinking_tokens"), &cursor);
+    }
+    let snapshot = activity.snapshot();
+    assert_eq!(snapshot.entries.len(), 2);
+    assert_eq!(snapshot.total, 38);
+    assert_eq!(snapshot.omitted, 0);
+}

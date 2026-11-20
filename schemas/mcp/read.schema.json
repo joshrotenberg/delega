@@ -1311,13 +1311,13 @@
             }
           },
           "activity_total": {
-            "description": "Entries reported over the whole run.",
+            "description": "Events reported over the whole run. A run of identical `system`\nevents shown as one entry counts each event.",
             "type": "integer",
             "format": "uint64",
             "minimum": 0
           },
           "activity_omitted": {
-            "description": "Entries not in `activity`: dropped to stay in bounds, or older than the\ncompact window, or at or before `after_cursor`.",
+            "description": "Events not in `activity` as their own entry: dropped to stay in bounds,\nolder than the compact window, at or before `after_cursor`, or folded\ninto a later entry of a run of identical `system` events.",
             "type": "integer",
             "format": "uint64",
             "minimum": 0
@@ -1363,7 +1363,7 @@
             "type": "string"
           },
           "summary": {
-            "description": "A short description. An agent message is shown by its length, never its\ntext; the text is in the partial text.",
+            "description": "A short description. An agent message is shown by its length, never its\ntext; the text is in the partial text. Consecutive provider `system`\nevents with the same summary are one entry, updated in place, whose\nsummary ends in ` (N in a row)` once N is 2 or more, for example\n`thinking_tokens (37 in a row)`.",
             "type": "string"
           }
         },
