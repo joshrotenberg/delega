@@ -124,9 +124,11 @@ acc_orphaned() {
 # scheduling use part of the interval. A poll (one pgrep, about 12 ms, far
 # longer on a loaded machine) can miss a short listing and then catches a later
 # one. It goes ahead after 0.3 s alone when the harness has turned listing off
-# (ACC_NO_LISTING) or pgrep is missing, and after about 3 s of polling
-# otherwise (a deadline in whole seconds, checked every poll), which keeps a
-# row far inside the harness's 30 s limit.
+# (ACC_NO_LISTING) or pgrep is missing, and otherwise stops polling once a
+# deadline about 3 s ahead (wall clock, whole seconds, checked between polls)
+# has passed. The deadline cannot interrupt one pgrep or date call that stalls,
+# and a wall-clock step can stretch it; on a machine where that happens the
+# harness's 30 s limit fails the row instead of letting it hang.
 acc_after_listing() {
   sleep 0.3
   [ -z "$ACC_NO_LISTING" ] || return 0
@@ -162,7 +164,8 @@ acc_run() {
   #   effort. The case has no time limit of its own (delega's default is 600 s
   #   and the harness allows 30 s), so a wait of a few seconds is harmless.
   # - orphan: the grandchild must not be seen before its setsid or beside its
-  #   parent. It starts after the ramp (#110). Waiting for a listing does not
+  #   parent. It waits 0.3 s, which usually clears the ramp (#110); a ramp
+  #   listing running late can still overlap it. Waiting for a listing does not
   #   suit it: several of its cases have a time limit or a signal at 1 s, and
   #   the wait can last over a second on a loaded machine (#112).
   if [ "$acc_variant" = bare ] && [ "$acc_behaviour" = success ]; then acc_after_listing; fi
