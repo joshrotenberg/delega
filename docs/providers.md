@@ -487,10 +487,11 @@ ignores them.
   [Deny rules](#deny-rules)). Not applied: hooks, `env`, `apiKeyHelper`,
   plugins, skills, MCP servers and settings-defined instructions. Every Claude
   run carries a note saying so.
-- Claude Code loads no instruction file into the worker's context by itself:
-  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` stops it loading any `CLAUDE.md` (the
-  user's, the project's, a reference directory's) and the auto-memory index,
-  and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns auto memory off. The worker can
+- Claude Code loads no `CLAUDE.md` file and no auto memory into the worker's
+  context automatically: `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` stops it loading
+  any `CLAUDE.md` (the user's, the project's, a reference directory's) and the
+  auto-memory index, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns auto memory
+  off. The worker can
   still read such a file with its tools; the delegated preamble asks it to read
   applicable repository instructions. Every Claude run carries a note saying so.
 - A working directory of `/` or the home directory makes the working-directory
@@ -801,7 +802,7 @@ each.
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
-| `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` keep every `CLAUDE.md` and the auto-memory index out of the worker's context, as Claude Code documents | Checked live with Claude Code 2.1.329 (#86, #106). A note on every run says what is and is not loaded. |
+| `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` stop Claude Code loading `CLAUDE.md` files and the auto-memory index into the worker's context automatically, as Claude Code documents | With Claude Code 2.1.329, a worker started this way listed no `CLAUDE.md`, `AGENTS.md` or auto-memory file in its context (#86, #106). A note on every run says what is not loaded automatically. |
 | A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
 | Codex words a usage or rate limit failure with "usage limit", "rate limit", "quota" or "context window", and Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
 | Claude Code names `error_max_turns` and `error_max_budget_usd` as result subtypes | They become the `provider_turn_limit` and `provider_budget_limit` error kinds. |
