@@ -97,51 +97,71 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
 }
 
 /// Pins the schedule itself, not one timing. A lister records when each
-/// listing starts. The child lives 1 s, so the first periodic listing (500 ms
-/// after the ramp ends) is not the one under test. At least four listings must
-/// start before 500 ms after spawn: the one at spawn and the three of
-/// `CAPTURE_RAMP`. A ramp cut to its first step gives two, no ramp gives one,
-/// and the early listings in `a_setsid_descendant_started_just_after_spawn...`
-/// then depend on luck. A ramp listing is never early: each is due at its
-/// offset from spawn, so the later ones start no sooner than that.
+/// listing starts and ends. The child lives 1 s, so the first periodic listing
+/// is not the one under test. Each of the three ramp listings must start
+/// promptly once it is due: no later than its offset from spawn (50, 100, 200
+/// ms) or the end of the listing before it, whichever is later, plus a margin
+/// for scheduling. Without that step the next listing would come one periodic
+/// interval (500 ms) after the previous one ended, far past the margin. Timing
+/// each start from the previous end, and not from spawn, keeps the test honest
+/// when `ps` is slow under load and the ramp listings run back to back. A ramp
+/// listing is never early, so each also starts no sooner than its offset.
 #[tokio::test]
-async fn the_listings_at_spawn_and_on_the_ramp_start_before_the_first_periodic_listing() {
+async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing() {
     use crate::process::ProcessHandle;
     use std::sync::Mutex;
     use std::time::Instant;
 
+    /// Far below the 500 ms a missing ramp step would cost, and far above
+    /// ordinary task scheduling delay.
+    const MARGIN: Duration = Duration::from_millis(250);
+
     let s = Scratch::new();
-    let starts: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorder = starts.clone();
+    let spans: Arc<Mutex<Vec<(Instant, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = spans.clone();
     let lister: Lister = Arc::new(move || {
         let recorder = recorder.clone();
         Box::pin(async move {
-            recorder.lock().expect("lock starts").push(Instant::now());
-            list_processes().await
+            let started = Instant::now();
+            let listing = list_processes().await;
+            recorder
+                .lock()
+                .expect("lock spans")
+                .push((started, Instant::now()));
+            listing
         })
     });
     let spec = sh(&s, "sleep 1", LONG).with_lister(lister);
     let spawned = Instant::now();
     let report = ProcessHandle::start(spec).wait().await;
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
-    let starts = starts.lock().expect("lock starts").clone();
-    let offsets: Vec<Duration> = starts.iter().map(|at| at.duration_since(spawned)).collect();
-    let early = offsets
+    let mut spans = spans.lock().expect("lock spans").clone();
+    spans.sort_by_key(|(started, _)| *started);
+    let offsets: Vec<(Duration, Duration)> = spans
         .iter()
-        .filter(|at| **at < Duration::from_millis(500))
-        .count();
-    assert!(
-        early >= 4,
-        "only {early} listings started before 500 ms after spawn: {offsets:?}"
-    );
+        .map(|(a, b)| {
+            (
+                a.saturating_duration_since(spawned),
+                b.saturating_duration_since(spawned),
+            )
+        })
+        .collect();
+    assert!(offsets.len() >= 4, "fewer than four listings: {offsets:?}");
     // Listing 0 is the one at spawn. The offsets are written out here, not
     // read from `CAPTURE_RAMP`, so that shortening the ramp fails the test.
     for (step, due_ms) in [50u64, 100, 200].into_iter().enumerate() {
         let due = Duration::from_millis(due_ms);
+        let (start, _) = offsets[step + 1];
+        let (_, previous_end) = offsets[step];
+        let ready = due.max(previous_end);
         assert!(
-            offsets[step + 1] + Duration::from_millis(5) >= due,
-            "ramp listing {step} started at {:?}, before its offset {due:?}: {offsets:?}",
-            offsets[step + 1]
+            start + Duration::from_millis(5) >= due,
+            "ramp listing {step} started at {start:?}, before its offset {due:?}: {offsets:?}"
+        );
+        assert!(
+            start <= ready + MARGIN,
+            "ramp listing {step} started at {start:?}, more than {MARGIN:?} after it was due at \
+             {ready:?}: {offsets:?}"
         );
     }
 }
