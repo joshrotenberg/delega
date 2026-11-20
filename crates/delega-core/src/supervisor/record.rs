@@ -121,7 +121,8 @@ pub(super) struct Worker {
     pub origin: Applied,
     pub provider: Provider,
     pub state: WorkerState,
-    /// The provider's latest session id.
+    /// The worker's session: the one it was started to resume, or else the
+    /// first one a run reported. It does not change once set.
     pub session_id: Option<String>,
     /// The run that is running.
     pub current: Option<String>,

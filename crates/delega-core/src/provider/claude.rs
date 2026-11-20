@@ -562,7 +562,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
             return;
         }
         if let Some(id) = str_field(event, "session_id") {
-            parsed.session_id = Some(id.to_string());
+            parsed.saw_session(id);
         }
         match kind {
             Some("assistant") => {

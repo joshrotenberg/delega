@@ -35,6 +35,8 @@
 #                    "No conversation found with session ID: <id>" and the
 #                    requested id as session_id, then exit 1
 #   no-session-id    a successful run whose events carry no session_id
+#   two-sessions     a successful run whose init and assistant events carry
+#                    the usual id and whose result carries fake-claude-session-2
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -317,6 +319,11 @@ case "$mode" in
   unknown-session)
     emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
     exit 1
+    ;;
+  two-sessions)
+    init
+    sid=fake-claude-session-2
+    success '"fake final answer"' '[]'
     ;;
   no-session-id)
     emit '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"working"}]}}'

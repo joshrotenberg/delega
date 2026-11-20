@@ -191,7 +191,7 @@
             "$ref": "#/$defs/Provider"
           },
           "session_id": {
-            "description": "The provider's session id, once a run has reported one.",
+            "description": "The provider's session id: the one the worker was started to resume,\nor else the first a run reported. A later run that reports another id\ndoes not change it.",
             "type": [
               "string",
               "null"

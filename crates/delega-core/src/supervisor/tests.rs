@@ -1198,6 +1198,54 @@ async fn a_follow_up_that_continued_another_session_does_not_replace_the_workers
     dir.assert_nothing_left().await;
 }
 
+#[tokio::test]
+async fn a_timed_out_follow_up_that_reported_another_session_does_not_replace_the_workers_session()
+{
+    let dir = Dir::new();
+    let mut config = dir.config();
+    config
+        .provider
+        .env_set
+        .push(("FAKE_RESUMED_SESSION_ID".into(), "stray-session".into()));
+    let supervisor = Supervisor::new(config);
+    let started = supervisor
+        .start(dir.request("echo:one"))
+        .await
+        .expect("start");
+    let first = finished_result(&supervisor, &started.run).await;
+    assert_eq!(first.outcome, Outcome::Completed, "{first:#?}");
+    let worker = started.worker.expect("worker");
+
+    // This follow-up reports the stray session, then runs out of time.
+    let hung = supervisor
+        .follow_up(&worker, "hang", Some(1))
+        .await
+        .expect("follow up");
+    let hung = finished_result(&supervisor, &hung.run).await;
+    assert_eq!(hung.outcome, Outcome::TimedOut, "{hung:#?}");
+    assert_eq!(hung.session_id.as_deref(), Some("stray-session"));
+
+    let followed = supervisor
+        .follow_up(&worker, "echo:two", None)
+        .await
+        .expect("follow up");
+    let result = finished_result(&supervisor, &followed.run).await;
+    let error = result.error.as_ref().expect("error");
+    assert!(
+        error
+            .message
+            .contains("resume session fake-claude-session-1 "),
+        "{result:#?}"
+    );
+    let list = supervisor.list().await.expect("list");
+    assert_eq!(
+        list.workers[0].session_id.as_deref(),
+        Some("fake-claude-session-1")
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
 fn provider_event(kind: &str, summary: &str) -> ProgressEvent {
     ProgressEvent::Provider {
         kind: kind.to_string(),

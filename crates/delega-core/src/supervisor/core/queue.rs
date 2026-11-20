@@ -248,18 +248,7 @@ impl Core {
         run.in_ready = false;
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
-        // A run that continued another session than the one it asked for does
-        // not replace the worker's session, so the next follow-up asks for the
-        // conversation the worker had.
-        let mismatched = result
-            .error
-            .as_ref()
-            .is_some_and(|e| e.kind == "session_mismatch");
-        let session = if mismatched {
-            None
-        } else {
-            result.session_id.clone()
-        };
+        let session = result.session_id.clone();
         self.note_cleanup(id, &result);
         let Some(run) = self.runs.get_mut(id) else {
             return;
@@ -282,7 +271,11 @@ impl Core {
                 worker.queue.retain(|r| r != id);
                 worker.last_run = Some(id.to_string());
                 worker.last_finish_seq = seq;
-                if session.is_some() {
+                // A worker never switches session: once it has one, a run that
+                // reports another id, whatever its outcome, does not replace
+                // it, so the next follow-up asks for the worker's own
+                // conversation. A worker with none takes the first reported.
+                if worker.session_id.is_none() {
                     worker.session_id = session;
                 }
             }

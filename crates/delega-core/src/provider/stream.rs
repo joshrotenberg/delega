@@ -7,7 +7,9 @@ use serde_json::{Map, Value};
 
 use crate::contract::result::{DeniedRequest, Usage};
 
-use super::limits::{DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, MAX_DENIED, MAX_LINE_BYTES};
+use super::limits::{
+    DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, MAX_DENIED, MAX_LINE_BYTES, MAX_SESSION_IDS,
+};
 use super::refusal::clip;
 
 /// How the provider's last terminal event ended.
@@ -40,8 +42,11 @@ pub(super) struct LineStats {
 /// Everything taken from one provider stream.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Parsed {
-    /// The provider's own session id.
+    /// The provider's own session id: the latest one the stream reported.
     pub session_id: Option<String>,
+    /// Every distinct session id the stream reported, in order, bounded by
+    /// [`MAX_SESSION_IDS`].
+    pub session_ids: Vec<String>,
     /// The final answer as the provider's terminal event reported it.
     pub final_text: Option<String>,
     /// The last assistant message seen, a fallback when the terminal event
@@ -68,6 +73,14 @@ pub(super) struct Parsed {
 }
 
 impl Parsed {
+    /// Record a session id the stream reported.
+    pub fn saw_session(&mut self, id: &str) {
+        self.session_id = Some(id.to_string());
+        if self.session_ids.len() < MAX_SESSION_IDS && !self.session_ids.iter().any(|s| s == id) {
+            self.session_ids.push(id.to_string());
+        }
+    }
+
     /// Record a denied request, bounded.
     pub fn deny(&mut self, tool: &str, target: Option<&str>, reason: Option<&str>) {
         if self.denied.len() >= MAX_DENIED {

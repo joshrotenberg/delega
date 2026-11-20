@@ -459,6 +459,119 @@ both!(
     start_unaffected
 );
 
+async fn mismatch_under_schema(provider: Provider) {
+    let rig = Rig::new();
+    let mut request = rig.request(provider, "structured-text");
+    request.answer_schema = Some(schema());
+    request.session.resume = Some("asked-session".into());
+    let result = run_checked(request, resumed_as(&rig, provider, "other-session")).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    assert_eq!(result.error.expect("error").kind, "answer_not_json");
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("asked-session") && n.contains("other-session")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+both!(
+    keeps_answer_not_json_and_notes_the_mismatch_of_a_resumed_run,
+    mismatch_under_schema
+);
+
+async fn mismatch_redacted(provider: Provider) {
+    let secret = "sk-ant-abcdefghijklmnopqrstuvwx";
+    // The error of a run that would have completed, and the note of one that
+    // failed another way.
+    for mode in ["success", "provider-error"] {
+        let rig = Rig::new();
+        let mut request = rig.request(provider, mode);
+        request.session.resume = Some("asked-session".into());
+        let result = run_checked(request, resumed_as(&rig, provider, secret)).await;
+        let error = result.error.expect("error");
+        let expected = if mode == "success" {
+            "session_mismatch"
+        } else {
+            "provider_error"
+        };
+        assert_eq!(error.kind, expected, "{mode}");
+        assert!(!error.message.contains(secret), "{mode}: {}", error.message);
+        assert!(
+            result.provider_notes.iter().all(|n| !n.contains(secret)),
+            "{mode}: {:?}",
+            result.provider_notes
+        );
+        if mode == "provider-error" {
+            assert!(
+                result
+                    .provider_notes
+                    .iter()
+                    .any(|n| n.contains("asked-session")),
+                "{:?}",
+                result.provider_notes
+            );
+        }
+        rig.assert_nothing_left().await;
+    }
+}
+both!(
+    redacts_a_credential_shaped_session_id_in_mismatch_text,
+    mismatch_redacted
+);
+
+#[tokio::test]
+async fn codex_keeps_provider_exit_for_a_missing_rollout_with_another_exit_code_or_a_thread() {
+    for mode in ["unknown-session-exit-3", "unknown-session-after-thread"] {
+        let rig = Rig::new();
+        let mut request = rig.request(Provider::Codex, mode);
+        request.session.resume = Some("missing-session".into());
+        let result = run_checked(request, rig.options(Provider::Codex)).await;
+        assert_eq!(result.outcome, Outcome::Failed, "{mode}: {result:#?}");
+        assert_eq!(result.error.expect("error").kind, "provider_exit", "{mode}");
+        rig.assert_nothing_left().await;
+    }
+}
+
+#[tokio::test]
+async fn claude_fails_a_resumed_run_whose_stream_also_reports_another_session() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "two-sessions");
+    request.session.resume = Some("asked-session".into());
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "session_mismatch");
+    assert!(
+        error.message.contains("fake-claude-session-2"),
+        "{}",
+        error.message
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn claude_notes_a_fresh_run_whose_stream_reports_two_sessions() {
+    let rig = Rig::new();
+    let result = run_checked(
+        rig.request(Provider::Claude, "two-sessions"),
+        rig.options(Provider::Claude),
+    )
+    .await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("fake-claude-session-1") && n.contains("fake-claude-session-2")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+
 async fn session_not_found(provider: Provider) {
     let rig = Rig::new();
     let mut request = rig.request(provider, "unknown-session");

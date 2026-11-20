@@ -21,6 +21,9 @@
 #                    "Error: thread/resume: thread/resume failed: no rollout
 #                    found for thread id <id> (code -32600)" on standard error,
 #                    then exit 1
+#   unknown-session-exit-3        the same standard error, but exit 3
+#   unknown-session-after-thread  a thread.started event, then the same
+#                    standard error and exit 1
 #   no-session-id    a successful run with no thread.started event
 
 for arg in "$@"; do
@@ -200,6 +203,15 @@ case "$mode" in
     exit 3
     ;;
   unknown-session)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 1
+    ;;
+  unknown-session-exit-3)
+    printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
+    exit 3
+    ;;
+  unknown-session-after-thread)
+    emit "{\"type\":\"thread.started\",\"thread_id\":\"$sid\"}"
     printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
     exit 1
     ;;

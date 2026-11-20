@@ -236,7 +236,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
         match kind {
             "thread.started" => {
                 if let Some(id) = str_field(event, "thread_id") {
-                    parsed.session_id = Some(id.to_string());
+                    parsed.saw_session(id);
                 }
             }
             "item.completed" if item_type == Some("agent_message") => {

@@ -474,7 +474,9 @@ pub struct WorkerView {
     pub name: Option<String>,
     /// The provider.
     pub provider: Provider,
-    /// The provider's session id, once a run has reported one.
+    /// The provider's session id: the one the worker was started to resume,
+    /// or else the first a run reported. A later run that reports another id
+    /// does not change it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Whether `follow_up` can continue this worker: it is not closed, was not
