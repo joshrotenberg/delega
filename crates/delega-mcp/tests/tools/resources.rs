@@ -133,12 +133,13 @@ async fn the_server_instructions_say_that_history_is_data() {
 fn sha256_hex(bytes: &[u8]) -> String {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("/usr/bin/shasum")
-        .args(["-a", "256"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("run shasum");
+    let mut child = crate::guarded_spawn(
+        Command::new("/usr/bin/shasum")
+            .args(["-a", "256"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped()),
+    )
+    .expect("run shasum");
     child
         .stdin
         .take()

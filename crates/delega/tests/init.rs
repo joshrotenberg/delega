@@ -9,12 +9,15 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use support::Guarded;
 use tempfile::TempDir;
 
 const PLUGIN_ID: &str = "delega@delega-local";
@@ -89,7 +92,10 @@ impl Rig {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.command(args).output().expect("run delega")
+        self.command(args)
+            .captured()
+            .guarded_output()
+            .expect("run delega")
     }
 
     /// Run with `--output json`, check the document against the committed
@@ -162,7 +168,8 @@ fn read_json(path: &Path) -> Value {
 fn delega_output(args: &[&str]) -> Vec<u8> {
     let out = Command::new(env!("CARGO_BIN_EXE_delega"))
         .args(args)
-        .output()
+        .captured()
+        .guarded_output()
         .expect("run delega");
     assert!(out.status.success());
     out.stdout
@@ -574,7 +581,8 @@ fn usage_errors_exit_two() {
             .arg(command)
             .env_clear()
             .env("PATH", &rig.empty)
-            .output()
+            .captured()
+            .guarded_output()
             .unwrap();
         assert_eq!(out.status.code(), Some(2), "{command}");
         assert!(text(&out.stderr).contains("HOME is not set"), "{command}");

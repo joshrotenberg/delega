@@ -7,7 +7,8 @@ use delega_core::contract::result::Cleanup;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{
-    PROVIDERS, Rig, assert_stop_cleanup, result_of, signal, text, wait_bounded, wait_exit_only,
+    Guarded, PROVIDERS, Rig, assert_stop_cleanup, guarded_pipe, result_of, signal, text,
+    wait_bounded, wait_exit_only,
 };
 
 #[test]
@@ -89,7 +90,7 @@ fn a_request_refused_before_start_exits_two_and_starts_nothing() {
                 "--output",
                 "json",
             ])
-            .output()
+            .guarded_output()
             .expect("run delega");
         assert_eq!(out.status.code(), Some(2), "{provider}");
         let result = result_of(&out);
@@ -106,7 +107,7 @@ fn a_missing_provider_executable_is_refused_naming_the_variable_to_set() {
         .command()
         .env_remove("DELEGA_CODEX_BIN")
         .args(rig.run_args("codex", "success", &["--output", "json"]))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(2));
     let result = result_of(&out);
@@ -268,13 +269,13 @@ fn a_closed_stdout_pipe_does_not_panic_and_keeps_the_outcome_status() {
     for format in ["text", "json"] {
         for provider in PROVIDERS {
             let rig = Rig::new();
-            let (reader, writer) = std::io::pipe().expect("pipe");
+            let (reader, writer) = guarded_pipe().expect("pipe");
             drop(reader);
             let out = rig
                 .command()
                 .args(rig.run_args(provider, "success", &["--output", format]))
                 .stdout(writer)
-                .output()
+                .guarded_output()
                 .expect("run delega");
             let err = text(&out.stderr);
             assert!(!err.contains("panicked"), "{provider} {format}: {err}");
@@ -312,7 +313,7 @@ fn a_signal_during_the_version_probe_stops_the_probe_and_starts_no_worker() {
             ))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .guarded_spawn()
             .expect("spawn delega");
         let began = std::time::Instant::now();
         while !rig.record.join("probe-started").exists() {
@@ -335,7 +336,8 @@ fn a_signal_during_the_version_probe_stops_the_probe_and_starts_no_worker() {
         // The probe slept in a shell of its own; nothing of it remains.
         let ps = Command::new("/bin/ps")
             .args(["-ax", "-o", "command="])
-            .output()
+            .captured()
+            .guarded_output()
             .expect("ps");
         let root = rig.path("");
         let leftovers = text(&ps.stdout)
@@ -425,7 +427,7 @@ fn a_signal_after_the_result_is_written_keeps_the_outcome_exit_status() {
                 .env("DELEGA_TEST_HOLD_AFTER_PRINT", &marker)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .spawn()
+                .guarded_spawn()
                 .expect("spawn delega"),
         ));
         let began = std::time::Instant::now();
@@ -536,14 +538,14 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
     // status: a whole `completed` result with 0, anything less with 130.
     for provider in PROVIDERS {
         let rig = Rig::new();
-        let (stderr_reader, stderr_writer) = std::io::pipe().expect("a pipe");
+        let (stderr_reader, stderr_writer) = guarded_pipe().expect("a pipe");
         fill(&stderr_writer);
         let mut child = Reaped(Some(
             rig.command()
                 .args(rig.run_args(provider, "large", &["--output", "json"]))
                 .stdout(Stdio::piped())
                 .stderr(Stdio::from(stderr_writer))
-                .spawn()
+                .guarded_spawn()
                 .expect("spawn delega"),
         ));
         let stdout = child.stdout.take().expect("stdout");
@@ -666,7 +668,7 @@ fn an_unwritable_standard_output_is_a_write_failure_not_a_silent_success() {
                 ])
                 .args(rig.run_args(provider, "success", &["--output", format]))
                 .stderr(Stdio::piped())
-                .output()
+                .guarded_output()
                 .expect("run delega");
             let err = text(&out.stderr);
             assert!(!err.contains("panicked"), "{provider} {format}: {err}");

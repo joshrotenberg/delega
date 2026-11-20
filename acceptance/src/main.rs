@@ -12,6 +12,7 @@ use delega_acceptance::procs;
 use delega_acceptance::report;
 use delega_acceptance::run_all::{close_gaps, run_all};
 use delega_acceptance::runner::{Context, GAP_CLOSED, GAP_NOT_SHOWN, MARKER_PREFIX, Measured};
+use delega_acceptance::spawn::Guarded;
 
 #[derive(Parser)]
 #[command(about = "Black-box acceptance measurement of the built delega binary")]
@@ -203,8 +204,9 @@ fn meta(
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .output()
+            .guarded_output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default()
     };
@@ -212,8 +214,9 @@ fn meta(
         .args(["version", "--output", "json"])
         .env_clear()
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .guarded_output()
         .ok()
         .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
         .unwrap_or(serde_json::Value::Null);

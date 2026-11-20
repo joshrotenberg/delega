@@ -1,11 +1,16 @@
 //! Runs the built `delega` binary and checks its output and exit status.
 
+mod support;
+
 use std::process::{Command, Output};
+
+use support::{Guarded, guarded_pipe};
 
 fn delega(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_delega"))
         .args(args)
-        .output()
+        .captured()
+        .guarded_output()
         .expect("run delega")
 }
 
@@ -59,14 +64,16 @@ fn version_json_has_name_version_and_schema_version() {
     let head = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .captured()
+        .guarded_output()
         .ok()
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
     let prefix = Command::new("git")
         .args(["rev-parse", "--show-prefix"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .captured()
+        .guarded_output()
         .ok()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
     let expected = match (head, prefix.as_deref()) {
@@ -111,7 +118,7 @@ fn version_json_carries_a_digest_of_each_skill_that_matches_skill_list_and_show(
                 .args(["-a", "256"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .spawn()
+                .guarded_spawn()
                 .expect("run shasum");
             child
                 .stdin
@@ -244,12 +251,13 @@ fn printing_commands_into_a_closed_pipe_exit_zero_without_panicking() {
     ] {
         // The reader end is closed before the command starts, so every write
         // fails with a broken pipe.
-        let (reader, writer) = std::io::pipe().expect("pipe");
+        let (reader, writer) = guarded_pipe().expect("pipe");
         drop(reader);
         let out = Command::new(env!("CARGO_BIN_EXE_delega"))
             .args(args)
+            .captured()
             .stdout(writer)
-            .output()
+            .guarded_output()
             .expect("run delega");
         let err = text(&out.stderr);
         assert!(!err.contains("panicked"), "{args:?}: {err}");

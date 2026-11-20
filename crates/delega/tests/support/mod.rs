@@ -10,13 +10,82 @@
 
 #![allow(dead_code)]
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use delega_core::contract::result::RunResult;
 use tempfile::TempDir;
+
+/// std's `Command::spawn`, `output` and `status` under delega's spawn lock
+/// (#107).
+///
+/// The tests of a binary run on concurrent threads. On macOS std creates a
+/// child's pipes and sets close-on-exec on them afterwards, so a child one
+/// test forks inside that window inherits another test's pipe ends: a
+/// `delega mcp` whose standard input is also held by an unrelated child never
+/// sees the end of its input. Each spawning method holds
+/// `delega_core::process::spawn_guard()` for the spawn call only and drops it
+/// before waiting or reading output; held longer, it would serialize every
+/// test's subprocess for its whole life. The lock covers the pipes std creates
+/// during that call; a pipe a test creates itself is covered only if it is
+/// made through [`guarded_pipe`]. clippy's `disallowed_methods` (the workspace
+/// `clippy.toml`) rejects a direct `spawn`, `output` or `status` call.
+///
+/// `guarded_output` never changes the standard streams. std's `output`
+/// defaults standard input to null and captures both outputs only where the
+/// caller set nothing, and std cannot tell which streams were set, so a helper
+/// that applied those defaults would overwrite the streams a test set on
+/// purpose (a closed pipe as standard output, say). Instead every command
+/// says what it wants: [`Rig::configure`] and [`Guarded::captured`] (which
+/// only sets streams and spawns nothing) set what `output` would have
+/// defaulted to, and a test that wants something else sets it afterwards.
+pub trait Guarded {
+    /// Set the streams `output` defaults to: standard input null, standard
+    /// output and standard error captured.
+    fn captured(&mut self) -> &mut Self;
+    /// `spawn` while holding the spawn lock.
+    fn guarded_spawn(&mut self) -> io::Result<Child>;
+    /// Spawn under the lock with the streams as set, then wait and collect
+    /// what was captured, as `output` does.
+    fn guarded_output(&mut self) -> io::Result<Output>;
+    /// `status` with the lock held for the spawn only.
+    fn guarded_status(&mut self) -> io::Result<ExitStatus>;
+}
+
+impl Guarded for Command {
+    fn captured(&mut self) -> &mut Self {
+        self.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn guarded_spawn(&mut self) -> io::Result<Child> {
+        let _held = delega_core::process::spawn_guard();
+        self.spawn()
+    }
+
+    fn guarded_output(&mut self) -> io::Result<Output> {
+        self.guarded_spawn()?.wait_with_output()
+    }
+
+    fn guarded_status(&mut self) -> io::Result<ExitStatus> {
+        self.guarded_spawn()?.wait()
+    }
+}
+
+/// `std::io::pipe()` under the spawn lock (#107). std creates the pipe and
+/// sets close-on-exec afterwards on macOS, the same window a spawn has, so a
+/// child another test forks meanwhile could inherit an end: a reader would
+/// then wait for that unrelated child, or a pipe whose reader was dropped
+/// would not be closed.
+#[allow(clippy::disallowed_methods)]
+pub fn guarded_pipe() -> io::Result<(io::PipeReader, io::PipeWriter)> {
+    let _held = delega_core::process::spawn_guard();
+    io::pipe()
+}
 
 /// The provider names `--provider` accepts.
 pub const PROVIDERS: [&str; 2] = ["claude", "codex"];
@@ -69,16 +138,22 @@ impl Rig {
         path
     }
 
-    /// `delega` with a controlled environment and no standard input.
+    /// `delega` with a controlled environment, no standard input and both
+    /// outputs captured.
     pub fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_delega"));
         self.configure(&mut command);
         command
     }
 
-    /// Give a command the controlled environment, whatever program it runs.
+    /// Give a command the controlled environment, whatever program it runs,
+    /// and the standard streams `output()` would default to: no standard
+    /// input, both outputs captured. [`Guarded::guarded_output`] keeps the
+    /// streams as they are set, so they are set here; a caller that wants
+    /// others sets them after this.
     pub fn configure(&self, command: &mut Command) {
         let config = self.path("home");
+        command.captured();
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -88,13 +163,15 @@ impl Rig {
             .env("CODEX_HOME", &config)
             .env("DELEGA_CLAUDE_BIN", fake("claude"))
             .env("DELEGA_CODEX_BIN", fake("codex"))
-            .env("FAKE_RECORD_DIR", &self.record)
-            .stdin(Stdio::null());
+            .env("FAKE_RECORD_DIR", &self.record);
     }
 
     /// Run `delega` with these arguments to its end.
     pub fn delega(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().expect("run delega")
+        self.command()
+            .args(args)
+            .guarded_output()
+            .expect("run delega")
     }
 
     /// The arguments of `delega run` for a provider, a prompt and the working
@@ -126,7 +203,7 @@ impl Rig {
             .arg(cwd)
             .args(["--env", "FAKE_RECORD_DIR"])
             .args(extra)
-            .output()
+            .guarded_output()
             .expect("run delega")
     }
 
@@ -134,7 +211,7 @@ impl Rig {
     pub fn run(&self, provider: &str, prompt: &str, extra: &[&str]) -> Output {
         self.command()
             .args(self.run_args(provider, prompt, extra))
-            .output()
+            .guarded_output()
             .expect("run delega")
     }
 
@@ -166,7 +243,7 @@ impl Rig {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .guarded_spawn()
             .expect("spawn delega");
         let mut stdin = child.stdin.take().expect("stdin");
         let input = input.to_string();
@@ -184,7 +261,7 @@ impl Rig {
             .args(self.run_args(provider, prompt, extra))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .guarded_spawn()
             .expect("spawn delega")
     }
 
@@ -230,7 +307,8 @@ impl Rig {
 fn group_members(group: i32) -> Vec<i32> {
     let out = Command::new("/bin/ps")
         .args(["-ax", "-o", "pid=,pgid=,stat="])
-        .output()
+        .captured()
+        .guarded_output()
         .expect("run ps");
     String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -248,7 +326,8 @@ fn group_members(group: i32) -> Vec<i32> {
 fn is_running(pid: i32) -> bool {
     let out = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
+        .captured()
+        .guarded_output()
         .expect("run ps");
     let stat = String::from_utf8_lossy(&out.stdout);
     let stat = stat.trim();
@@ -340,7 +419,7 @@ pub fn wait_exit_only(child: &mut Child, limit: Duration) -> std::process::ExitS
 pub fn signal(pid: u32, name: &str) {
     let status = Command::new("/bin/kill")
         .args([format!("-{name}"), pid.to_string()])
-        .status()
+        .guarded_status()
         .expect("run kill");
     assert!(status.success(), "kill -{name} {pid} failed");
 }

@@ -13,7 +13,7 @@ use std::process::Output;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use support::{Rig, text};
+use support::{Guarded, Rig, text};
 
 /// A value no output's `applied` may contain.
 const ENV_SENTINEL: &str = "cli-env-sentinel-value-3308";
@@ -85,7 +85,7 @@ fn a_real_run_reports_the_file_and_the_layer_that_set_each_field() {
                 "300s",
             ],
         ))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let result = json_of(&out);
@@ -261,7 +261,7 @@ fn applied_never_holds_an_environment_value_or_a_deny_rule() {
             "success",
             &["--output", "json", "--env", &flag_value],
         ))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let result = json_of(&out);
@@ -285,7 +285,7 @@ fn applied_never_holds_an_environment_value_or_a_deny_rule() {
             "success",
             &["--output", "json", "--dry-run", "--env", &flag_value],
         ))
-        .output()
+        .guarded_output()
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let shown = json_of(&out)["dry_run"]["applied"].to_string();

@@ -10,6 +10,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+use crate::spawn::Guarded;
+
 /// The workspace root, fixed at build time.
 pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,12 +35,15 @@ pub fn build() -> Result<PathBuf, String> {
             "delega",
             "--message-format=json-render-diagnostics",
         ])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     if release {
         command.arg("--release");
     }
-    let out = command.output().map_err(|e| format!("run cargo: {e}"))?;
+    let out = command
+        .guarded_output()
+        .map_err(|e| format!("run cargo: {e}"))?;
     if !out.status.success() {
         return Err(format!("cargo build -p delega failed: {}", out.status));
     }
