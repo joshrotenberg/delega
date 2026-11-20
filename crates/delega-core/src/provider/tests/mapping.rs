@@ -218,7 +218,7 @@ fn claude_grants_value_is_the_exact_command_list() {
 
 #[test]
 fn every_claude_launch_turns_off_memory_files_and_auto_memory() {
-    // Without these the worker gets the user's auto-memory index from their
+    // Without these the worker can get the user's auto-memory index from their
     // home directory, whatever --setting-sources says (#106).
     let rig = Rig::new();
     for mode in [Mode::Read, Mode::Write, Mode::Full] {
