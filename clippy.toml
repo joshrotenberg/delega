@@ -5,6 +5,9 @@
 # `delega_core::process::spawn_guard()` across the spawn call only, usually
 # through a `Guarded` helper. `output` and `status` spawn too. A pipe made with
 # `std::io::pipe` has the same window and is made under the guard as well.
+# One deliberate exception: `crates/delega/build.rs` runs `git` one call at a
+# time in a build script, a process of its own with no other spawning thread,
+# so it has a statement-level `#[allow]` instead of the guard.
 # This is the only `clippy.toml`; a crate-level one would replace it.
 disallowed-methods = [
   { path = "tokio::process::Command::spawn", reason = "hold delega_core::process::spawn_guard() across the spawn (#104, #107)" },

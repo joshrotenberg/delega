@@ -367,15 +367,17 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         }
     };
 
-    let started = Instant::now();
-    let mut child: Child = match fixture.command(ctx, case).guarded_spawn() {
-        Ok(c) => c,
-        Err(err) => {
-            m.verdict = "fail".to_string();
-            m.problems.push(format!("could not start delega: {err}"));
-            return m;
-        }
-    };
+    // Timed from when the spawn lock is held, so waiting for another job's
+    // spawn is not counted as part of this case.
+    let (mut child, started): (Child, Instant) =
+        match fixture.command(ctx, case).guarded_spawn_timed() {
+            Ok(spawned) => spawned,
+            Err(err) => {
+                m.verdict = "fail".to_string();
+                m.problems.push(format!("could not start delega: {err}"));
+                return m;
+            }
+        };
     let delega_pid = i32::try_from(child.id()).unwrap_or(0);
     let mut stdout = child.stdout.take();
     let stderr_reader = child.stderr.take().map(drain);

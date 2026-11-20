@@ -18,10 +18,16 @@
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output};
+use std::time::Instant;
 
 pub trait Guarded {
     /// `spawn` while holding the spawn lock.
     fn guarded_spawn(&mut self) -> io::Result<Child>;
+    /// `spawn` while holding the spawn lock, with the instant taken once the
+    /// lock is held, just before the spawn. A case is timed from that instant,
+    /// so time spent queued behind another job's spawn does not count toward
+    /// its elapsed time, its scheduled actions or its hang limit.
+    fn guarded_spawn_timed(&mut self) -> io::Result<(Child, Instant)>;
     /// Spawn under the lock with the streams as set, then wait and collect
     /// what was captured, as `output` does.
     fn guarded_output(&mut self) -> io::Result<Output>;
@@ -36,11 +42,51 @@ impl Guarded for Command {
         self.spawn()
     }
 
+    #[allow(clippy::disallowed_methods)]
+    fn guarded_spawn_timed(&mut self) -> io::Result<(Child, Instant)> {
+        let _held = delega_core::process::spawn_guard();
+        let started = Instant::now();
+        Ok((self.spawn()?, started))
+    }
+
     fn guarded_output(&mut self) -> io::Result<Output> {
         self.guarded_spawn()?.wait_with_output()
     }
 
     fn guarded_status(&mut self) -> io::Result<ExitStatus> {
         self.guarded_spawn()?.wait()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Guarded;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_timed_spawn_takes_its_start_instant_after_waiting_for_the_spawn_lock() {
+        let (held, is_held) = channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = delega_core::process::spawn_guard();
+            held.send(()).expect("signal that the lock is held");
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        is_held.recv().expect("the holder took the lock");
+        let began = Instant::now();
+        let (mut child, started) = Command::new("/usr/bin/true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .guarded_spawn_timed()
+            .expect("spawn true");
+        child.wait().expect("wait for true");
+        holder.join().expect("holder thread");
+        let queued = started.duration_since(began);
+        assert!(
+            queued >= Duration::from_millis(150),
+            "the start instant was taken {queued:?} after the call, before the lock was free"
+        );
     }
 }
