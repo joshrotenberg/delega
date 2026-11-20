@@ -113,6 +113,30 @@ acc_orphaned() {
   [ "$acc_parent" != "$acc_mid" ]
 }
 
+# Return right after one of delega's process listings has ended, so what the
+# caller starts next has a whole listing interval before the next one. delega
+# lists processes by running `ps` as its own child, and delega is this
+# provider's parent. Its listings run at spawn and 50, 100 and 200 ms after it
+# (CAPTURE_RAMP), then 500 ms after the previous one ends. Waiting 0.3 s first
+# leaves the ramp behind, so the listing seen is the ramp's last or a periodic
+# one, and the next is about 500 ms away whatever the machine's speed. A poll
+# (one pgrep, about 12 ms, far longer on a loaded machine) can miss a short
+# listing; it then catches a later one, so the wait can last a second or more.
+# Bounded at 150 polls, after which it goes ahead, as before #112.
+acc_after_listing() {
+  sleep 0.3
+  acc_seen=0
+  acc_n=0
+  while [ $acc_n -lt 150 ]; do
+    if pgrep -P "$PPID" -x ps >/dev/null 2>&1; then
+      acc_seen=1
+    elif [ $acc_seen = 1 ]; then
+      return
+    fi
+    acc_n=$((acc_n + 1))
+  done
+}
+
 # acc_run BEHAVIOUR:VARIANT
 acc_run() {
   acc_behaviour=${1%%:*}
@@ -123,16 +147,19 @@ acc_run() {
   else
     trap 'exit 130' INT TERM
   fi
-  # delega lists processes at spawn and 50, 100 and 200 ms after it
-  # (CAPTURE_RAMP), then every 500 ms. A descendant started inside those early
-  # listings is often seen by one, and delega adopts it, so a documented gap
-  # does not show: the bare variant's child of a provider that finishes at
-  # once, and the orphan variant's grandchild, seen before its setsid (perl
-  # starts slowly on a loaded machine) or beside its parent. On a slow CI
-  # runner an orphan row then closed its gap in all three repeats (#110).
-  # Starting either after the ramp puts it between the ramp's last listing and
-  # the first periodic one, 500 ms later.
-  if [ "$acc_variant" = bare ] && [ "$acc_behaviour" = success ]; then sleep 0.3; fi
+  # Two variants document gaps that show only when no delega listing sees
+  # their descendant at the wrong moment, and a descendant started inside the
+  # early listings (spawn, 50, 100 and 200 ms; CAPTURE_RAMP) is often seen:
+  # - bare, with success: the detached child must start and the provider
+  #   finish between two listings. A fixed delay ran past the first periodic
+  #   listing on a slow CI runner and the row closed its gap in all three
+  #   repeats (#112), so it starts right after one of delega's listings. A
+  #   successful provider has no time limit, so the wait costs nothing.
+  # - orphan: the grandchild must not be seen before its setsid or beside its
+  #   parent. It starts after the ramp (#110). Waiting for a listing does not
+  #   suit it: several of its cases have a time limit or a signal at 1 s, and
+  #   the wait can last over a second on a loaded machine (#112).
+  if [ "$acc_variant" = bare ] && [ "$acc_behaviour" = success ]; then acc_after_listing; fi
   if [ "$acc_variant" = orphan ]; then sleep 0.3; fi
   acc_start_variant "$acc_variant"
   acc_wait_ready "$acc_variant"
