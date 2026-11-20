@@ -1032,3 +1032,58 @@ both!(
     keeps_the_old_kind_of_a_failure_that_names_no_account_or_model_problem,
     unrelated_failure_keeps_its_kind
 );
+
+async fn secret_at_clip(provider: Provider) {
+    let modes: &[&str] = match provider {
+        Provider::Claude => &["secret-at-clip"],
+        Provider::Codex => &["secret-at-clip", "secret-at-clip-error-only"],
+    };
+    for mode in modes {
+        let error = failure_of(provider, mode).await;
+        // Clipped first, the message would keep "sk-ant-abcdefg", too short for
+        // the redactor to recognise.
+        assert!(
+            !error.message.contains("sk-ant"),
+            "{mode}: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("[redacted]"),
+            "{mode}: {}",
+            error.message
+        );
+    }
+}
+both!(
+    redacts_a_credential_across_the_message_clip_point,
+    secret_at_clip
+);
+
+#[tokio::test]
+async fn claude_missing_session_with_a_404_not_found_is_session_not_found_not_a_missing_model() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "unknown-session-404");
+    request.session.resume = Some("missing-session".into());
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "session_not_found");
+    assert!(
+        error
+            .message
+            .starts_with("No conversation found with session ID: missing-session"),
+        "{}",
+        error.message
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn claude_stderr_excerpt_drops_a_credential_cut_by_the_scan_window() {
+    let error = failure_of(Provider::Claude, "stderr-secret-at-scan").await;
+    assert_eq!(error.kind, "provider_exit");
+    // The scan window starts inside the key; its last characters must not
+    // reach the message.
+    assert!(!error.message.contains("uvwx"), "{}", error.message);
+    assert!(error.message.ends_with("end"), "{}", error.message);
+}

@@ -11,8 +11,7 @@ use crate::contract::request::Effort;
 use crate::contract::result::Usage;
 
 use super::launch::{Built, Elide, Inputs};
-use super::limits::PROVIDER_MESSAGE_CHARS;
-use super::refusal::{Refusal, clip};
+use super::refusal::Refusal;
 use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
 
 /// Features switched off for every worker.
@@ -257,21 +256,45 @@ fn document_kind(message: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether lowercased text says a model does not exist in the form
+/// ``model `name` does not exist`` (or with `'` or `"` around the name): the
+/// word "model" directly before the quoted name, and "does not exist" directly
+/// after it.
+fn names_missing_model(lower: &str) -> bool {
+    lower.match_indices("model ").any(|(at, word)| {
+        let rest = &lower[at + word.len()..];
+        let Some(quote) = rest
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '`' | '\'' | '"'))
+        else {
+            return false;
+        };
+        let name = &rest[1..];
+        name.find(quote)
+            .is_some_and(|end| end > 0 && name[end + 1..].starts_with(" does not exist"))
+    })
+}
+
 /// The error kind of a message by its words. Codex 0.170.0 gives no codes in
 /// `codex exec --json`, only text.
 fn text_kind(message: &str) -> Option<&'static str> {
     let lower = message.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
-    if has(&["usage limit", "quota"]) {
+    // The same order as the structured kinds: usage limit, auth, model,
+    // context, capacity (Codex text names no billing failure).
+    if has(&[
+        "usage limit",
+        "exceeded your current quota",
+        "insufficient_quota",
+    ]) {
         Some("provider_usage_limit")
-    } else if has(&["context window"]) {
-        Some("provider_context_exhausted")
     } else if has(&["unexpected status 401", "unexpected status 403"]) {
         Some("provider_auth")
-    } else if has(&["model is not supported", "model_not_found"])
-        || (lower.contains("model") && lower.contains("does not exist"))
-    {
+    } else if has(&["model is not supported", "model_not_found"]) || names_missing_model(&lower) {
         Some("provider_model_unavailable")
+    } else if has(&["context window"]) {
+        Some("provider_context_exhausted")
     } else if has(&[
         "unexpected status 429",
         "unexpected status 503",
@@ -365,7 +388,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     .and_then(Value::as_str)
                     .unwrap_or("Codex turn failed");
                 parsed.terminal = Terminal::Failure {
-                    message: clip(message, PROVIDER_MESSAGE_CHARS),
+                    message: message.to_string(),
                     code: failure_kind(event, message),
                 };
                 parsed.usage = usage(event);
@@ -373,7 +396,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
             "error" => {
                 if let Some(message) = str_field(event, "message") {
                     parsed.error_code = failure_kind(event, message);
-                    parsed.errors.push(clip(message, PROVIDER_MESSAGE_CHARS));
+                    parsed.saw_error(message);
                     parsed.stopped_by_denial = false;
                 }
             }

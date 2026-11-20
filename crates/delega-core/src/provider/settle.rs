@@ -9,7 +9,9 @@ use crate::contract::result::{Cleanup, ErrorDetail, RunResult, Timing};
 use crate::process::{Ending, ProcessReport};
 
 use super::facts::Facts;
-use super::limits::{STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS};
+use super::limits::{
+    PROVIDER_MESSAGE_CHARS, STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS,
+};
 use super::redact::Redactor;
 use super::refusal::clip;
 use super::stream::{Parsed, Terminal};
@@ -66,8 +68,11 @@ fn session_not_found(
         return false;
     };
     match (provider, &parsed.terminal) {
+        // The failed result may also carry status 404 and `not_found_error`,
+        // which alone would make it `provider_model_unavailable`.
         (Provider::Claude, Terminal::Failure { message, .. }) => {
-            kind == "provider_error" && message.starts_with(CLAUDE_UNKNOWN_SESSION)
+            (kind == "provider_error" || CLASSIFIED.contains(&kind))
+                && message.starts_with(CLAUDE_UNKNOWN_SESSION)
         }
         // Codex 0.170.0 exits 1 before it starts a thread, so nothing is on
         // standard output. A JSON `error` event before the exit makes the kind
@@ -96,6 +101,13 @@ const CLASSIFIED: [&str; 6] = [
     "provider_context_exhausted",
 ];
 
+/// A provider's message as it goes into a result: secrets redacted from the
+/// whole text first, then clipped, so a credential across the clip point is
+/// still removed whole.
+fn provider_text(redactor: &Redactor, message: &str) -> String {
+    clip(&redactor.apply(message), PROVIDER_MESSAGE_CHARS)
+}
+
 fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDetail {
     ErrorDetail {
         kind: kind.to_string(),
@@ -108,7 +120,17 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
 /// removed. Only the final [`STDERR_SCAN_BYTES`] are read.
 fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
     let bytes = &report.stderr.bytes;
-    let tail = &bytes[bytes.len().saturating_sub(STDERR_SCAN_BYTES)..];
+    let start = bytes.len().saturating_sub(STDERR_SCAN_BYTES);
+    let mut tail = &bytes[start..];
+    // When the scan starts inside the output, its first word may be the end
+    // of a credential whose start the redactor would need; drop it.
+    if start > 0 {
+        let word_end = tail
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(tail.len());
+        tail = &tail[word_end..];
+    }
     let text = redactor.apply(&String::from_utf8_lossy(tail));
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.is_empty() {
@@ -300,7 +322,7 @@ fn exited(
             format!(
                 "the provider stopped after {} denied request(s) it was not granted: {}",
                 parsed.denied.len(),
-                s.redactor.apply(message)
+                provider_text(s.redactor, message)
             ),
             partial,
         ),
@@ -311,7 +333,7 @@ fn exited(
             ctx,
             error(
                 kind.unwrap_or("provider_error"),
-                s.redactor.apply(message),
+                provider_text(s.redactor, message),
                 Some(code),
             ),
             partial,
@@ -329,12 +351,12 @@ fn no_terminal(
     parsed: &Parsed,
     redactor: &Redactor,
 ) -> ErrorDetail {
-    if let Some(last) = parsed.errors.last() {
+    if let Some(last) = &parsed.last_error {
         return error(
             parsed.error_code.unwrap_or("provider_error"),
             format!(
                 "{} (the provider exited with code {code} without a final result)",
-                redactor.apply(last)
+                provider_text(redactor, last)
             ),
             Some(code),
         );

@@ -126,7 +126,8 @@ fn codex_failed_turn_keeps_its_message_and_error_events_are_collected() {
         r#"{"type":"error","message":"Retrying connection"}"#,
         r#"{"type":"turn.failed","error":{"message":"rejected"}}"#,
     ]));
-    assert_eq!(parsed.errors, ["Retrying connection"]);
+    assert_eq!(parsed.error_count, 1);
+    assert_eq!(parsed.last_error.as_deref(), Some("Retrying connection"));
     assert_eq!(
         parsed.terminal,
         Terminal::Failure {
@@ -322,5 +323,76 @@ fn codex_words_name_the_kind() {
         let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
         let parsed = codex::parse(line.to_string().as_bytes());
         assert_eq!(failure_code(&parsed), kind, "{message}");
+    }
+}
+
+#[test]
+fn claude_work_after_a_rejected_rate_limit_event_keeps_a_later_failure_unnamed() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageStatus":"rejected","isUsingOverage":false}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"went on working"}]}}"#,
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Connection reset"]}"#,
+    ]));
+    assert_eq!(failure_code(&parsed), None);
+}
+
+#[test]
+fn claude_sub_agent_result_neither_ends_nor_names_the_run() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"result","parent_tool_use_id":"t1","subtype":"success","is_error":true,"api_error_status":401,"result":"sub-agent auth failed"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"the answer"}"#,
+        r#"{"type":"result","parent_tool_use_id":"t2","subtype":"success","is_error":true,"result":"late"}"#,
+    ]));
+    assert_eq!(parsed.terminal, Terminal::Success);
+    assert_eq!(parsed.final_text.as_deref(), Some("the answer"));
+    assert!(parsed.notes.is_empty(), "{:?}", parsed.notes);
+
+    let alone = claude::parse(
+        br#"{"type":"result","parent_tool_use_id":"t1","subtype":"success","is_error":true,"api_error_status":401,"result":"x"}"#,
+    );
+    assert_eq!(alone.terminal, Terminal::None);
+}
+
+#[test]
+fn codex_words_that_only_mention_a_model_or_a_quota_name_no_kind() {
+    for message in [
+        "Working directory /tmp/model-tests does not exist",
+        "Local disk quota exceeded while saving the transcript",
+        "The model output file does not exist",
+        "model '' does not exist",
+    ] {
+        let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
+        let parsed = codex::parse(line.to_string().as_bytes());
+        assert_eq!(failure_code(&parsed), None, "{message}");
+    }
+}
+
+#[test]
+fn codex_words_follow_the_documented_precedence() {
+    for (message, kind) in [
+        (
+            "unexpected status 401 Unauthorized: access to the extended context window was denied",
+            "provider_auth",
+        ),
+        (
+            "The model 'gpt-x' does not exist; the context window is unknown",
+            "provider_model_unavailable",
+        ),
+        (
+            "context window full, rate limit also reached",
+            "provider_context_exhausted",
+        ),
+        (
+            "unexpected status 429: insufficient_quota",
+            "provider_usage_limit",
+        ),
+        (
+            "The model \"gpt-y\" does not exist",
+            "provider_model_unavailable",
+        ),
+    ] {
+        let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
+        let parsed = codex::parse(line.to_string().as_bytes());
+        assert_eq!(failure_code(&parsed), Some(kind), "{message}");
     }
 }

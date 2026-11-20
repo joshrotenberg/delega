@@ -34,6 +34,9 @@
 #                    subtype error_during_execution, is_error true, the error
 #                    "No conversation found with session ID: <id>" and the
 #                    requested id as session_id, then exit 1
+#   unknown-session-404  the unknown-session result, also carrying
+#                    api_error_status 404 and api_error_type not_found_error
+#                    (not recorded; a shape that would read as a missing model)
 #   no-session-id    a successful run whose events carry no session_id
 #   two-sessions     a successful run whose first event carries
 #                    fake-claude-session-2 and whose later events, ending the
@@ -78,6 +81,11 @@
 #   result-text-error  no assistant error message; a result with the text
 #                    "Something unexpected happened" and no errors or API
 #                    fields
+#   stderr-secret-at-scan  standard error whose last 8 KiB start 10 bytes
+#                    before the end of an sk-ant- key: the key, 8178 newlines
+#                    and "end", then exit 3
+#   secret-at-clip   a failed result whose text is 485 "a", a space, then an
+#                    sk-ant- key that runs across the 500-character clip point
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -438,6 +446,21 @@ case "$mode" in
     ;;
   unknown-session)
     emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
+    exit 1
+    ;;
+  unknown-session-404)
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"api_error_status\":404,\"api_error_type\":\"not_found_error\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
+    exit 1
+    ;;
+  stderr-secret-at-scan)
+    init
+    { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8178 /dev/zero | tr '\0' '\n'; printf 'end\n'; } >&2
+    exit 3
+    ;;
+  secret-at-clip)
+    init
+    pad=$(head -c 485 /dev/zero | tr '\0' a)
+    api_error_result "\"terminal_reason\":\"other\"" "$pad sk-ant-abcdefghijklmnopqrstuvwx tail"
     exit 1
     ;;
   two-sessions)

@@ -53,6 +53,10 @@
 #   usage-limit-info-only  a turn.failed whose message names nothing, with
 #                    codex_error_info usage_limit_exceeded
 #   context-window   a turn.failed saying the model's context window ran out
+#   secret-at-clip   a turn.failed whose message is 485 "a", a space, then an
+#                    sk-ant- key that runs across the 500-character clip point
+#   secret-at-clip-error-only  the same message on an error event, with no
+#                    terminal event
 #   capacity         a turn.failed with "unexpected status 503 Service
 #                    Unavailable: the server is at capacity" (not recorded)
 
@@ -271,6 +275,18 @@ case "$mode" in
   context-window)
     init
     emit '{"type":"turn.failed","error":{"message":"Codex ran out of room in the model'"'"'s context window. Start a new thread or clear earlier history before retrying."}}'
+    exit 1
+    ;;
+  secret-at-clip)
+    init
+    pad=$(head -c 485 /dev/zero | tr '\0' a)
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"$pad sk-ant-abcdefghijklmnopqrstuvwx tail\"}}"
+    exit 1
+    ;;
+  secret-at-clip-error-only)
+    init
+    pad=$(head -c 485 /dev/zero | tr '\0' a)
+    emit "{\"type\":\"error\",\"message\":\"$pad sk-ant-abcdefghijklmnopqrstuvwx tail\"}"
     exit 1
     ;;
   capacity)

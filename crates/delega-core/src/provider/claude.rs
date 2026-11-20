@@ -14,10 +14,7 @@ use crate::contract::result::Usage;
 
 use super::hook::{GRANTS_ENV, HookCommand};
 use super::launch::{Built, Elide, Inputs};
-use super::limits::{
-    DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, PROVIDER_MESSAGE_CHARS,
-    SETTINGS_ARGUMENT_LIMIT,
-};
+use super::limits::{DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, SETTINGS_ARGUMENT_LIMIT};
 use super::refusal::{Refusal, clip};
 use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
 
@@ -489,13 +486,15 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
     (!empty).then_some(usage)
 }
 
+/// The whole failure text of a failed result. `settle` redacts it and then
+/// clips it, so a credential is never cut before the redactor sees it.
 fn failure_message(event: &Map<String, Value>) -> String {
     let errors: Vec<&str> = event
         .get("errors")
         .and_then(Value::as_array)
         .map(|list| list.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let text = if !errors.is_empty() {
+    if !errors.is_empty() {
         errors.join("; ")
     } else if let Some(result) = str_field(event, "result") {
         // An API failure (an unknown model, a bad key, a usage limit) carries
@@ -506,8 +505,7 @@ fn failure_message(event: &Map<String, Value>) -> String {
             Some("success") | None => "Claude Code reported an error".to_string(),
             Some(subtype) => format!("Claude Code ended with {subtype}"),
         }
-    };
-    clip(&text, PROVIDER_MESSAGE_CHARS)
+    }
 }
 
 /// The API error fields of a root assistant message marked
@@ -673,7 +671,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
         // The first terminal event decides; later events only count for the
         // session ids the stream reported.
         if parsed.terminal != Terminal::None {
-            if kind == Some("result") {
+            if kind == Some("result") && !subagent {
                 parsed.note_second_terminal();
             }
             if let Some(id) = session {
@@ -693,9 +691,15 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 if let Some(text) = assistant_text(event) {
                     parsed.last_text = Some(text);
                 }
-                api_message = (event.get("is_api_error_message").and_then(Value::as_bool)
-                    == Some(true))
-                .then(|| api_error(event));
+                // Only the last root assistant message can name an API
+                // error, and a normal message after a rejected rate limit
+                // event shows the run went on.
+                let is_api_error =
+                    event.get("is_api_error_message").and_then(Value::as_bool) == Some(true);
+                api_message = is_api_error.then(|| api_error(event));
+                if !is_api_error {
+                    usage_limited = false;
+                }
                 last_work = seq;
             }
             Some("user") => {
@@ -721,17 +725,16 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
             Some("error") => {
                 let message =
                     str_field(event, "message").unwrap_or("Claude Code reported an error");
-                parsed.errors.push(clip(message, PROVIDER_MESSAGE_CHARS));
+                parsed.saw_error(message);
             }
             Some("system") if str_field(event, "subtype") == Some("api_retry") => {
-                parsed
-                    .errors
-                    .push("Claude Code is retrying a failed API request".to_string());
+                parsed.saw_error("Claude Code is retrying a failed API request");
             }
             Some("rate_limit_event") if !subagent => {
                 usage_limited = rate_limit_rejected(event);
             }
-            Some("result") => {
+            // A sub-agent's result does not end the worker's run.
+            Some("result") if !subagent => {
                 let subtype = str_field(event, "subtype");
                 let success = subtype == Some("success")
                     && event.get("is_error").and_then(Value::as_bool) != Some(true);
@@ -800,7 +803,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 parsed.stopped_by_denial = !success
                     && code.is_none()
                     && !parsed.denied.is_empty()
-                    && parsed.errors.is_empty()
+                    && parsed.error_count == 0
                     && !went_on
                     && errors_are_about_denial;
             }

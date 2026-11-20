@@ -203,8 +203,10 @@ of `provider_error`:
 | `provider_model_unavailable` | The requested model does not exist or this account cannot use it. |
 | `provider_context_exhausted` | The conversation no longer fits the model's context window. |
 
-Only failed runs are classified; a success is never changed. `session_not_found`,
-`provider_turn_limit` and `provider_budget_limit` keep their precedence. After
+Only failed runs are classified; a success is never changed. `session_not_found`
+outranks every kind here (a Claude Code result for a missing session may also
+carry status 404 and `not_found_error`), and `provider_turn_limit` and
+`provider_budget_limit` keep their precedence. After
 them, a usage limit outranks the rest, because the same failure also carries a
 rate limit and HTTP 429; then billing, auth, model, context and capacity, in
 that order. A failure that matches none keeps `provider_error`. How each
@@ -215,8 +217,12 @@ provider's events are read is in its Stream section ([Claude Code](#stream),
 
 Provider standard error and provider error messages can echo what the provider
 was given. Before they go into an error message, standard error is cut to its
-last 8 KiB, joined to one line, and cut again to its last 300 characters. Two
-kinds of text are replaced with `[redacted]` first:
+last 8 KiB (when that cut falls inside the output, the partial first word is
+dropped, as it may be the end of a credential), joined to one line, and cut
+again to its last 300 characters. A provider error message is kept whole and
+cut to its first 500 characters only after redaction, so a credential across
+that point is still removed whole. Two kinds of text are replaced with
+`[redacted]` first:
 
 - the value of every variable passed to the provider whose name looks like a
   secret or belongs to the provider, when the value is at least 6 characters;
@@ -584,9 +590,10 @@ A failed result's message is its `errors` joined with `; `; when it has no
 neither, a sentence naming the subtype. A failed result that is not a turn or
 budget limit gets a [provider failure kind](#provider-failure-kinds) from three
 sources: the result itself; the last root assistant message, when that message
-has `is_api_error_message: true` (a later root assistant message without it
-clears it); and the latest root `rate_limit_event`. Sub-agent events are not
-used. Fields read: the assistant message's `error`, and `api_error`,
+has `is_api_error_message: true`; and the latest root `rate_limit_event`. A
+later root assistant message without `is_api_error_message` clears both, since
+the run went on after them. Sub-agent events are not used, and a sub-agent's
+`result` (one with a non-null `parent_tool_use_id`) does not end the run. Fields read: the assistant message's `error`, and `api_error`,
 `api_error_type` and `api_error_status` on either. In order:
 
 - `provider_usage_limit`: `api_error` `usage_limit_reached`, or the latest
@@ -725,13 +732,16 @@ or an object with one key) decides first: `usage_limit_exceeded` is
 `provider_context_exhausted`. Next, a message that is a JSON error document is
 read by `error.code` (`insufficient_quota`, `context_length_exceeded`,
 `invalid_api_key`, `model_not_found`, `rate_limit_exceeded`, ...) or
-`error.type`. Last, the message's words, case-insensitive, in order:
+`error.type`. Last, the message's words, case-insensitive, in the order of the
+[precedence](#provider-failure-kinds) (Codex text names no billing failure):
 
-- `provider_usage_limit`: "usage limit" or "quota".
-- `provider_context_exhausted`: "context window".
+- `provider_usage_limit`: "usage limit", "exceeded your current quota" or
+  "insufficient_quota".
 - `provider_auth`: "unexpected status 401" or "unexpected status 403".
 - `provider_model_unavailable`: "model is not supported", "model_not_found",
-  or "does not exist" in a message that says "model".
+  or ``model `name` does not exist`` with the name in backticks, single or
+  double quotes directly after "model".
+- `provider_context_exhausted`: "context window".
 - `provider_capacity`: "unexpected status 429", "503" or "529", "rate limit",
   "overloaded" or "at capacity".
 
