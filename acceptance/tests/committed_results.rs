@@ -59,8 +59,10 @@ fn the_committed_reports_are_what_report_generates_from_the_committed_results() 
 
 #[test]
 fn the_committed_results_cover_exactly_the_matrix_rows_with_their_current_expectations() {
-    let matrix: BTreeMap<String, matrix::Row> =
-        matrix::all().into_iter().map(|r| (r.id.clone(), r)).collect();
+    let matrix: BTreeMap<String, matrix::Row> = matrix::all()
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect();
     for (name, runs) in [("results.jsonl", 1u32), ("repeats.jsonl", 3)] {
         let committed = rows(&acceptance_dir().join(name));
         let ids: BTreeSet<&str> = committed.iter().map(|m| m.id.as_str()).collect();
