@@ -249,6 +249,10 @@ impl Fixture {
         if case.case.ps_unavailable {
             // Test-only seam: no place to look for `ps`.
             command.env("DELEGA_TEST_NO_PROCESS_LISTING", "");
+            // Tell the fake too, so it does not wait for a listing that never
+            // comes (acc-lib.sh, acc_after_listing).
+            command.env("ACC_NO_LISTING", "1");
+            command.args(["--env", "ACC_NO_LISTING"]);
         }
         command
     }
