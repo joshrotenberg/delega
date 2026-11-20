@@ -387,14 +387,15 @@ fn a_signal_after_the_result_is_written_keeps_the_outcome_exit_status() {
         // The print thread creates the marker once the whole result is written,
         // then holds before reporting its exit code: the signal lands in that
         // window every time.
-        let child = rig
-            .command()
-            .args(rig.run_args(provider, "success", &["--output", "json"]))
-            .env("DELEGA_TEST_HOLD_AFTER_PRINT", &marker)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn delega");
+        let mut child = Reaped(Some(
+            rig.command()
+                .args(rig.run_args(provider, "success", &["--output", "json"]))
+                .env("DELEGA_TEST_HOLD_AFTER_PRINT", &marker)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn delega"),
+        ));
         let began = std::time::Instant::now();
         while !marker.exists() {
             assert!(
@@ -404,7 +405,7 @@ fn a_signal_after_the_result_is_written_keeps_the_outcome_exit_status() {
             std::thread::sleep(Duration::from_millis(10));
         }
         signal(child.id(), "TERM");
-        let out = wait_bounded(child);
+        let out = wait_bounded(child.take());
         assert_eq!(result_of(&out).outcome, Outcome::Completed, "{provider}");
         assert_eq!(
             out.status.code(),
@@ -412,6 +413,163 @@ fn a_signal_after_the_result_is_written_keeps_the_outcome_exit_status() {
             "{provider}: a written completed result must exit 0: {}",
             text(&out.stderr)
         );
+        rig.assert_nothing_left();
+    }
+}
+
+/// A child that is killed and reaped when the test fails before it was waited
+/// for, so a failed assertion leaves no `delega` behind.
+struct Reaped(Option<std::process::Child>);
+
+impl Reaped {
+    fn take(&mut self) -> std::process::Child {
+        self.0.take().expect("the child was already taken")
+    }
+}
+
+impl std::ops::Deref for Reaped {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("the child was already taken")
+    }
+}
+
+impl std::ops::DerefMut for Reaped {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("the child was already taken")
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// What a pipe holds at most on Linux (its default size) and on macOS (the
+/// size its buffer grows to on demand).
+const PIPE_LIMIT: usize = 64 * 1024;
+
+/// Fill `pipe` so a further write blocks. A thread writes into it until it
+/// blocks; the pipe is full once it holds [`PIPE_LIMIT`] bytes and `poll` says
+/// it is not writable. A macOS pipe starts smaller and grows when a write does
+/// not fit, so stopping at the first "not writable" would leave room. The
+/// thread finishes once the reader drains the pipe.
+fn fill(pipe: &std::io::PipeWriter) -> std::thread::JoinHandle<()> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let written = Arc::new(AtomicUsize::new(0));
+    let mut writer = pipe.try_clone().expect("a second pipe writer");
+    let count = Arc::clone(&written);
+    let filler = std::thread::spawn(move || {
+        let chunk = [b'.'; 512];
+        for _ in 0..(4 * PIPE_LIMIT / chunk.len()) {
+            if writer.write_all(&chunk).is_err() {
+                return;
+            }
+            count.fetch_add(chunk.len(), Ordering::SeqCst);
+        }
+    });
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let began = std::time::Instant::now();
+    loop {
+        let mut fds = [PollFd::new(pipe, PollFlags::OUT)];
+        let writable = poll(&mut fds, Some(&now)).expect("poll the pipe") > 0;
+        if written.load(Ordering::SeqCst) >= PIPE_LIMIT && !writable {
+            return filler;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "the pipe never filled"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Wait until `pipe` has something to read, failing the test past `limit`.
+fn wait_readable(pipe: &impl std::os::fd::AsFd, limit: Duration) {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let step = Timespec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000,
+    };
+    let began = std::time::Instant::now();
+    loop {
+        let mut fds = [PollFd::new(pipe, PollFlags::IN)];
+        match poll(&mut fds, Some(&step)) {
+            Ok(n) if n > 0 => return,
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(err) => panic!("poll the pipe: {err}"),
+        }
+        assert!(
+            began.elapsed() < limit,
+            "nothing was written within {limit:?}"
+        );
+    }
+}
+
+#[test]
+fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_not_delivered() {
+    // The case from the review: nobody reads standard output while delega
+    // writes a large result, standard error is full so delega stays alive a
+    // while after deciding its status, a signal arrives, and standard output is
+    // drained later. Whatever the reader ends up with must agree with the exit
+    // status: a whole `completed` result with 0, anything less with 130.
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let (stderr_reader, stderr_writer) = std::io::pipe().expect("a pipe");
+        let filler = fill(&stderr_writer);
+        let mut child = Reaped(Some(
+            rig.command()
+                .args(rig.run_args(provider, "large", &["--output", "json"]))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(stderr_writer))
+                .spawn()
+                .expect("spawn delega"),
+        ));
+        let stdout = child.stdout.take().expect("stdout");
+        // The result is written only once the worker is gone, so delega is now
+        // writing it, and blocks once the pipe is full.
+        wait_readable(&stdout, Duration::from_secs(120));
+        signal(child.id(), "TERM");
+        // Long enough for delega to have taken the signal; the reader then
+        // drains while delega is still alive, held by its full standard error.
+        std::thread::sleep(Duration::from_millis(450));
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut { stdout }, &mut bytes);
+            bytes
+        });
+        let status = wait_exit_only(&mut child, Duration::from_secs(90));
+        let delivered = reader.join().expect("stdout reader");
+        drop(child);
+        let stderr = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut { stderr_reader }, &mut bytes);
+            bytes
+        });
+        let stderr = stderr.join().expect("stderr reader");
+        filler.join().expect("filler");
+        let result: Option<delega_core::contract::result::RunResult> =
+            serde_json::from_slice(&delivered).ok();
+        match (status.code(), result) {
+            (Some(0), Some(result)) => assert_eq!(result.outcome, Outcome::Completed, "{provider}"),
+            (Some(130), None) => {}
+            (code, result) => panic!(
+                "{provider}: exit {code:?} with {} bytes, a whole result: {}; stderr ends: {}",
+                delivered.len(),
+                result.is_some(),
+                text(&stderr[stderr.len().saturating_sub(500)..]).trim_start_matches('.')
+            ),
+        }
         rig.assert_nothing_left();
     }
 }
