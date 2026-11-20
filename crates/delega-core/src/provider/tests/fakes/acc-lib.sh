@@ -123,11 +123,17 @@ acc_run() {
   else
     trap 'exit 130' INT TERM
   fi
-  # A provider that detaches a child and finishes at once is seen by the early
-  # listings delega takes in the first 200 ms of a run (CAPTURE_RAMP), so the
-  # gap the bare variant documents would not show. Starting it after the ramp
-  # puts the child between that listing and the first periodic one.
+  # delega lists processes at spawn and 50, 100 and 200 ms after it
+  # (CAPTURE_RAMP), then every 500 ms. A descendant started inside those early
+  # listings is often seen by one, and delega adopts it, so a documented gap
+  # does not show: the bare variant's child of a provider that finishes at
+  # once, and the orphan variant's grandchild, seen before its setsid (perl
+  # starts slowly on a loaded machine) or beside its parent. On a slow CI
+  # runner an orphan row then closed its gap in all three repeats (#110).
+  # Starting either after the ramp puts it between the ramp's last listing and
+  # the first periodic one, 500 ms later.
   if [ "$acc_variant" = bare ] && [ "$acc_behaviour" = success ]; then sleep 0.3; fi
+  if [ "$acc_variant" = orphan ]; then sleep 0.3; fi
   acc_start_variant "$acc_variant"
   acc_wait_ready "$acc_variant"
   case "$acc_behaviour" in
