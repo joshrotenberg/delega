@@ -890,9 +890,9 @@ async fn a_start_that_stops_waiting_for_a_check_slot_does_not_keep_one() {
 
 /// A start that waits most of its bound for a check slot and then meets a check
 /// that does not answer is refused when the one bound, measured from the start
-/// of the call, has passed: not after the wait plus a fresh bound. Time is
-/// paused, so the clock moves only when every task is waiting on a timer, and
-/// the timing does not depend on how loaded the machine is.
+/// of the call, has passed: not after the wait plus a fresh bound, and not
+/// before. Time is paused, so the clock moves only when no task can run, and the
+/// timing does not depend on how loaded the machine is.
 #[tokio::test(start_paused = true)]
 async fn a_start_that_waited_for_a_check_slot_has_only_the_rest_of_its_bound_for_the_check() {
     use super::limits::MAX_PENDING_PREFLIGHTS;
@@ -903,16 +903,18 @@ async fn a_start_that_waited_for_a_check_slot_has_only_the_rest_of_its_bound_for
     const BOUND: Duration = Duration::from_secs(10);
     const SLOT_WAIT: Duration = Duration::from_secs(8);
     // The timer rounds a deadline up to the next millisecond, so the refusal
-    // may come up to 1 ms after the bound. A fresh bound for the check would
-    // make it SLOT_WAIT later, 8 s.
+    // comes at the bound or up to 1 ms after it. A fresh bound for the check
+    // would make it SLOT_WAIT later, 8 s; an earlier deadline makes it early.
     const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
 
     let dir = Dir::new();
     let released = Arc::new(AtomicBool::new(false));
     let _release = Release(released.clone());
+    let entered = Arc::new(AtomicBool::new(false));
     let check = {
-        let released = released.clone();
+        let (released, entered) = (released.clone(), entered.clone());
         Arc::new(move |_: &Request, _: &ProviderOptions| {
+            entered.store(true, Ordering::SeqCst);
             while !released.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -928,15 +930,40 @@ async fn a_start_that_waited_for_a_check_slot_has_only_the_rest_of_its_bound_for
         .expect("take every slot");
     let supervisor =
         Supervisor::with_hooks(dir.config(), super::runner::provider_launch(), preflight);
-    let freer = tokio::spawn(async move {
-        tokio::time::sleep(SLOT_WAIT).await;
-        drop(taken);
-    });
+    let freer = {
+        let entered = entered.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SLOT_WAIT).await;
+            let freed_at = Instant::now();
+            drop(taken);
+            // Paused time jumps to the next timer as soon as no task can run,
+            // which would let the start time out while the check's thread is
+            // still waiting to be scheduled. This task stays runnable by
+            // yielding until the check reports it has entered, so the clock
+            // cannot move first. The real-time limit only ends a check that
+            // never enters; one thread spawn needs far less than a minute.
+            let limit = std::time::Instant::now() + Duration::from_secs(60);
+            while !entered.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < limit,
+                    "the check never entered after its slot freed"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                Instant::now(),
+                freed_at,
+                "time moved before the check entered"
+            );
+        })
+    };
 
     let begun = Instant::now();
     let refused = supervisor.start(dir.request("held")).await.expect("start");
     let took = begun.elapsed();
-    freer.await.expect("the task that frees the slots");
+    freer
+        .await
+        .expect("the slot freed and the check entered before time moved on");
 
     assert_eq!(refused.outcome, Some(Outcome::Refused), "{refused:#?}");
     let error = refused.error.as_ref().expect("error");
@@ -946,10 +973,9 @@ async fn a_start_that_waited_for_a_check_slot_has_only_the_rest_of_its_bound_for
         error.message.starts_with("the check did not finish"),
         "{error:?}"
     );
-    assert!(took >= SLOT_WAIT, "refused before a slot freed: {took:?}");
     assert!(
-        took <= BOUND + TIMER_RESOLUTION,
-        "refused {took:?} after the start, past its bound of {BOUND:?}"
+        took >= BOUND && took <= BOUND + TIMER_RESOLUTION,
+        "refused {took:?} after the start, not at its bound of {BOUND:?}"
     );
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
