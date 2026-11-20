@@ -249,6 +249,10 @@ impl Core {
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
         let session = result.session_id.clone();
+        self.note_cleanup(id, &result);
+        let Some(run) = self.runs.get_mut(id) else {
+            return;
+        };
         run.bytes = super::retention::weigh(&result, &run.activity);
         self.retained_bytes += run.bytes;
         run.result = Some(result);

@@ -54,6 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::contract::applied::Applied;
 use crate::contract::request::Request;
+use crate::contract::result::Cleanup;
 
 mod activity;
 mod actor;
@@ -83,7 +84,7 @@ pub use views::{
     StartResponse, Target, TextWindow, WaitResponse, WaitTargets, WorkerBrief, WorkerView,
 };
 
-use command::{Closing, Command, Stopping, WaitStart};
+use command::{Closing, Command, Stopping, WaitStart, Wake};
 
 /// What every clone of a [`Supervisor`] shares. Dropping the last clone stops
 /// the supervisor.
@@ -98,6 +99,9 @@ struct Shared {
     failed: Arc<Mutex<Option<String>>>,
     /// Runs the request checks of `start`.
     preflight: preflight::Preflight,
+    /// Test only: holds the next `wait` between its timeout and its view.
+    #[cfg(test)]
+    view_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 impl Shared {
@@ -197,6 +201,8 @@ impl Supervisor {
                 root,
                 failed,
                 preflight,
+                #[cfg(test)]
+                view_pause: Mutex::new(None),
             }),
         }
     }
@@ -352,22 +358,75 @@ impl Supervisor {
                 reply,
             })
             .await??;
-        let (waiter, timed_out) = match start {
-            WaitStart::Ready => (None, false),
-            WaitStart::Pending { id, rx } => match tokio::time::timeout(applied, rx).await {
-                Ok(_) => (None, false),
-                Err(_) => (Some(id), true),
-            },
+        // The receiver outlives the timeout: dropping it would close the
+        // registration, and a command handled before the view (a shutdown, or any
+        // command that prunes closed registrations) would then make the view read
+        // a registration that is gone as one that fired.
+        let mut pending = None;
+        let (waiter, timed_out, released) = match start {
+            WaitStart::Ready => (None, false, false),
+            WaitStart::Released => (None, false, true),
+            WaitStart::Pending { id, mut rx } => {
+                let woke = tokio::time::timeout(applied, &mut rx).await;
+                match woke {
+                    Ok(woke) => (None, false, matches!(woke, Ok(Wake::Shutdown))),
+                    Err(_) => {
+                        pending = Some(rx);
+                        (Some(id), true, false)
+                    }
+                }
+            }
         };
-        self.call(|reply| Command::WaitView {
-            targets,
-            after: after_cursor,
-            waiter,
-            timed_out,
-            timeout_secs: applied.as_secs(),
-            reply,
-        })
-        .await?
+        #[cfg(test)]
+        self.pause_before_view().await;
+        let mut response = self
+            .call(|reply| Command::WaitView {
+                targets,
+                after: after_cursor,
+                waiter,
+                timed_out,
+                released,
+                timeout_secs: applied.as_secs(),
+                reply,
+            })
+            .await??;
+        // Shutdown may have fired the registration after the timeout and before
+        // the view; the view then finds nothing registered and cannot say why.
+        if let Some(mut rx) = pending {
+            response.released_by_shutdown |= matches!(rx.try_recv(), Ok(Wake::Shutdown));
+        }
+        Ok(response)
+    }
+
+    /// Test only: hold the next `wait` after its timeout has elapsed and before
+    /// it asks for the view. Returns a receiver that fires when the wait is held
+    /// and a sender that lets it go on.
+    #[cfg(test)]
+    pub(crate) fn pause_next_wait_before_view(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self
+            .shared
+            .view_pause
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((reached_tx, release_rx));
+        (reached_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    async fn pause_before_view(&self) {
+        let held = self
+            .shared
+            .view_pause
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((reached, release)) = held {
+            let _ = reached.send(());
+            let _ = release.await;
+        }
     }
 
     /// The result if the run has finished; otherwise its state, the partial text
@@ -499,6 +558,17 @@ impl Supervisor {
             unsettled,
             failed: self.shared.failure(),
         }
+    }
+
+    /// Every run on this supervisor that settled with cleanup not confirmed,
+    /// oldest first, with what the result says could not be confirmed.
+    ///
+    /// Recorded when each run settles, so a run counts after a later run on the
+    /// same worker replaced it as the latest, and after retention dropped its
+    /// result. At most the 256 most recent are kept. Still answers after a
+    /// shutdown.
+    pub async fn unconfirmed(&self) -> Result<Vec<(String, Cleanup)>, Error> {
+        self.call(|reply| Command::Unconfirmed { reply }).await
     }
 
     /// Make the supervisor's task panic. Test only.

@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 
 use crate::contract::applied::Applied;
 use crate::contract::request::Request;
-use crate::contract::result::RunResult;
+use crate::contract::result::{Cleanup, RunResult};
 
 use super::error::Error;
 use super::views::{
@@ -22,8 +22,24 @@ pub(super) type Reply<T> = oneshot::Sender<Result<T, Error>>;
 pub(super) enum WaitStart {
     /// Something named has finished already, or nothing named can.
     Ready,
-    /// Registered. `rx` fires when something named finishes.
-    Pending { id: u64, rx: oneshot::Receiver<()> },
+    /// Shutdown has begun and the wait has a cursor, so it answers at once
+    /// without anything named having finished after the cursor.
+    Released,
+    /// Registered. `rx` fires when something named finishes, or when shutdown
+    /// releases the wait.
+    Pending {
+        id: u64,
+        rx: oneshot::Receiver<Wake>,
+    },
+}
+
+/// Why a registered wait fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wake {
+    /// Something named finished.
+    Finished,
+    /// Shutdown began while nothing named had finished.
+    Shutdown,
 }
 
 /// What `interrupt` gets back.
@@ -87,6 +103,8 @@ pub(super) enum Command {
         /// The registration to remove, when the caller gave up waiting.
         waiter: Option<u64>,
         timed_out: bool,
+        /// Shutdown released the wait, so nothing named need have finished.
+        released: bool,
         timeout_secs: u64,
         reply: Reply<WaitResponse>,
     },
@@ -119,6 +137,10 @@ pub(super) enum Command {
     /// The runs that are still running.
     Unsettled {
         reply: oneshot::Sender<Vec<String>>,
+    },
+    /// Every run that settled with cleanup not confirmed.
+    Unconfirmed {
+        reply: oneshot::Sender<Vec<(String, Cleanup)>>,
     },
     /// A run's task reported its result.
     Finished {

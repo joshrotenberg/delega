@@ -14,7 +14,7 @@
 
 use tokio::sync::oneshot;
 
-use super::super::command::WaitStart;
+use super::super::command::{WaitStart, Wake};
 use super::super::error::Error;
 use super::super::limits::MAX_WAIT_TARGETS;
 use super::super::state::RunState;
@@ -27,7 +27,7 @@ pub(super) struct Waiter {
     /// Each named worker, and the run it was on when the wait was made.
     workers: Vec<(String, Option<String>)>,
     after: Option<u64>,
-    wake: oneshot::Sender<()>,
+    wake: oneshot::Sender<Wake>,
 }
 
 impl Core {
@@ -75,9 +75,7 @@ impl Core {
         // whatever its cursor. A wait without a cursor still waits for the runs
         // to settle, which is how a caller follows a shutdown that ran out of its
         // bound.
-        if after.is_some() && self.mode != super::Mode::Active {
-            return Ok(WaitStart::Ready);
-        }
+        let released_now = after.is_some() && self.mode != super::Mode::Active;
         let (wake, rx) = oneshot::channel();
         let waiter = Waiter {
             runs,
@@ -87,6 +85,9 @@ impl Core {
         };
         if self.waiter_ready(&waiter) {
             return Ok(WaitStart::Ready);
+        }
+        if released_now {
+            return Ok(WaitStart::Released);
         }
         self.waiters.retain(|_, w| !w.wake.is_closed());
         self.next_waiter += 1;
@@ -132,7 +133,7 @@ impl Core {
             .collect();
         for id in ready {
             if let Some(waiter) = self.waiters.remove(&id) {
-                let _ = waiter.wake.send(());
+                let _ = waiter.wake.send(Wake::Finished);
             }
         }
     }
@@ -140,8 +141,16 @@ impl Core {
     /// Fire every registered wait, ready or not. Shutdown does this, so a call
     /// that waits on a cursor that no run will pass is released with the rest.
     pub(super) fn wake_all_waiters(&mut self) {
-        for (_, waiter) in self.waiters.drain() {
-            let _ = waiter.wake.send(());
+        let waiters: Vec<Waiter> = self.waiters.drain().map(|(_, w)| w).collect();
+        for waiter in waiters {
+            // A wait whose runs finished in the same command as the shutdown, a
+            // queued run discarded for one, was ready on its own account.
+            let why = if self.waiter_ready(&waiter) {
+                Wake::Finished
+            } else {
+                Wake::Shutdown
+            };
+            let _ = waiter.wake.send(why);
         }
     }
 
@@ -152,6 +161,7 @@ impl Core {
         after: Option<u64>,
         waiter: Option<u64>,
         timed_out: bool,
+        released: bool,
         timeout_secs: u64,
     ) -> WaitResponse {
         // A registration that is already gone fired before the caller gave up.
@@ -187,6 +197,7 @@ impl Core {
         WaitResponse {
             cursor: self.current_cursor(),
             timed_out: timed_out && !ready_now,
+            released_by_shutdown: released,
             timeout_secs,
             runs,
             workers,
