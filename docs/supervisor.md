@@ -162,18 +162,22 @@ A follow-up is refused as a finished run, not an error, when:
 - its queue is full, kind `queue_full`;
 - the worker was started `ephemeral`, so there is no session to continue, kind
   `no_session`;
+- the worker is idle and has no session: none was given with `session.resume`
+  at start and no run reported one, kind `no_session`;
 - the prompt is not valid, kind `invalid_request`.
 
-A follow-up queued behind a run that ended without reporting a session is
-refused, kind `no_session`, when its turn comes. If the worker is idle when the
+A follow-up queued behind a run is refused, kind `no_session`, when its turn
+comes if the worker still has no session then. If the worker is idle when the
 follow-up is made, the refusal is immediate and the response says so: every
 response that says a run is `finished` carries its `outcome` and its `error`
 (kind and message). An unknown worker is an error.
 
-A worker whose first run ended without reporting a session, such as one whose
-provider failed before it started, cannot take a follow-up. `list` flags it:
-`can_follow_up` is false for a closed worker, an `ephemeral` one, and one that
-has no session and no run that might still report one.
+A worker that has no session, such as one started without `session.resume`
+whose provider failed before it reported one, cannot take a follow-up. A worker
+started with `session.resume` keeps that id even if its first run reported
+none, and can. `list` flags it: `can_follow_up` is false for a closed worker,
+an `ephemeral` one, and one that has no session and no run that might still
+report one.
 
 ## Waiting and cursors
 

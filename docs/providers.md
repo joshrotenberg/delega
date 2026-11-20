@@ -146,24 +146,30 @@ characters and a note says how many lines were affected.
 
 **Resumed sessions.** When `session.resume` is set, every session id the stream
 reports is compared with it; any other id is a mismatch, including when the
-stream reports the requested id and another one. `session_mismatch` replaces
-only an outcome that would otherwise be `completed`: such a run is `failed`
-with kind `session_mismatch`, the message names both ids, `text` keeps the
-answer as partial text, and `session_id` is the latest id the provider
-reported. Every other outcome stands (for example `timed_out`, `interrupted`,
+stream reports the requested id and another one. The whole stream counts: the
+first terminal event still decides the answer, but ids reported after it are
+compared too. Ids in Claude Code sub-agent events (those with
+`parent_tool_use_id`) are not taken, as their text is not. `session_mismatch`
+replaces only an outcome that would otherwise be `completed`: such a run is
+`failed` with kind `session_mismatch`, the message names both ids, `text` keeps
+the answer as partial text, and `session_id` is the latest id the provider
+reported up to its first terminal event. Every other outcome stands (for example `timed_out`, `interrupted`,
 `answer_not_json` or `provider_error`), and a note names both ids. Both the
 message and the note are redacted like other provider text (see
 [Text from the provider](#text-from-the-provider)). A run that reports no
 session id is not a mismatch, and an `ephemeral` run is not checked. A run
 without `session.resume` whose stream reports more than one session id gets a
-note naming them.
+note naming them: at most the first 8 distinct ids, with the number of further
+distinct ids that are not listed.
 
 A resumed run that failed because the provider could not find the session has
 kind `session_not_found` instead of `provider_error` or `provider_exit`, with
 the same message: for Claude Code, a failed result whose error text starts
-`No conversation found with session ID`; for Codex, a run that exited with
-code 1, reported no thread and no terminal event, and whose standard error
-contains `no rollout found for thread id`. Neither is matched when
+`No conversation found with session ID`; for Codex, a run with kind
+`provider_exit`, or `provider_error` after a JSON `error` event, that exited
+with code 1, reported no thread and no terminal event, and whose captured
+standard error (its last 64 KiB) contains `no rollout found for thread id`
+anywhere. Neither is matched when
 `session.resume` is not set.
 
 ### Error kinds
