@@ -73,8 +73,9 @@ cargo run -p delega-acceptance -- --report
 `spike-numbers.jsonl` holds the numbers copied from the spike's committed
 results; `scripts/extract-spike-numbers.py` produced it.
 
-`tests/committed_results.rs`, part of `cargo test --workspace`, keeps these
-files current. It fails when the committed results do not hold exactly the
+`tests/committed_results.rs`, part of `cargo test --workspace`, keeps the
+committed results (`results.jsonl`, `repeats.jsonl`) and the documents
+generated from them (`RESULTS.md`, `COMPARISON.md`) current. It fails when the committed results do not hold exactly the
 matrix's rows (each row once in `results.jsonl`, as repeats 1 to 3 in
 `repeats.jsonl`), when any expectation a committed row records (outcome, exit,
 cleanup verdict, survivors, leak class, timing dependence, reason text) differs
