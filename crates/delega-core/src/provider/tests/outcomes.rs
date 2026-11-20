@@ -867,3 +867,168 @@ both!(
     dropping_the_wait_future_interrupts_the_run,
     a_dropped_wait_future_stops_the_run
 );
+
+/// Run one fake mode that ends in a failure and return its error.
+async fn failure_of(provider: Provider, mode: &str) -> crate::contract::result::ErrorDetail {
+    let rig = Rig::new();
+    let result = run_checked(rig.request(provider, mode), rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{mode}: {result:#?}");
+    rig.assert_nothing_left().await;
+    result.error.expect("error")
+}
+
+#[tokio::test]
+async fn claude_unknown_model_is_provider_model_unavailable_with_its_reason() {
+    let error = failure_of(Provider::Claude, "model-not-found").await;
+    assert_eq!(error.kind, "provider_model_unavailable");
+    assert_eq!(error.provider_exit_code, Some(1));
+    assert!(
+        error
+            .message
+            .starts_with("There's an issue with the selected model (no-such-model)"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_invalid_api_key_is_provider_auth() {
+    let error = failure_of(Provider::Claude, "invalid-api-key").await;
+    assert_eq!(error.kind, "provider_auth");
+    assert!(
+        error.message.contains("Invalid API key"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_account_error_without_a_status_is_provider_auth() {
+    let error = failure_of(Provider::Claude, "account-on-hold").await;
+    assert_eq!(error.kind, "provider_auth");
+}
+
+#[tokio::test]
+async fn claude_billing_error_is_provider_billing() {
+    let error = failure_of(Provider::Claude, "billing-error").await;
+    assert_eq!(error.kind, "provider_billing");
+}
+
+#[tokio::test]
+async fn claude_overloaded_api_is_provider_capacity() {
+    let error = failure_of(Provider::Claude, "overloaded").await;
+    assert_eq!(error.kind, "provider_capacity");
+    assert_eq!(error.message, "API Error: 529 overloaded");
+}
+
+#[tokio::test]
+async fn claude_prompt_too_long_is_provider_context_exhausted() {
+    let error = failure_of(Provider::Claude, "prompt-too-long").await;
+    assert_eq!(error.kind, "provider_context_exhausted");
+    assert_eq!(error.message, "Prompt is too long");
+}
+
+#[tokio::test]
+async fn claude_usage_limit_outranks_its_rate_limit_error_and_429() {
+    let error = failure_of(Provider::Claude, "usage-limit").await;
+    assert_eq!(error.kind, "provider_usage_limit");
+    assert!(
+        error.message.starts_with("You've hit your session limit"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_rejected_rate_limit_event_makes_a_429_failure_a_usage_limit() {
+    let error = failure_of(Provider::Claude, "usage-limit-event").await;
+    assert_eq!(error.kind, "provider_usage_limit");
+}
+
+#[tokio::test]
+async fn claude_rate_limit_event_covered_by_overage_is_not_a_usage_limit() {
+    let error = failure_of(Provider::Claude, "overage-rate-limit-event").await;
+    assert_eq!(error.kind, "provider_capacity");
+}
+
+#[tokio::test]
+async fn claude_rejected_rate_limit_event_does_not_change_a_success() {
+    let rig = Rig::new();
+    let request = rig.request(Provider::Claude, "rate-limit-event-then-success");
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert_eq!(result.error, None);
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn claude_failed_result_without_errors_reports_its_result_text() {
+    let error = failure_of(Provider::Claude, "result-text-error").await;
+    assert_eq!(error.kind, "provider_error");
+    assert_eq!(error.message, "Something unexpected happened");
+}
+
+#[tokio::test]
+async fn codex_unsupported_model_is_provider_model_unavailable() {
+    let error = failure_of(Provider::Codex, "model-unsupported").await;
+    assert_eq!(error.kind, "provider_model_unavailable");
+    assert_eq!(error.provider_exit_code, Some(1));
+    assert!(
+        error
+            .message
+            .contains("'no-such-model' model is not supported"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn codex_401_is_provider_auth() {
+    let error = failure_of(Provider::Codex, "invalid-api-key").await;
+    assert_eq!(error.kind, "provider_auth");
+    assert!(
+        error
+            .message
+            .starts_with("unexpected status 401 Unauthorized"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn codex_usage_limit_is_provider_usage_limit() {
+    for mode in [
+        "usage-limit",
+        "usage-limit-error-only",
+        "usage-limit-info-only",
+    ] {
+        let error = failure_of(Provider::Codex, mode).await;
+        assert_eq!(error.kind, "provider_usage_limit", "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn codex_context_window_is_provider_context_exhausted_not_a_usage_limit() {
+    let error = failure_of(Provider::Codex, "context-window").await;
+    assert_eq!(error.kind, "provider_context_exhausted");
+}
+
+#[tokio::test]
+async fn codex_503_at_capacity_is_provider_capacity() {
+    let error = failure_of(Provider::Codex, "capacity").await;
+    assert_eq!(error.kind, "provider_capacity");
+}
+
+async fn unrelated_failure_keeps_its_kind(provider: Provider) {
+    for (mode, kind) in [
+        ("provider-error", "provider_error"),
+        ("exit-nonzero", "provider_exit"),
+    ] {
+        let error = failure_of(provider, mode).await;
+        assert_eq!(error.kind, kind, "{mode}");
+    }
+}
+both!(
+    keeps_the_old_kind_of_a_failure_that_names_no_account_or_model_problem,
+    unrelated_failure_keeps_its_kind
+);

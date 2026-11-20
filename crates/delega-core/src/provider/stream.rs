@@ -21,7 +21,8 @@ pub(super) enum Terminal {
     /// The provider reported success.
     Success,
     /// The provider reported failure: its message and, for a failure the
-    /// provider names, a stable error kind (a turn or budget limit).
+    /// provider names or delega recognises, a stable error kind (a turn,
+    /// budget or usage limit, an account, capacity or model failure).
     Failure {
         message: String,
         code: Option<&'static str>,
@@ -64,6 +65,9 @@ pub(super) struct Parsed {
     pub denied_omitted: usize,
     /// Messages from provider error events that did not end the run.
     pub errors: Vec<String>,
+    /// The error kind the last error event names, used when no terminal event
+    /// follows. `None` is `provider_error`.
+    pub error_code: Option<&'static str>,
     /// Whether the run stopped because of the latest denial: the provider
     /// reported a failure that is not a named limit, a denial was recorded and
     /// nothing after it went on or went wrong.

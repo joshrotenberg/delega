@@ -195,3 +195,132 @@ fn claude_cache_creation_tokens_count_as_input_and_an_error_flagged_success_has_
         }
     );
 }
+
+fn failure_code(parsed: &crate::provider::stream::Parsed) -> Option<&'static str> {
+    match parsed.terminal {
+        Terminal::Failure { code, .. } => code,
+        ref other => panic!("not a failure: {other:?}"),
+    }
+}
+
+#[test]
+fn claude_api_error_fields_on_the_result_alone_name_the_kind() {
+    for (fields, kind) in [
+        (r#""api_error_type":"permission_error""#, "provider_auth"),
+        (r#""api_error_status":403"#, "provider_auth"),
+        (r#""api_error_type":"billing_error""#, "provider_billing"),
+        (
+            r#""api_error_type":"not_found_error","api_error_status":404"#,
+            "provider_model_unavailable",
+        ),
+        (r#""api_error_status":503"#, "provider_capacity"),
+        (
+            r#""api_error":"usage_limit_reached","api_error_status":429"#,
+            "provider_usage_limit",
+        ),
+    ] {
+        let line = format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,{fields},"result":"x"}}"#
+        );
+        let parsed = claude::parse(line.as_bytes());
+        assert_eq!(failure_code(&parsed), Some(kind), "{fields}");
+    }
+}
+
+#[test]
+fn claude_not_found_without_404_is_not_a_missing_model() {
+    let parsed = claude::parse(
+        br#"{"type":"result","subtype":"success","is_error":true,"api_error_type":"not_found_error","result":"x"}"#,
+    );
+    assert_eq!(failure_code(&parsed), None);
+}
+
+#[test]
+fn claude_sub_agent_api_errors_and_rate_limit_events_do_not_name_the_kind() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"assistant","parent_tool_use_id":"t1","is_api_error_message":true,"error":"model_not_found","message":{"content":[]}}"#,
+        r#"{"type":"rate_limit_event","parent_tool_use_id":"t1","rate_limit_info":{"status":"rejected"}}"#,
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Connection reset"]}"#,
+    ]));
+    assert_eq!(failure_code(&parsed), None);
+}
+
+#[test]
+fn claude_api_error_message_followed_by_more_work_does_not_name_a_later_failure() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"assistant","is_api_error_message":true,"error":"overloaded","api_error_status":529,"message":{"content":[]}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"retried and went on"}]}}"#,
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Connection reset"]}"#,
+    ]));
+    assert_eq!(failure_code(&parsed), None);
+}
+
+#[test]
+fn claude_rate_limit_event_with_allowed_warning_overage_is_not_a_usage_limit() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageStatus":"allowed_warning"}}"#,
+        r#"{"type":"result","subtype":"success","is_error":true,"result":"stopped"}"#,
+    ]));
+    assert_eq!(failure_code(&parsed), None);
+}
+
+#[test]
+fn claude_api_error_fields_never_turn_a_success_into_a_failure() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"api_error_status":429,"result":"fine"}"#,
+    ]));
+    assert_eq!(parsed.terminal, Terminal::Success);
+}
+
+#[test]
+fn codex_structured_codes_and_json_documents_come_before_words() {
+    for (line, kind) in [
+        (
+            r#"{"type":"turn.failed","error":{"message":"rate limit","codex_error_info":"context_window_exceeded"}}"#,
+            "provider_context_exhausted",
+        ),
+        (
+            r#"{"type":"turn.failed","error":{"message":"stopped","codex_error_info":{"usage_limit_exceeded":{}}}}"#,
+            "provider_usage_limit",
+        ),
+        (
+            r#"{"type":"turn.failed","error":{"message":"{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"rate limit\"}}"}}"#,
+            "provider_model_unavailable",
+        ),
+        (
+            r#"{"type":"turn.failed","error":{"message":"{\"error\":{\"type\":\"insufficient_quota\"}}"}}"#,
+            "provider_usage_limit",
+        ),
+    ] {
+        let parsed = codex::parse(line.as_bytes());
+        assert_eq!(failure_code(&parsed), Some(kind), "{line}");
+    }
+}
+
+#[test]
+fn codex_words_name_the_kind() {
+    for (message, kind) in [
+        ("Rate limit reached for requests", Some("provider_capacity")),
+        ("The service is overloaded", Some("provider_capacity")),
+        (
+            "unexpected status 429 Too Many Requests",
+            Some("provider_capacity"),
+        ),
+        ("unexpected status 403 Forbidden", Some("provider_auth")),
+        (
+            "The model `gpt-x` does not exist",
+            Some("provider_model_unavailable"),
+        ),
+        (
+            "You exceeded your current quota",
+            Some("provider_usage_limit"),
+        ),
+        ("The file does not exist", None),
+        ("Stream disconnected", None),
+    ] {
+        let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
+        let parsed = codex::parse(line.to_string().as_bytes());
+        assert_eq!(failure_code(&parsed), kind, "{message}");
+    }
+}

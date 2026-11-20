@@ -71,18 +71,30 @@ fn session_not_found(
         }
         // Codex 0.170.0 exits 1 before it starts a thread, so nothing is on
         // standard output. A JSON `error` event before the exit makes the kind
-        // `provider_error`. All of the captured standard error is searched; the
+        // `provider_error`, or a kind the event's text names. All of the captured standard error is searched; the
         // capture is bounded. Standard output cut at the capture limit may hide
         // a thread or a terminal event, so it does not match.
         (Provider::Codex, Terminal::None)
             if code == 1 && parsed.session_ids.is_empty() && !report.stdout.truncated =>
         {
-            matches!(kind, "provider_exit" | "provider_error")
+            (matches!(kind, "provider_exit" | "provider_error") || CLASSIFIED.contains(&kind))
                 && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
         }
         _ => false,
     }
 }
+
+/// The kinds a provider failure is given by what it says (see the provider
+/// parsers). A Codex `error` event before the exit can carry one of them, and
+/// `session_not_found` still outranks it.
+const CLASSIFIED: [&str; 6] = [
+    "provider_usage_limit",
+    "provider_auth",
+    "provider_billing",
+    "provider_capacity",
+    "provider_model_unavailable",
+    "provider_context_exhausted",
+];
 
 fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDetail {
     ErrorDetail {
@@ -319,7 +331,7 @@ fn no_terminal(
 ) -> ErrorDetail {
     if let Some(last) = parsed.errors.last() {
         return error(
-            "provider_error",
+            parsed.error_code.unwrap_or("provider_error"),
             format!(
                 "{} (the provider exited with code {code} without a final result)",
                 redactor.apply(last)

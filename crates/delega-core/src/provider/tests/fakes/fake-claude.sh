@@ -44,6 +44,40 @@
 #                    event carrying fake-claude-stray
 #   subagent-session  a successful run with a sub-agent message (one with
 #                    parent_tool_use_id) carrying fake-claude-subagent
+#
+# Modes about provider account, capacity and model failures. Each writes a
+# root assistant message with is_api_error_message true and then a `result`
+# with subtype success, is_error true, its reason in `result` and no `errors`,
+# then exits 1, unless it says otherwise:
+#   model-not-found  Claude Code 2.1.329 given an unknown --model: assistant
+#                    error model_not_found, api_error_status 404,
+#                    api_error_type not_found_error
+#   invalid-api-key  Claude Code 2.1.329 with an invalid API key: assistant
+#                    error authentication_failed, api_error_status 401,
+#                    api_error_type authentication_error
+#   account-on-hold  assistant error account_on_hold and no status or type
+#                    (a value the 2.1.329 executable lists; not recorded)
+#   billing-error    assistant error billing_error and api_error_type
+#                    billing_error (a value the executable lists; not recorded)
+#   usage-limit      Claude Code 2.1.314 at a usage limit, as an earlier runner
+#                    recorded it: assistant error rate_limit, api_error_status
+#                    429, api_error usage_limit_reached with rate_limit_info,
+#                    and a result with api_error usage_limit_reached
+#   usage-limit-event  a root rate_limit_event with status rejected and
+#                    overage rejected, then a failed result with status 429
+#                    and the text "API Error: 429 ..." and no assistant error
+#   overage-rate-limit-event  the same rejected rate_limit_event but with
+#                    isUsingOverage true, then a failed result with status 529
+#                    and the text "API Error: 529 overloaded"
+#   rate-limit-event-then-success  the rejected rate_limit_event, then a
+#                    successful run (exit 0)
+#   overloaded       assistant error overloaded, then a result with
+#                    api_error_status 529 and "API Error: 529 overloaded"
+#   prompt-too-long  no assistant error message; a result with the text
+#                    "Prompt is too long" and no errors
+#   result-text-error  no assistant error message; a result with the text
+#                    "Something unexpected happened" and no errors or API
+#                    fields
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -239,6 +273,17 @@ success() {
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":0.001,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},\"permission_denials\":$2}"
 }
 
+# api_error_message FIELDS TEXT: a root assistant message marked
+# is_api_error_message, with the extra JSON members FIELDS and the text TEXT.
+api_error_message() {
+  emit "{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"session_id\":\"$sid\",\"message\":{\"model\":\"<synthetic>\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$2\"}]},\"is_api_error_message\":true,$1}"
+}
+# api_error_result FIELDS TEXT: a failed result with subtype success, the
+# extra JSON members FIELDS, TEXT as `result` and no `errors`.
+api_error_result() {
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"session_id\":\"$sid\",$1,\"result\":\"$2\",\"permission_denials\":[]}"
+}
+
 # The acceptance harness's process behaviours (`acc:<behaviour>:<variant>`, see
 # acc-lib.sh). No unit test uses them.
 acc_success() { success '"fake final answer"' '[]'; }
@@ -322,6 +367,74 @@ case "$mode" in
     init
     printf 'fake provider crashed\n' >&2
     exit 3
+    ;;
+  model-not-found)
+    init
+    text="There's an issue with the selected model (no-such-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+    api_error_message "\"error\":\"model_not_found\",\"api_error_status\":404,\"api_error_type\":\"not_found_error\"" "$text"
+    api_error_result "\"api_error_status\":404,\"api_error_type\":\"not_found_error\",\"terminal_reason\":\"api_error\"" "$text"
+    exit 1
+    ;;
+  invalid-api-key)
+    init
+    text="Invalid API key · Fix external API key"
+    api_error_message "\"error\":\"authentication_failed\",\"api_error_status\":401,\"api_error_type\":\"authentication_error\",\"api_error_origin\":\"first_party\"" "$text"
+    api_error_result "\"api_error_status\":401,\"api_error_type\":\"authentication_error\",\"terminal_reason\":\"api_error\"" "$text"
+    exit 1
+    ;;
+  account-on-hold)
+    init
+    text="Your account is on hold"
+    api_error_message "\"error\":\"account_on_hold\"" "$text"
+    api_error_result "\"terminal_reason\":\"api_error\"" "$text"
+    exit 1
+    ;;
+  billing-error)
+    init
+    text="Your credit balance is too low"
+    api_error_message "\"error\":\"billing_error\",\"api_error_type\":\"billing_error\"" "$text"
+    api_error_result "\"api_error_type\":\"billing_error\"" "$text"
+    exit 1
+    ;;
+  usage-limit)
+    init
+    text="You've hit your session limit · resets 1pm (America/Los_Angeles)"
+    emit "{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"session_id\":\"$sid\",\"message\":{\"model\":\"<synthetic>\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$text\"}]},\"error\":\"rate_limit\",\"is_api_error_message\":true,\"api_error_status\":429,\"api_error\":\"usage_limit_reached\",\"api_error_params\":{\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"overageDisabledReason\":\"org_level_disabled\",\"isUsingOverage\":false}}}"
+    api_error_result "\"api_error_status\":429,\"api_error\":\"usage_limit_reached\"" "$text"
+    exit 1
+    ;;
+  usage-limit-event)
+    init
+    emit "{\"type\":\"rate_limit_event\",\"session_id\":\"$sid\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"isUsingOverage\":false}}"
+    api_error_result "\"api_error_status\":429" "API Error: 429 rate limited"
+    exit 1
+    ;;
+  overage-rate-limit-event)
+    init
+    emit "{\"type\":\"rate_limit_event\",\"session_id\":\"$sid\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"allowed\",\"isUsingOverage\":true}}"
+    api_error_result "\"api_error_status\":529" "API Error: 529 overloaded"
+    exit 1
+    ;;
+  rate-limit-event-then-success)
+    init
+    emit "{\"type\":\"rate_limit_event\",\"session_id\":\"$sid\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"isUsingOverage\":false}}"
+    success '"fake final answer"' '[]'
+    ;;
+  overloaded)
+    init
+    api_error_message "\"error\":\"overloaded\",\"api_error_status\":529" "API Error: 529 overloaded"
+    api_error_result "\"api_error_status\":529" "API Error: 529 overloaded"
+    exit 1
+    ;;
+  prompt-too-long)
+    init
+    api_error_result "\"terminal_reason\":\"api_error\"" "Prompt is too long"
+    exit 1
+    ;;
+  result-text-error)
+    init
+    api_error_result "\"terminal_reason\":\"other\"" "Something unexpected happened"
+    exit 1
     ;;
   unknown-session)
     emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"

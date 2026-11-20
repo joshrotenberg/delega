@@ -34,6 +34,27 @@
 #   stray-after-completed  a successful run followed, after turn.completed, by
 #                    a thread.started event for fake-codex-stray
 #   no-session-id    a successful run with no thread.started event
+#
+# Modes about provider account, capacity and model failures. Each exits 1:
+#   model-unsupported  Codex 0.170.0 given an unknown --model with a ChatGPT
+#                    login: an error event and a turn.failed with "The
+#                    'no-such-model' model is not supported when using Codex
+#                    with a ChatGPT account."
+#   invalid-api-key  Codex 0.170.0 with an invalid API key: ten error events
+#                    "Reconnecting... n/5 (unexpected status 401 Unauthorized:
+#                    Incorrect API key provided: ...)" and a turn.failed with
+#                    "unexpected status 401 Unauthorized: Incorrect API key
+#                    provided: ..."
+#   usage-limit      the usage limit text an earlier runner recorded, on an
+#                    error event and a turn.failed, both with codex_error_info
+#                    usage_limit_exceeded
+#   usage-limit-error-only  the usage limit error event with codex_error_info
+#                    usage_limit_exceeded and no terminal event
+#   usage-limit-info-only  a turn.failed whose message names nothing, with
+#                    codex_error_info usage_limit_exceeded
+#   context-window   a turn.failed saying the model's context window ran out
+#   capacity         a turn.failed with "unexpected status 503 Service
+#                    Unavailable: the server is at capacity" (not recorded)
 
 for arg in "$@"; do
   case "$arg" in
@@ -210,6 +231,52 @@ case "$mode" in
     init
     printf 'fake provider crashed\n' >&2
     exit 3
+    ;;
+  model-unsupported)
+    init
+    msg="The 'no-such-model' model is not supported when using Codex with a ChatGPT account."
+    emit "{\"type\":\"error\",\"message\":\"$msg\"}"
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"$msg\"}}"
+    exit 1
+    ;;
+  invalid-api-key)
+    init
+    detail="unexpected status 401 Unauthorized: Incorrect API key provided: sk-fake-****test. You can find your API key at https://platform.openai.com/account/api-keys."
+    n=1
+    while [ $n -le 10 ]; do
+      emit "{\"type\":\"error\",\"message\":\"Reconnecting... $(( (n + 1) / 2 ))/5 ($detail)\"}"
+      n=$((n+1))
+    done
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"$detail\"}}"
+    exit 1
+    ;;
+  usage-limit)
+    init
+    msg="You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 3rd, 2026 11:04 AM."
+    emit "{\"type\":\"error\",\"message\":\"$msg\",\"codex_error_info\":\"usage_limit_exceeded\"}"
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"$msg\",\"codex_error_info\":\"usage_limit_exceeded\"}}"
+    exit 1
+    ;;
+  usage-limit-error-only)
+    init
+    msg="You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 3rd, 2026 11:04 AM."
+    emit "{\"type\":\"error\",\"message\":\"$msg\",\"codex_error_info\":\"usage_limit_exceeded\"}"
+    exit 1
+    ;;
+  usage-limit-info-only)
+    init
+    emit '{"type":"turn.failed","codex_error_info":"usage_limit_exceeded","error":{"message":"The turn could not continue"}}'
+    exit 1
+    ;;
+  context-window)
+    init
+    emit '{"type":"turn.failed","error":{"message":"Codex ran out of room in the model'"'"'s context window. Start a new thread or clear earlier history before retrying."}}'
+    exit 1
+    ;;
+  capacity)
+    init
+    emit '{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable: the server is at capacity"}}'
+    exit 1
     ;;
   unknown-session)
     printf 'Error: thread/resume: thread/resume failed: no rollout found for thread id %s (code -32600)\n' "$resume" >&2
