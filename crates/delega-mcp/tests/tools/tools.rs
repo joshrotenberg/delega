@@ -728,7 +728,7 @@ async fn a_waiting_call_with_an_unreachable_cursor_is_released_by_shutdown() {
 }
 
 #[tokio::test]
-async fn a_cursorless_wait_released_by_shutdown_says_so_and_one_a_finish_released_does_not() {
+async fn a_cursorless_wait_released_by_shutdown_says_so_and_a_timed_out_wait_does_not() {
     let mut rig = Rig::new(Provider::Codex).await;
     let gate = rig.gate("shutdown-cursorless");
     let started = rig
