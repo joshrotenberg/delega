@@ -438,8 +438,10 @@ Behavior:
     exit status is the outcome's, or 130 when the outcome was `completed`,
     because its result was not delivered; standard output then holds the start
     of the document. If it does not report within 1 s, the exit status is the
-    cut-short one. Standard output stays in blocking mode, because its file
-    description can be shared with other processes. An interrupted write
+    cut-short one. `delega` does not change the mode of standard output: its
+    file description can be shared with other processes, so a blocking
+    descriptor stays blocking (`O_NONBLOCK` is never set), and a descriptor the
+    caller made non-blocking stays non-blocking. An interrupted write
     (`EINTR`) is retried, a reader that closed the pipe (`EPIPE`) counts as
     delivered, and any other error, `EAGAIN` from a descriptor another process
     set to non-blocking included, is a write failure.
@@ -456,8 +458,8 @@ Behavior:
       the wait for standard output to become writable. A write after `poll`
       reported it writable can still block: when another process writes to the
       same pipe; on macOS when pipe memory is over its growth cap, because the
-      kernel's writability check counts the largest size a pipe may grow to,
-      which can exceed the buffer it has; on a terminal with flow control,
+      kernel's writability check counts the larger of the default pipe capacity
+      and the capacity currently allocated, which can exceed the room left; on a terminal with flow control,
       whose readiness does not promise room for a whole piece; and on a regular
       file on a stalled filesystem. A stop then waits the 1 s and exits with
       the cut-short status. A blocked piece of at most `PIPE_BUF` bytes goes

@@ -76,8 +76,10 @@ impl Stop {
 ///
 /// The bytes go out in pieces of at most `PIPE_BUF` bytes, each written only
 /// after `poll` reports standard output writable, and `stop` is checked before
-/// each piece. Standard output stays in blocking mode: its file description may
-/// be shared with other processes, so `O_NONBLOCK` is not set.
+/// each piece. The mode of standard output is left as inherited: its file
+/// description may be shared with other processes, so `O_NONBLOCK` is never
+/// set, and a descriptor the caller made non-blocking stays so (its `EAGAIN` is
+/// a write failure).
 ///
 /// [`STOP_POLL`] bounds only the wait for readiness. When a pipe has `delega`
 /// as its only writer, a piece written after `POLLOUT` fits (Linux reports
