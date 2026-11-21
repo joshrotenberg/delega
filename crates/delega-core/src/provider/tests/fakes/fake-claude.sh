@@ -34,6 +34,9 @@
 #                    subtype error_during_execution, is_error true, the error
 #                    "No conversation found with session ID: <id>" and the
 #                    requested id as session_id, then exit 1
+#   unknown-session-404  the unknown-session result, also carrying
+#                    api_error_status 404 and api_error_type not_found_error
+#                    (not recorded; a shape that would read as a missing model)
 #   no-session-id    a successful run whose events carry no session_id
 #   two-sessions     a successful run whose first event carries
 #                    fake-claude-session-2 and whose later events, ending the
@@ -44,6 +47,77 @@
 #                    event carrying fake-claude-stray
 #   subagent-session  a successful run with a sub-agent message (one with
 #                    parent_tool_use_id) carrying fake-claude-subagent
+#
+# Modes about provider account, capacity and model failures. Each writes a
+# root assistant message with is_api_error_message true and then a `result`
+# with subtype success, is_error true, its reason in `result` and no `errors`,
+# then exits 1, unless it says otherwise:
+#   model-not-found  Claude Code 2.1.329 given an unknown --model: assistant
+#                    error model_not_found, api_error_status 404,
+#                    api_error_type not_found_error
+#   invalid-api-key  Claude Code 2.1.329 with an invalid API key: assistant
+#                    error authentication_failed, api_error_status 401,
+#                    api_error_type authentication_error
+#   account-on-hold  assistant error account_on_hold and no status or type
+#                    (a value the 2.1.329 executable lists; not recorded)
+#   billing-error    assistant error billing_error and api_error_type
+#                    billing_error (a value the executable lists; not recorded)
+#   usage-limit      Claude Code 2.1.314 at a usage limit, as an earlier runner
+#                    recorded it: assistant error rate_limit, api_error_status
+#                    429, api_error usage_limit_reached with rate_limit_info,
+#                    and a result with api_error usage_limit_reached
+#   usage-limit-event  a root rate_limit_event with status rejected and
+#                    overage rejected, then a failed result with status 429
+#                    and the text "API Error: 429 ..." and no assistant error
+#   overage-rate-limit-event  the same rejected rate_limit_event but with
+#                    isUsingOverage true, then a failed result with status 529
+#                    and the text "API Error: 529 overloaded"
+#   rate-limit-event-then-success  the rejected rate_limit_event, then a
+#                    successful run (exit 0)
+#   overloaded       assistant error overloaded, then a result with
+#                    api_error_status 529 and "API Error: 529 overloaded"
+#   prompt-too-long  no assistant error message; a result with the text
+#                    "Prompt is too long" and no errors
+#   result-text-error  no assistant error message; a result with the text
+#                    "Something unexpected happened" and no errors or API
+#                    fields
+#   Standard error within the capture limit (exit 3; TOKEN is
+#   abcdefghijklmnop123). The "window" is the last 8 KiB, where the excerpt
+#   is cut:
+#   stderr-key-at-window  an sk-ant- key whose last 10 bytes start the window,
+#                    then newlines and "end"
+#   stderr-bearer-at-window  "Authorization: Bearer TOKEN" with the window
+#                    starting at the space before TOKEN, then newlines and the
+#                    line "complete line survives"
+#   stderr-bearer-line-before-window  "Authorization: Bearer", a newline, the
+#                    line "TOKEN" starting exactly 8 KiB from the end, newlines
+#                    and "last"
+#   stderr-nbsp-at-window  "Authorization: Bearer", then 8 KiB from the end a
+#                    non-breaking space, a space, TOKEN, spaces and "end"
+#   stderr-key-shape-after-cut  "xsk-ant-" and 24 "a", 8158 spaces and "end":
+#                    the window drops the "x", leaving a key-shaped word that
+#                    the first redaction pass did not see
+#   stderr-key-shape-after-300-cut  one line, "start xsk-ant-" and 24 "a", a
+#                    space, 264 "b" and " end": the 300-character cut drops the
+#                    "x", leaving a key-shaped word right after the "... "
+#   stderr-marker-secret-after-300-cut  one line, "start xhiddenvalue42", a
+#                    space, 282 "b" and " end": the 300-character cut drops the
+#                    "x", leaving "hiddenvalue42" at the start of the excerpt,
+#                    the end of a configured secret "...hiddenvalue42"
+#   Standard error past the 64 KiB capture limit (exit 3):
+#   stderr-bearer-at-8k-of-capture  a line that the capture cuts off, then in
+#                    the capture: newlines, "Authorization: Bearer" ending
+#                    exactly 8 KiB into the capture, the line TOKEN, a private
+#                    key block (see key_block) that redaction shrinks to one
+#                    marker so TOKEN would reach the excerpt, and "end"
+#   stderr-first-line-kept  the lines "first line" and "second line"
+#   denied-result-text-error  a failed result with a Bash denial, no errors
+#                    and the result text "Connection reset"
+#   denied-refused-secret  the denied-refused result, its error naming Bash and
+#                    then, after 480 "a", an sk-ant- key across the
+#                    500-character clip point
+#   secret-at-clip   a failed result whose text is 485 "a", a space, then an
+#                    sk-ant- key that runs across the 500-character clip point
 
 if [ "$1" = "--version" ]; then
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
@@ -239,6 +313,26 @@ success() {
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":0.001,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},\"permission_denials\":$2}"
 }
 
+# key_block N: a private key block with N bytes of body and no newline, which
+# the redactor replaces with one marker, so text far before the 8 KiB excerpt
+# reaches it.
+key_block() {
+  printf '%s' '-----BEGIN RSA PRIVATE KEY-----'
+  head -c "$1" /dev/zero | tr '\0' A
+  printf '%s' '-----END RSA PRIVATE KEY-----'
+}
+
+# api_error_message FIELDS TEXT: a root assistant message marked
+# is_api_error_message, with the extra JSON members FIELDS and the text TEXT.
+api_error_message() {
+  emit "{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"session_id\":\"$sid\",\"message\":{\"model\":\"<synthetic>\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$2\"}]},\"is_api_error_message\":true,$1}"
+}
+# api_error_result FIELDS TEXT: a failed result with subtype success, the
+# extra JSON members FIELDS, TEXT as `result` and no `errors`.
+api_error_result() {
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"session_id\":\"$sid\",$1,\"result\":\"$2\",\"permission_denials\":[]}"
+}
+
 # The acceptance harness's process behaviours (`acc:<behaviour>:<variant>`, see
 # acc-lib.sh). No unit test uses them.
 acc_success() { success '"fake final answer"' '[]'; }
@@ -323,8 +417,146 @@ case "$mode" in
     printf 'fake provider crashed\n' >&2
     exit 3
     ;;
+  model-not-found)
+    init
+    text="There's an issue with the selected model (no-such-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+    api_error_message "\"error\":\"model_not_found\",\"api_error_status\":404,\"api_error_type\":\"not_found_error\"" "$text"
+    api_error_result "\"api_error_status\":404,\"api_error_type\":\"not_found_error\",\"terminal_reason\":\"api_error\"" "$text"
+    exit 1
+    ;;
+  invalid-api-key)
+    init
+    text="Invalid API key · Fix external API key"
+    api_error_message "\"error\":\"authentication_failed\",\"api_error_status\":401,\"api_error_type\":\"authentication_error\",\"api_error_origin\":\"first_party\"" "$text"
+    api_error_result "\"api_error_status\":401,\"api_error_type\":\"authentication_error\",\"terminal_reason\":\"api_error\"" "$text"
+    exit 1
+    ;;
+  account-on-hold)
+    init
+    text="Your account is on hold"
+    api_error_message "\"error\":\"account_on_hold\"" "$text"
+    api_error_result "\"terminal_reason\":\"api_error\"" "$text"
+    exit 1
+    ;;
+  billing-error)
+    init
+    text="Your credit balance is too low"
+    api_error_message "\"error\":\"billing_error\",\"api_error_type\":\"billing_error\"" "$text"
+    api_error_result "\"api_error_type\":\"billing_error\"" "$text"
+    exit 1
+    ;;
+  usage-limit)
+    init
+    text="You've hit your session limit · resets 1pm (America/Los_Angeles)"
+    emit "{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"session_id\":\"$sid\",\"message\":{\"model\":\"<synthetic>\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"$text\"}]},\"error\":\"rate_limit\",\"is_api_error_message\":true,\"api_error_status\":429,\"api_error\":\"usage_limit_reached\",\"api_error_params\":{\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"overageDisabledReason\":\"org_level_disabled\",\"isUsingOverage\":false}}}"
+    api_error_result "\"api_error_status\":429,\"api_error\":\"usage_limit_reached\"" "$text"
+    exit 1
+    ;;
+  usage-limit-event)
+    init
+    emit "{\"type\":\"rate_limit_event\",\"session_id\":\"$sid\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"isUsingOverage\":false}}"
+    api_error_result "\"api_error_status\":429" "API Error: 429 rate limited"
+    exit 1
+    ;;
+  overage-rate-limit-event)
+    init
+    emit "{\"type\":\"rate_limit_event\",\"session_id\":\"$sid\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"allowed\",\"isUsingOverage\":true}}"
+    api_error_result "\"api_error_status\":529" "API Error: 529 overloaded"
+    exit 1
+    ;;
+  rate-limit-event-then-success)
+    init
+    emit "{\"type\":\"rate_limit_event\",\"session_id\":\"$sid\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"isUsingOverage\":false}}"
+    success '"fake final answer"' '[]'
+    ;;
+  overloaded)
+    init
+    api_error_message "\"error\":\"overloaded\",\"api_error_status\":529" "API Error: 529 overloaded"
+    api_error_result "\"api_error_status\":529" "API Error: 529 overloaded"
+    exit 1
+    ;;
+  prompt-too-long)
+    init
+    api_error_result "\"terminal_reason\":\"api_error\"" "Prompt is too long"
+    exit 1
+    ;;
+  result-text-error)
+    init
+    api_error_result "\"terminal_reason\":\"other\"" "Something unexpected happened"
+    exit 1
+    ;;
   unknown-session)
     emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
+    exit 1
+    ;;
+  unknown-session-404)
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"api_error_status\":404,\"api_error_type\":\"not_found_error\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
+    exit 1
+    ;;
+  stderr-key-at-window)
+    init
+    { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8178 /dev/zero | tr '\0' '\n'; printf 'end\n'; } >&2
+    exit 3
+    ;;
+  stderr-bearer-at-window)
+    init
+    { printf 'Authorization: Bearer abcdefghijklmnop123\n'; head -c 8148 /dev/zero | tr '\0' '\n'; printf 'complete line survives\n'; } >&2
+    exit 3
+    ;;
+  stderr-key-shape-after-cut)
+    init
+    { printf 'xsk-ant-'; head -c 24 /dev/zero | tr '\0' a; head -c 8158 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-key-shape-after-300-cut)
+    init
+    { printf 'start xsk-ant-'; head -c 24 /dev/zero | tr '\0' a; printf ' '; head -c 264 /dev/zero | tr '\0' b; printf ' end'; } >&2
+    exit 3
+    ;;
+  stderr-marker-secret-after-300-cut)
+    init
+    { printf 'start xhiddenvalue42 '; head -c 282 /dev/zero | tr '\0' b; printf ' end'; } >&2
+    exit 3
+    ;;
+  stderr-bearer-at-8k-of-capture)
+    init
+    {
+      printf 'output before the capture\n'
+      head -c 8171 /dev/zero | tr '\0' '\n'
+      printf 'Authorization: Bearer\nabcdefghijklmnop123\n'
+      key_block 57258
+      printf '\nend\n'
+    } >&2
+    exit 3
+    ;;
+  stderr-bearer-line-before-window)
+    init
+    { printf 'Authorization: Bearer\nabcdefghijklmnop123\n'; head -c 8167 /dev/zero | tr '\0' '\n'; printf 'last\n'; } >&2
+    exit 3
+    ;;
+  stderr-nbsp-at-window)
+    init
+    { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123'; head -c 8167 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-first-line-kept)
+    init
+    { printf 'first line\nsecond line\n'; } >&2
+    exit 3
+    ;;
+  denied-result-text-error)
+    init
+    emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"session_id\":\"$sid\",\"result\":\"Connection reset\",\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\",\"tool_input\":{\"command\":\"make install\"}}]}"
+    ;;
+  denied-refused-secret)
+    init
+    pad=$(head -c 480 /dev/zero | tr '\0' a)
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$sid\",\"errors\":[\"Bash $pad sk-ant-abcdefghijklmnopqrstuvwx tail\"],\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\",\"tool_input\":{\"command\":\"make install\"}}]}"
+    ;;
+  secret-at-clip)
+    init
+    pad=$(head -c 485 /dev/zero | tr '\0' a)
+    api_error_result "\"terminal_reason\":\"other\"" "$pad sk-ant-abcdefghijklmnopqrstuvwx tail"
     exit 1
     ;;
   two-sessions)

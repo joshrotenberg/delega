@@ -109,7 +109,7 @@ chunks the tap never received, and the result's `provider_notes` says so too.
 | Outcome | When |
 | --- | --- |
 | `completed` | The provider reported success, exited with code 0, and gave answer text. With `answer_schema`, the text parsed as JSON. A denial that did not stop the run is listed in `permissions.denied`. |
-| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run that would otherwise have completed but whose stream reported another session than `session.resume` (`session_mismatch`; any other outcome stands with a note), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
+| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit, or, when the failure says so, `provider_usage_limit`, `provider_auth`, `provider_billing`, `provider_capacity`, `provider_model_unavailable` or `provider_context_exhausted`, see [Provider failure kinds](#provider-failure-kinds)), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run that would otherwise have completed but whose stream reported another session than `session.resume` (`session_mismatch`; any other outcome stands with a note), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
 | `timed_out` | The time limit passed. `text` holds any partial answer. |
 | `interrupted` | `interrupt()` was called, or the handle or future was dropped. |
 | `refused` before start | See steps 1 and 2 above. `timing.started_at` is absent. |
@@ -117,21 +117,22 @@ chunks the tap never received, and the result's `provider_notes` says so too.
 
 **When a run is `refused` after start.** Only when all of these hold: the
 provider's first terminal event is a failure; that failure is not a limit the
-provider names (`provider_turn_limit`, `provider_budget_limit`,
-`provider_usage_limit`); at least one request was denied; and nothing reported an
+provider names (`provider_turn_limit`, `provider_budget_limit`) and has none of
+the [provider failure kinds](#provider-failure-kinds); at least one request was denied; and nothing reported an
 error separately and nothing went on after the last denial.
 
 - Claude Code: the denials arrive in the failed result event. The run counts as
   stopped by the denial when no `error` event and no `api_retry` event was seen;
   when no assistant message or tool result came after the result of the last
   denied call; and when every entry in the result's `errors` names a denied tool
-  or speaks of permission or denial. An entry such as "API connection lost"
-  makes the run `failed`.
+  or speaks of permission or denial (a result with no `errors` is judged by its
+  `result` text the same way, and a result with neither counts as about the
+  denial, as before). An entry or text such as "API connection lost" makes the
+  run `failed`.
 - Codex: the last item before the failure must be the `declined` command. Any
   later item (an agent message, another command, a `file_change`) or an `error`
-  event ends the attribution. A `turn.failed` whose message speaks of a usage
-  limit, rate limit, quota or context window has kind `provider_usage_limit`,
-  and so is `failed`.
+  event ends the attribution. A `turn.failed` with one of the provider failure
+  kinds (for example a usage limit) is `failed`.
 
 Every other failure with a denial is `failed` with the denial listed in
 `permissions.denied`. `provider_exit_code` is in the error of every `failed` and
@@ -184,17 +185,56 @@ anywhere. Neither is matched when
 `forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit` (all
 refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
-`provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
+`provider_auth`, `provider_billing`, `provider_capacity`,
+`provider_model_unavailable`, `provider_context_exhausted`, `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
 `session_mismatch`, `session_not_found`, `provider_preparation_failed`, `spawn_failed`, `process_signaled`,
 `wait_failed`, `internal_error` (failed); `permission_denied` (refused after
 start); `timed_out`; `interrupted`.
 
+### Provider failure kinds
+
+A failed run whose provider failure says why gets a kind for the reason instead
+of `provider_error`:
+
+| Kind | Meaning |
+| --- | --- |
+| `provider_usage_limit` | The account's usage limit or quota is used up. Retrying before it resets fails again. |
+| `provider_auth` | The credentials or the account cannot be used: an invalid key, an organisation not allowed, an account on hold, a verification needed, a cloud credential error, or HTTP 401 or 403. |
+| `provider_billing` | A billing problem, such as no credit left. |
+| `provider_capacity` | The provider is rate limiting or overloaded (HTTP 429, 503, 529). Retrying later can work. |
+| `provider_model_unavailable` | The requested model does not exist or this account cannot use it. |
+| `provider_context_exhausted` | The conversation no longer fits the model's context window. |
+
+Only failed runs are classified; a success is never changed. `session_not_found`
+outranks every kind here (a Claude Code result for a missing session may also
+carry status 404 and `not_found_error`), and `provider_turn_limit` and
+`provider_budget_limit` keep their precedence. After
+them, a usage limit outranks the rest, because the same failure also carries a
+rate limit and HTTP 429; then billing, auth, model, context and capacity, in
+that order. A failure that matches none keeps `provider_error`. How each
+provider's events are read is in its Stream section ([Claude Code](#stream),
+[Codex](#stream-1)). The message is the provider's, redacted as below.
+
 ### Text from the provider
 
 Provider standard error and provider error messages can echo what the provider
-was given. Before they go into an error message, standard error is cut to its
-last 8 KiB, joined to one line, and cut again to its last 300 characters. Two
-kinds of text are replaced with `[redacted]` first:
+was given. Standard error is captured up to its last 64 KiB. All of the
+captured standard error is redacted before the excerpt is cut from it: its last
+8 KiB, joined to one line, and its last 300 characters. The excerpt's own cuts
+come after redaction, so they cannot split a secret. When the 300-character cut
+removed text, the excerpt starts with `... ` (three dots and a space, so the
+marker never joins a word). After both cuts and the marker, the finished excerpt
+is redacted once more, so neither cut can leave a newly key-shaped string (such
+as the end of `xsk-ant-...` without its `x`) unredacted.
+
+The remaining limit: when standard error was longer than its 64 KiB capture,
+the start of the capture is a cut made before redaction. A secret cut there
+(part of a key, or a token whose `Bearer` was not captured) is not recognised.
+It could show only if redaction removes nearly all of the capture, so that the
+capture's start reaches the excerpt.
+
+A provider error message is kept whole and cut to its first 500 characters
+after redaction. Two kinds of text are replaced with `[redacted]`:
 
 - the value of every variable passed to the provider whose name looks like a
   secret or belongs to the provider, when the value is at least 6 characters;
@@ -205,8 +245,9 @@ kinds of text are replaced with `[redacted]` first:
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,
 quotes and commas separate tokens. The text after `Bearer` is removed whole. The
-shapes are a heuristic; a credential in another form is not caught. The
-answer text itself is the provider's output and is not redacted. A denied
+shapes are a heuristic; a credential in another form is not caught. Configured
+secret values that overlap delega's own markers (`...`, `[redacted]`) are not
+supported. The answer text itself is the provider's output and is not redacted. A denied
 request records the command or path the provider asked for, as written.
 
 A structured answer that parses but does not satisfy the schema is `completed`
@@ -557,6 +598,35 @@ fresh one, see [Outcomes](#outcomes)). The
 and are not used as the worker's text. When the result carries no text, the last
 assistant message is used and a note says so.
 
+A failed result's message is its `errors` joined with `; `; when it has no
+`errors`, its `result` text (an API failure carries its reason there); with
+neither, a sentence naming the subtype. A failed result that is not a turn or
+budget limit gets a [provider failure kind](#provider-failure-kinds) from three
+sources: the result itself; the last root assistant message, when that message
+has `is_api_error_message: true`; and the latest root `rate_limit_event`. A
+later root assistant message without `is_api_error_message` clears both, since
+the run went on after them. Sub-agent events are not used, and a sub-agent's
+`result` (one with a non-null `parent_tool_use_id`) does not end the run. Fields read: the assistant message's `error`, and `api_error`,
+`api_error_type` and `api_error_status` on either. Every structured field is
+checked before the result text, so the text rules come last whatever their
+kind. In order:
+
+- `provider_usage_limit`: `api_error` `usage_limit_reached`, or the latest
+  `rate_limit_event` has `rate_limit_info.status` `rejected` and overage does
+  not cover it (`isUsingOverage` is not true and `overageStatus` is not
+  `allowed` or `allowed_warning`).
+- `provider_billing`: `error` or `api_error_type` `billing_error`.
+- `provider_auth`: `error` `authentication_failed`, `oauth_org_not_allowed`,
+  `account_on_hold`, `verification_required` or `cloud_credential_error`;
+  `api_error_type` `authentication_error` or `permission_error`; or status 401
+  or 403.
+- `provider_model_unavailable`: `error` `model_not_found`, or
+  `api_error_type` `not_found_error` with status 404.
+- `provider_capacity`: `error` `rate_limit` or `overloaded`, `api_error_type`
+  `rate_limit_error` or `overloaded_error`, or status 429, 503 or 529.
+- `provider_context_exhausted`: the result text starts `Prompt is too long`.
+- `provider_capacity`: the result text starts `API Error: 429`, `503` or `529`.
+
 ### `native_args` allowlist
 
 | Option | Value |
@@ -668,6 +738,28 @@ mismatch on a resumed run and the several-ids note on a fresh one). A message it
 (`input_tokens`, `output_tokens`, `cached_input_tokens`,
 `reasoning_output_tokens`); `turn.failed` is failure with its message. `error`
 events are kept: they fail the run only if no terminal event follows.
+
+The [provider failure kind](#provider-failure-kinds) comes from the
+`turn.failed` event, or from the last `error` event when no terminal event
+follows. An `error` event or `turn.failed` with a `codex_error_info` and no
+message counts, with the message `Codex reported <name>`. A structured `codex_error_info` (on the event or its `error`; a string,
+or an object with one key) decides first: `usage_limit_exceeded` is
+`provider_usage_limit` and `context_window_exceeded` is
+`provider_context_exhausted`. Next, a message that is a JSON error document is
+read by `error.code` (`insufficient_quota`, `context_length_exceeded`,
+`invalid_api_key`, `model_not_found`, `rate_limit_exceeded`, ...) or
+`error.type`. Last, the message's words, case-insensitive, in the order of the
+[precedence](#provider-failure-kinds) (Codex text names no billing failure):
+
+- `provider_usage_limit`: "usage limit", "exceeded your current quota" or
+  "insufficient_quota".
+- `provider_auth`: "unexpected status 401" or "unexpected status 403".
+- `provider_model_unavailable`: "model is not supported", "model_not_found",
+  or ``model `name` does not exist`` with the name in backticks, single or
+  double quotes directly after "model", where "model" starts a word.
+- `provider_context_exhausted`: "context window".
+- `provider_capacity`: "unexpected status 429", "503" or "529", "rate limit",
+  "overloaded" or "at capacity".
 
 ### `native_args` allowlist
 
@@ -831,6 +923,32 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
   standard output and the standard error `Error: thread/resume: thread/resume
   failed: no rollout found for thread id <id> (code -32600)`. It becomes kind
   `session_not_found`.
+- With Claude Code 2.1.329 (#116), an unknown `--model` writes a root
+  `assistant` event with `error: "model_not_found"`, `api_error_status: 404`,
+  `api_error_type: "not_found_error"`, `is_api_error_message: true` and the
+  text "There's an issue with the selected model (no-such-model). It may not
+  exist or you may not have access to it. Run --model to pick a different
+  model.", then a `result` with subtype `success`, `is_error: true`, the same
+  status and type, `terminal_reason: "api_error"`, that text in `result` and no
+  `errors`, and exits 1. It becomes kind `provider_model_unavailable`.
+- With Claude Code 2.1.329 (#116), an invalid API key gives the same shape with
+  `error: "authentication_failed"`, `api_error_status: 401`, `api_error_type:
+  "authentication_error"`, `api_error_origin: "first_party"` and the text
+  "Invalid API key · Fix external API key". It becomes kind `provider_auth`.
+  The 2.1.329 executable lists these values for the assistant `error`:
+  `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`,
+  `verification_required`, `billing_error`, `rate_limit`, `overloaded`,
+  `invalid_request`, `model_not_found`, `server_error`, `unknown`,
+  `max_output_tokens`, `cloud_credential_error`. Only the two above were run.
+- With Codex 0.170.0 (#116), `codex exec --json` carries no structured codes
+  for these failures, only text. An unknown model with a ChatGPT login gives an
+  `error` event and a `turn.failed` with the message "The 'no-such-model' model
+  is not supported when using Codex with a ChatGPT account." and exits 1 (kind
+  `provider_model_unavailable`). An invalid API key gives ten `error` events
+  "Reconnecting... n/5 (unexpected status 401 Unauthorized: Incorrect API key
+  provided: ...)" and a `turn.failed` with "unexpected status 401
+  Unauthorized: Incorrect API key provided: ...", and exits 1 (kind
+  `provider_auth`).
 
 ## Unverified against the real CLI
 
@@ -853,7 +971,10 @@ each.
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
 | `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` stop Claude Code loading `CLAUDE.md` files and the auto-memory index into the worker's context automatically, as Claude Code documents | With Claude Code 2.1.329, a worker started this way listed no `CLAUDE.md`, `AGENTS.md` or auto-memory file in its context (#86, #106). A note on every run says what is not loaded automatically. |
 | A Claude failure with `permission_denials` and no `error` or `api_retry` event is a stop caused by the denial | Anything else with a denial is `failed`. |
-| Codex words a usage or rate limit failure with "usage limit", "rate limit", "quota" or "context window", and Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
+| Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
+| Claude Code 2.1.314 at a usage limit, as an earlier runner recorded it, writes a root assistant message with `error: "rate_limit"`, `is_api_error_message: true`, `api_error_status: 429`, `api_error: "usage_limit_reached"` and `api_error_params.rate_limit_info` (`status: "rejected"`, `overageStatus`, `isUsingOverage`), with text such as "You've hit your session limit · resets 1pm (America/Los_Angeles)", then a failed `result` with `api_error: "usage_limit_reached"` and that text, and exits 1; a root `rate_limit_event` with `rate_limit_info.status: "rejected"` can also appear | `usage_limit_reached` or a rejected `rate_limit_event` that overage does not cover is `provider_usage_limit`, ahead of the `rate_limit` and 429 it also carries. With `isUsingOverage` true or `overageStatus` `allowed` or `allowed_warning`, overage covers it. |
+| Claude Code capacity failures carry `api_error_status` 429, 503 or 529 with text like "API Error: 529 overloaded", or assistant `error` `rate_limit` or `overloaded`; `billing_error` and the account `error` values other than `authentication_failed` reach the stream like the live shapes; a context overflow is a failed result whose text starts "Prompt is too long" | Matched as described in the Claude Code [Stream](#stream) section. Not run live. |
+| Codex at a usage limit, as an earlier runner recorded it, writes `error` and `turn.failed` messages "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at ...", and `codex_error_info: "usage_limit_exceeded"` can appear on such events; capacity failures say "unexpected status 429", "503" or "529", "rate limit", "overloaded" or "at capacity"; a context overflow says "context window" or carries `codex_error_info` `context_window_exceeded` | Matched as described in the Codex [Stream](#stream-1) section. A context overflow was `provider_usage_limit` before #116 and is now `provider_context_exhausted`. |
 | Claude Code names `error_max_turns` and `error_max_budget_usd` as result subtypes | They become the `provider_turn_limit` and `provider_budget_limit` error kinds. |
 
 ## Not done

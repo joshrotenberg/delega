@@ -14,10 +14,7 @@ use crate::contract::result::Usage;
 
 use super::hook::{GRANTS_ENV, HookCommand};
 use super::launch::{Built, Elide, Inputs};
-use super::limits::{
-    DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, PROVIDER_MESSAGE_CHARS,
-    SETTINGS_ARGUMENT_LIMIT,
-};
+use super::limits::{DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, SETTINGS_ARGUMENT_LIMIT};
 use super::refusal::{Refusal, clip};
 use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
 
@@ -489,21 +486,131 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
     (!empty).then_some(usage)
 }
 
+/// The whole failure text of a failed result. `settle` redacts it and then
+/// clips it, so a credential is never cut before the redactor sees it.
 fn failure_message(event: &Map<String, Value>) -> String {
     let errors: Vec<&str> = event
         .get("errors")
         .and_then(Value::as_array)
         .map(|list| list.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let text = if errors.is_empty() {
+    if !errors.is_empty() {
+        errors.join("; ")
+    } else if let Some(result) = str_field(event, "result") {
+        // An API failure (an unknown model, a bad key, a usage limit) carries
+        // its reason in `result` and has no `errors`.
+        result.to_string()
+    } else {
         match str_field(event, "subtype") {
             Some("success") | None => "Claude Code reported an error".to_string(),
             Some(subtype) => format!("Claude Code ended with {subtype}"),
         }
-    } else {
-        errors.join("; ")
+    }
+}
+
+/// The API error fields of a root assistant message marked
+/// `is_api_error_message`, or of a failed result. Only these short fields are
+/// kept, so the state stays bounded however long the stream is.
+#[derive(Debug, Clone, Default)]
+struct ApiError {
+    /// The assistant message's `error`, such as `model_not_found`.
+    error: Option<String>,
+    /// `api_error`, such as `usage_limit_reached`.
+    api_error: Option<String>,
+    /// `api_error_type`, such as `authentication_error`.
+    kind: Option<String>,
+    /// `api_error_status`, the HTTP status.
+    status: Option<u64>,
+}
+
+/// The longest API error field kept; the known values are much shorter.
+const API_FIELD_CHARS: usize = 64;
+
+fn api_error(event: &Map<String, Value>) -> ApiError {
+    let field = |key: &str| str_field(event, key).map(|v| clip(v, API_FIELD_CHARS));
+    ApiError {
+        error: field("error"),
+        api_error: field("api_error"),
+        kind: field("api_error_type"),
+        status: event.get("api_error_status").and_then(Value::as_u64),
+    }
+}
+
+/// Whether a root `rate_limit_event` says the account is at a usage limit:
+/// its status is `rejected` and overage does not cover the request.
+fn rate_limit_rejected(event: &Map<String, Value>) -> bool {
+    let Some(info) = event.get("rate_limit_info") else {
+        return false;
     };
-    clip(&text, PROVIDER_MESSAGE_CHARS)
+    let text = |key: &str| info.get(key).and_then(Value::as_str);
+    let overage = info.get("isUsingOverage").and_then(Value::as_bool) == Some(true)
+        || matches!(text("overageStatus"), Some("allowed" | "allowed_warning"));
+    text("status") == Some("rejected") && !overage
+}
+
+/// Assistant `error` values that mean the account or its credentials cannot
+/// be used.
+const AUTH_ERRORS: [&str; 5] = [
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "account_on_hold",
+    "verification_required",
+    "cloud_credential_error",
+];
+
+/// The error kind of a failed result that names no turn or budget limit, from
+/// the result, the last root API error message and the latest root
+/// `rate_limit_event`. `None` keeps `provider_error`.
+fn failure_kind(
+    result: &Map<String, Value>,
+    message: Option<&ApiError>,
+    usage_limited: bool,
+) -> Option<&'static str> {
+    let own = api_error(result);
+    let sources: Vec<&ApiError> = std::iter::once(&own).chain(message).collect();
+    let error = message.and_then(|m| m.error.as_deref());
+    let any = |pick: fn(&ApiError) -> Option<&str>, values: &[&str]| {
+        sources
+            .iter()
+            .any(|s| pick(s).is_some_and(|v| values.contains(&v)))
+    };
+    let kind_is = |values: &[&str]| any(|s| s.kind.as_deref(), values);
+    let status_is = |values: &[u64]| {
+        sources
+            .iter()
+            .any(|s| s.status.is_some_and(|v| values.contains(&v)))
+    };
+    let error_is = |values: &[&str]| error.is_some_and(|e| values.contains(&e));
+    let text = str_field(result, "result").unwrap_or_default();
+
+    if usage_limited || any(|s| s.api_error.as_deref(), &["usage_limit_reached"]) {
+        Some("provider_usage_limit")
+    } else if error_is(&["billing_error"]) || kind_is(&["billing_error"]) {
+        Some("provider_billing")
+    } else if error_is(&AUTH_ERRORS)
+        || kind_is(&["authentication_error", "permission_error"])
+        || status_is(&[401, 403])
+    {
+        Some("provider_auth")
+    } else if error_is(&["model_not_found"]) || (kind_is(&["not_found_error"]) && status_is(&[404]))
+    {
+        Some("provider_model_unavailable")
+    } else if error_is(&["rate_limit", "overloaded"])
+        || kind_is(&["rate_limit_error", "overloaded_error"])
+        || status_is(&[429, 503, 529])
+    {
+        Some("provider_capacity")
+    } else if text.starts_with("Prompt is too long") {
+        // The text rules come only after every structured field.
+        Some("provider_context_exhausted")
+    } else if ["API Error: 429", "API Error: 503", "API Error: 529"]
+        .iter()
+        .any(|p| text.starts_with(p))
+    {
+        Some("provider_capacity")
+    } else {
+        None
+    }
 }
 
 /// Whether an error text from the failed result is about a denial: it names a
@@ -551,6 +658,10 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut seq = 0usize;
     let mut result_at: HashMap<String, usize> = HashMap::new();
     let mut last_work = 0usize;
+    // The last root assistant message, when it was an API error message, and
+    // whether the latest root rate limit event said the usage limit was hit.
+    let mut api_message: Option<ApiError> = None;
+    let mut usage_limited = false;
     let stats = for_each_event(bytes, |event| {
         seq += 1;
         let kind = str_field(event, "type");
@@ -563,7 +674,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
         // The first terminal event decides; later events only count for the
         // session ids the stream reported.
         if parsed.terminal != Terminal::None {
-            if kind == Some("result") {
+            if kind == Some("result") && !subagent {
                 parsed.note_second_terminal();
             }
             if let Some(id) = session {
@@ -582,6 +693,15 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 }
                 if let Some(text) = assistant_text(event) {
                     parsed.last_text = Some(text);
+                }
+                // Only the last root assistant message can name an API
+                // error, and a normal message after a rejected rate limit
+                // event shows the run went on.
+                let is_api_error =
+                    event.get("is_api_error_message").and_then(Value::as_bool) == Some(true);
+                api_message = is_api_error.then(|| api_error(event));
+                if !is_api_error {
+                    usage_limited = false;
                 }
                 last_work = seq;
             }
@@ -608,21 +728,24 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
             Some("error") => {
                 let message =
                     str_field(event, "message").unwrap_or("Claude Code reported an error");
-                parsed.errors.push(clip(message, PROVIDER_MESSAGE_CHARS));
+                parsed.saw_error(message);
             }
             Some("system") if str_field(event, "subtype") == Some("api_retry") => {
-                parsed
-                    .errors
-                    .push("Claude Code is retrying a failed API request".to_string());
+                parsed.saw_error("Claude Code is retrying a failed API request");
             }
-            Some("result") => {
+            Some("rate_limit_event") if !subagent => {
+                usage_limited = rate_limit_rejected(event);
+            }
+            // A sub-agent's result does not end the worker's run.
+            Some("result") if !subagent => {
                 let subtype = str_field(event, "subtype");
                 let success = subtype == Some("success")
                     && event.get("is_error").and_then(Value::as_bool) != Some(true);
                 let code = match subtype {
                     Some("error_max_turns") => Some("provider_turn_limit"),
                     Some("error_max_budget_usd") => Some("provider_budget_limit"),
-                    _ => None,
+                    _ if success => None,
+                    _ => failure_kind(event, api_message.as_ref(), usage_limited),
                 };
                 parsed.final_text = str_field(event, "result").map(str::to_string);
                 parsed.terminal = if success {
@@ -673,17 +796,24 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                             .to_lowercase()
                     })
                     .collect();
-                let errors_are_about_denial = event
+                // The result's `errors`, or its `result` text when it has
+                // no `errors`, must all be about the denial.
+                let errors: Vec<&str> = event
                     .get("errors")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
-                    .all(|e| mentions_denial(e, &tools));
+                    .collect();
+                let errors_are_about_denial = if errors.is_empty() {
+                    str_field(event, "result").is_none_or(|r| mentions_denial(r, &tools))
+                } else {
+                    errors.iter().all(|e| mentions_denial(e, &tools))
+                };
                 parsed.stopped_by_denial = !success
                     && code.is_none()
                     && !parsed.denied.is_empty()
-                    && parsed.errors.is_empty()
+                    && parsed.error_count == 0
                     && !went_on
                     && errors_are_about_denial;
             }

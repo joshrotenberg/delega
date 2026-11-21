@@ -11,8 +11,7 @@ use crate::contract::request::Effort;
 use crate::contract::result::Usage;
 
 use super::launch::{Built, Elide, Inputs};
-use super::limits::PROVIDER_MESSAGE_CHARS;
-use super::refusal::{Refusal, clip};
+use super::refusal::Refusal;
 use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
 
 /// Features switched off for every worker.
@@ -210,6 +209,133 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
     (!empty).then_some(usage)
 }
 
+/// The error kind a `codex_error_info` name (see [`info_name`]) stands for,
+/// when it is one delega knows.
+fn info_kind(name: &str) -> Option<&'static str> {
+    match name {
+        "usage_limit_exceeded" => Some("provider_usage_limit"),
+        "context_window_exceeded" => Some("provider_context_exhausted"),
+        _ => None,
+    }
+}
+
+/// The error kind of a message that is itself a JSON error document, from
+/// its `error.code` or `error.type` (or a top-level `code` or `type`).
+fn document_kind(message: &str) -> Option<&'static str> {
+    let trimmed = message.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let doc: Value = serde_json::from_str(trimmed).ok()?;
+    let inner = doc.get("error").filter(|e| e.is_object()).unwrap_or(&doc);
+    let field = |key: &str| inner.get(key).and_then(Value::as_str);
+    let by_code = match field("code") {
+        Some("insufficient_quota" | "usage_limit_reached" | "usage_limit_exceeded") => {
+            Some("provider_usage_limit")
+        }
+        Some("context_length_exceeded" | "context_window_exceeded") => {
+            Some("provider_context_exhausted")
+        }
+        Some("invalid_api_key") => Some("provider_auth"),
+        Some("model_not_found") => Some("provider_model_unavailable"),
+        Some("rate_limit_exceeded" | "server_overloaded") => Some("provider_capacity"),
+        _ => None,
+    };
+    by_code.or(match field("type") {
+        Some("insufficient_quota" | "usage_limit_reached") => Some("provider_usage_limit"),
+        Some("authentication_error" | "permission_error") => Some("provider_auth"),
+        Some("rate_limit_error" | "overloaded_error" | "server_overloaded") => {
+            Some("provider_capacity")
+        }
+        _ => None,
+    })
+}
+
+/// Whether lowercased text says a model does not exist in the form
+/// ``model `name` does not exist`` (or with `'` or `"` around the name): the
+/// word "model" directly before the quoted name, and "does not exist" directly
+/// after it.
+fn names_missing_model(lower: &str) -> bool {
+    lower.match_indices("model ").any(|(at, word)| {
+        // "model" must start a word, so "submodel" does not count.
+        let starts_word = lower[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if !starts_word {
+            return false;
+        }
+        let rest = &lower[at + word.len()..];
+        let Some(quote) = rest
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '`' | '\'' | '"'))
+        else {
+            return false;
+        };
+        let name = &rest[1..];
+        name.find(quote)
+            .is_some_and(|end| end > 0 && name[end + 1..].starts_with(" does not exist"))
+    })
+}
+
+/// The error kind of a message by its words. Codex 0.170.0 gives no codes in
+/// `codex exec --json`, only text.
+fn text_kind(message: &str) -> Option<&'static str> {
+    let lower = message.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    // The same order as the structured kinds: usage limit, auth, model,
+    // context, capacity (Codex text names no billing failure).
+    if has(&[
+        "usage limit",
+        "exceeded your current quota",
+        "insufficient_quota",
+    ]) {
+        Some("provider_usage_limit")
+    } else if has(&["unexpected status 401", "unexpected status 403"]) {
+        Some("provider_auth")
+    } else if has(&["model is not supported", "model_not_found"]) || names_missing_model(&lower) {
+        Some("provider_model_unavailable")
+    } else if has(&["context window"]) {
+        Some("provider_context_exhausted")
+    } else if has(&[
+        "unexpected status 429",
+        "unexpected status 503",
+        "unexpected status 529",
+        "rate limit",
+        "overloaded",
+        "at capacity",
+    ]) {
+        Some("provider_capacity")
+    } else {
+        None
+    }
+}
+
+/// The name in a `codex_error_info` on the event or its `error`, when it is a
+/// string or an object with one key.
+fn info_name(event: &Map<String, Value>) -> Option<&str> {
+    let info = event
+        .get("codex_error_info")
+        .or_else(|| event.get("error").and_then(|e| e.get("codex_error_info")))?;
+    match info {
+        Value::String(s) if !s.is_empty() => Some(s.as_str()),
+        Value::Object(map) if map.len() == 1 => map.keys().next().map(String::as_str),
+        _ => None,
+    }
+}
+
+/// The error kind of a failed turn or an error event: a structured
+/// `codex_error_info` on the event or its `error` first, then a message that
+/// is a JSON error document, then the message's words. `None` keeps
+/// `provider_error`.
+fn failure_kind(event: &Map<String, Value>, message: &str) -> Option<&'static str> {
+    info_name(event)
+        .and_then(info_kind)
+        .or_else(|| document_kind(message))
+        .or_else(|| text_kind(message))
+}
+
 /// Reduce the output stream to a [`Parsed`].
 pub(super) fn parse(bytes: &[u8]) -> Parsed {
     let mut parsed = Parsed::default();
@@ -269,24 +395,33 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                 parsed.usage = usage(event);
             }
             "turn.failed" => {
-                let message = event
+                let text = event
                     .get("error")
                     .and_then(|e| e.get("message"))
                     .and_then(Value::as_str)
-                    .unwrap_or("Codex turn failed");
-                let lower = message.to_lowercase();
-                let limit = ["usage limit", "rate limit", "quota", "context window"]
-                    .iter()
-                    .any(|w| lower.contains(w));
+                    .filter(|m| !m.is_empty());
+                let message = match (text, info_name(event)) {
+                    (Some(text), _) => text.to_string(),
+                    (None, Some(name)) => format!("Codex reported {name}"),
+                    (None, None) => "Codex turn failed".to_string(),
+                };
                 parsed.terminal = Terminal::Failure {
-                    message: clip(message, PROVIDER_MESSAGE_CHARS),
-                    code: limit.then_some("provider_usage_limit"),
+                    code: failure_kind(event, &message),
+                    message,
                 };
                 parsed.usage = usage(event);
             }
             "error" => {
-                if let Some(message) = str_field(event, "message") {
-                    parsed.errors.push(clip(message, PROVIDER_MESSAGE_CHARS));
+                // An event with only a structured `codex_error_info` counts
+                // too, with a message naming it.
+                let message = match (str_field(event, "message"), info_name(event)) {
+                    (Some(text), _) => Some(text.to_string()),
+                    (None, Some(name)) => Some(format!("Codex reported {name}")),
+                    (None, None) => None,
+                };
+                if let Some(message) = message {
+                    parsed.error_code = failure_kind(event, &message);
+                    parsed.saw_error(&message);
                     parsed.stopped_by_denial = false;
                 }
             }

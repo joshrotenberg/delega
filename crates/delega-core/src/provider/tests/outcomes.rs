@@ -867,3 +867,366 @@ both!(
     dropping_the_wait_future_interrupts_the_run,
     a_dropped_wait_future_stops_the_run
 );
+
+/// Run one fake mode that ends in a failure and return its error.
+async fn failure_of(provider: Provider, mode: &str) -> crate::contract::result::ErrorDetail {
+    let rig = Rig::new();
+    let result = run_checked(rig.request(provider, mode), rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{mode}: {result:#?}");
+    rig.assert_nothing_left().await;
+    result.error.expect("error")
+}
+
+#[tokio::test]
+async fn claude_unknown_model_is_provider_model_unavailable_with_its_reason() {
+    let error = failure_of(Provider::Claude, "model-not-found").await;
+    assert_eq!(error.kind, "provider_model_unavailable");
+    assert_eq!(error.provider_exit_code, Some(1));
+    assert!(
+        error
+            .message
+            .starts_with("There's an issue with the selected model (no-such-model)"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_invalid_api_key_is_provider_auth() {
+    let error = failure_of(Provider::Claude, "invalid-api-key").await;
+    assert_eq!(error.kind, "provider_auth");
+    assert!(
+        error.message.contains("Invalid API key"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_account_error_without_a_status_is_provider_auth() {
+    let error = failure_of(Provider::Claude, "account-on-hold").await;
+    assert_eq!(error.kind, "provider_auth");
+}
+
+#[tokio::test]
+async fn claude_billing_error_is_provider_billing() {
+    let error = failure_of(Provider::Claude, "billing-error").await;
+    assert_eq!(error.kind, "provider_billing");
+}
+
+#[tokio::test]
+async fn claude_overloaded_api_is_provider_capacity() {
+    let error = failure_of(Provider::Claude, "overloaded").await;
+    assert_eq!(error.kind, "provider_capacity");
+    assert_eq!(error.message, "API Error: 529 overloaded");
+}
+
+#[tokio::test]
+async fn claude_prompt_too_long_is_provider_context_exhausted() {
+    let error = failure_of(Provider::Claude, "prompt-too-long").await;
+    assert_eq!(error.kind, "provider_context_exhausted");
+    assert_eq!(error.message, "Prompt is too long");
+}
+
+#[tokio::test]
+async fn claude_usage_limit_outranks_its_rate_limit_error_and_429() {
+    let error = failure_of(Provider::Claude, "usage-limit").await;
+    assert_eq!(error.kind, "provider_usage_limit");
+    assert!(
+        error.message.starts_with("You've hit your session limit"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn claude_rejected_rate_limit_event_makes_a_429_failure_a_usage_limit() {
+    let error = failure_of(Provider::Claude, "usage-limit-event").await;
+    assert_eq!(error.kind, "provider_usage_limit");
+}
+
+#[tokio::test]
+async fn claude_rate_limit_event_covered_by_overage_is_not_a_usage_limit() {
+    let error = failure_of(Provider::Claude, "overage-rate-limit-event").await;
+    assert_eq!(error.kind, "provider_capacity");
+}
+
+#[tokio::test]
+async fn claude_rejected_rate_limit_event_does_not_change_a_success() {
+    let rig = Rig::new();
+    let request = rig.request(Provider::Claude, "rate-limit-event-then-success");
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert_eq!(result.error, None);
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn claude_failed_result_without_errors_reports_its_result_text() {
+    let error = failure_of(Provider::Claude, "result-text-error").await;
+    assert_eq!(error.kind, "provider_error");
+    assert_eq!(error.message, "Something unexpected happened");
+}
+
+#[tokio::test]
+async fn codex_unsupported_model_is_provider_model_unavailable() {
+    let error = failure_of(Provider::Codex, "model-unsupported").await;
+    assert_eq!(error.kind, "provider_model_unavailable");
+    assert_eq!(error.provider_exit_code, Some(1));
+    assert!(
+        error
+            .message
+            .contains("'no-such-model' model is not supported"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn codex_401_is_provider_auth() {
+    let error = failure_of(Provider::Codex, "invalid-api-key").await;
+    assert_eq!(error.kind, "provider_auth");
+    assert!(
+        error
+            .message
+            .starts_with("unexpected status 401 Unauthorized"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn codex_usage_limit_is_provider_usage_limit() {
+    for mode in [
+        "usage-limit",
+        "usage-limit-error-only",
+        "usage-limit-info-only",
+    ] {
+        let error = failure_of(Provider::Codex, mode).await;
+        assert_eq!(error.kind, "provider_usage_limit", "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn codex_context_window_is_provider_context_exhausted_not_a_usage_limit() {
+    let error = failure_of(Provider::Codex, "context-window").await;
+    assert_eq!(error.kind, "provider_context_exhausted");
+}
+
+#[tokio::test]
+async fn codex_503_at_capacity_is_provider_capacity() {
+    let error = failure_of(Provider::Codex, "capacity").await;
+    assert_eq!(error.kind, "provider_capacity");
+}
+
+async fn unrelated_failure_keeps_its_kind(provider: Provider) {
+    for (mode, kind) in [
+        ("provider-error", "provider_error"),
+        ("exit-nonzero", "provider_exit"),
+    ] {
+        let error = failure_of(provider, mode).await;
+        assert_eq!(error.kind, kind, "{mode}");
+    }
+}
+both!(
+    keeps_the_old_kind_of_a_failure_that_names_no_account_or_model_problem,
+    unrelated_failure_keeps_its_kind
+);
+
+async fn secret_at_clip(provider: Provider) {
+    let modes: &[&str] = match provider {
+        Provider::Claude => &["secret-at-clip"],
+        Provider::Codex => &["secret-at-clip", "secret-at-clip-error-only"],
+    };
+    for mode in modes {
+        let error = failure_of(provider, mode).await;
+        // Clipped first, the message would keep "sk-ant-abcdefg", too short for
+        // the redactor to recognise.
+        assert!(
+            !error.message.contains("sk-ant"),
+            "{mode}: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("[redacted]"),
+            "{mode}: {}",
+            error.message
+        );
+    }
+}
+both!(
+    redacts_a_credential_across_the_message_clip_point,
+    secret_at_clip
+);
+
+#[tokio::test]
+async fn claude_missing_session_with_a_404_not_found_is_session_not_found_not_a_missing_model() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "unknown-session-404");
+    request.session.resume = Some("missing-session".into());
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "session_not_found");
+    assert!(
+        error
+            .message
+            .starts_with("No conversation found with session ID: missing-session"),
+        "{}",
+        error.message
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn codex_error_event_with_only_codex_error_info_is_provider_usage_limit() {
+    let error = failure_of(Provider::Codex, "usage-limit-info-no-message").await;
+    assert_eq!(error.kind, "provider_usage_limit");
+    assert!(
+        error
+            .message
+            .starts_with("Codex reported usage_limit_exceeded"),
+        "{}",
+        error.message
+    );
+}
+
+async fn denied_refused_secret(provider: Provider) {
+    let rig = Rig::new();
+    let request = rig.request(provider, "denied-refused-secret");
+    let result = run_checked(request, rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "permission_denied");
+    // Clipped first, the message would keep "sk-ant-abcdefg".
+    assert!(!error.message.contains("sk-ant"), "{}", error.message);
+    assert!(error.message.contains("[redacted]"), "{}", error.message);
+    rig.assert_nothing_left().await;
+}
+both!(
+    redacts_a_credential_across_the_clip_point_in_a_denial_stop_message,
+    denied_refused_secret
+);
+
+#[tokio::test]
+async fn claude_denial_with_an_unrelated_result_text_and_no_errors_is_failed_not_refused() {
+    let rig = Rig::new();
+    let request = rig.request(Provider::Claude, "denied-result-text-error");
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "provider_error");
+    assert_eq!(error.message, "Connection reset");
+    assert_eq!(result.permissions.denied.len(), 1);
+    rig.assert_nothing_left().await;
+}
+
+/// The standard error excerpt of a fake mode that exits 3: it must not show
+/// `hidden` and must end with `ending`.
+async fn stderr_excerpt_hides(mode: &str, hidden: &str, ending: &str) {
+    let error = failure_of(Provider::Claude, mode).await;
+    assert_eq!(error.kind, "provider_exit", "{mode}");
+    assert!(!error.message.contains(hidden), "{mode}: {}", error.message);
+    assert!(error.message.ends_with(ending), "{mode}: {}", error.message);
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_key_whose_end_starts_the_excerpt_window() {
+    stderr_excerpt_hides("stderr-key-at-window", "uvwx", "end").await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_token_whose_bearer_is_just_before_the_excerpt_window() {
+    stderr_excerpt_hides(
+        "stderr-bearer-at-window",
+        "abcdefghijklmnop123",
+        "complete line survives",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_token_on_the_line_after_a_bearer_8_kib_into_a_cut_capture() {
+    stderr_excerpt_hides(
+        "stderr-bearer-at-8k-of-capture",
+        "abcdefghijklmnop123",
+        "end",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_token_whose_bearer_is_on_the_line_before_the_excerpt() {
+    stderr_excerpt_hides(
+        "stderr-bearer-line-before-window",
+        "abcdefghijklmnop123",
+        "last",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_token_after_a_non_breaking_space_at_the_excerpt_start() {
+    stderr_excerpt_hides("stderr-nbsp-at-window", "abcdefghijklmnop123", "end").await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_keeps_the_first_line_of_a_capture_that_was_not_cut() {
+    let error = failure_of(Provider::Claude, "stderr-first-line-kept").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(
+        error
+            .message
+            .ends_with("its standard error ended with: first line second line"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_key_shape_that_the_window_cut_creates() {
+    // The window drops the "x" of "xsk-ant-aaa...", which the full-capture
+    // pass did not match as a key.
+    stderr_excerpt_hides("stderr-key-shape-after-cut", "sk-ant-", "end").await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_key_shape_that_the_300_character_cut_creates() {
+    // The 300-character cut drops the "x" of "xsk-ant-aaa..."; the key shape
+    // then follows the "... " that marks the cut.
+    let error = failure_of(Provider::Claude, "stderr-key-shape-after-300-cut").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(!error.message.contains("sk-ant-"), "{}", error.message);
+    assert!(
+        error.message.contains("ended with: ... [redacted] b"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn stderr_excerpt_marker_never_completes_a_configured_secret_that_starts_with_dots() {
+    // The 300-character cut leaves "hiddenvalue42" at the start of the
+    // excerpt; a marker touching it would rebuild the configured secret.
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    options
+        .env_set
+        .push(("MY_SERVICE_API_TOKEN".into(), "...hiddenvalue42".into()));
+    let request = rig.request(Provider::Claude, "stderr-marker-secret-after-300-cut");
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "provider_exit");
+    assert!(
+        !error.message.contains("...hiddenvalue42"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("ended with: ... hiddenvalue42 b"),
+        "{}",
+        error.message
+    );
+    rig.assert_nothing_left().await;
+}

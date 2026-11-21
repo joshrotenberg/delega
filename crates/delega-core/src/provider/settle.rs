@@ -9,7 +9,9 @@ use crate::contract::result::{Cleanup, ErrorDetail, RunResult, Timing};
 use crate::process::{Ending, ProcessReport};
 
 use super::facts::Facts;
-use super::limits::{STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS};
+use super::limits::{
+    PROVIDER_MESSAGE_CHARS, STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS,
+};
 use super::redact::Redactor;
 use super::refusal::clip;
 use super::stream::{Parsed, Terminal};
@@ -66,22 +68,44 @@ fn session_not_found(
         return false;
     };
     match (provider, &parsed.terminal) {
+        // The failed result may also carry status 404 and `not_found_error`,
+        // which alone would make it `provider_model_unavailable`.
         (Provider::Claude, Terminal::Failure { message, .. }) => {
-            kind == "provider_error" && message.starts_with(CLAUDE_UNKNOWN_SESSION)
+            (kind == "provider_error" || CLASSIFIED.contains(&kind))
+                && message.starts_with(CLAUDE_UNKNOWN_SESSION)
         }
         // Codex 0.170.0 exits 1 before it starts a thread, so nothing is on
         // standard output. A JSON `error` event before the exit makes the kind
-        // `provider_error`. All of the captured standard error is searched; the
+        // `provider_error`, or a kind the event's text names. All of the captured standard error is searched; the
         // capture is bounded. Standard output cut at the capture limit may hide
         // a thread or a terminal event, so it does not match.
         (Provider::Codex, Terminal::None)
             if code == 1 && parsed.session_ids.is_empty() && !report.stdout.truncated =>
         {
-            matches!(kind, "provider_exit" | "provider_error")
+            (matches!(kind, "provider_exit" | "provider_error") || CLASSIFIED.contains(&kind))
                 && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
         }
         _ => false,
     }
+}
+
+/// The kinds a provider failure is given by what it says (see the provider
+/// parsers). A Codex `error` event before the exit can carry one of them, and
+/// `session_not_found` still outranks it.
+const CLASSIFIED: [&str; 6] = [
+    "provider_usage_limit",
+    "provider_auth",
+    "provider_billing",
+    "provider_capacity",
+    "provider_model_unavailable",
+    "provider_context_exhausted",
+];
+
+/// A provider's message as it goes into a result: secrets redacted from the
+/// whole text first, then clipped, so a credential across the clip point is
+/// still removed whole.
+fn provider_text(redactor: &Redactor, message: &str) -> String {
+    clip(&redactor.apply(message), PROVIDER_MESSAGE_CHARS)
 }
 
 fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDetail {
@@ -93,25 +117,41 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
 }
 
 /// The last part of the provider's standard error as one line, with secrets
-/// removed. Only the final [`STDERR_SCAN_BYTES`] are read.
+/// removed. All of the captured standard error is decoded and redacted first;
+/// only then is the excerpt cut from it: its last [`STDERR_SCAN_BYTES`],
+/// joined to one line, and its last [`STDERR_EXCERPT_CHARS`] characters, so
+/// these cuts cannot split a secret. A 300-character cut is marked by a
+/// leading `... ` (with a space, so it never joins a word), and the finished
+/// excerpt is redacted once more, in case a cut left a newly
+/// credential-shaped string.
 fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
-    let bytes = &report.stderr.bytes;
-    let tail = &bytes[bytes.len().saturating_sub(STDERR_SCAN_BYTES)..];
-    let text = redactor.apply(&String::from_utf8_lossy(tail));
+    let decoded = String::from_utf8_lossy(&report.stderr.bytes);
+    let redacted = redactor.apply(&decoded);
+    let mut start = redacted.len().saturating_sub(STDERR_SCAN_BYTES);
+    while !redacted.is_char_boundary(start) {
+        start += 1;
+    }
+    let text = &redacted[start..];
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.is_empty() {
         return None;
     }
     let count = one_line.chars().count();
-    Some(if count > STDERR_EXCERPT_CHARS {
-        let tail: String = one_line
+    let cut = count > STDERR_EXCERPT_CHARS;
+    let kept: String = if cut {
+        one_line
             .chars()
             .skip(count - STDERR_EXCERPT_CHARS)
-            .collect();
-        format!("...{tail}")
+            .collect()
     } else {
         one_line
-    })
+    };
+    // The marker for the 300-character cut is followed by a space, so it
+    // never joins a word. Either cut can turn the end of a word the first
+    // pass did not match (such as `xsk-ant-...` losing its `x`) into a
+    // credential shape, so the finished excerpt is redacted once more.
+    let excerpt = if cut { format!("... {kept}") } else { kept };
+    Some(redactor.apply(&excerpt))
 }
 
 fn timing(facts: &Facts, report: &ProcessReport) -> Timing {
@@ -288,7 +328,7 @@ fn exited(
             format!(
                 "the provider stopped after {} denied request(s) it was not granted: {}",
                 parsed.denied.len(),
-                s.redactor.apply(message)
+                provider_text(s.redactor, message)
             ),
             partial,
         ),
@@ -299,7 +339,7 @@ fn exited(
             ctx,
             error(
                 kind.unwrap_or("provider_error"),
-                s.redactor.apply(message),
+                provider_text(s.redactor, message),
                 Some(code),
             ),
             partial,
@@ -317,12 +357,12 @@ fn no_terminal(
     parsed: &Parsed,
     redactor: &Redactor,
 ) -> ErrorDetail {
-    if let Some(last) = parsed.errors.last() {
+    if let Some(last) = &parsed.last_error {
         return error(
-            "provider_error",
+            parsed.error_code.unwrap_or("provider_error"),
             format!(
                 "{} (the provider exited with code {code} without a final result)",
-                redactor.apply(last)
+                provider_text(redactor, last)
             ),
             Some(code),
         );

@@ -75,8 +75,8 @@ pub const NATIVE_NUMBER_CHARS: usize = 10;
 pub const DENIAL_REASON_CHARS: usize = 300;
 /// Most tool error reasons remembered while reading a Claude Code stream.
 pub const MAX_REASONS: usize = 64;
-/// Most bytes of provider standard error read for an error message, from the
-/// end.
+/// Most bytes of redacted provider standard error read for an error message,
+/// from the end.
 pub const STDERR_SCAN_BYTES: usize = 8 * 1024;
 /// Shortest environment value that is removed from provider text. Shorter
 /// values would also remove ordinary words.

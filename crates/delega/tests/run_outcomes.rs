@@ -816,3 +816,21 @@ fn a_resume_of_a_session_the_provider_cannot_find_fails_with_session_not_found()
         rig.assert_nothing_left();
     }
 }
+
+#[test]
+fn an_unknown_model_fails_with_provider_model_unavailable_and_exits_one() {
+    for (provider, mode) in [
+        ("claude", "model-not-found"),
+        ("codex", "model-unsupported"),
+    ] {
+        let rig = Rig::new();
+        let out = rig.run(provider, mode, &["--output", "json"]);
+        assert_eq!(out.status.code(), Some(1), "{provider}");
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Failed, "{provider}");
+        let error = result.error.expect("error");
+        assert_eq!(error.kind, "provider_model_unavailable", "{provider}");
+        assert!(error.message.contains("no-such-model"), "{}", error.message);
+        rig.assert_nothing_left();
+    }
+}

@@ -20,8 +20,10 @@ pub(super) enum Terminal {
     None,
     /// The provider reported success.
     Success,
-    /// The provider reported failure: its message and, for a failure the
-    /// provider names, a stable error kind (a turn or budget limit).
+    /// The provider reported failure: its whole message (`settle` redacts it
+    /// and then clips it) and, for a failure the
+    /// provider names or delega recognises, a stable error kind (a turn,
+    /// budget or usage limit, an account, capacity or model failure).
     Failure {
         message: String,
         code: Option<&'static str>,
@@ -62,8 +64,15 @@ pub(super) struct Parsed {
     pub denied: Vec<DeniedRequest>,
     /// How many denials were not recorded because of the bound.
     pub denied_omitted: usize,
-    /// Messages from provider error events that did not end the run.
-    pub errors: Vec<String>,
+    /// How many provider error events (and Claude Code API retries) were
+    /// seen before the first terminal event.
+    pub error_count: usize,
+    /// The whole message of the last of them. `settle` redacts it and then
+    /// clips it; only the last is kept, so the state stays bounded.
+    pub last_error: Option<String>,
+    /// The error kind the last error event names, used when no terminal event
+    /// follows. `None` is `provider_error`.
+    pub error_code: Option<&'static str>,
     /// Whether the run stopped because of the latest denial: the provider
     /// reported a failure that is not a named limit, a denial was recorded and
     /// nothing after it went on or went wrong.
@@ -97,6 +106,12 @@ impl Parsed {
             id.hash(&mut hasher);
             self.session_ids_omitted.insert(hasher.finish());
         }
+    }
+
+    /// Record a provider error event's message.
+    pub fn saw_error(&mut self, message: &str) {
+        self.error_count += 1;
+        self.last_error = Some(message.to_string());
     }
 
     /// Record a denied request, bounded.

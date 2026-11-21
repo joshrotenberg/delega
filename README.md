@@ -99,6 +99,11 @@ to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
 the skills. Everything in it is built except the parts marked **Later** and the
 items listed under Deferred at the end.
 
+A failed run's `error.kind` says why it failed, including account, billing,
+capacity, model and context failures the provider reports (`provider_auth`,
+`provider_capacity`, `provider_model_unavailable` and others); see the
+[error kinds](docs/providers.md#error-kinds).
+
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.
 
