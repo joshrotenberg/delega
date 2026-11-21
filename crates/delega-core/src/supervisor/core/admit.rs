@@ -74,6 +74,7 @@ impl Core {
             origin,
             state: WorkerState::Idle,
             session_id,
+            session_usage: None,
             current: None,
             queue: [run_id.clone()].into(),
             runs: vec![run_id.clone()],

@@ -271,7 +271,15 @@ pub(super) fn settle(
     }
     result.provider_notes = notes;
     result.applied = s.facts.result_applied();
-    result.usage = parsed.usage.clone();
+    // A resumed run's stream may give only session totals, which are not the
+    // run's own; the supervisor works a follow-up's out from the worker's
+    // previous totals.
+    result.usage = if s.resume.is_some() {
+        parsed.usage.clone()
+    } else {
+        parsed.fresh_usage.clone()
+    };
+    result.session_usage = parsed.session_usage.clone();
     if !s.ephemeral {
         result.session_id = parsed.session_id.clone();
     }

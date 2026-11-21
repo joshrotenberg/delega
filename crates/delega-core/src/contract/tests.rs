@@ -125,6 +125,13 @@ fn full_result() -> RunResult {
             reasoning_tokens: Some(4),
             cost_usd: Some(0.5),
         }),
+        session_usage: Some(Usage {
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            cached_tokens: Some(30),
+            reasoning_tokens: Some(40),
+            cost_usd: Some(1.5),
+        }),
         timing: Timing {
             queued_at: "2026-11-18T10:00:00Z".into(),
             started_at: Some("2026-11-18T10:00:01Z".into()),
@@ -190,6 +197,15 @@ fn result_with_an_unknown_field_is_still_read() {
     let mut value = serde_json::to_value(full_result()).unwrap();
     value["added_later"] = json!(true);
     assert!(serde_json::from_value::<RunResult>(value).is_ok());
+}
+
+#[test]
+fn result_written_before_session_usage_existed_is_still_read() {
+    let mut value = serde_json::to_value(full_result()).unwrap();
+    value.as_object_mut().unwrap().remove("session_usage");
+    let result: RunResult = serde_json::from_value(value).unwrap();
+    assert_eq!(result.session_usage, None);
+    assert!(result.usage.is_some());
 }
 
 #[test]

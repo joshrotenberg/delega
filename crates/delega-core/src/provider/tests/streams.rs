@@ -48,7 +48,11 @@ fn claude_result_event_gives_text_usage_cost_session_and_denials() {
         (usage.input_tokens, usage.output_tokens, usage.cached_tokens),
         (Some(3), Some(9), Some(2))
     );
-    assert_eq!(usage.cost_usd, Some(0.25));
+    // Without model_usage_since_last_result, the session's total cost is the
+    // run's only when the run did not resume.
+    assert_eq!(usage.cost_usd, None);
+    assert_eq!(parsed.fresh_usage.unwrap().cost_usd, Some(0.25));
+    assert_eq!(parsed.session_usage.unwrap().cost_usd, Some(0.25));
     let denied: Vec<&str> = parsed.denied.iter().map(|d| d.request.as_str()).collect();
     assert_eq!(denied, ["Bash: rm -rf x", "Read: /etc/passwd", "Grep"]);
 }
@@ -82,12 +86,54 @@ fn claude_failure_subtypes_and_errors_become_a_failure_message() {
     assert_eq!(flagged.final_text.as_deref(), Some("x"));
 }
 
+/// The pair captured from Claude Code 2.1.329 on a resumed run.
+const CLAUDE_RESUMED_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s-1","result":"ok","total_cost_usd":0.0173514,"usage":{"input_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":100,"output_tokens":4},"modelUsage":{"claude-a":{"inputTokens":9,"outputTokens":205,"cacheReadInputTokens":300,"cacheCreationInputTokens":40,"costUSD":0.0173514}},"model_usage_since_last_result":{"claude-a":{"inputTokens":3,"outputTokens":4,"cacheReadInputTokens":100,"cacheCreationInputTokens":20,"costUSD":0.0059314}}}"#;
+
+#[test]
+fn claude_run_cost_is_the_per_run_model_cost_not_the_session_total() {
+    let parsed = claude::parse(&lines(&[CLAUDE_RESUMED_RESULT]));
+    let usage = parsed.usage.unwrap();
+    assert_eq!(usage.cost_usd, Some(0.0059314));
+    assert_eq!(usage.output_tokens, Some(4));
+    assert_eq!(parsed.fresh_usage.unwrap().cost_usd, Some(0.0059314));
+}
+
+#[test]
+fn claude_session_usage_sums_model_usage_and_takes_total_cost() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"result","subtype":"success","result":"x","total_cost_usd":0.5,"modelUsage":{"a":{"inputTokens":1,"cacheCreationInputTokens":2,"outputTokens":3,"cacheReadInputTokens":4,"costUSD":0.2},"b":{"inputTokens":10,"outputTokens":30,"cacheReadInputTokens":40,"costUSD":0.3}}}"#,
+    ]));
+    let session = parsed.session_usage.unwrap();
+    assert_eq!(
+        (
+            session.input_tokens,
+            session.output_tokens,
+            session.cached_tokens,
+            session.reasoning_tokens,
+            session.cost_usd
+        ),
+        (Some(13), Some(33), Some(44), None, Some(0.5))
+    );
+}
+
+#[test]
+fn claude_negative_or_missing_model_costs_are_ignored() {
+    let parsed = claude::parse(&lines(&[
+        r#"{"type":"result","subtype":"success","result":"x","total_cost_usd":-1,"usage":{"output_tokens":2},"model_usage_since_last_result":{"a":{"costUSD":-0.5},"b":{"costUSD":"x"}}}"#,
+    ]));
+    assert_eq!(parsed.usage.unwrap().cost_usd, None);
+    assert_eq!(parsed.fresh_usage.unwrap().cost_usd, None);
+    assert_eq!(parsed.session_usage, None);
+}
+
 #[test]
 fn claude_with_no_usable_numbers_reports_no_usage() {
     let parsed = claude::parse(&lines(&[
         r#"{"type":"result","subtype":"success","result":"x","usage":{"service_tier":"standard"}}"#,
     ]));
     assert_eq!(parsed.usage, None);
+    assert_eq!(parsed.fresh_usage, None);
+    assert_eq!(parsed.session_usage, None);
 }
 
 #[test]
@@ -105,7 +151,11 @@ fn codex_events_give_thread_final_message_usage_and_declined_commands() {
     assert_eq!(parsed.session_id.as_deref(), Some("th-1"));
     assert_eq!(parsed.final_text.as_deref(), Some("done"));
     assert_eq!(parsed.terminal, Terminal::Success);
-    let usage = parsed.usage.unwrap();
+    // The counts are the thread's totals: the run's own only for a run that
+    // did not resume.
+    assert_eq!(parsed.usage, None);
+    assert_eq!(parsed.fresh_usage, parsed.session_usage);
+    let usage = parsed.session_usage.unwrap();
     assert_eq!(
         (
             usage.input_tokens,

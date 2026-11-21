@@ -16,7 +16,7 @@ use super::hook::{GRANTS_ENV, HookCommand};
 use super::launch::{Built, Elide, Inputs};
 use super::limits::{DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, SETTINGS_ARGUMENT_LIMIT};
 use super::refusal::{Refusal, clip};
-use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
+use super::stream::{Parsed, Terminal, cost, count, for_each_event, non_empty, str_field};
 
 /// The built-in tools `full` grants. Anything else a Claude Code install offers
 /// (sub-agents, MCP tools, background tasks) stays off.
@@ -461,10 +461,35 @@ fn denial_target(item: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn usage(event: &Map<String, Value>) -> Option<Usage> {
+/// The sum of `keys` over every model's entry in a per-model usage object such
+/// as `modelUsage`. `None` when no entry has any of them.
+fn model_count(models: Option<&Value>, keys: &[&str]) -> Option<u64> {
+    let entries = models?.as_object()?;
+    entries
+        .values()
+        .flat_map(|entry| keys.iter().filter_map(|k| count(entry, k)))
+        .reduce(u64::saturating_add)
+}
+
+/// The sum of `costUSD` over every model's entry in a per-model usage object.
+fn model_cost(models: Option<&Value>) -> Option<f64> {
+    let entries = models?.as_object()?;
+    entries
+        .values()
+        .filter_map(|entry| cost(entry.get("costUSD")))
+        .reduce(|a, b| a + b)
+        .filter(|c| c.is_finite())
+}
+
+/// Usage from a `result` event: the run's own (`usage`, and `fresh_usage` for
+/// a run that did not resume) and the session's (`session_usage`).
+///
+/// The result's `usage` token counts are the run's own; `total_cost_usd` and
+/// `modelUsage` are session totals; `model_usage_since_last_result` is the
+/// run's own per-model figures, so its `costUSD` is the run's cost.
+fn usages(event: &Map<String, Value>, parsed: &mut Parsed) {
     let counts = event.get("usage");
-    let cost = event.get("total_cost_usd").and_then(Value::as_f64);
-    let usage = Usage {
+    let tokens = Usage {
         // Input tokens that were sent, including those written to the cache.
         input_tokens: counts.and_then(|u| {
             let plain = count(u, "input_tokens");
@@ -477,13 +502,28 @@ fn usage(event: &Map<String, Value>) -> Option<Usage> {
         output_tokens: counts.and_then(|u| count(u, "output_tokens")),
         cached_tokens: counts.and_then(|u| count(u, "cache_read_input_tokens")),
         reasoning_tokens: None,
-        cost_usd: cost.filter(|c| c.is_finite() && *c >= 0.0),
+        cost_usd: None,
     };
-    let empty = usage.input_tokens.is_none()
-        && usage.output_tokens.is_none()
-        && usage.cached_tokens.is_none()
-        && usage.cost_usd.is_none();
-    (!empty).then_some(usage)
+    let total_cost = cost(event.get("total_cost_usd"));
+    let run_cost = model_cost(event.get("model_usage_since_last_result"));
+    parsed.usage = non_empty(Usage {
+        cost_usd: run_cost,
+        ..tokens.clone()
+    });
+    // Without the per-run figures, the session total is the run's cost only
+    // when the run started the session.
+    parsed.fresh_usage = non_empty(Usage {
+        cost_usd: run_cost.or(total_cost),
+        ..tokens
+    });
+    let models = event.get("modelUsage");
+    parsed.session_usage = non_empty(Usage {
+        input_tokens: model_count(models, &["inputTokens", "cacheCreationInputTokens"]),
+        output_tokens: model_count(models, &["outputTokens"]),
+        cached_tokens: model_count(models, &["cacheReadInputTokens"]),
+        reasoning_tokens: None,
+        cost_usd: total_cost,
+    });
 }
 
 /// The whole failure text of a failed result. `settle` redacts it and then
@@ -756,7 +796,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                         code,
                     }
                 };
-                parsed.usage = usage(event);
+                usages(event, &mut parsed);
                 if let Some(items) = event.get("permission_denials").and_then(Value::as_array) {
                     for item in items {
                         let tool = item

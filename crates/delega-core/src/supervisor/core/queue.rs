@@ -15,6 +15,7 @@ use super::super::record::Run;
 use super::super::results;
 use super::super::runner;
 use super::super::state::{RunState, WorkerState};
+use super::super::usage;
 use super::{Core, Mode};
 
 impl Core {
@@ -226,7 +227,7 @@ impl Core {
     /// Make a run finished with `result`: the one place a run ends. Frees its
     /// running slot, tells whoever waits on it, records the session, and lines
     /// up the worker's next run.
-    pub(super) fn finish_run(&mut self, id: &str, result: RunResult) {
+    pub(super) fn finish_run(&mut self, id: &str, mut result: RunResult) {
         let seq = self.next_cursor();
         let Some(run) = self.runs.get_mut(id) else {
             return;
@@ -248,6 +249,18 @@ impl Core {
         run.in_ready = false;
         run.finished_seq = Some(seq);
         run.finished_at = Some(Instant::now());
+        // A run of the worker's own session (or of the session a worker
+        // without one is about to take) that reported totals: a follow-up
+        // without its own token counts gets the difference from the totals
+        // the worker last saw, and these totals become the ones it last saw.
+        if let Some(worker) = run.worker.as_ref().and_then(|w| self.workers.get_mut(w))
+            && result.session_id.is_some()
+            && (worker.session_id.is_none() || result.session_id == worker.session_id)
+            && result.session_usage.is_some()
+        {
+            usage::fill_from_totals(&mut result, worker.session_usage.as_ref());
+            worker.session_usage = result.session_usage.clone();
+        }
         let session = result.session_id.clone();
         self.note_cleanup(id, &result);
         let Some(run) = self.runs.get_mut(id) else {

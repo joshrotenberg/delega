@@ -69,6 +69,7 @@ mod record;
 mod results;
 mod runner;
 mod state;
+mod usage;
 mod views;
 
 #[cfg(test)]

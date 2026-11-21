@@ -179,6 +179,22 @@ none, and can. `list` flags it: `can_follow_up` is false for a closed worker,
 an `ephemeral` one, and one that has no session and no run that might still
 report one.
 
+### Follow-up usage
+
+A worker keeps the latest `session_usage` that a run of its session reported.
+A run whose result has `session_usage` but no run token counts in `usage`
+(Codex reports only the thread's totals on a resumed turn) gets `usage` filled
+with the difference from those previous totals, field by field over the fields
+both have, only when every such value is at least the previous one; otherwise
+`usage` stays empty. Fields the result already has are kept, and a result with
+its own token counts (Claude Code) is left as it is. The result's totals then
+become the worker's. Only a run that reported the worker's session (or the
+first session of a worker that had none) counts.
+
+The difference covers everything since the previous reported totals, including
+a run in between that reported none, such as a failed run: a follow-up after
+it reports the usage of both.
+
 ## Waiting and cursors
 
 One counter numbers every run that finishes and every activity entry. A response

@@ -12,7 +12,7 @@ use crate::contract::result::Usage;
 
 use super::launch::{Built, Elide, Inputs};
 use super::refusal::Refusal;
-use super::stream::{Parsed, Terminal, count, for_each_event, str_field};
+use super::stream::{Parsed, Terminal, count, for_each_event, non_empty, str_field};
 
 /// Features switched off for every worker.
 const DISABLED_FEATURES: [&str; 4] = ["plugins", "apps", "hooks", "multi_agent"];
@@ -193,20 +193,23 @@ pub(super) fn disabled_servers(stdout: &str) -> Result<String, String> {
     Ok(format!("mcp_servers={{{}}}", entries.join(",")))
 }
 
-fn usage(event: &Map<String, Value>) -> Option<Usage> {
-    let counts = event.get("usage")?;
-    let usage = Usage {
-        input_tokens: count(counts, "input_tokens"),
-        output_tokens: count(counts, "output_tokens"),
-        cached_tokens: count(counts, "cached_input_tokens"),
-        reasoning_tokens: count(counts, "reasoning_output_tokens"),
-        cost_usd: None,
-    };
-    let empty = usage.input_tokens.is_none()
-        && usage.output_tokens.is_none()
-        && usage.cached_tokens.is_none()
-        && usage.reasoning_tokens.is_none();
-    (!empty).then_some(usage)
+/// Usage from a `turn.completed` or `turn.failed` event. Codex reports the
+/// thread's totals, so they are the session's, and the run's own only when the
+/// run did not resume the thread. The run's own figures on a resumed thread
+/// are not reported.
+fn usages(event: &Map<String, Value>, parsed: &mut Parsed) {
+    let session = event.get("usage").and_then(|counts| {
+        non_empty(Usage {
+            input_tokens: count(counts, "input_tokens"),
+            output_tokens: count(counts, "output_tokens"),
+            cached_tokens: count(counts, "cached_input_tokens"),
+            reasoning_tokens: count(counts, "reasoning_output_tokens"),
+            cost_usd: None,
+        })
+    });
+    parsed.usage = None;
+    parsed.fresh_usage = session.clone();
+    parsed.session_usage = session;
 }
 
 /// The error kind a `codex_error_info` name (see [`info_name`]) stands for,
@@ -392,7 +395,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
             }
             "turn.completed" => {
                 parsed.terminal = Terminal::Success;
-                parsed.usage = usage(event);
+                usages(event, &mut parsed);
             }
             "turn.failed" => {
                 let text = event
@@ -409,7 +412,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     code: failure_kind(event, &message),
                     message,
                 };
-                parsed.usage = usage(event);
+                usages(event, &mut parsed);
             }
             "error" => {
                 // An event with only a structured `codex_error_info` counts

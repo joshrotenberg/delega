@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::contract::applied::Applied;
 use crate::contract::permissions::Mode;
 use crate::contract::request::{Provider, Request};
-use crate::contract::result::{RunResult, WorkerRef};
+use crate::contract::result::{RunResult, Usage, WorkerRef};
 
 use super::activity::Activity;
 use super::state::{RunState, WorkerState};
@@ -124,6 +124,9 @@ pub(super) struct Worker {
     /// The worker's session: the one it was started to resume, or else the
     /// first one a run reported. It does not change once set.
     pub session_id: Option<String>,
+    /// The latest `session_usage` a run of the worker's session reported: the
+    /// baseline a follow-up's own usage is worked out from.
+    pub session_usage: Option<Usage>,
     /// The run that is running.
     pub current: Option<String>,
     /// Runs waiting, next first.

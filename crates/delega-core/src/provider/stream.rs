@@ -58,8 +58,14 @@ pub(super) struct Parsed {
     pub last_text: Option<String>,
     /// How the stream ended.
     pub terminal: Terminal,
-    /// Token counts and cost.
+    /// The run's own token counts and cost that the stream gives whether or
+    /// not the run resumed a session.
     pub usage: Option<Usage>,
+    /// The run's own token counts and cost when the run did not resume a
+    /// session, so the session is the run and its totals are the run's.
+    pub fresh_usage: Option<Usage>,
+    /// The provider's totals for the whole session through this run.
+    pub session_usage: Option<Usage>,
     /// Requests answered no.
     pub denied: Vec<DeniedRequest>,
     /// How many denials were not recorded because of the bound.
@@ -184,6 +190,23 @@ pub(super) fn str_field<'a>(event: &'a Map<String, Value>, key: &str) -> Option<
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
+}
+
+/// `usage` unless every field is empty.
+pub(super) fn non_empty(usage: Usage) -> Option<Usage> {
+    let empty = usage.input_tokens.is_none()
+        && usage.output_tokens.is_none()
+        && usage.cached_tokens.is_none()
+        && usage.reasoning_tokens.is_none()
+        && usage.cost_usd.is_none();
+    (!empty).then_some(usage)
+}
+
+/// A cost: a finite number that is not negative.
+pub(super) fn cost(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|c| c.is_finite() && *c >= 0.0)
 }
 
 /// A count field.

@@ -169,12 +169,31 @@ One JSON object, versioned, the same from every surface.
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied: the configuration file, which layer set each request field, the environment, the deny rules and the context mode, as names, counts, paths and digests. Optional; see [`applied`](#applied). |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
-| `usage` | Tokens in and out, cached, reasoning; `cost_usd` when the provider reports it. |
+| `usage` | This run's own consumption: tokens in and out, cached, reasoning, and `cost_usd`. A field is present only when delega knows the run's own value. See [Usage](#usage). |
+| `session_usage` | The provider's totals for the whole session through this run, in the same fields, when the provider reports totals. For a run that started its session, the session is the run. |
 | `timing` | Queued, started and finished times, duration, and the time limit applied as `timeout_secs`. |
 | `provenance` | delega version, and the provider executable path and version. `build` is in the schema but not filled yet. |
 
 A caller that only needs to know what happened reads `outcome`, `text`, `error`
 and `cleanup`.
+
+### Usage
+
+On a resumed run the providers report session totals for some values, so
+`usage` is not copied from the provider as is:
+
+- Claude Code: the tokens are the run's own. `cost_usd` is the run's own cost
+  from `model_usage_since_last_result`; without it, a run that did not resume
+  takes the session's total cost, and a resumed run has no `cost_usd`.
+  `session_usage` has the session's total cost and tokens.
+- Codex: only the thread's totals are reported. They are `session_usage`, and
+  `usage` too for a run that did not resume. A resumed run has no `usage` from
+  the provider layer (`delega run --resume`).
+- Under the supervisor (MCP, library), a follow-up that has `session_usage` but
+  no run token counts gets `usage` from the difference with the worker's
+  previous totals; see [supervisor.md](supervisor.md#follow-up-usage).
+
+Compact reads leave out `usage` and `session_usage`, as they do provenance.
 
 ### `applied`
 

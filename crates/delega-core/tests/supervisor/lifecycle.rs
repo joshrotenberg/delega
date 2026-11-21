@@ -502,7 +502,7 @@ async fn compact_and_full_finished_reads_differ_in_what_they_hold() {
     for key in ["run", "outcome", "text", "cleanup", "timing", "session_id"] {
         assert!(result.contains_key(key), "compact lacks {key}: {json}");
     }
-    for key in ["usage", "provenance", "schema_version"] {
+    for key in ["usage", "session_usage", "provenance", "schema_version"] {
         assert!(!result.contains_key(key), "compact holds {key}: {json}");
     }
     assert!(json.get("progress").is_none(), "{json}");
@@ -510,7 +510,13 @@ async fn compact_and_full_finished_reads_differ_in_what_they_hold() {
     let full = read_full(&supervisor, &started.run).await;
     let json = serde_json::to_value(&full).expect("serialize");
     let result = json["result"].as_object().expect("result object");
-    for key in ["usage", "provenance", "schema_version", "permissions"] {
+    for key in [
+        "usage",
+        "session_usage",
+        "provenance",
+        "schema_version",
+        "permissions",
+    ] {
         assert!(result.contains_key(key), "full lacks {key}: {json}");
     }
     let progress = &json["progress"];

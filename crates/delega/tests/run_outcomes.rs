@@ -33,9 +33,14 @@ fn a_completed_run_in_json_prints_the_whole_result() {
         assert_eq!(result.cleanup, Cleanup::Confirmed);
         assert_eq!(result.timing.timeout_secs, 600);
         assert!(result.session_id.is_some());
+        // A run that started its session: its usage is the session's totals.
         assert!(result.usage.is_some());
+        assert_eq!(result.session_usage, result.usage);
         // The document is the only thing on standard output.
         let whole = text(&out.stdout);
+        let json: serde_json::Value = serde_json::from_str(&whole).expect("json");
+        assert!(json["usage"].is_object(), "{provider}: {whole}");
+        assert!(json["session_usage"].is_object(), "{provider}: {whole}");
         assert!(whole.trim_start().starts_with('{') && whole.ends_with("}\n"));
         rig.assert_nothing_left();
     }
