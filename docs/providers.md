@@ -221,10 +221,11 @@ Provider standard error and provider error messages can echo what the provider
 was given. Standard error is captured up to its last 64 KiB. All of the
 captured standard error is redacted before the excerpt is cut from it: its last
 8 KiB, joined to one line, and its last 300 characters. The excerpt's own cuts
-come after redaction, so they cannot split a secret. After both cuts, the cut
-text is redacted once more, before the `...` that marks the 300-character cut is
-put in front of it, so neither cut can leave a newly key-shaped string (such as
-the end of `xsk-ant-...` without its `x`) unredacted.
+come after redaction, so they cannot split a secret. When the 300-character cut
+removed text, the excerpt starts with `... ` (three dots and a space, so the
+marker never joins a word). After both cuts and the marker, the finished excerpt
+is redacted once more, so neither cut can leave a newly key-shaped string (such
+as the end of `xsk-ant-...` without its `x`) unredacted.
 
 The remaining limit: when standard error was longer than its 64 KiB capture,
 the start of the capture is a cut made before redaction. A secret cut there
@@ -244,8 +245,9 @@ after redaction. Two kinds of text are replaced with `[redacted]`:
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,
 quotes and commas separate tokens. The text after `Bearer` is removed whole. The
-shapes are a heuristic; a credential in another form is not caught. The
-answer text itself is the provider's output and is not redacted. A denied
+shapes are a heuristic; a credential in another form is not caught. Configured
+secret values that overlap delega's own markers (`...`, `[redacted]`) are not
+supported. The answer text itself is the provider's output and is not redacted. A denied
 request records the command or path the provider asked for, as written.
 
 A structured answer that parses but does not satisfy the schema is `completed`

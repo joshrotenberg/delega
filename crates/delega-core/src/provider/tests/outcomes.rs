@@ -1193,13 +1193,40 @@ async fn stderr_excerpt_redacts_a_key_shape_that_the_window_cut_creates() {
 #[tokio::test]
 async fn stderr_excerpt_redacts_a_key_shape_that_the_300_character_cut_creates() {
     // The 300-character cut drops the "x" of "xsk-ant-aaa..."; the key shape
-    // then follows the "..." that marks the cut.
+    // then follows the "... " that marks the cut.
     let error = failure_of(Provider::Claude, "stderr-key-shape-after-300-cut").await;
     assert_eq!(error.kind, "provider_exit");
     assert!(!error.message.contains("sk-ant-"), "{}", error.message);
     assert!(
-        error.message.contains("ended with: ...[redacted] b"),
+        error.message.contains("ended with: ... [redacted] b"),
         "{}",
         error.message
     );
+}
+
+#[tokio::test]
+async fn stderr_excerpt_marker_never_completes_a_configured_secret_that_starts_with_dots() {
+    // The 300-character cut leaves "hiddenvalue42" at the start of the
+    // excerpt; a marker touching it would rebuild the configured secret.
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    options
+        .env_set
+        .push(("MY_SERVICE_API_TOKEN".into(), "...hiddenvalue42".into()));
+    let request = rig.request(Provider::Claude, "stderr-marker-secret-after-300-cut");
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "provider_exit");
+    assert!(
+        !error.message.contains("...hiddenvalue42"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("ended with: ... hiddenvalue42 b"),
+        "{}",
+        error.message
+    );
+    rig.assert_nothing_left().await;
 }
