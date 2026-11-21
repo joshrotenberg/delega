@@ -116,33 +116,34 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
     }
 }
 
-/// The captured standard error without its partial first line, when the
-/// capture was cut at its limit: the cut may fall inside a credential or just
-/// after `Bearer`, leaving text the redactor cannot recognise. Everything up
-/// to and including the first newline is dropped; with no newline, the first
-/// word after any leading whitespace.
-fn without_cut_start(text: &str) -> &str {
-    if let Some(newline) = text.find('\n') {
-        return &text[newline + 1..];
+/// The captured standard error bytes to redact. When the capture was cut at
+/// its limit, its start may fall inside a secret, inside a character, or after
+/// a `Bearer` or a private key's first line that is no longer there, leaving
+/// text the redactor cannot recognise. So the first [`STDERR_SCAN_BYTES`] of
+/// such a capture are dropped, and then everything through the next newline;
+/// with no further newline nothing is kept. A secret longer than that which
+/// runs across the start of the capture can still show its end. A capture
+/// that was not cut is kept whole.
+fn without_cut_start(captured: &[u8], truncated: bool) -> &[u8] {
+    if !truncated {
+        return captured;
     }
-    let word = text.trim_start();
-    word.find(char::is_whitespace)
-        .map_or("", |end| &word[end..])
+    let after = &captured[captured.len().min(STDERR_SCAN_BYTES)..];
+    after
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(&[], |newline| &after[newline + 1..])
 }
 
 /// The last part of the provider's standard error as one line, with secrets
-/// removed. All of the captured standard error is redacted first; only then
-/// is the excerpt cut from it: its last [`STDERR_SCAN_BYTES`], joined to one
-/// line, and its last [`STDERR_EXCERPT_CHARS`] characters. A cut made after
-/// redaction cannot split a secret.
+/// removed. The captured standard error (see [`without_cut_start`]) is
+/// redacted first; only then is the excerpt cut from it: its last
+/// [`STDERR_SCAN_BYTES`], joined to one line, and its last
+/// [`STDERR_EXCERPT_CHARS`] characters, so these cuts cannot split a secret.
 fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
-    let captured = String::from_utf8_lossy(&report.stderr.bytes);
-    let kept = if report.stderr.truncated {
-        without_cut_start(&captured)
-    } else {
-        &captured
-    };
-    let redacted = redactor.apply(kept);
+    let kept = without_cut_start(&report.stderr.bytes, report.stderr.truncated);
+    let decoded = String::from_utf8_lossy(kept);
+    let redacted = redactor.apply(&decoded);
     let mut start = redacted.len().saturating_sub(STDERR_SCAN_BYTES);
     while !redacted.is_char_boundary(start) {
         start += 1;

@@ -218,18 +218,21 @@ provider's events are read is in its Stream section ([Claude Code](#stream),
 ### Text from the provider
 
 Provider standard error and provider error messages can echo what the provider
-was given. Secrets are removed from the whole text first, and only then is the
-text cut, so a cut can never split a secret. Standard error is captured up to
-its last 64 KiB; all of the capture is redacted, and the excerpt is then cut
-from the redacted text: its last 8 KiB, joined to one line, and its last 300
-characters. When the capture itself was cut at its limit, its partial first
-line is dropped before redaction, because the cut may fall inside a credential
-or after a `Bearer` that is no longer there: everything up to and including the
-first newline, or, when the capture holds no newline, its first word after any
-leading whitespace (Unicode whitespace, so a non-breaking space counts). A
-capture that was not cut keeps its first line. A provider error message is kept
-whole and cut to its first 500 characters after redaction. Two kinds of text
-are replaced with `[redacted]`:
+was given. Secrets are removed before the text is cut. Standard error is
+captured up to its last 64 KiB. All of the capture is redacted, and the excerpt
+is then cut from the redacted text: its last 8 KiB, joined to one line, and its
+last 300 characters. These cuts come after redaction and cannot split a secret.
+
+The start of a capture that was itself cut at its limit can fall inside a
+secret, inside a character, or after a `Bearer` or a private key's first line
+that is no longer captured. So, before decoding and redacting such a capture,
+its first 8 KiB are dropped and then everything through the next newline; when
+no newline follows, nothing of the capture is used. A capture that was not cut
+is used whole. The remaining limit: a secret longer than 8 KiB that runs across
+the start of a cut capture can still show its end in the excerpt.
+
+A provider error message is kept whole and cut to its first 500 characters
+after redaction. Two kinds of text are replaced with `[redacted]`:
 
 - the value of every variable passed to the provider whose name looks like a
   secret or belongs to the provider, when the value is at least 6 characters;

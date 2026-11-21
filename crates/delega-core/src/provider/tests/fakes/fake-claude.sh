@@ -100,6 +100,16 @@
 #   stderr-nbsp-at-capture  no newline at all; the capture starts with a
 #                    non-breaking space, a space and TOKEN after
 #                    "Authorization: Bearer", then spaces and "end"
+#   stderr-bearer-newline-at-capture  the capture starts at the newline of
+#                    "Authorization: Bearer" / TOKEN, then the line TOKEN, a key
+#                    block and "end"
+#   stderr-split-char-at-capture  no newline at all; the capture starts on the
+#                    second byte of a non-breaking space after "Authorization:
+#                    Bearer", then " TOKEN ", a key block and " end"
+#   stderr-key-lines-at-capture  a multi-line private key whose BEGIN line and
+#                    the start of its first body line are before the capture;
+#                    the capture holds the rest of that line, 40 BODYLINE lines,
+#                    the END line, a key block and "end"
 #   Standard error within the capture limit (exit 3):
 #   stderr-bearer-line-before-window  "Authorization: Bearer", a newline, the
 #                    line "TOKEN" starting exactly 8 KiB from the end, newlines
@@ -512,6 +522,31 @@ case "$mode" in
   stderr-nbsp-at-capture)
     init
     { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123 '; key_block 65449; printf ' end'; } >&2
+    exit 3
+    ;;
+  stderr-bearer-newline-at-capture)
+    init
+    { printf 'Authorization: Bearer\nabcdefghijklmnop123\n'; key_block 65450; printf '\nend\n'; } >&2
+    exit 3
+    ;;
+  stderr-split-char-at-capture)
+    init
+    { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123 '; key_block 65450; printf ' end'; } >&2
+    exit 3
+    ;;
+  stderr-key-lines-at-capture)
+    init
+    {
+      printf -- '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAXYZ0123456789\n'
+      n=0
+      while [ $n -lt 40 ]; do
+        printf 'BODYLINE'; head -c 56 /dev/zero | tr '\0' Q; printf '\n'
+        n=$((n+1))
+      done
+      printf -- '-----END RSA PRIVATE KEY-----\n'
+      key_block 62827
+      printf '\nend\n'
+    } >&2
     exit 3
     ;;
   stderr-bearer-line-before-window)

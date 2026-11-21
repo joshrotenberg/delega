@@ -1155,10 +1155,29 @@ async fn stderr_excerpt_drops_a_token_whose_bearer_ends_the_line_before_the_capt
     .await;
 }
 
+/// The end of the error message when no standard error excerpt is added.
+const NO_EXCERPT: &str = "without a final result";
+
 #[tokio::test]
-async fn stderr_excerpt_without_a_newline_drops_a_token_after_leading_space_at_the_capture() {
+async fn stderr_excerpt_of_a_cut_capture_with_no_later_newline_keeps_nothing_after_a_bearer() {
     stderr_excerpt_hides(
         "stderr-bearer-at-capture-one-line",
+        "abcdefghijklmnop123",
+        NO_EXCERPT,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_of_a_cut_capture_with_no_later_newline_keeps_nothing_after_a_non_breaking_space()
+ {
+    stderr_excerpt_hides("stderr-nbsp-at-capture", "abcdefghijklmnop123", NO_EXCERPT).await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_drops_a_token_when_the_capture_starts_at_the_newline_after_bearer() {
+    stderr_excerpt_hides(
+        "stderr-bearer-newline-at-capture",
         "abcdefghijklmnop123",
         "end",
     )
@@ -1166,8 +1185,18 @@ async fn stderr_excerpt_without_a_newline_drops_a_token_after_leading_space_at_t
 }
 
 #[tokio::test]
-async fn stderr_excerpt_without_a_newline_skips_a_non_breaking_space_at_the_capture() {
-    stderr_excerpt_hides("stderr-nbsp-at-capture", "abcdefghijklmnop123", "end").await;
+async fn stderr_excerpt_drops_a_token_when_the_capture_starts_inside_a_multi_byte_space() {
+    stderr_excerpt_hides(
+        "stderr-split-char-at-capture",
+        "abcdefghijklmnop123",
+        NO_EXCERPT,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_drops_private_key_lines_whose_begin_line_the_capture_cut_off() {
+    stderr_excerpt_hides("stderr-key-lines-at-capture", "BODYLINE", "end").await;
 }
 
 #[tokio::test]
