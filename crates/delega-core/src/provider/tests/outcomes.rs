@@ -1143,3 +1143,42 @@ both!(
     redacts_a_credential_across_the_clip_point_in_a_denial_stop_message,
     denied_refused_secret
 );
+
+#[tokio::test]
+async fn claude_one_line_stderr_excerpt_drops_a_bearer_token_after_leading_space() {
+    let error = failure_of(Provider::Claude, "stderr-bearer-at-scan-one-line").await;
+    assert_eq!(error.kind, "provider_exit");
+    // The window opens on the space after "Bearer"; the token after it is
+    // the cut word.
+    assert!(
+        !error.message.contains("abcdefghijklmnop123"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.ends_with("end"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn claude_stderr_excerpt_keeps_a_whole_first_line_when_the_scan_starts_at_a_line() {
+    let error = failure_of(Provider::Claude, "stderr-line-at-scan").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(
+        error.message.contains("complete first line last"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("earlier"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn claude_denial_with_an_unrelated_result_text_and_no_errors_is_failed_not_refused() {
+    let rig = Rig::new();
+    let request = rig.request(Provider::Claude, "denied-result-text-error");
+    let result = run_checked(request, rig.options(Provider::Claude)).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "provider_error");
+    assert_eq!(error.message, "Connection reset");
+    assert_eq!(result.permissions.denied.len(), 1);
+    rig.assert_nothing_left().await;
+}

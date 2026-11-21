@@ -411,3 +411,30 @@ fn codex_turn_failed_with_only_codex_error_info_names_the_kind_and_says_so() {
         }
     );
 }
+
+#[test]
+fn claude_structured_status_outranks_prompt_too_long_text() {
+    let parsed = claude::parse(
+        br#"{"type":"result","subtype":"success","is_error":true,"api_error_status":503,"result":"Prompt is too long"}"#,
+    );
+    assert_eq!(failure_code(&parsed), Some("provider_capacity"));
+}
+
+#[test]
+fn claude_denial_with_no_errors_is_judged_by_its_result_text() {
+    let denial = r#""permission_denials":[{"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"make"}}]"#;
+    let about = claude::parse(
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"result":"Permission to use Bash was denied",{denial}}}"#
+        )
+        .as_bytes(),
+    );
+    assert!(about.stopped_by_denial);
+    let other = claude::parse(
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"result":"Connection reset",{denial}}}"#
+        )
+        .as_bytes(),
+    );
+    assert!(!other.stopped_by_denial);
+}

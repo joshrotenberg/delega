@@ -124,15 +124,25 @@ fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String>
     let mut tail = &bytes[start..];
     // When the scan starts inside the output, its first line may hold the
     // end of a credential whose start (or whose `Bearer`) the redactor would
-    // need; drop up to and including the first newline. A window with no
-    // newline drops only its partial first word.
+    // need; drop up to and including the first newline, unless the window
+    // starts right after a newline and so on a whole line. A window with no
+    // newline drops its first word, after any leading whitespace, whatever
+    // came before it.
     if start > 0 {
+        let at_line_start = bytes[start - 1] == b'\n';
         let cut = match tail.iter().position(|b| *b == b'\n') {
+            Some(_) if at_line_start => 0,
             Some(newline) => newline + 1,
-            None => tail
-                .iter()
-                .position(u8::is_ascii_whitespace)
-                .unwrap_or(tail.len()),
+            None => {
+                let word = tail
+                    .iter()
+                    .position(|b| !b.is_ascii_whitespace())
+                    .unwrap_or(tail.len());
+                tail[word..]
+                    .iter()
+                    .position(u8::is_ascii_whitespace)
+                    .map_or(tail.len(), |end| word + end)
+            }
         };
         tail = &tail[cut..];
     }

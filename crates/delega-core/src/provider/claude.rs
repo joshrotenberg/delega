@@ -595,14 +595,17 @@ fn failure_kind(
     } else if error_is(&["model_not_found"]) || (kind_is(&["not_found_error"]) && status_is(&[404]))
     {
         Some("provider_model_unavailable")
-    } else if text.starts_with("Prompt is too long") {
-        Some("provider_context_exhausted")
     } else if error_is(&["rate_limit", "overloaded"])
         || kind_is(&["rate_limit_error", "overloaded_error"])
         || status_is(&[429, 503, 529])
-        || ["API Error: 429", "API Error: 503", "API Error: 529"]
-            .iter()
-            .any(|p| text.starts_with(p))
+    {
+        Some("provider_capacity")
+    } else if text.starts_with("Prompt is too long") {
+        // The text rules come only after every structured field.
+        Some("provider_context_exhausted")
+    } else if ["API Error: 429", "API Error: 503", "API Error: 529"]
+        .iter()
+        .any(|p| text.starts_with(p))
     {
         Some("provider_capacity")
     } else {
@@ -793,13 +796,20 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                             .to_lowercase()
                     })
                     .collect();
-                let errors_are_about_denial = event
+                // The result's `errors`, or its `result` text when it has
+                // no `errors`, must all be about the denial.
+                let errors: Vec<&str> = event
                     .get("errors")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
-                    .all(|e| mentions_denial(e, &tools));
+                    .collect();
+                let errors_are_about_denial = if errors.is_empty() {
+                    str_field(event, "result").is_none_or(|r| mentions_denial(r, &tools))
+                } else {
+                    errors.iter().all(|e| mentions_denial(e, &tools))
+                };
                 parsed.stopped_by_denial = !success
                     && code.is_none()
                     && !parsed.denied.is_empty()

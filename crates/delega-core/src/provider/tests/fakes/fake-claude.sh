@@ -90,6 +90,14 @@
 #                    after "Authorization: Bearer", so the window opens with the
 #                    token alone, then the token's line end, 8148 newlines and
 #                    the line "complete line survives", then exit 3
+#   stderr-bearer-at-scan-one-line  standard error with no newline whose last
+#                    8 KiB start at the space after "Authorization: Bearer":
+#                    the token, 8169 spaces and "end", then exit 3
+#   stderr-line-at-scan  standard error whose last 8 KiB start right after a
+#                    newline: "earlier line", then the whole line "complete
+#                    first line", 8167 newlines and "last", then exit 3
+#   denied-result-text-error  a failed result with a Bash denial, no errors
+#                    and the result text "Connection reset"
 #   denied-refused-secret  the denied-refused result, its error naming Bash and
 #                    then, after 480 "a", an sk-ant- key across the
 #                    500-character clip point
@@ -475,6 +483,20 @@ case "$mode" in
     init
     { printf 'Authorization: Bearer abcdefghijklmnop123\n'; head -c 8148 /dev/zero | tr '\0' '\n'; printf 'complete line survives\n'; } >&2
     exit 3
+    ;;
+  stderr-bearer-at-scan-one-line)
+    init
+    { printf 'Authorization: Bearer abcdefghijklmnop123'; head -c 8169 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-line-at-scan)
+    init
+    { printf 'earlier line\ncomplete first line\n'; head -c 8167 /dev/zero | tr '\0' '\n'; printf 'last\n'; } >&2
+    exit 3
+    ;;
+  denied-result-text-error)
+    init
+    emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"session_id\":\"$sid\",\"result\":\"Connection reset\",\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\",\"tool_input\":{\"command\":\"make install\"}}]}"
     ;;
   denied-refused-secret)
     init

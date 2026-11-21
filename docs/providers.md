@@ -125,7 +125,8 @@ error separately and nothing went on after the last denial.
   stopped by the denial when no `error` event and no `api_retry` event was seen;
   when no assistant message or tool result came after the result of the last
   denied call; and when every entry in the result's `errors` names a denied tool
-  or speaks of permission or denial. An entry such as "API connection lost"
+  or speaks of permission or denial (a result with no `errors` is judged by its
+  `result` text the same way). An entry or text such as "API connection lost"
   makes the run `failed`.
 - Codex: the last item before the failure must be the `declined` command. Any
   later item (an agent message, another command, a `file_change`) or an `error`
@@ -218,8 +219,9 @@ provider's events are read is in its Stream section ([Claude Code](#stream),
 Provider standard error and provider error messages can echo what the provider
 was given. Before they go into an error message, standard error is cut to its
 last 8 KiB (when that cut falls inside the output, everything up to and
-including the first newline in it is dropped, or only the partial first word
-when it holds no newline, as the cut may fall inside a credential or just after
+including the first newline in it is dropped, unless the cut falls right after
+a newline; when it holds no newline, its first word after any leading
+whitespace is dropped; the cut may fall inside a credential or just after
 `Bearer`), joined to one line, and cut
 again to its last 300 characters. A provider error message is kept whole and
 cut to its first 500 characters only after redaction, so a credential across
@@ -596,7 +598,9 @@ has `is_api_error_message: true`; and the latest root `rate_limit_event`. A
 later root assistant message without `is_api_error_message` clears both, since
 the run went on after them. Sub-agent events are not used, and a sub-agent's
 `result` (one with a non-null `parent_tool_use_id`) does not end the run. Fields read: the assistant message's `error`, and `api_error`,
-`api_error_type` and `api_error_status` on either. In order:
+`api_error_type` and `api_error_status` on either. Every structured field is
+checked before the result text, so the text rules come last whatever their
+kind. In order:
 
 - `provider_usage_limit`: `api_error` `usage_limit_reached`, or the latest
   `rate_limit_event` has `rate_limit_info.status` `rejected` and overage does
@@ -609,10 +613,10 @@ the run went on after them. Sub-agent events are not used, and a sub-agent's
   or 403.
 - `provider_model_unavailable`: `error` `model_not_found`, or
   `api_error_type` `not_found_error` with status 404.
-- `provider_context_exhausted`: the result text starts `Prompt is too long`.
 - `provider_capacity`: `error` `rate_limit` or `overloaded`, `api_error_type`
-  `rate_limit_error` or `overloaded_error`, status 429, 503 or 529, or result
-  text starting `API Error: 429`, `503` or `529`.
+  `rate_limit_error` or `overloaded_error`, or status 429, 503 or 529.
+- `provider_context_exhausted`: the result text starts `Prompt is too long`.
+- `provider_capacity`: the result text starts `API Error: 429`, `503` or `529`.
 
 ### `native_args` allowlist
 
