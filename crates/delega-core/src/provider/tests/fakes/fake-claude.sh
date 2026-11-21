@@ -97,6 +97,9 @@
 #   stderr-key-shape-after-cut  "xsk-ant-" and 24 "a", 8158 spaces and "end":
 #                    the window drops the "x", leaving a key-shaped word that
 #                    the first redaction pass did not see
+#   stderr-key-shape-after-300-cut  one line, "start xsk-ant-" and 24 "a", a
+#                    space, 264 "b" and " end": the 300-character cut drops the
+#                    "x", leaving a key-shaped word right after the "..."
 #   Standard error past the 64 KiB capture limit (exit 3):
 #   stderr-bearer-at-8k-of-capture  a line that the capture cuts off, then in
 #                    the capture: newlines, "Authorization: Bearer" ending
@@ -499,6 +502,11 @@ case "$mode" in
   stderr-key-shape-after-cut)
     init
     { printf 'xsk-ant-'; head -c 24 /dev/zero | tr '\0' a; head -c 8158 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-key-shape-after-300-cut)
+    init
+    { printf 'start xsk-ant-'; head -c 24 /dev/zero | tr '\0' a; printf ' '; head -c 264 /dev/zero | tr '\0' b; printf ' end'; } >&2
     exit 3
     ;;
   stderr-bearer-at-8k-of-capture)

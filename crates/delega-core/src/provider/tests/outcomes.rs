@@ -1189,3 +1189,17 @@ async fn stderr_excerpt_redacts_a_key_shape_that_the_window_cut_creates() {
     // pass did not match as a key.
     stderr_excerpt_hides("stderr-key-shape-after-cut", "sk-ant-", "end").await;
 }
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_key_shape_that_the_300_character_cut_creates() {
+    // The 300-character cut drops the "x" of "xsk-ant-aaa..."; the key shape
+    // then follows the "..." that marks the cut.
+    let error = failure_of(Provider::Claude, "stderr-key-shape-after-300-cut").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(!error.message.contains("sk-ant-"), "{}", error.message);
+    assert!(
+        error.message.contains("ended with: ...[redacted] b"),
+        "{}",
+        error.message
+    );
+}
