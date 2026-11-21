@@ -221,7 +221,9 @@ Provider standard error and provider error messages can echo what the provider
 was given. Standard error is captured up to its last 64 KiB. All of the
 captured standard error is redacted before the excerpt is cut from it: its last
 8 KiB, joined to one line, and its last 300 characters. The excerpt's own cuts
-come after redaction, so they cannot split a secret.
+come after redaction, so they cannot split a secret. The finished excerpt is
+then redacted once more, so a cut cannot leave a newly key-shaped string (such
+as the end of `xsk-ant-...` without its `x`) unredacted.
 
 The remaining limit: when standard error was longer than its 64 KiB capture,
 the start of the capture is a cut made before redaction. A secret cut there

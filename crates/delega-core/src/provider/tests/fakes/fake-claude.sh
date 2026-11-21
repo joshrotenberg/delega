@@ -94,6 +94,9 @@
 #                    and "last"
 #   stderr-nbsp-at-window  "Authorization: Bearer", then 8 KiB from the end a
 #                    non-breaking space, a space, TOKEN, spaces and "end"
+#   stderr-key-shape-after-cut  "xsk-ant-" and 24 "a", 8158 spaces and "end":
+#                    the window drops the "x", leaving a key-shaped word that
+#                    the first redaction pass did not see
 #   Standard error past the 64 KiB capture limit (exit 3):
 #   stderr-bearer-at-8k-of-capture  a line that the capture cuts off, then in
 #                    the capture: newlines, "Authorization: Bearer" ending
@@ -491,6 +494,11 @@ case "$mode" in
   stderr-bearer-at-window)
     init
     { printf 'Authorization: Bearer abcdefghijklmnop123\n'; head -c 8148 /dev/zero | tr '\0' '\n'; printf 'complete line survives\n'; } >&2
+    exit 3
+    ;;
+  stderr-key-shape-after-cut)
+    init
+    { printf 'xsk-ant-'; head -c 24 /dev/zero | tr '\0' a; head -c 8158 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
     exit 3
     ;;
   stderr-bearer-at-8k-of-capture)

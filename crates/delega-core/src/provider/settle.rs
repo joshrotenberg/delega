@@ -120,7 +120,8 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
 /// removed. All of the captured standard error is decoded and redacted first;
 /// only then is the excerpt cut from it: its last [`STDERR_SCAN_BYTES`],
 /// joined to one line, and its last [`STDERR_EXCERPT_CHARS`] characters, so
-/// these cuts cannot split a secret.
+/// these cuts cannot split a secret. The finished excerpt is redacted once
+/// more, in case a cut left a newly credential-shaped string.
 fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
     let decoded = String::from_utf8_lossy(&report.stderr.bytes);
     let redacted = redactor.apply(&decoded);
@@ -134,7 +135,7 @@ fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String>
         return None;
     }
     let count = one_line.chars().count();
-    Some(if count > STDERR_EXCERPT_CHARS {
+    let excerpt = if count > STDERR_EXCERPT_CHARS {
         let tail: String = one_line
             .chars()
             .skip(count - STDERR_EXCERPT_CHARS)
@@ -142,7 +143,11 @@ fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String>
         format!("...{tail}")
     } else {
         one_line
-    })
+    };
+    // A cut can turn the end of a word the first pass did not match (such as
+    // `xsk-ant-...` losing its `x`) into a credential shape, so the finished
+    // excerpt is redacted once more.
+    Some(redactor.apply(&excerpt))
 }
 
 fn timing(facts: &Facts, report: &ProcessReport) -> Timing {

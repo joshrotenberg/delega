@@ -1182,3 +1182,10 @@ async fn stderr_excerpt_keeps_the_first_line_of_a_capture_that_was_not_cut() {
         error.message
     );
 }
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_key_shape_that_the_window_cut_creates() {
+    // The window drops the "x" of "xsk-ant-aaa...", which the full-capture
+    // pass did not match as a key.
+    stderr_excerpt_hides("stderr-key-shape-after-cut", "sk-ant-", "end").await;
+}
