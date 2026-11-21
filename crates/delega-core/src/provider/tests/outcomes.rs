@@ -1131,14 +1131,14 @@ async fn stderr_excerpt_hides(mode: &str, hidden: &str, ending: &str) {
 }
 
 #[tokio::test]
-async fn stderr_excerpt_drops_a_key_cut_by_the_capture_limit() {
-    stderr_excerpt_hides("stderr-key-at-capture", "uvwx", "end").await;
+async fn stderr_excerpt_redacts_a_key_whose_end_starts_the_excerpt_window() {
+    stderr_excerpt_hides("stderr-key-at-window", "uvwx", "end").await;
 }
 
 #[tokio::test]
-async fn stderr_excerpt_drops_a_token_whose_bearer_the_capture_cut_off_and_keeps_later_lines() {
+async fn stderr_excerpt_redacts_a_token_whose_bearer_is_just_before_the_excerpt_window() {
     stderr_excerpt_hides(
-        "stderr-bearer-at-capture",
+        "stderr-bearer-at-window",
         "abcdefghijklmnop123",
         "complete line survives",
     )
@@ -1146,57 +1146,13 @@ async fn stderr_excerpt_drops_a_token_whose_bearer_the_capture_cut_off_and_keeps
 }
 
 #[tokio::test]
-async fn stderr_excerpt_drops_a_token_whose_bearer_ends_the_line_before_the_capture() {
+async fn stderr_excerpt_redacts_a_token_on_the_line_after_a_bearer_8_kib_into_a_cut_capture() {
     stderr_excerpt_hides(
-        "stderr-bearer-line-before-capture",
-        "abcdefghijklmnop123",
-        "complete line survives",
-    )
-    .await;
-}
-
-/// The end of the error message when no standard error excerpt is added.
-const NO_EXCERPT: &str = "without a final result";
-
-#[tokio::test]
-async fn stderr_excerpt_of_a_cut_capture_with_no_later_newline_keeps_nothing_after_a_bearer() {
-    stderr_excerpt_hides(
-        "stderr-bearer-at-capture-one-line",
-        "abcdefghijklmnop123",
-        NO_EXCERPT,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn stderr_excerpt_of_a_cut_capture_with_no_later_newline_keeps_nothing_after_a_non_breaking_space()
- {
-    stderr_excerpt_hides("stderr-nbsp-at-capture", "abcdefghijklmnop123", NO_EXCERPT).await;
-}
-
-#[tokio::test]
-async fn stderr_excerpt_drops_a_token_when_the_capture_starts_at_the_newline_after_bearer() {
-    stderr_excerpt_hides(
-        "stderr-bearer-newline-at-capture",
+        "stderr-bearer-at-8k-of-capture",
         "abcdefghijklmnop123",
         "end",
     )
     .await;
-}
-
-#[tokio::test]
-async fn stderr_excerpt_drops_a_token_when_the_capture_starts_inside_a_multi_byte_space() {
-    stderr_excerpt_hides(
-        "stderr-split-char-at-capture",
-        "abcdefghijklmnop123",
-        NO_EXCERPT,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn stderr_excerpt_drops_private_key_lines_whose_begin_line_the_capture_cut_off() {
-    stderr_excerpt_hides("stderr-key-lines-at-capture", "BODYLINE", "end").await;
 }
 
 #[tokio::test]

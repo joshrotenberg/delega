@@ -81,41 +81,25 @@
 #   result-text-error  no assistant error message; a result with the text
 #                    "Something unexpected happened" and no errors or API
 #                    fields
-#   Standard error past the 64 KiB capture limit, so the capture starts
-#   inside it. Between the start and the ending each writes a private key block
-#   (see key_block) that redaction shrinks to one marker, so the start of the
-#   capture reaches the 8 KiB excerpt. Each exits 3; TOKEN is
-#   abcdefghijklmnop123:
-#   stderr-key-at-capture  the capture starts 10 bytes before the end of an
-#                    sk-ant- key, then newlines and "end"
-#   stderr-bearer-at-capture  the capture starts at the space after
-#                    "Authorization: Bearer" on the same line: " TOKEN", the
-#                    line end, newlines and the line "complete line survives"
-#   stderr-bearer-line-before-capture  "Authorization: Bearer" ends the line
-#                    before the capture, which starts with the line "TOKEN",
-#                    then newlines and "complete line survives"
-#   stderr-bearer-at-capture-one-line  no newline at all; the capture starts
-#                    at the space after "Authorization: Bearer": " TOKEN",
-#                    spaces and "end"
-#   stderr-nbsp-at-capture  no newline at all; the capture starts with a
-#                    non-breaking space, a space and TOKEN after
-#                    "Authorization: Bearer", then spaces and "end"
-#   stderr-bearer-newline-at-capture  the capture starts at the newline of
-#                    "Authorization: Bearer" / TOKEN, then the line TOKEN, a key
-#                    block and "end"
-#   stderr-split-char-at-capture  no newline at all; the capture starts on the
-#                    second byte of a non-breaking space after "Authorization:
-#                    Bearer", then " TOKEN ", a key block and " end"
-#   stderr-key-lines-at-capture  a multi-line private key whose BEGIN line and
-#                    the start of its first body line are before the capture;
-#                    the capture holds the rest of that line, 40 BODYLINE lines,
-#                    the END line, a key block and "end"
-#   Standard error within the capture limit (exit 3):
+#   Standard error within the capture limit (exit 3; TOKEN is
+#   abcdefghijklmnop123). The "window" is the last 8 KiB, where the excerpt
+#   is cut:
+#   stderr-key-at-window  an sk-ant- key whose last 10 bytes start the window,
+#                    then newlines and "end"
+#   stderr-bearer-at-window  "Authorization: Bearer TOKEN" with the window
+#                    starting at the space before TOKEN, then newlines and the
+#                    line "complete line survives"
 #   stderr-bearer-line-before-window  "Authorization: Bearer", a newline, the
 #                    line "TOKEN" starting exactly 8 KiB from the end, newlines
 #                    and "last"
 #   stderr-nbsp-at-window  "Authorization: Bearer", then 8 KiB from the end a
 #                    non-breaking space, a space, TOKEN, spaces and "end"
+#   Standard error past the 64 KiB capture limit (exit 3):
+#   stderr-bearer-at-8k-of-capture  a line that the capture cuts off, then in
+#                    the capture: newlines, "Authorization: Bearer" ending
+#                    exactly 8 KiB into the capture, the line TOKEN, a private
+#                    key block (see key_block) that redaction shrinks to one
+#                    marker so TOKEN would reach the excerpt, and "end"
 #   stderr-first-line-kept  the lines "first line" and "second line"
 #   denied-result-text-error  a failed result with a Bash denial, no errors
 #                    and the result text "Connection reset"
@@ -320,7 +304,7 @@ success() {
 }
 
 # key_block N: a private key block with N bytes of body and no newline, which
-# the redactor replaces with one marker, so text past the 8 KiB excerpt
+# the redactor replaces with one marker, so text far before the 8 KiB excerpt
 # reaches it.
 key_block() {
   printf '%s' '-----BEGIN RSA PRIVATE KEY-----'
@@ -499,52 +483,23 @@ case "$mode" in
     emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"api_error_status\":404,\"api_error_type\":\"not_found_error\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
     exit 1
     ;;
-  stderr-key-at-capture)
+  stderr-key-at-window)
     init
-    { printf 'sk-ant-abcdefghijklmnopqrstuvwx\n'; key_block 65460; printf '\nend\n'; } >&2
+    { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8178 /dev/zero | tr '\0' '\n'; printf 'end\n'; } >&2
     exit 3
     ;;
-  stderr-bearer-at-capture)
+  stderr-bearer-at-window)
     init
-    { printf 'Authorization: Bearer abcdefghijklmnop123\n'; key_block 65431; printf '\ncomplete line survives\n'; } >&2
+    { printf 'Authorization: Bearer abcdefghijklmnop123\n'; head -c 8148 /dev/zero | tr '\0' '\n'; printf 'complete line survives\n'; } >&2
     exit 3
     ;;
-  stderr-bearer-line-before-capture)
-    init
-    { printf 'Authorization: Bearer\nabcdefghijklmnop123\n'; key_block 65432; printf '\ncomplete line survives\n'; } >&2
-    exit 3
-    ;;
-  stderr-bearer-at-capture-one-line)
-    init
-    { printf 'Authorization: Bearer abcdefghijklmnop123 '; key_block 65451; printf ' end'; } >&2
-    exit 3
-    ;;
-  stderr-nbsp-at-capture)
-    init
-    { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123 '; key_block 65449; printf ' end'; } >&2
-    exit 3
-    ;;
-  stderr-bearer-newline-at-capture)
-    init
-    { printf 'Authorization: Bearer\nabcdefghijklmnop123\n'; key_block 65450; printf '\nend\n'; } >&2
-    exit 3
-    ;;
-  stderr-split-char-at-capture)
-    init
-    { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123 '; key_block 65450; printf ' end'; } >&2
-    exit 3
-    ;;
-  stderr-key-lines-at-capture)
+  stderr-bearer-at-8k-of-capture)
     init
     {
-      printf -- '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAXYZ0123456789\n'
-      n=0
-      while [ $n -lt 40 ]; do
-        printf 'BODYLINE'; head -c 56 /dev/zero | tr '\0' Q; printf '\n'
-        n=$((n+1))
-      done
-      printf -- '-----END RSA PRIVATE KEY-----\n'
-      key_block 62827
+      printf 'output before the capture\n'
+      head -c 8171 /dev/zero | tr '\0' '\n'
+      printf 'Authorization: Bearer\nabcdefghijklmnop123\n'
+      key_block 57258
       printf '\nend\n'
     } >&2
     exit 3

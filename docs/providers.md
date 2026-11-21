@@ -218,18 +218,16 @@ provider's events are read is in its Stream section ([Claude Code](#stream),
 ### Text from the provider
 
 Provider standard error and provider error messages can echo what the provider
-was given. Secrets are removed before the text is cut. Standard error is
-captured up to its last 64 KiB. All of the capture is redacted, and the excerpt
-is then cut from the redacted text: its last 8 KiB, joined to one line, and its
-last 300 characters. These cuts come after redaction and cannot split a secret.
+was given. Standard error is captured up to its last 64 KiB. All of the
+captured standard error is redacted before the excerpt is cut from it: its last
+8 KiB, joined to one line, and its last 300 characters. The excerpt's own cuts
+come after redaction, so they cannot split a secret.
 
-The start of a capture that was itself cut at its limit can fall inside a
-secret, inside a character, or after a `Bearer` or a private key's first line
-that is no longer captured. So, before decoding and redacting such a capture,
-its first 8 KiB are dropped and then everything through the next newline; when
-no newline follows, nothing of the capture is used. A capture that was not cut
-is used whole. The remaining limit: a secret longer than 8 KiB that runs across
-the start of a cut capture can still show its end in the excerpt.
+The remaining limit: when standard error was longer than its 64 KiB capture,
+the start of the capture is a cut made before redaction. A secret cut there
+(part of a key, or a token whose `Bearer` was not captured) is not recognised.
+It could show only if redaction removes nearly all of the capture, so that the
+capture's start reaches the excerpt.
 
 A provider error message is kept whole and cut to its first 500 characters
 after redaction. Two kinds of text are replaced with `[redacted]`:
