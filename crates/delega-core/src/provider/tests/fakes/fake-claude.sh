@@ -81,21 +81,32 @@
 #   result-text-error  no assistant error message; a result with the text
 #                    "Something unexpected happened" and no errors or API
 #                    fields
-#   stderr-secret-at-scan  standard error whose last 8 KiB start 10 bytes
-#                    before the end of an sk-ant- key: the key, 8178 newlines
-#                    and "end", then exit 3
-#   stderr-secret-at-scan-one-line  the same, but with 8179 spaces in place
-#                    of the newlines, so the window holds no newline
-#   stderr-bearer-at-scan  standard error whose last 8 KiB start at the space
-#                    after "Authorization: Bearer", so the window opens with the
-#                    token alone, then the token's line end, 8148 newlines and
-#                    the line "complete line survives", then exit 3
-#   stderr-bearer-at-scan-one-line  standard error with no newline whose last
-#                    8 KiB start at the space after "Authorization: Bearer":
-#                    the token, 8169 spaces and "end", then exit 3
-#   stderr-line-at-scan  standard error whose last 8 KiB start right after a
-#                    newline: "earlier line", then the whole line "complete
-#                    first line", 8167 newlines and "last", then exit 3
+#   Standard error past the 64 KiB capture limit, so the capture starts
+#   inside it. Between the start and the ending each writes a private key block
+#   (see key_block) that redaction shrinks to one marker, so the start of the
+#   capture reaches the 8 KiB excerpt. Each exits 3; TOKEN is
+#   abcdefghijklmnop123:
+#   stderr-key-at-capture  the capture starts 10 bytes before the end of an
+#                    sk-ant- key, then newlines and "end"
+#   stderr-bearer-at-capture  the capture starts at the space after
+#                    "Authorization: Bearer" on the same line: " TOKEN", the
+#                    line end, newlines and the line "complete line survives"
+#   stderr-bearer-line-before-capture  "Authorization: Bearer" ends the line
+#                    before the capture, which starts with the line "TOKEN",
+#                    then newlines and "complete line survives"
+#   stderr-bearer-at-capture-one-line  no newline at all; the capture starts
+#                    at the space after "Authorization: Bearer": " TOKEN",
+#                    spaces and "end"
+#   stderr-nbsp-at-capture  no newline at all; the capture starts with a
+#                    non-breaking space, a space and TOKEN after
+#                    "Authorization: Bearer", then spaces and "end"
+#   Standard error within the capture limit (exit 3):
+#   stderr-bearer-line-before-window  "Authorization: Bearer", a newline, the
+#                    line "TOKEN" starting exactly 8 KiB from the end, newlines
+#                    and "last"
+#   stderr-nbsp-at-window  "Authorization: Bearer", then 8 KiB from the end a
+#                    non-breaking space, a space, TOKEN, spaces and "end"
+#   stderr-first-line-kept  the lines "first line" and "second line"
 #   denied-result-text-error  a failed result with a Bash denial, no errors
 #                    and the result text "Connection reset"
 #   denied-refused-secret  the denied-refused result, its error naming Bash and
@@ -298,6 +309,15 @@ success() {
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":0.001,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},\"permission_denials\":$2}"
 }
 
+# key_block N: a private key block with N bytes of body and no newline, which
+# the redactor replaces with one marker, so text past the 8 KiB excerpt
+# reaches it.
+key_block() {
+  printf '%s' '-----BEGIN RSA PRIVATE KEY-----'
+  head -c "$1" /dev/zero | tr '\0' A
+  printf '%s' '-----END RSA PRIVATE KEY-----'
+}
+
 # api_error_message FIELDS TEXT: a root assistant message marked
 # is_api_error_message, with the extra JSON members FIELDS and the text TEXT.
 api_error_message() {
@@ -469,29 +489,44 @@ case "$mode" in
     emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"$resume\",\"api_error_status\":404,\"api_error_type\":\"not_found_error\",\"errors\":[\"No conversation found with session ID: $resume\"],\"permission_denials\":[]}"
     exit 1
     ;;
-  stderr-secret-at-scan)
+  stderr-key-at-capture)
     init
-    { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8178 /dev/zero | tr '\0' '\n'; printf 'end\n'; } >&2
+    { printf 'sk-ant-abcdefghijklmnopqrstuvwx\n'; key_block 65460; printf '\nend\n'; } >&2
     exit 3
     ;;
-  stderr-secret-at-scan-one-line)
+  stderr-bearer-at-capture)
     init
-    { printf 'sk-ant-abcdefghijklmnopqrstuvwx'; head -c 8179 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    { printf 'Authorization: Bearer abcdefghijklmnop123\n'; key_block 65431; printf '\ncomplete line survives\n'; } >&2
     exit 3
     ;;
-  stderr-bearer-at-scan)
+  stderr-bearer-line-before-capture)
     init
-    { printf 'Authorization: Bearer abcdefghijklmnop123\n'; head -c 8148 /dev/zero | tr '\0' '\n'; printf 'complete line survives\n'; } >&2
+    { printf 'Authorization: Bearer\nabcdefghijklmnop123\n'; key_block 65432; printf '\ncomplete line survives\n'; } >&2
     exit 3
     ;;
-  stderr-bearer-at-scan-one-line)
+  stderr-bearer-at-capture-one-line)
     init
-    { printf 'Authorization: Bearer abcdefghijklmnop123'; head -c 8169 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    { printf 'Authorization: Bearer abcdefghijklmnop123 '; key_block 65451; printf ' end'; } >&2
     exit 3
     ;;
-  stderr-line-at-scan)
+  stderr-nbsp-at-capture)
     init
-    { printf 'earlier line\ncomplete first line\n'; head -c 8167 /dev/zero | tr '\0' '\n'; printf 'last\n'; } >&2
+    { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123 '; key_block 65449; printf ' end'; } >&2
+    exit 3
+    ;;
+  stderr-bearer-line-before-window)
+    init
+    { printf 'Authorization: Bearer\nabcdefghijklmnop123\n'; head -c 8167 /dev/zero | tr '\0' '\n'; printf 'last\n'; } >&2
+    exit 3
+    ;;
+  stderr-nbsp-at-window)
+    init
+    { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123'; head -c 8167 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-first-line-kept)
+    init
+    { printf 'first line\nsecond line\n'; } >&2
     exit 3
     ;;
   denied-result-text-error)

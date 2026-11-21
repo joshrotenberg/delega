@@ -116,37 +116,38 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
     }
 }
 
-/// The last part of the provider's standard error as one line, with secrets
-/// removed. Only the final [`STDERR_SCAN_BYTES`] are read.
-fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
-    let bytes = &report.stderr.bytes;
-    let start = bytes.len().saturating_sub(STDERR_SCAN_BYTES);
-    let mut tail = &bytes[start..];
-    // When the scan starts inside the output, its first line may hold the
-    // end of a credential whose start (or whose `Bearer`) the redactor would
-    // need; drop up to and including the first newline, unless the window
-    // starts right after a newline and so on a whole line. A window with no
-    // newline drops its first word, after any leading whitespace, whatever
-    // came before it.
-    if start > 0 {
-        let at_line_start = bytes[start - 1] == b'\n';
-        let cut = match tail.iter().position(|b| *b == b'\n') {
-            Some(_) if at_line_start => 0,
-            Some(newline) => newline + 1,
-            None => {
-                let word = tail
-                    .iter()
-                    .position(|b| !b.is_ascii_whitespace())
-                    .unwrap_or(tail.len());
-                tail[word..]
-                    .iter()
-                    .position(u8::is_ascii_whitespace)
-                    .map_or(tail.len(), |end| word + end)
-            }
-        };
-        tail = &tail[cut..];
+/// The captured standard error without its partial first line, when the
+/// capture was cut at its limit: the cut may fall inside a credential or just
+/// after `Bearer`, leaving text the redactor cannot recognise. Everything up
+/// to and including the first newline is dropped; with no newline, the first
+/// word after any leading whitespace.
+fn without_cut_start(text: &str) -> &str {
+    if let Some(newline) = text.find('\n') {
+        return &text[newline + 1..];
     }
-    let text = redactor.apply(&String::from_utf8_lossy(tail));
+    let word = text.trim_start();
+    word.find(char::is_whitespace)
+        .map_or("", |end| &word[end..])
+}
+
+/// The last part of the provider's standard error as one line, with secrets
+/// removed. All of the captured standard error is redacted first; only then
+/// is the excerpt cut from it: its last [`STDERR_SCAN_BYTES`], joined to one
+/// line, and its last [`STDERR_EXCERPT_CHARS`] characters. A cut made after
+/// redaction cannot split a secret.
+fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
+    let captured = String::from_utf8_lossy(&report.stderr.bytes);
+    let kept = if report.stderr.truncated {
+        without_cut_start(&captured)
+    } else {
+        &captured
+    };
+    let redacted = redactor.apply(kept);
+    let mut start = redacted.len().saturating_sub(STDERR_SCAN_BYTES);
+    while !redacted.is_char_boundary(start) {
+        start += 1;
+    }
+    let text = &redacted[start..];
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.is_empty() {
         return None;

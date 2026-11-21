@@ -1079,42 +1079,6 @@ async fn claude_missing_session_with_a_404_not_found_is_session_not_found_not_a_
 }
 
 #[tokio::test]
-async fn claude_stderr_excerpt_drops_a_credential_cut_by_the_scan_window() {
-    let error = failure_of(Provider::Claude, "stderr-secret-at-scan").await;
-    assert_eq!(error.kind, "provider_exit");
-    // The scan window starts inside the key; its last characters must not
-    // reach the message.
-    assert!(!error.message.contains("uvwx"), "{}", error.message);
-    assert!(error.message.ends_with("end"), "{}", error.message);
-}
-
-#[tokio::test]
-async fn claude_stderr_excerpt_drops_a_bearer_token_cut_by_the_scan_window_and_keeps_later_lines() {
-    let error = failure_of(Provider::Claude, "stderr-bearer-at-scan").await;
-    assert_eq!(error.kind, "provider_exit");
-    // The window opens at the space after "Bearer", so the token stands
-    // alone; its whole line is dropped and the next full line stays.
-    assert!(
-        !error.message.contains("abcdefghijklmnop123"),
-        "{}",
-        error.message
-    );
-    assert!(
-        error.message.ends_with("complete line survives"),
-        "{}",
-        error.message
-    );
-}
-
-#[tokio::test]
-async fn claude_stderr_excerpt_without_a_newline_drops_only_the_cut_word() {
-    let error = failure_of(Provider::Claude, "stderr-secret-at-scan-one-line").await;
-    assert_eq!(error.kind, "provider_exit");
-    assert!(!error.message.contains("uvwx"), "{}", error.message);
-    assert!(error.message.ends_with("end"), "{}", error.message);
-}
-
-#[tokio::test]
 async fn codex_error_event_with_only_codex_error_info_is_provider_usage_limit() {
     let error = failure_of(Provider::Codex, "usage-limit-info-no-message").await;
     assert_eq!(error.kind, "provider_usage_limit");
@@ -1145,32 +1109,6 @@ both!(
 );
 
 #[tokio::test]
-async fn claude_one_line_stderr_excerpt_drops_a_bearer_token_after_leading_space() {
-    let error = failure_of(Provider::Claude, "stderr-bearer-at-scan-one-line").await;
-    assert_eq!(error.kind, "provider_exit");
-    // The window opens on the space after "Bearer"; the token after it is
-    // the cut word.
-    assert!(
-        !error.message.contains("abcdefghijklmnop123"),
-        "{}",
-        error.message
-    );
-    assert!(error.message.ends_with("end"), "{}", error.message);
-}
-
-#[tokio::test]
-async fn claude_stderr_excerpt_keeps_a_whole_first_line_when_the_scan_starts_at_a_line() {
-    let error = failure_of(Provider::Claude, "stderr-line-at-scan").await;
-    assert_eq!(error.kind, "provider_exit");
-    assert!(
-        error.message.contains("complete first line last"),
-        "{}",
-        error.message
-    );
-    assert!(!error.message.contains("earlier"), "{}", error.message);
-}
-
-#[tokio::test]
 async fn claude_denial_with_an_unrelated_result_text_and_no_errors_is_failed_not_refused() {
     let rig = Rig::new();
     let request = rig.request(Provider::Claude, "denied-result-text-error");
@@ -1181,4 +1119,81 @@ async fn claude_denial_with_an_unrelated_result_text_and_no_errors_is_failed_not
     assert_eq!(error.message, "Connection reset");
     assert_eq!(result.permissions.denied.len(), 1);
     rig.assert_nothing_left().await;
+}
+
+/// The standard error excerpt of a fake mode that exits 3: it must not show
+/// `hidden` and must end with `ending`.
+async fn stderr_excerpt_hides(mode: &str, hidden: &str, ending: &str) {
+    let error = failure_of(Provider::Claude, mode).await;
+    assert_eq!(error.kind, "provider_exit", "{mode}");
+    assert!(!error.message.contains(hidden), "{mode}: {}", error.message);
+    assert!(error.message.ends_with(ending), "{mode}: {}", error.message);
+}
+
+#[tokio::test]
+async fn stderr_excerpt_drops_a_key_cut_by_the_capture_limit() {
+    stderr_excerpt_hides("stderr-key-at-capture", "uvwx", "end").await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_drops_a_token_whose_bearer_the_capture_cut_off_and_keeps_later_lines() {
+    stderr_excerpt_hides(
+        "stderr-bearer-at-capture",
+        "abcdefghijklmnop123",
+        "complete line survives",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_drops_a_token_whose_bearer_ends_the_line_before_the_capture() {
+    stderr_excerpt_hides(
+        "stderr-bearer-line-before-capture",
+        "abcdefghijklmnop123",
+        "complete line survives",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_without_a_newline_drops_a_token_after_leading_space_at_the_capture() {
+    stderr_excerpt_hides(
+        "stderr-bearer-at-capture-one-line",
+        "abcdefghijklmnop123",
+        "end",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_without_a_newline_skips_a_non_breaking_space_at_the_capture() {
+    stderr_excerpt_hides("stderr-nbsp-at-capture", "abcdefghijklmnop123", "end").await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_token_whose_bearer_is_on_the_line_before_the_excerpt() {
+    stderr_excerpt_hides(
+        "stderr-bearer-line-before-window",
+        "abcdefghijklmnop123",
+        "last",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_redacts_a_token_after_a_non_breaking_space_at_the_excerpt_start() {
+    stderr_excerpt_hides("stderr-nbsp-at-window", "abcdefghijklmnop123", "end").await;
+}
+
+#[tokio::test]
+async fn stderr_excerpt_keeps_the_first_line_of_a_capture_that_was_not_cut() {
+    let error = failure_of(Provider::Claude, "stderr-first-line-kept").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(
+        error
+            .message
+            .ends_with("its standard error ended with: first line second line"),
+        "{}",
+        error.message
+    );
 }
