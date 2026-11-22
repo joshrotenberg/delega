@@ -100,7 +100,7 @@ All defaults are named constants in `supervisor/limits.rs`.
 | `wait_default` | 30 s | Used when `wait` gets no `timeout_secs` (`Limits::wait_default`, reported by `list` as `default_wait_secs`; `delega mcp` sets it from `mcp.wait_default_secs` of the [configuration file](api.md#configuration-file)). The ceiling is kept high for library callers; the MCP layer should keep each wait short, well inside what a tool-calling client allows for one call, and rely on the cursor to continue. |
 | `max_waits_in_flight` | 64 | Waits blocked at once. A wait counts while its caller is blocked: from when it found nothing to report until it is woken, its time passes, shutdown releases it or its caller drops it. A wait that is answered at once takes no slot, and neither does a wait whose applied timeout is 0, which never blocks and is never turned away. A wait that would block beyond the limit is not registered and returns at once with `limit_reached: "max_waits_in_flight"`; see [Waiting and cursors](#waiting-and-cursors). At least 1. `list` reports it with `waits_in_flight`. The MCP server handles 128 requests at once, so at least half stay free for `interrupt`, `close`, `start` and the reads; `delega-mcp` asserts this at compile time, and `mcp.max_waits_in_flight` of the [configuration file](api.md#configuration-file) can lower the limit and cannot raise it. |
 | preflight bound | 10 s | The longest `start` spends checking paths, the executable and the schema before it is admitted. |
-| outstanding request checks | 16 | Request checks that have started and not ended, each on an OS thread of its own. A check that timed out still counts until its thread ends. A start that finds all 16 busy waits for a slot without holding a thread, and the wait counts against the preflight bound measured from when the start began. If no slot frees in time it is refused, kind `preflight_timeout`. A burst of concurrent starts is served in turn, not refused. The value is `MAX_LIVE_WORKERS`; a hung filesystem costs at most 16 threads. `list` does not report it. |
+| outstanding request checks | 16 | Request checks that have started and not ended, each on an OS thread of its own. A check that timed out still counts until its thread ends. A start that finds all 16 busy waits for a slot without holding a thread. After initial request validation, waiting for a slot and waiting for the check share a single deadline. Either wait can end in `preflight_timeout`; slots can run out because checks are slow, not only because the filesystem hangs. The value is `MAX_LIVE_WORKERS`, so stuck checks cost at most 16 threads. `list` does not report it. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer; `text_offset` pages through the rest. |
 | compact structured answer | 16 KiB | A compact read leaves out a structured answer whose JSON is larger than this and gives its size. |
 | `shutdown_bound` | 30 s | The longest `shutdown` waits for runs to settle. |
@@ -121,15 +121,17 @@ directory, the `native_args`, the executable and the answer schema. The dry run
 touches the filesystem, so it is not done on the supervisor's task: the caller's
 `start` runs it on a thread of its own, bounded by the preflight bound, and posts
 the result to the supervisor, so a hung filesystem can delay only that `start`,
-never `wait` or `interrupt`. If the bound passes the start is refused (kind
-`preflight_timeout`). The thread is detached and cannot be cancelled: nothing
+never `wait` or `interrupt`. If the bound passes, the preflight result is
+`preflight_timeout`; a refusal for the request, the name or the live-worker
+limit, or a supervisor error, takes its place. The thread is detached and cannot be cancelled: nothing
 waits for it, so a hung filesystem cannot hold up `shutdown` or a runtime drop,
-and its late result is discarded when the filesystem answers. Because a hung
+and its late result is discarded when the filesystem answers. Because a slow or hung
 check keeps its thread, the number of outstanding checks is capped (16, see
 [Limits and defaults](#limits-and-defaults)); a `start` beyond the cap
-waits for a slot within the same preflight bound and is refused `preflight_timeout`
-if none frees; `shutdown` releases a waiting start with `Error::ShutDown` (`Error::Failed` if the supervisor's task had failed).
-If any step fails the
+waits for a slot, and the wait and the check share the preflight bound. A `start` still being checked when `shutdown` begins returns
+`Error::ShutDown`, and one that reaches a supervisor whose task has failed
+returns `Error::Failed`; neither creates a run.
+If any check refuses, the
 request is still a run: the response is `finished`, the outcome is `refused`, the
 error says why, and `read` returns the result. **A refused start creates no
 worker**, so the result has no `worker`, as the contract says. Names are unique
@@ -282,24 +284,29 @@ verdict.
 
 ## Stopping
 
-- **interrupt of a running run** asks the provider layer to stop it and waits,
-  bounded, for it to settle. The result is `interrupted` and carries the
-  process layer's cleanup verdict, the partial text and the session id. Runs
-  queued behind it go on.
+- **interrupt of a running run** asks the provider layer to stop it and waits
+  for it to settle, up to the interrupt bound. The response has `settled: true` and the result
+  only if the run settled in time and its result is still retained; otherwise
+  `settled: false` and no result.
+  Runs queued behind it go on.
 - **interrupt of a queued run** removes it. Its result is `interrupted`, never
   started: no `started_at`, zero duration, confirmed cleanup.
 - **interrupt of a finished run** returns its result unchanged.
 - **interrupt of a worker** acts on its current run.
 - **close** marks the worker closed, finishes every queued run `interrupted`
-  with the message `discarded by close`, stops the running run and waits for it,
-  and frees the live-worker slot at once. The running-run slot is freed when the
+  with the message `discarded by close`, stops the running run and waits for it
+  as interrupt does (it can return with `settled: false`), and frees the
+  live-worker slot at once. The running-run slot is freed when the
   run has stopped. Finished results stay readable. Closing a closed worker
-  returns the same answer with `already_closed`. An outcome of `interrupted`
+  reports `already_closed` with the current state, not a copy of the first
+  answer. An outcome of `interrupted`
   was chosen because the caller stopped the run; `refused` is for a run that did
   not go ahead on its own terms.
 - **shutdown** closes every live worker the same way, with the message
   `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits for
-  runs to settle within the bound, naming any that did not. It wakes every
+  runs to settle within the bound. The report's `unsettled` lists the runs
+  still running when it was taken, and a failure of the supervisor's task is
+  reported separately in `failed`. It wakes every
   `wait` that is registered, whatever its cursor, and each answers with the
   states at that moment (a run may still be stopping). A `wait` with a cursor
   made after it began answers at once too, so a call that arrives as shutdown
