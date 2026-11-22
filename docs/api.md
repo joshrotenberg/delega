@@ -619,7 +619,9 @@ run, the default and the range of the time limit, the output bounds and the
 version probe limit; for the supervisor (see
 [supervisor.md](supervisor.md#limits-and-defaults)), the worker, run and queue
 limits, retention by count, size and time, the default wait, its ceiling and
-how many waits may block at once, and the cap on outstanding request checks; the skills built into this
+how many waits may block at once (the configured limit: `doctor` is a process
+of its own and cannot see a server's open waits, which that server's `list`
+reports as `waits_in_flight`), and the cap on outstanding request checks; the skills built into this
 executable with their digests, as `delega version --output json` lists them; and
 whether process inspection works, by running one `ps` listing as cleanup does.
 
@@ -956,7 +958,7 @@ eighth, `respond`, when live asking is added.
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
-| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` is present, and otherwise absent, when the wait would have blocked and as many waits as the server allows were blocked already: it returned at once with `timeout_secs: 0`, `timed_out: true` and the current states. |
+| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` is present, and otherwise absent, when the wait would have blocked and as many waits as the server allows were blocked already: it returned at once with `timeout_secs: 0`, `timed_out: true` and the current states. A wait asked with `timeout_secs: 0` never gets it. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
 | `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`, and `max_waits_in_flight`) and in use (including `waits_in_flight`); a `cursor`. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
@@ -1127,8 +1129,9 @@ Rules that hold for every tool:
   once with the current states, `timeout_secs: 0`, `timed_out: true` and
   `limit_reached: "max_waits_in_flight"`. Let an open wait return, or call
   again later with the cursor. A wait that has something to report is answered
-  whatever the count, and a wait stops counting when it returns or its request
-  is cancelled.
+  whatever the count, and so is a wait whose applied timeout is 0, which never
+  blocks and never carries `limit_reached`. A wait stops counting when its time
+  has passed, when it is woken or when its request is cancelled.
   `read` takes `text_offset`, a number of characters, to page a long answer;
   page by run id, because a worker's latest run can change between pages.
 

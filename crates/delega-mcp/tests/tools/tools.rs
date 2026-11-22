@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use delega_core::contract::request::Provider;
-use delega_core::supervisor::Limits;
+use delega_core::supervisor::{Limits, Supervisor, SupervisorConfig};
 use serde_json::{Value, json};
 
 use super::{Rig, assert_honest_cleanup};
@@ -852,6 +852,13 @@ async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_no
     assert_eq!(refused["runs"][0]["state"], "running", "{refused}");
     assert!(refused.get("released_by_shutdown").is_none(), "{refused}");
 
+    // A wait given no time never blocks, so it is not turned away.
+    let poll = rig
+        .call("wait", json!({"runs": [run], "timeout_secs": 0}))
+        .await;
+    assert!(poll.get("limit_reached").is_none(), "{poll}");
+    assert_eq!(poll["timed_out"], true, "{poll}");
+
     // A wait with nothing to block on is answered without a slot.
     let unknown = rig
         .call(
@@ -883,4 +890,24 @@ async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_no
     let listed = rig.call("list", json!({})).await;
     assert_eq!(listed["limits"]["waits_in_flight"], 0, "{listed}");
     rig.finish().await;
+}
+
+#[tokio::test]
+async fn no_router_is_built_for_a_supervisor_whose_waits_could_fill_the_request_slots() {
+    let router_for = |max_waits_in_flight: usize| {
+        let supervisor = Supervisor::new(SupervisorConfig {
+            limits: Limits {
+                max_waits_in_flight,
+                ..Limits::default()
+            },
+            ..SupervisorConfig::default()
+        });
+        delega_mcp::router(supervisor, &delega_mcp::BuildInfo::default())
+    };
+    assert!(router_for(64).is_ok());
+    let Err(error) = router_for(65) else {
+        panic!("a router was built for 65 waits in flight");
+    };
+    assert!(error.contains("65 waits in flight"), "{error}");
+    assert!(error.contains("at most 64"), "{error}");
 }

@@ -90,7 +90,8 @@ Do not leave many waits open at once: one `wait` can name every run and worker
 you care about. A `wait` that would block when the limit on open waits is
 reached returns at once with `limit_reached: "max_waits_in_flight"`,
 `timeout_secs: 0` and the current states. Nothing is wrong with the workers:
-let an open wait return, then call `wait` again with the `cursor`. `interrupt`,
+let an open wait return, then call `wait` again with the `cursor`. A `wait` with
+`timeout_secs: 0` only checks the states and is never turned away. `interrupt`,
 `close`, `start`, `read` and `list` are not held behind open waits.
 
 Responses are compact by default. Pass `detail: "full"` to `read` only when you

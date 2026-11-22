@@ -8,7 +8,7 @@ use delega_core::supervisor::{ShutdownReport, Supervisor};
 use tower_mcp::{McpRouter, StdioTransport};
 
 /// Most requests handled at once.
-const MAX_CONCURRENT_REQUESTS: usize = 128;
+pub(crate) const MAX_CONCURRENT_REQUESTS: usize = 128;
 // A `wait` can hold a request for the whole wait ceiling. The supervisor lets
 // at most `max_waits_in_flight` of them block, and the configuration file can
 // lower that and cannot raise it, so at least half of the requests stay free
@@ -77,6 +77,11 @@ pub struct Served {
 /// plus a short grace. Only then does it return, and the caller drops the
 /// runtime. Standard output carries protocol messages and nothing else; this
 /// function writes nothing to either stream.
+///
+/// At most 128 requests are handled at once. `router` must have been built by
+/// this crate for `supervisor`: the router constructors refuse a supervisor
+/// whose `max_waits_in_flight` is more than half of that, so open waits cannot
+/// hold the other calls behind them.
 pub async fn serve(
     router: McpRouter,
     supervisor: &Supervisor,

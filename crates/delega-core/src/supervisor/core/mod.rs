@@ -121,7 +121,7 @@ impl Core {
     /// shutdown. Pruning comes first so a read never sees a result past its
     /// retention time.
     pub fn handle(&mut self, command: Command) {
-        self.prune(Instant::now());
+        self.prune_and_wake(Instant::now());
         match command {
             Command::Start {
                 request,
@@ -142,9 +142,10 @@ impl Core {
             Command::Wait {
                 targets,
                 after,
+                applied,
                 reply,
             } => {
-                let _ = reply.send(self.wait(&targets, after));
+                let _ = reply.send(self.wait(&targets, after, applied));
             }
             Command::WaitView {
                 targets,
@@ -264,6 +265,15 @@ impl Core {
         self.dispatch();
         self.check_shutdown();
         self.wake_waiters();
-        self.prune(Instant::now());
+        self.prune_and_wake(Instant::now());
+    }
+
+    /// Prune, and if anything went, wake the waits that named it. A wait on a
+    /// run or worker that is gone has nothing left to wait for, and it must
+    /// not hold a slot against the command that follows the pruning.
+    fn prune_and_wake(&mut self, now: Instant) {
+        if self.prune(now) {
+            self.wake_waiters();
+        }
     }
 }

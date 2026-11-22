@@ -12,6 +12,10 @@
 //! a caller that passes back the cursor it got never misses a finish and never
 //! sees the same one twice.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use tokio::sync::oneshot;
 
 use super::super::command::{WaitStart, Wake};
@@ -28,6 +32,17 @@ pub(super) struct Waiter {
     workers: Vec<(String, Option<String>)>,
     after: Option<u64>,
     wake: oneshot::Sender<Wake>,
+    /// True while the caller waits for `wake`. The caller clears it when its
+    /// time has passed; the registration then stays only until the caller has
+    /// its view, and does not count as a wait in flight.
+    blocked: Arc<AtomicBool>,
+}
+
+impl Waiter {
+    /// Whether a caller is blocked on this registration.
+    fn in_flight(&self) -> bool {
+        !self.wake.is_closed() && self.blocked.load(Ordering::SeqCst)
+    }
 }
 
 impl Core {
@@ -36,6 +51,7 @@ impl Core {
         &mut self,
         targets: &WaitTargets,
         after: Option<u64>,
+        applied: Duration,
     ) -> Result<WaitStart, Error> {
         if targets.runs.is_empty() && targets.workers.is_empty() {
             return Err(Error::InvalidArguments(
@@ -77,11 +93,13 @@ impl Core {
         // bound.
         let released_now = after.is_some() && self.mode != super::Mode::Active;
         let (wake, rx) = oneshot::channel();
+        let blocked = Arc::new(AtomicBool::new(true));
         let waiter = Waiter {
             runs,
             workers,
             after,
             wake,
+            blocked: Arc::clone(&blocked),
         };
         if self.waiter_ready(&waiter) {
             return Ok(WaitStart::Ready);
@@ -89,30 +107,34 @@ impl Core {
         if released_now {
             return Ok(WaitStart::Released);
         }
-        // A registration whose caller has gone holds no slot.
+        // A wait given no time is a poll. Nothing named is ready, which is its
+        // whole answer: it never blocks, so it is not registered, takes no
+        // slot and is never turned away for the limit.
+        if applied.is_zero() {
+            let view = self.wait_view(targets, after, None, true, false, 0);
+            return Ok(WaitStart::Answered(Box::new(view)));
+        }
         self.waiters.retain(|_, w| !w.wake.is_closed());
-        if self.waiters.len() >= self.config.limits.max_waits_in_flight {
-            // Nothing named is ready, so this is what a wait of no time answers.
+        if self.waits_in_flight() >= self.config.limits.max_waits_in_flight {
+            // The same answer as a poll, marked so the caller can tell.
             let mut view = self.wait_view(targets, after, None, true, false, 0);
             view.limit_reached = Some(WaitLimit::MaxWaitsInFlight);
-            return Ok(WaitStart::LimitReached(Box::new(view)));
+            return Ok(WaitStart::Answered(Box::new(view)));
         }
         self.next_waiter += 1;
         let id = self.next_waiter;
         self.waiters.insert(id, waiter);
-        Ok(WaitStart::Pending { id, rx })
+        Ok(WaitStart::Pending { id, rx, blocked })
     }
 
-    /// How many waits are blocked now. The registrations are the count, so it
-    /// cannot drift from them: one leaves when it fires, when its caller asks
-    /// for the view after its time passed, and when its caller has gone. A
-    /// caller that has gone is not counted even before its registration is
-    /// removed.
+    /// How many waits are blocked now: the registrations whose caller is
+    /// still waiting to be woken. It is counted from the registrations, so it
+    /// cannot drift from them. A registration is removed when it fires and
+    /// when pruning removes what it named, and it stops counting, before it is
+    /// removed, when its caller's time has passed (the caller keeps it until
+    /// it has its view) and when its caller has gone.
     pub(super) fn waits_in_flight(&self) -> usize {
-        self.waiters
-            .values()
-            .filter(|w| !w.wake.is_closed())
-            .count()
+        self.waiters.values().filter(|w| w.in_flight()).count()
     }
 
     fn waiter_ready(&self, waiter: &Waiter) -> bool {

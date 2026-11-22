@@ -50,7 +50,8 @@ const WAIT: &str = "Wait until any named run finishes, or the current run of any
     a limited number of waits block at once (list reports max_waits_in_flight and \
     waits_in_flight); a wait beyond it returns at once with limit_reached \
     \"max_waits_in_flight\", timeout_secs 0 and the current states: let an open wait return, \
-    or call again later with the cursor. Pass the cursor back as after to be told only \
+    or call again later with the cursor; a wait with timeout_secs 0 only checks and is never \
+    turned away. Pass the cursor back as after to be told only \
     of what finishes later, instead of waiting long. Next, read a run that finished.";
 
 const READ: &str = "Read a run, or a worker's current run: the result if it has finished, \

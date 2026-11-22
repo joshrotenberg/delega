@@ -404,8 +404,9 @@ async fn an_unconfirmed_run_stays_recorded_after_a_refused_follow_up_replaced_it
     dir.assert_nothing_left().await;
 }
 
-/// Start a gated run and a `wait` for it that times out at once and is held
-/// before it asks for its view. Returns the held wait and the gate that lets it
+/// Start a gated run and a `wait` for it that times out after a second and is
+/// held before it asks for its view. The wait is given time because a wait
+/// given none is answered in one command and never reaches its view. Returns the held wait and the gate that lets it
 /// go on.
 async fn wait_held_after_its_timeout(
     dir: &Dir,
@@ -426,10 +427,64 @@ async fn wait_held_after_its_timeout(
             runs: vec![started.run],
             workers: Vec::new(),
         };
-        tokio::spawn(async move { supervisor.wait(targets, Some(0), None).await })
+        tokio::spawn(async move { supervisor.wait(targets, Some(1), None).await })
     };
     reached.await.expect("the wait reached its view");
     (waiting, release)
+}
+
+#[tokio::test]
+async fn a_wait_held_between_its_timeout_and_its_view_takes_no_slot_from_the_next_wait() {
+    let dir = Dir::new();
+    let mut config = dir.config();
+    config.limits.max_waits_in_flight = 1;
+    let supervisor = Supervisor::new(config);
+    let (waiting, release) = wait_held_after_its_timeout(&dir, &supervisor).await;
+    // Its time has passed and its registration is still there, kept for the
+    // view. It blocks nothing, so it is not a wait in flight.
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.max_waits_in_flight, 1);
+    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
+    let run = listed.workers[0].brief.current_run.clone().expect("run");
+    // The one slot is free: the next wait blocks instead of being turned away.
+    let next = {
+        let supervisor = supervisor.clone();
+        let targets = WaitTargets {
+            runs: vec![run],
+            workers: Vec::new(),
+        };
+        tokio::spawn(async move { supervisor.wait(targets, Some(120), None).await })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while supervisor
+        .list()
+        .await
+        .expect("list")
+        .limits
+        .waits_in_flight
+        != 1
+    {
+        assert!(
+            !next.is_finished(),
+            "the next wait was answered instead of blocking"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the next wait never blocked"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release.send(()).expect("release the wait");
+    let held = waiting.await.expect("task").expect("wait");
+    assert!(held.timed_out, "{held:#?}");
+    assert_eq!(held.limit_reached, None);
+    assert_eq!(held.timeout_secs, 1);
+    std::fs::write(dir.gate(), b"").expect("open the gate");
+    let woken = next.await.expect("task").expect("wait");
+    assert!(!woken.timed_out, "{woken:#?}");
+    assert_eq!(woken.limit_reached, None);
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
 }
 
 #[tokio::test]

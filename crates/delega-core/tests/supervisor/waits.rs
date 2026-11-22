@@ -550,6 +550,16 @@ async fn a_wait_past_the_limit_returns_at_once_and_list_and_interrupt_still_answ
     assert_eq!(polled.limit_reached, Some(WaitLimit::MaxWaitsInFlight));
     assert_eq!(polled.runs[0].changed, Some(false));
 
+    // A wait given no time never blocks, so the limit does not apply to it.
+    let poll = supervisor
+        .wait(runs(&[&a.run]), Some(0), None)
+        .await
+        .expect("wait");
+    assert_eq!(poll.limit_reached, None, "{poll:#?}");
+    assert!(poll.timed_out);
+    assert_eq!(poll.timeout_secs, 0);
+    assert_eq!(poll.runs[0].state, RunState::Running);
+
     // A wait with something to report takes no slot and is served at the limit.
     let begun = Instant::now();
     let ready = supervisor
@@ -601,28 +611,17 @@ async fn a_wait_that_times_out_frees_its_slot() {
         .expect("start");
     gate.started().await;
 
-    let short = {
-        let supervisor = supervisor.clone();
-        let targets = runs(&[&started.run]);
-        tokio::spawn(async move { supervisor.wait(targets, Some(2), None).await })
-    };
-    // Whether the short wait is still parked when the next one arrives depends
-    // on the machine, so the limit is only asserted if `list` saw it parked.
-    let listed = supervisor.list().await.expect("list");
-    let second = supervisor
-        .wait(runs(&[&started.run]), Some(0), None)
+    let timed_out = supervisor
+        .wait(runs(&[&started.run]), Some(1), None)
         .await
         .expect("wait");
-    if listed.limits.waits_in_flight == 1 && !short.is_finished() {
-        assert_eq!(second.limit_reached, Some(WaitLimit::MaxWaitsInFlight));
-    }
-    let timed_out = short.await.expect("task").expect("wait");
     assert!(timed_out.timed_out);
     assert_eq!(timed_out.limit_reached, None);
-    assert_eq!(timed_out.timeout_secs, 2);
+    assert_eq!(timed_out.timeout_secs, 1);
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
 
     // The slot is free: the next wait parks instead of being turned away.
-    waits_in_flight(&supervisor, 0).await;
     let parked = park(&supervisor, runs(&[&started.run]));
     waits_in_flight(&supervisor, 1).await;
     gate.open();
@@ -630,6 +629,108 @@ async fn a_wait_that_times_out_frees_its_slot() {
     assert_eq!(response.limit_reached, None);
     assert!(!response.timed_out);
     waits_in_flight(&supervisor, 0).await;
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_whose_default_timeout_is_zero_is_a_poll_and_is_never_turned_away_for_the_limit() {
+    let rig = Rig::new();
+    let limits = Limits {
+        max_waits_in_flight: 1,
+        wait_default: Duration::ZERO,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let gate = rig.gate("poll");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    let parked = park(&supervisor, runs(&[&started.run]));
+    waits_in_flight(&supervisor, 1).await;
+
+    for timeout in [None, Some(0)] {
+        let poll = supervisor
+            .wait(runs(&[&started.run]), timeout, None)
+            .await
+            .expect("wait");
+        assert_eq!(poll.limit_reached, None, "{timeout:?}: {poll:#?}");
+        assert!(poll.timed_out, "{timeout:?}");
+        assert_eq!(poll.timeout_secs, 0, "{timeout:?}");
+    }
+    // The polls took no slot and left the parked wait alone.
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 1, "{listed:#?}");
+    // A poll still reports a finish.
+    gate.open();
+    let woken = parked.await.expect("task").expect("wait");
+    assert!(!woken.timed_out, "{woken:#?}");
+    let poll = supervisor
+        .wait(runs(&[&started.run]), None, None)
+        .await
+        .expect("wait");
+    assert!(!poll.timed_out, "{poll:#?}");
+    assert_eq!(poll.runs[0].state, RunState::Finished);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_parked_wait_whose_run_aged_out_does_not_hold_its_slot_against_the_next_wait() {
+    let rig = Rig::new();
+    let limits = Limits {
+        max_waits_in_flight: 1,
+        retention: Duration::from_secs(3),
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let (old, held) = (rig.gate("old"), rig.gate("held"));
+    let b = supervisor
+        .start(rig.request(Provider::Claude, &held.prompt()))
+        .await
+        .expect("start");
+    held.started().await;
+    let a = supervisor
+        .start(rig.request(Provider::Claude, &old.prompt()))
+        .await
+        .expect("start");
+    old.started().await;
+    old.open();
+    let done = finished(&supervisor, &[&a.run]).await;
+
+    // Parked on the finished run with a cursor past its finish: nothing will
+    // wake it until the result ages out.
+    let stale = {
+        let supervisor = supervisor.clone();
+        let targets = runs(&[&a.run]);
+        let cursor = done.cursor;
+        tokio::spawn(async move {
+            supervisor
+                .wait(targets, Some(PARKED_SECS), Some(cursor))
+                .await
+        })
+    };
+    waits_in_flight(&supervisor, 1).await;
+    // No command is sent while the result ages out, so the pruning happens in
+    // the command of the wait below, which must find the slot free.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let next = supervisor
+        .wait(runs(&[&b.run]), Some(1), None)
+        .await
+        .expect("wait");
+    assert_eq!(next.limit_reached, None, "{next:#?}");
+    assert_eq!(next.timeout_secs, 1);
+    assert!(next.timed_out);
+
+    let gone = stale.await.expect("task").expect("wait");
+    assert_eq!(gone.unknown, [a.run.as_str()], "{gone:#?}");
+    assert_eq!(gone.limit_reached, None);
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
+    held.open();
+    result_of(&supervisor, &b.run).await;
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
