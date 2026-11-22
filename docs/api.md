@@ -800,6 +800,10 @@ Claude Code, start a new session or reconnect `plugin:delega:delega` from `/mcp`
 server); in Codex, start a new session. Then read `delega://identity` and check it
 against `plugin/delega/IDENTITY.json`.
 
+Until then the session keeps running the server it started with, and that
+server says so: `list` and `delega://identity` carry `stale_server`
+([Stale server](#stale-server)).
+
 `--output json` prints one document, including for exit-1 failures. The
 `operation` field is `install` or `uninstall`. Both documents have `ok`,
 `dry_run`, `install_dir`, `hosts` (each with its `status`, the `commands` run
@@ -960,7 +964,7 @@ eighth, `respond`, when live asking is added.
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
 | `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` is present, and otherwise absent, when the wait would have blocked and as many waits as the server allows were blocked already: it returned at once with `timeout_secs: 0`, `timed_out: true` and the current states. A wait asked with `timeout_secs: 0` never gets it. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
-| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`, and `max_waits_in_flight`) and in use (including `waits_in_flight`); a `cursor`. |
+| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`, and `max_waits_in_flight`) and in use (including `waits_in_flight`); a `cursor`; and `stale_server` only when the server is older than the installed executable ([Stale server](#stale-server)). |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
 | `close` | `worker` | Stops the worker's running run (at most 30 s), discards queued runs and frees its slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. Results already produced stay readable for the retention time. Closing again answers the same way. |
@@ -1135,6 +1139,42 @@ Rules that hold for every tool:
   `read` takes `text_offset`, a number of characters, to page a long answer;
   page by run id, because a worker's latest run can change between pages.
 
+### Stale server
+
+A host session keeps running the server it started with. After `delega plugin
+install` refreshes the plugin, that server is older than the installed one until
+it is reconnected (in Claude Code, `plugin:delega:delega` from `/mcp`) or a new
+session starts. The server reports it:
+
+- **What is checked.** At start `delega mcp` records the path of its own
+  executable and that file's device, inode, size and modification time. Each
+  `list` and each read of `delega://identity` asks for the status of that path
+  again, one `stat` per call. The server is stale when nothing is at the path
+  or the file there is another one. `delega plugin install` writes the
+  executable through a staged file and a rename, so a refresh always puts
+  another file at the path Claude Code runs. Codex runs the server from a
+  versioned cache directory that a refresh replaces, so there the path is gone.
+  Nothing is hashed and no provider is run.
+- **What is reported.** `list` and the identity resource gain a `stale_server`
+  object, absent while the server is current:
+
+  | Field | Meaning |
+  | --- | --- |
+  | `change` | `replaced` when another file is at the path (or the file was rewritten), `removed` when nothing is. |
+  | `running_revision` | The `revision` of the running build, as in `delega://identity`. |
+  | `installed_revision` | The `revision` in `IDENTITY.json` in the directory above the executable's (`plugin/delega/IDENTITY.json`). Absent when that file is missing, is over 64 KiB or has no `revision`, which is the usual case after `removed`. |
+  | `what_to_do` | A fixed sentence: reconnect the server (for example from `/mcp` in Claude Code) or start a new session. |
+
+  Nothing else in either document changes, and the tools go on working.
+  `delega version --output json` never has the field.
+- **Limits of the check.** It compares files, not builds: `delega plugin
+  install` with identical bytes still replaces the file and is reported, and
+  the two revisions can then be equal. A server whose executable path could not
+  be found or read at start never reports stale, and neither does one for which
+  the later `stat` fails for another reason than the path being gone. The
+  library builds such a server unless it is given the executable
+  (`router_with_executable`).
+
 ### Running the server
 
 `delega mcp` serves one connection on standard input and output, with one
@@ -1223,7 +1263,10 @@ There is one source and three doors.
   with `name`, `version`, `schema_version` (the contract's), `revision` (a
   12-character source revision or `unknown`), `features` (empty: the crates
   define no Cargo features) and `skills`, the name, URI and SHA-256 digest of
-  each skill; `delega version --output json` prints the same document.
+  each skill; `delega version --output json` prints the same document. The
+  resource is computed on each read and adds `stale_server` while the server is
+  older than the installed executable ([Stale server](#stale-server)); the
+  command never prints that field.
 - **Plugin.** `delega plugin install` installs the same files as a plugin into Claude Code
   and Codex, for hosts that load skills from disk
   ([Install and uninstall](#install-and-uninstall)).

@@ -11,12 +11,14 @@ use delega_core::supervisor::{
     CloseResponse, Detail, Error, FollowUpResponse, InterruptResponse, ListResponse, ReadResponse,
     StartResponse, Supervisor, Target, WaitResponse, WaitTargets,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 use tower_mcp::extract::{RawArgs, State};
 use tower_mcp::{CallToolResult, Content, Tool, ToolBuilder};
 
 use crate::args::{CloseArgs, FollowUpArgs, InterruptArgs, ListArgs, ReadArgs, WaitArgs};
+use crate::stale::{StaleServer, Staleness};
 use crate::start;
 
 /// The tool names. The server lists them sorted by name.
@@ -63,7 +65,8 @@ const READ: &str = "Read a run, or a worker's current run: the result if it has 
 
 const LIST: &str = "List the workers on this connection with their state, queue length and \
     session id, and the limits in force and in use. Returns at once. Check it before starting \
-    many workers.";
+    many workers. stale_server is present when the installed executable is no longer the one \
+    this server runs: tell the user to reconnect the server or start a new session.";
 
 const INTERRUPT: &str = "Stop a run, or a worker's current run. Returns when the run has \
     stopped and cleanup was attempted, after 30 s at most; settled false means the stop has \
@@ -73,6 +76,20 @@ const INTERRUPT: &str = "Stop a run, or a worker's current run. Returns when the
 const CLOSE: &str = "Stop a worker, discard its queued runs and free its slot. Returns when its \
     running run has stopped, after 30 s at most. Read the results you need first: they stay \
     readable only for a bounded time after close. Closing a closed worker answers the same way.";
+
+/// The answer to `list`: the supervisor's, and `stale_server` while the
+/// executable this server was started from is no longer the one on disk.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[schemars(title = "ListResponse")]
+struct ListAnswer {
+    #[serde(flatten)]
+    list: ListResponse,
+    /// Present only when the executable this server was started from has been
+    /// replaced or removed since, for example by `delega plugin install`: the
+    /// host is still running the old build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_server: Option<StaleServer>,
+}
 
 /// A tool's name and the schemas of its arguments and result, as the server
 /// lists them.
@@ -89,17 +106,22 @@ pub struct ToolSchemas {
 /// The schemas of the seven tools, built from the same definitions the server
 /// lists, without a supervisor or a runtime.
 pub fn tool_schemas() -> Vec<ToolSchemas> {
-    tools(None, PartialRequest::default(), None)
-        .iter()
-        .map(|tool| {
-            let definition = tool.definition();
-            ToolSchemas {
-                name: definition.name,
-                input: definition.input_schema,
-                output: definition.output_schema.unwrap_or(Value::Null),
-            }
-        })
-        .collect()
+    tools(
+        None,
+        PartialRequest::default(),
+        None,
+        Staleness::new(None, ""),
+    )
+    .iter()
+    .map(|tool| {
+        let definition = tool.definition();
+        ToolSchemas {
+            name: definition.name,
+            input: definition.input_schema,
+            output: definition.output_schema.unwrap_or(Value::Null),
+        }
+    })
+    .collect()
 }
 
 /// The text a tool returns, as structured content and as the same JSON in a
@@ -133,6 +155,8 @@ struct Adapter {
     defaults: PartialRequest,
     /// The configuration file those defaults came from, for `applied.config`.
     config: Option<AppliedConfig>,
+    /// Whether the executable the server runs from is still the one on disk.
+    staleness: Staleness,
 }
 
 impl Adapter {
@@ -154,11 +178,13 @@ pub(crate) fn tools(
     supervisor: Option<Supervisor>,
     defaults: PartialRequest,
     config: Option<AppliedConfig>,
+    staleness: Staleness,
 ) -> Vec<Tool> {
     let adapter = Arc::new(Adapter {
         supervisor,
         defaults,
         config,
+        staleness,
     });
     vec![
         start_tool(&adapter),
@@ -272,11 +298,19 @@ fn list_tool(adapter: &Arc<Adapter>) -> Tool {
     let adapter = adapter.clone();
     ToolBuilder::new("list")
         .description(LIST)
-        .output_schema_for::<ListResponse>()
+        .output_schema_for::<ListAnswer>()
         .read_only_safe()
         .handler(move |_args: ListArgs| {
             let adapter = adapter.clone();
-            async move { Ok(adapter.with(|s| async move { s.list().await }).await) }
+            async move {
+                // Asked on every call: the executable can be replaced at any time.
+                let stale_server = adapter.staleness.check().await;
+                Ok(adapter
+                    .with(|s| async move {
+                        s.list().await.map(|list| ListAnswer { list, stale_server })
+                    })
+                    .await)
+            }
         })
         .build()
 }

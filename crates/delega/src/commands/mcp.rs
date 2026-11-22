@@ -147,11 +147,15 @@ async fn serve(
         }
     };
     let supervisor = Supervisor::new(config);
-    let router = match delega_mcp::router_with_config(
+    // Recorded now, so that `list` and the identity resource can say when a
+    // later `delega plugin install` has replaced or removed this executable.
+    // When it cannot be recorded the server never reports itself stale.
+    let router = match delega_mcp::router_with_executable(
         supervisor.clone(),
         &version::build_info(),
         defaults,
         file,
+        delega_mcp::Executable::current(),
     ) {
         Ok(router) => router,
         Err(err) => {

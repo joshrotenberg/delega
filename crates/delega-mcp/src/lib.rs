@@ -7,6 +7,10 @@
 //! the build. The adapter keeps no state beyond the supervisor handle: limits,
 //! queueing and retention are the supervisor's.
 //!
+//! A server built with the [`Executable`] it runs from
+//! ([`router_with_executable`]) says when that file has been replaced or removed
+//! since it started: `list` and `delega://identity` then carry `stale_server`.
+//!
 //! [`router`] builds the server for a supervisor and [`serve`] runs it on
 //! standard input and output until input ends or a stop signal arrives, then
 //! stops every worker before returning. [`tool_schemas`] gives the schemas of
@@ -22,6 +26,7 @@
 mod args;
 mod resources;
 mod serve;
+mod stale;
 mod start;
 mod tools;
 
@@ -32,6 +37,7 @@ use tower_mcp::McpRouter;
 
 pub use resources::{BuildInfo, IDENTITY_URI, identity};
 pub use serve::{Ended, Served, serve};
+pub use stale::{Change, Executable, StaleServer, WHAT_TO_DO};
 pub use tools::{TOOL_NAMES, ToolSchemas, tool_schemas};
 
 /// What the server tells a client about itself.
@@ -75,6 +81,22 @@ pub fn router_with_config(
     defaults: PartialRequest,
     config: Option<AppliedConfig>,
 ) -> Result<McpRouter, String> {
+    router_with_executable(supervisor, build, defaults, config, None)
+}
+
+/// [`router_with_config`] for a server that knows the executable it runs from.
+/// On each `list` and each read of `delega://identity` the server asks for the
+/// status of that file once; when the file is gone or is another file, both
+/// carry a `stale_server` object ([`StaleServer`]) that says the host is still
+/// running the old build and what to do. `delega mcp` passes
+/// [`Executable::current`]. With `None` the server never reports stale.
+pub fn router_with_executable(
+    supervisor: Supervisor,
+    build: &BuildInfo,
+    defaults: PartialRequest,
+    config: Option<AppliedConfig>,
+    executable: Option<Executable>,
+) -> Result<McpRouter, String> {
     let waits = supervisor.limits().max_waits_in_flight;
     let most = serve::MAX_CONCURRENT_REQUESTS / 2;
     if waits > most {
@@ -85,13 +107,14 @@ pub fn router_with_config(
             serve::MAX_CONCURRENT_REQUESTS
         ));
     }
+    let staleness = stale::Staleness::new(executable, &build.revision);
     let skills = resources::skill_set().map_err(|error| error.to_string())?;
     let mut router = McpRouter::new()
         .server_info("delega", delega_core::VERSION)
         .instructions(INSTRUCTIONS)
         .skills(skills)
-        .resource(resources::identity_resource(build));
-    for tool in tools::tools(Some(supervisor), defaults, config) {
+        .resource(resources::identity_resource(build, staleness.clone()));
+    for tool in tools::tools(Some(supervisor), defaults, config, staleness) {
         router = router.tool(tool);
     }
     Ok(router)
