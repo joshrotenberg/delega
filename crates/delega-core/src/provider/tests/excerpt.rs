@@ -4,7 +4,7 @@ use crate::process::Captured;
 use crate::provider::limits::{
     MIN_REDACTED_VALUE_CHARS, STDERR_CUT_START_BYTES, STDERR_EXCERPT_CHARS,
 };
-use crate::provider::redact::{MASK, Redactor};
+use crate::provider::redact::{MASK, Redactor, private_key_blocks};
 use crate::provider::settle::{STDERR_CUT_GUARD_BYTES, STDERR_NOT_SHOWN, excerpt, stderr_note};
 
 /// Twenty long keys, which redact to twenty markers: less than one excerpt.
@@ -464,10 +464,44 @@ fn known_values_on_private_key_markers_never_expose_a_key_body() {
     let touching = format!("{BLOCK}{RSA}");
     let after_prefix = format!("a-long-prefix-OVERLAP{BLOCK}\nafter");
     let lone_then_block = format!("-----BEGIN EC PRIVATE KEY-----\n{BLOCK}\nafter");
+    let lone_then_both = format!("-----BEGIN EC PRIVATE KEY-----\n{adjacent}");
+    let piece_at_start = "-----BEGIN PRIVATE KEY-----\nMIIEbodyone\npiece-PRIVATE KEY-----\n\
+                          MIIEbodytwo\n-----END PRIVATE KEY-----\nafter";
+    let early_piece = format!("a-long-prefix-OVERLAP{piece_at_start}");
     let open = "before\n-----BEGIN PRIVATE KEY-----\nMIIEbodyone\nMIIEbodytwo";
     let cases: &[(&[&str], &str, &[&str])] = &[
-        // No value at all.
+        // No value at all: two blocks, and a begin line with no key of its
+        // own right before a block.
         (&[], &adjacent, &both),
+        (&[], &lone_then_block, &one),
+        (&[], &lone_then_both, &both),
+        // That begin line and a value on the next block's begin marker.
+        (
+            &["-----BEGIN EC PRIVATE KEY-----", "-BEGIN PRIV"],
+            &lone_then_block,
+            &one,
+        ),
+        // A value on a begin marker and one in the body holding the end
+        // marker, and the same where the marker starts the text and ends a
+        // value (for a cut capture).
+        (
+            &[
+                "OVERLAP-----BEGIN",
+                "bodyone\nMIIEbodytwo\n-----END PRIVATE KEY",
+            ],
+            &after_prefix,
+            &one,
+        ),
+        (
+            &["OVERLAP-----BEGIN", "piece-PRIVATE KEY-----"],
+            &early_piece,
+            &one,
+        ),
+        (
+            &["before-----BEGIN", "piece-PRIVATE KEY-----"],
+            piece_at_start,
+            &one,
+        ),
         // A value that is a whole begin line.
         (&["-----BEGIN PRIVATE KEY-----"], &adjacent, &both),
         (&["-----BEGIN RSA PRIVATE KEY-----"], &adjacent, &both),
@@ -528,102 +562,259 @@ impl Seeded {
     }
 }
 
-/// Generated texts of plain lines and private key blocks, with known values
-/// placed where they interfere with one of the two ways blocks are looked
-/// for, never both ways for the same block. What is generated:
+/// A generated text of plain lines and private key blocks, the values to know
+/// for it, and its key body lines. The blocks are whole (the last one can
+/// lack its end line) and each has its own label. Around and in them, by
+/// chance: a begin line with no key of its own before a block; a line holding
+/// `PRIVATE KEY-----` in a body; and as known values those lines, body lines,
+/// plain lines, a block's begin line or end line or a part of either, the end
+/// of the line before a block with its begin marker, whole blocks, and
+/// stretches of the text picked anywhere.
 ///
-/// - Every block has its own label (`K7 PRIVATE KEY`), so a value on one
-///   block's begin line is not on another's.
-/// - A block is of one of three kinds. A plain one has no value on its
-///   markers. A block hidden from the look at the replaced text has a value
-///   on its begin marker: the whole begin line, its start, or the end of the
-///   line before it and the marker. A block hidden from the look at the given
-///   text has a begin line with no key right before it, or a line that holds
-///   the end marker in its body, and that line is a known value.
-/// - Further values are whole body lines, whole plain lines, and the whole
-///   text of blocks of the first two kinds.
-/// - The last block can lack its end line.
-///
-/// Not generated, because the output can show a body line then: a block
-/// defeated both ways (for example a body line holding the end marker in a
-/// block whose begin marker a value overlaps, or whose begin marker starts a
-/// cut capture and ends a value), and a value on an end line.
-#[test]
-fn generated_values_on_private_key_markers_never_expose_a_key_body() {
-    let mut random = Seeded(0x00C0_FFEE);
-    let mut kinds = [0usize; 3];
-    for round in 0..400 {
-        // A first line that ends no value: `apply_cut` replaces the end of a
-        // value at the start, and on a begin marker that is a value on it.
-        let mut text = String::from("the text starts here\n");
-        let mut values: Vec<String> = Vec::new();
-        let mut bodies: Vec<String> = Vec::new();
-        let units = 1 + random.below(6);
-        for unit in 0..units {
-            let id = format!("{round}x{unit}");
-            if random.chance(3) {
-                let line = format!("plain line {id} of ordinary text");
-                text.push_str(&line);
-                text.push('\n');
-                if random.chance(4) {
-                    values.push(line);
-                }
-                continue;
+/// One thing is never generated: a whole end line inside a key body. The
+/// block ends there, whatever is known.
+fn generated_keys(random: &mut Seeded, round: usize) -> (String, Vec<String>, Vec<String>) {
+    let mut text = String::new();
+    let mut values: Vec<String> = Vec::new();
+    let mut bodies: Vec<String> = Vec::new();
+    let units = 1 + random.below(6);
+    for unit in 0..units {
+        let id = format!("{round}x{unit}");
+        if random.chance(3) {
+            let line = format!("plain line {id} of ordinary text");
+            text.push_str(&line);
+            text.push('\n');
+            if random.chance(4) {
+                values.push(line);
             }
-            let begin = format!("-----BEGIN K{id} PRIVATE KEY-----");
-            let kind = random.below(3);
-            kinds[kind] += 1;
-            // Hidden from the look at the given text, in one of two ways.
-            let lone_begin_before = kind == 2 && random.chance(2);
-            let early_end = kind == 2 && !lone_begin_before;
-            if lone_begin_before {
-                let lone = format!("-----BEGIN L{id} PRIVATE KEY-----");
-                text.push_str(&lone);
-                text.push('\n');
+            continue;
+        }
+        if random.chance(4) {
+            let lone = format!("-----BEGIN L{id} PRIVATE KEY-----");
+            text.push_str(&lone);
+            text.push('\n');
+            if random.chance(2) {
                 values.push(lone);
             }
-            // Hidden from the look at the replaced text.
-            if kind == 1 {
-                let before = text
-                    .strip_suffix('\n')
-                    .filter(|t| t.ends_with("ordinary text"));
-                match (random.below(3), before) {
-                    (0, _) => values.push(begin.clone()),
-                    (1, Some(before)) => {
-                        values.push(format!("{}\n-----BEGIN", &before[before.len() - 8..]));
-                    }
-                    _ => values.push(format!("-----BEGIN K{id} PRIV")),
-                }
+        }
+        let begin = format!("-----BEGIN K{id} PRIVATE KEY-----");
+        let end = format!("-----END K{id} PRIVATE KEY-----");
+        let before = text.strip_suffix('\n').filter(|t| t.len() >= 8);
+        match (random.below(6), before) {
+            (0, _) => values.push(begin.clone()),
+            (1, Some(before)) => {
+                values.push(format!("{}\n-----BEGIN", &before[before.len() - 8..]));
             }
-            let mut block = format!("{begin}\n");
-            for line in 0..1 + random.below(3) {
-                let body = format!("MIIE{id}y{line}Body");
-                block.push_str(&body);
+            (2, _) => values.push(format!("-----BEGIN K{id} PRIV")),
+            _ => {}
+        }
+        let mut block = format!("{begin}\n");
+        for line in 0..1 + random.below(3) {
+            let body = format!("MIIE{id}y{line}Body");
+            block.push_str(&body);
+            block.push('\n');
+            if random.chance(5) {
+                values.push(body.clone());
+            }
+            bodies.push(body);
+            if random.chance(4) {
+                let piece = format!("piece{id}y{line}-PRIVATE KEY-----");
+                block.push_str(&piece);
                 block.push('\n');
-                if random.chance(5) {
-                    values.push(body.clone());
-                }
-                bodies.push(body);
-                if early_end && line == 0 {
-                    let piece = format!("piece{id}-PRIVATE KEY-----");
-                    block.push_str(&piece);
-                    block.push('\n');
+                if random.chance(2) {
                     values.push(piece);
                 }
             }
-            let open = unit + 1 == units && random.chance(3);
-            if !open {
-                block.push_str(&format!("-----END K{id} PRIVATE KEY-----\n"));
-                if kind != 2 && random.chance(4) {
-                    values.push(block.trim_end().to_string());
-                }
-            }
-            text.push_str(&block);
         }
+        if unit + 1 == units && random.chance(3) {
+            text.push_str(&block);
+            continue;
+        }
+        block.push_str(&end);
+        match random.below(8) {
+            0 => values.push(end),
+            1 => values.push(format!("KEY-----\n-----END K{id}")),
+            2 => values.push(format!("K{id} PRIVATE KEY-----")),
+            3 => values.push(block.clone()),
+            _ => {}
+        }
+        text.push_str(&block);
+        text.push('\n');
+    }
+    // Stretches of the text, wherever they fall.
+    for _ in 0..random.below(4) {
+        let len = 6 + random.below(40);
+        if text.len() > len {
+            let start = random.below(text.len() - len);
+            values.push(text[start..start + len].to_string());
+        }
+    }
+    (text, values, bodies)
+}
+
+#[test]
+fn generated_values_on_private_key_markers_never_expose_a_key_body() {
+    let mut random = Seeded(0x00C0_FFEE);
+    let mut blocks = 0;
+    for round in 0..600 {
+        let (text, values, bodies) = generated_keys(&mut random, round);
+        blocks += bodies.len();
         let values: Vec<&str> = values.iter().map(String::as_str).collect();
         let bodies: Vec<&str> = bodies.iter().map(String::as_str).collect();
         hides_bodies(&values, &text, &bodies);
+        // And with no value known at all.
+        hides_bodies(&[], &text, &bodies);
     }
-    // Every kind of block was generated many times.
-    assert!(kinds.iter().all(|count| *count > 100), "{kinds:?}");
+    assert!(blocks > 1000, "{blocks}");
+}
+
+/// The rule private key blocks were found by before an end had to be an end
+/// line: a block ended at the first `PRIVATE KEY-----` after its begin line,
+/// whatever line that was in. Kept here only to compare with.
+fn earlier_private_key_blocks(text: &str) -> Vec<(usize, usize)> {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "PRIVATE KEY-----";
+    let mut blocks = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(BEGIN) {
+        let start = from + at;
+        let label = start + BEGIN.len();
+        let after = &text.as_bytes()[label..];
+        let window = &after[..after.len().min(64)];
+        let label_end = window.windows(5).position(|w| w == b"-----");
+        let Some(label_end) = label_end.filter(|i| after[..*i].ends_with(b"PRIVATE KEY")) else {
+            from = label;
+            continue;
+        };
+        let body = label + label_end + 5;
+        from = text[body..]
+            .find(END)
+            .map_or(text.len(), |end| body + end + END.len());
+        blocks.push((start, from));
+    }
+    blocks
+}
+
+/// Every byte the earlier rule took for part of a private key is part of one
+/// by the rule in use.
+fn covers_what_the_earlier_rule_covered(text: &str) {
+    let mut covered = vec![false; text.len()];
+    private_key_blocks(text, |start, end| covered[start..end].fill(true));
+    for (start, end) in earlier_private_key_blocks(text) {
+        let missed = covered[start..end].iter().position(|byte| !byte);
+        assert_eq!(
+            missed.map(|at| start + at),
+            None,
+            "the earlier rule covered {start}..{end} of {text:?}"
+        );
+    }
+}
+
+#[test]
+fn the_end_line_rule_covers_every_byte_the_earlier_private_key_rule_covered() {
+    const BLOCK: &str = "-----BEGIN PRIVATE KEY-----\nMIIEbodyone\n-----END PRIVATE KEY-----";
+    for text in [
+        BLOCK.to_string(),
+        format!("{BLOCK}\n{BLOCK}\nafter"),
+        format!("{BLOCK}{BLOCK}"),
+        // The dashes that close an end line open the next begin line.
+        "-----BEGIN PRIVATE KEY-----\nb\n-----END PRIVATE KEY-----BEGIN PRIVATE KEY-----\nb2\n\
+         -----END PRIVATE KEY-----\ntail"
+            .to_string(),
+        // The same after an early `PRIVATE KEY-----`, where the earlier rule
+        // ended the first block and so found the second.
+        "-----BEGIN PRIVATE KEY-----\nxPRIVATE KEY-----\nb\n-----END PRIVATE KEY-----BEGIN \
+         PRIVATE KEY-----\nb2\n-----END PRIVATE KEY-----\ntail"
+            .to_string(),
+        format!("-----BEGIN RSA PRIVATE KEY-----\n{BLOCK}\nafter"),
+        "-----BEGIN PRIVATE KEY-----END PRIVATE KEY-----\nafter".to_string(),
+        "-----BEGIN PRIVATE KEY-----\nb\n-----END PRIVATE\nKEY-----\nafter".to_string(),
+        "-----BEGIN PRIVATE KEY-----\nb\n-----END CERTIFICATE-----\nPRIVATE KEY-----\nafter"
+            .to_string(),
+        "-----BEGIN PRIVATE KEY-----\nopen body".to_string(),
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----".to_string(),
+    ] {
+        covers_what_the_earlier_rule_covered(&text);
+    }
+    let mut random = Seeded(0x5EED);
+    // The generated key texts, and then marker pieces in any order, which
+    // put markers into each other in ways no key text does.
+    for round in 0..300 {
+        covers_what_the_earlier_rule_covered(&generated_keys(&mut random, round).0);
+    }
+    const PIECES: [&str; 14] = [
+        "-----BEGIN ",
+        "-----END ",
+        "PRIVATE KEY-----",
+        "PRIVATE KEY",
+        "-----",
+        "--",
+        "RSA ",
+        "BEGIN ",
+        "END ",
+        "\n",
+        " ",
+        "body",
+        "CERTIFICATE-----",
+        "0123456789012345678901234567890123456789",
+    ];
+    for _ in 0..20_000 {
+        let text: String = (0..1 + random.below(24))
+            .map(|_| PIECES[random.below(PIECES.len())])
+            .collect();
+        covers_what_the_earlier_rule_covered(&text);
+    }
+}
+
+#[test]
+fn a_private_key_block_ends_only_at_an_end_line() {
+    let redactor = none();
+    // `PRIVATE KEY-----` in a begin line or in a body ends nothing.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN RSA PRIVATE KEY-----\n-----BEGIN PRIVATE KEY-----\nMIIEbody\n-----END \
+             PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\nxPRIVATE KEY-----\nMIIEtwo\n-----END RSA \
+             PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    // An end marker with another label, or with its label on two lines, is
+    // not an end line, and a block with none goes to the end of the text.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END CERTIFICATE-----\nMIIEtwo\n-----END \
+             PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    assert_eq!(
+        redactor.apply("a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END PRIVATE\nKEY-----\nb"),
+        "a [redacted]"
+    );
+    assert_eq!(
+        redactor.apply("a -----BEGIN PRIVATE KEY-----\nMIIEone\nPRIVATE KEY-----\nb"),
+        "a [redacted]"
+    );
+    // The dashes that close an end line can open the next begin line.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END PRIVATE KEY-----BEGIN PRIVATE \
+             KEY-----\nMIIEtwo\n-----END PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    // Blocks one after another stay apart.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END PRIVATE KEY-----\nbetween\n\
+             -----BEGIN PRIVATE KEY-----\nMIIEtwo\n-----END PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nbetween\n[redacted]\nb"
+    );
 }

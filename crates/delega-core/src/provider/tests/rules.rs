@@ -418,6 +418,21 @@ fn private_key_removal_is_linear_in_the_input() {
         let out = redactor.apply(&noise);
         let examined = crate::provider::redact::take_examined();
         assert_eq!(out.len(), noise.len());
+        // The same for end markers that are not a key's, inside a key block
+        // that never ends: the search for its end line looks at each once.
+        let open = format!(
+            "-----BEGIN PRIVATE KEY-----{}",
+            "-----END CERTIFICATE".repeat(repeats)
+        );
+        let out = redactor.apply(&open);
+        let examined_open = crate::provider::redact::take_examined();
+        assert_eq!(out, "[redacted]");
+        assert!(
+            examined_open >= open.len() && examined_open <= FACTOR * open.len(),
+            "{} bytes were scanned for {} bytes of a block with no end line",
+            examined_open,
+            open.len()
+        );
         assert!(
             examined >= noise.len(),
             "only {} bytes were counted for {} bytes of input: the scan no longer counts \

@@ -272,27 +272,29 @@ after redaction. Two kinds of text are replaced with `[redacted]`:
 
 The values and private key blocks are replaced in one pass over the text as
 the provider wrote it. Every occurrence of every value is found, occurrences
-that overlap included. Private key blocks (from a `BEGIN` line through the next
-`PRIVATE KEY-----`, or to the end of the text when there is none) are looked
-for twice: in the text as written, and in the text with the values replaced,
-with what is found there mapped back. Both findings count, because a value can
-lie on a block's markers and each way then misses shapes the other finds: as
-written, a value that is a `BEGIN` line with no key, or that holds
-`PRIVATE KEY-----` inside a key body, ends a block early; with values replaced,
-a value that overlaps a `BEGIN` marker has removed it. Stretches that overlap
-or touch are replaced together by one `[redacted]`. The replacements are not
-searched for values again, so a value that happens to match inside
-`[redacted]` cannot lengthen the text. The key shapes and `Bearer` tokens are
-replaced after that, and only shorten the text.
+that overlap included. A private key block goes from a `-----BEGIN ... PRIVATE
+KEY-----` line through its end line, or to the end of the text when it has
+none. An end line is `-----END `, a label ending in `PRIVATE KEY` on the same
+line, and `-----`; a `PRIVATE KEY-----` anywhere else, a `BEGIN` line included,
+ends nothing, so a `BEGIN` line with no key of its own takes the block after it
+with it. Blocks are looked for twice: in the text as written, and in the text
+with the values replaced, with what is found there mapped back. Both findings
+count, because a value can lie on a block's markers and each way then misses a
+shape the other finds: as written, a value that holds a whole end line inside a
+key body ends the block there; with values replaced, a value that overlaps a
+`BEGIN` marker has removed it. Stretches that overlap or touch are replaced
+together by one `[redacted]`. The replacements are not searched for values
+again, so a value that happens to match inside `[redacted]` cannot lengthen the
+text. The key shapes and `Bearer` tokens are replaced after that, and only
+shorten the text.
 
 Taking both findings removes at least what each removes alone, and sometimes
-more than the key: a value across a block's `END` line leaves the block without
-one in the second look, so everything after it is removed. A key body can still
-show when one block defeats both looks at once (a body line holding
-`PRIVATE KEY-----` in a block whose `BEGIN` marker a value overlaps), and,
-with or without values, when a `BEGIN ... PRIVATE KEY-----` line with no key
-of its own comes right before a block: that line's block ends at the next
-`PRIVATE KEY-----`, which is in the following block's `BEGIN` line.
+more than the key: a value across a block's end line leaves the block without
+one in the second look, so everything after it is removed. The remaining limit
+is a key block that known values are crafted around: one overlapping its
+`BEGIN` marker and one containing a whole end line inside its body. Then
+neither look finds the rest of the body. A whole end line inside a key body
+ends the block in any case; what follows it is not part of a key block.
 
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,

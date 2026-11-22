@@ -160,7 +160,7 @@ fn credential_shaped(token: &str) -> bool {
     false
 }
 
-/// The longest label looked at after `-----BEGIN `, in bytes.
+/// The longest label looked at after `-----BEGIN ` or `-----END `, in bytes.
 const BEGIN_LABEL_WINDOW: usize = 64;
 
 // Test builds count the bytes the private key scan looks at, so a test can
@@ -189,38 +189,76 @@ pub(super) fn take_examined() -> usize {
     EXAMINED.with(|total| total.replace(0))
 }
 
+/// The length of a private key label at the start of `after`, the text that
+/// follows a begin or end marker: the bytes up to the first `-----` within
+/// [`BEGIN_LABEL_WINDOW`], when they end with `PRIVATE KEY`.
+fn key_label(after: &[u8]) -> Option<usize> {
+    let window = &after[..after.len().min(BEGIN_LABEL_WINDOW)];
+    examined(window.len());
+    window
+        .windows(5)
+        .position(|w| w == b"-----")
+        .filter(|len| after[..*len].ends_with(b"PRIVATE KEY"))
+}
+
+/// Where the private key block whose body starts at `body` ends: after its
+/// end line, or at the end of the text when it has none. An end line is
+/// `-----END `, a label as for a begin line, on one line, and `-----`. A
+/// `PRIVATE KEY-----` anywhere else, a begin line included, ends nothing.
+fn key_block_end(text: &str, body: usize) -> usize {
+    const END: &str = "-----END ";
+    let mut from = body;
+    while let Some(at) = text[from..].find(END) {
+        examined(at + END.len());
+        let label = from + at + END.len();
+        let after = &text.as_bytes()[label..];
+        let on_one_line = |len: &usize| !after[..*len].contains(&b'\n');
+        if let Some(len) = key_label(after).filter(on_one_line) {
+            return label + len + 5;
+        }
+        from = label;
+    }
+    examined(text.len() - from);
+    text.len()
+}
+
 /// Report the byte span of every private key block in `text` to `found`: from
 /// its begin marker up to its end line, or to the end of the text when it has
 /// none. One forward pass: every search starts where the last one stopped, and
-/// a begin marker that is not a key is skipped after a bounded look.
-fn private_key_blocks(text: &str, mut found: impl FnMut(usize, usize)) {
+/// a marker that is not a key's is skipped after a bounded look.
+///
+/// The spans cover at least what the earlier rule covered, which ended a
+/// block at the first `PRIVATE KEY-----` after its begin line, whatever line
+/// that was in, and went on from there:
+///
+/// - Both rules know a begin line the same way. Here the search goes on from
+///   the five dashes that close an end line, since they can open the next
+///   begin line, so every begin line in the text either starts a block here
+///   or lies inside one, before those dashes.
+/// - A block that starts at the same begin line ends no earlier here: its
+///   end line is in its body and holds a `PRIVATE KEY-----`, so the first one
+///   in the body, where the earlier rule stopped, is not after it.
+/// - A begin line inside a block here is before the block's end line, and
+///   cannot overlap it: the first dashes after its marker close its label at
+///   the latest where the end line starts. So the end line's
+///   `PRIVATE KEY-----` is in that begin line's body as well, and a block the
+///   earlier rule started there ended inside this one.
+///
+/// Spans can overlap by those five dashes.
+pub(super) fn private_key_blocks(text: &str, mut found: impl FnMut(usize, usize)) {
     const BEGIN: &str = "-----BEGIN ";
-    const END: &str = "PRIVATE KEY-----";
     let mut from = 0;
     while let Some(at) = text[from..].find(BEGIN) {
         examined(at + BEGIN.len());
         let start = from + at;
         let label = start + BEGIN.len();
-        let after = &text.as_bytes()[label..];
-        let window = &after[..after.len().min(BEGIN_LABEL_WINDOW)];
-        examined(window.len());
-        let label_end = window.windows(5).position(|w| w == b"-----");
-        let Some(label_end) = label_end.filter(|i| after[..*i].ends_with(b"PRIVATE KEY")) else {
+        let Some(len) = key_label(&text.as_bytes()[label..]) else {
             from = label;
             continue;
         };
-        let body = label + label_end + 5;
-        from = match text[body..].find(END) {
-            Some(end) => {
-                examined(end + END.len());
-                body + end + END.len()
-            }
-            None => {
-                examined(text.len() - body);
-                text.len()
-            }
-        };
-        found(start, from);
+        let end = key_block_end(text, label + len + 5);
+        found(start, end);
+        from = end - 5;
     }
     // The search that found no further marker looked at all of what was left.
     examined(text.len() - from);
@@ -228,15 +266,9 @@ fn private_key_blocks(text: &str, mut found: impl FnMut(usize, usize)) {
 
 /// Replace private key blocks (see [`private_key_blocks`]).
 fn without_private_keys(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut copied = 0;
-    private_key_blocks(text, |start, end| {
-        out.push_str(&text[copied..start]);
-        out.push_str(MASK);
-        copied = end;
-    });
-    out.push_str(&text[copied..]);
-    out
+    let mut covered = Coverage::new(text.len());
+    private_key_blocks(text, |start, end| covered.mark(start, end));
+    Masked::new(text, &covered.runs()).text
 }
 
 /// Which bytes of a text are to be replaced, as a difference array: one more
@@ -438,10 +470,8 @@ impl Redactor {
     /// has shapes it misses:
     ///
     /// - On the text as it was given, a value that would have been replaced
-    ///   still acts as text. A begin line that is a value, with no key after
-    ///   it, takes the begin line of the next block for its end; a value in a
-    ///   key body that holds the end marker ends the block early. Either way
-    ///   the rest of a body is left out.
+    ///   still acts as text. A value in a key body that holds a whole end
+    ///   line ends the block there, and the rest of the body is left out.
     /// - On the text with the values replaced, a value that overlaps a begin
     ///   marker has removed the marker, and the block is not found at all.
     ///
