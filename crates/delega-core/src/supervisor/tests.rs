@@ -1397,3 +1397,232 @@ fn a_repeated_system_event_in_a_full_buffer_replaces_the_tail_and_evicts_nothing
     assert_eq!(tail.cursor, cursor.load(Ordering::SeqCst));
     assert_eq!(after.total, MAX_ACTIVITY as u64 + 1);
 }
+
+/// A wall clock the test moves by hand. It counts its readings, so a test can
+/// tell that a call has taken its starting time before moving the clock.
+struct HandClock {
+    now: std::sync::Mutex<std::time::SystemTime>,
+    readings: AtomicUsize,
+}
+
+impl HandClock {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            now: std::sync::Mutex::new(
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1 << 30),
+            ),
+            readings: AtomicUsize::new(0),
+        })
+    }
+
+    fn clock(self: &Arc<Self>) -> super::bound::WallClock {
+        let clock = self.clone();
+        Arc::new(move || {
+            clock.readings.fetch_add(1, Ordering::SeqCst);
+            *clock.now.lock().expect("clock")
+        })
+    }
+
+    /// Wait until a bounded call has read its starting time. The deadline only
+    /// ends a test that would otherwise hang.
+    async fn bound_began(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while self.readings.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no bounded call read the wall clock"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    fn forward(&self, by: Duration) {
+        let mut now = self.now.lock().expect("clock");
+        *now += by;
+    }
+
+    fn back(&self, by: Duration) {
+        let mut now = self.now.lock().expect("clock");
+        *now -= by;
+    }
+}
+
+/// Far more awake time than the one check interval a bound needs to notice
+/// that wall time has passed, on a loaded machine, and far less than any limit
+/// the tests below would otherwise run to.
+const NOTICED_WITHIN: Duration = Duration::from_secs(20);
+
+/// Start a gated run on a supervisor that reads `clock`, and a `wait` for it
+/// with `timeout_secs`. Returns once the wait has read its starting time, with
+/// the awake time at which the wait began.
+async fn parked_wait(
+    dir: &Dir,
+    clock: &Arc<HandClock>,
+    timeout_secs: u64,
+) -> (
+    Supervisor,
+    tokio::task::JoinHandle<Result<super::WaitResponse, Error>>,
+    tokio::time::Instant,
+) {
+    let supervisor = Supervisor::with_wall_clock(dir.config(), clock.clock());
+    let started = supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let begun = tokio::time::Instant::now();
+    let waiting = {
+        let supervisor = supervisor.clone();
+        let targets = WaitTargets {
+            runs: vec![started.run],
+            workers: Vec::new(),
+        };
+        tokio::spawn(async move { supervisor.wait(targets, Some(timeout_secs), None).await })
+    };
+    clock.bound_began().await;
+    (supervisor, waiting, begun)
+}
+
+#[tokio::test]
+async fn a_wait_ends_timed_out_once_wall_time_passed_its_limit_though_awake_time_did_not() {
+    let dir = Dir::new();
+    let clock = HandClock::new();
+    let (supervisor, waiting, begun) = parked_wait(&dir, &clock, 300).await;
+    // What a sleep of the machine does: wall time moves, Tokio's does not.
+    clock.forward(Duration::from_secs(300));
+    let response = waiting.await.expect("task").expect("wait");
+    let took = begun.elapsed();
+    assert!(response.timed_out, "{response:#?}");
+    assert_eq!(response.timeout_secs, 300, "{response:#?}");
+    assert!(!response.released_by_shutdown, "{response:#?}");
+    assert!(
+        took < NOTICED_WITHIN,
+        "the wait took {took:?} of awake time after 300 s of wall time had passed"
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wall_clock_set_back_does_not_end_a_wait_early() {
+    let dir = Dir::new();
+    let clock = HandClock::new();
+    let (supervisor, waiting, begun) = parked_wait(&dir, &clock, 2).await;
+    clock.back(Duration::from_secs(3600));
+    let response = waiting.await.expect("task").expect("wait");
+    let took = begun.elapsed();
+    assert!(response.timed_out, "{response:#?}");
+    // The wait began after `begun` was taken, so it cannot be shorter.
+    assert!(
+        took >= Duration::from_secs(2) && took < NOTICED_WITHIN,
+        "the wait took {took:?}, not its 2 s of awake time"
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_still_ends_at_its_awake_time_limit_when_the_wall_clock_does_not_move() {
+    let dir = Dir::new();
+    let clock = HandClock::new();
+    let (supervisor, waiting, begun) = parked_wait(&dir, &clock, 1).await;
+    let response = waiting.await.expect("task").expect("wait");
+    let took = begun.elapsed();
+    assert!(response.timed_out, "{response:#?}");
+    assert!(
+        took >= Duration::from_secs(1) && took < NOTICED_WITHIN,
+        "the wait took {took:?}, not its 1 s of awake time"
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// How long the run of [`unstoppable`] outlasts a stop: longer than the
+/// interval at which a bound checks wall time, so the check comes first.
+const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// A supervisor that reads `clock`, with a running run that ignores the polite
+/// stop and so ends only when the stop escalates, [`STOP_GRACE`] later.
+async fn unstoppable(dir: &Dir, clock: &Arc<HandClock>) -> (Supervisor, super::StartResponse) {
+    let record = dir.root().join("record");
+    std::fs::create_dir(&record).expect("create directory");
+    let mut config = dir.config();
+    config.provider.stop_grace = Some(STOP_GRACE);
+    config.provider.env_set.push((
+        "FAKE_RECORD_DIR".to_string(),
+        record.to_string_lossy().into_owned(),
+    ));
+    let supervisor = Supervisor::with_wall_clock(config, clock.clock());
+    let started = supervisor.start(dir.request("hang")).await.expect("start");
+    // The fake writes this after it has begun ignoring the polite stop.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while !record.join("started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hanging run never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (supervisor, started)
+}
+
+#[tokio::test]
+async fn an_interrupt_says_not_settled_once_wall_time_passed_its_bound_though_awake_time_did_not() {
+    let dir = Dir::new();
+    let clock = HandClock::new();
+    let (supervisor, started) = unstoppable(&dir, &clock).await;
+    let bound = supervisor.shared.config.interrupt_bound;
+    let begun = tokio::time::Instant::now();
+    let interrupting = {
+        let (supervisor, run) = (supervisor.clone(), started.run.clone());
+        tokio::spawn(async move { supervisor.interrupt(Target::Run(run)).await })
+    };
+    clock.bound_began().await;
+    clock.forward(bound);
+    let response = interrupting.await.expect("task").expect("interrupt");
+    let took = begun.elapsed();
+    assert!(!response.settled, "{response:#?}");
+    assert!(response.result.is_none(), "{response:#?}");
+    assert!(
+        took < STOP_GRACE,
+        "the interrupt took {took:?}: it waited for the run, not for wall time"
+    );
+    // The stop was asked for and goes on; the run still ends interrupted.
+    let result = finished_result(&supervisor, &started.run).await;
+    assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_close_says_not_settled_once_wall_time_passed_its_bound_though_awake_time_did_not() {
+    let dir = Dir::new();
+    let clock = HandClock::new();
+    let (supervisor, started) = unstoppable(&dir, &clock).await;
+    let bound = supervisor.shared.config.interrupt_bound;
+    let worker = started.worker.clone().expect("worker");
+    let begun = tokio::time::Instant::now();
+    let closing = {
+        let (supervisor, worker) = (supervisor.clone(), worker.clone());
+        tokio::spawn(async move { supervisor.close(&worker).await })
+    };
+    clock.bound_began().await;
+    clock.forward(bound);
+    let response = closing.await.expect("task").expect("close");
+    let took = begun.elapsed();
+    assert!(!response.settled, "{response:#?}");
+    assert!(response.result.is_none(), "{response:#?}");
+    assert_eq!(
+        response.stopped_run.as_deref(),
+        Some(started.run.as_str()),
+        "{response:#?}"
+    );
+    assert!(
+        took < STOP_GRACE,
+        "the close took {took:?}: it waited for the run, not for wall time"
+    );
+    let result = finished_result(&supervisor, &started.run).await;
+    assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}

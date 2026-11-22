@@ -96,14 +96,14 @@ All defaults are named constants in `supervisor/limits.rs`.
 | `retained_results` | 256 | Finished results kept readable, across the supervisor. |
 | `retained_bytes` | 64 MiB | Estimated bytes of finished results kept (answer, structured answer, notes and partial text, plus a fixed amount each). The oldest are dropped first; the newest is always kept. |
 | `retention` | 1 hour | How long a finished result stays readable. |
-| `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
+| `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. The time a `wait` applies counts wall time and awake time, whichever passes first; see [How the bounds count time](#how-the-bounds-count-time). |
 | `wait_default` | 30 s | Used when `wait` gets no `timeout_secs` (`Limits::wait_default`, reported by `list` as `default_wait_secs`; `delega mcp` sets it from `mcp.wait_default_secs` of the [configuration file](api.md#configuration-file)). The ceiling is kept high for library callers; the MCP layer should keep each wait short, well inside what a tool-calling client allows for one call, and rely on the cursor to continue. |
 | preflight bound | 10 s | The longest `start` spends checking paths, the executable and the schema before it is admitted. |
 | outstanding request checks | 16 | Request checks that have started and not ended, each on an OS thread of its own. A check that timed out still counts until its thread ends. A start that finds all 16 busy waits for a slot without holding a thread, and the wait counts against the preflight bound measured from when the start began. If no slot frees in time it is refused, kind `preflight_timeout`. A burst of concurrent starts is served in turn, not refused. The value is `MAX_LIVE_WORKERS`; a hung filesystem costs at most 16 threads. `list` does not report it. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer; `text_offset` pages through the rest. |
 | compact structured answer | 16 KiB | A compact read leaves out a structured answer whose JSON is larger than this and gives its size. |
 | `shutdown_bound` | 30 s | The longest `shutdown` waits for runs to settle. |
-| `interrupt_bound` | 30 s | The longest `interrupt` or `close` waits for a running run to settle. |
+| `interrupt_bound` | 30 s | The longest `interrupt` or `close` waits for a running run to settle, counted in wall time and awake time, whichever passes first. |
 
 The process layer bounds each stop on its own by its cleanup deadline, so the
 supervisor's bounds only matter when a stop is slower than that. `list` returns
@@ -337,6 +337,25 @@ dropped, but their old results are.
 the queue is in the result: `started_at` minus `queued_at`. `duration_ms` is the
 provider's run from start to finish, and `timeout_secs` is the limit that applied
 to it; the limit does not run while the run is queued.
+
+### How the bounds count time
+
+The applied `timeout_secs` of `wait` and the `interrupt_bound` of `interrupt`
+and `close` count wall time and awake time, and end when either reaches the
+limit. A timer counts only the time the machine was awake (`Instant` is
+`CLOCK_UPTIME_RAW` on macOS and `CLOCK_MONOTONIC` on Linux), while the caller of
+a tool measures the call in wall time, so a bound on awake time alone would
+outlast the caller's own limit by however long the machine slept. Each of these
+bounds therefore also compares the wall clock with its limit once a second of
+awake time (`WALL_CHECK_INTERVAL`), and after a sleep ends within a second of
+the machine waking. A wall clock set back counts as no time passed, which leaves
+the awake-time bound in force. A wall clock set forward ends the bound early: a
+`wait` answers `timed_out`, and an `interrupt` or `close` answers
+`settled: false` while the stop goes on.
+
+A run's time limit counts awake time only, on purpose: a run paused by sleep has
+not used its time. The preflight bound, `shutdown_bound` and retention are also
+counted in awake time.
 
 ## Ids
 
