@@ -19,12 +19,18 @@
 //!   preferences domain `com.openai.codex`.
 //!
 //! **What a report holds.** Fixed paths, counts and key names from the tables
-//! below, with fixed text for each. It never holds a value, and it never holds
-//! a name read from a directory: a drop-in file or a user's preferences
-//! directory can be named anything, including a credential or text with a line
-//! break, so the drop-in directory and the per-user preferences are each one
-//! source with the directory's fixed path and a count. A file's text is parsed,
-//! the names of the keys in the tables are looked up, and the text is dropped.
+//! below, with fixed text for each. Every string in a report is a constant of
+//! this module or a fixed path: nothing is copied from a file or a directory.
+//! It never holds a value. It never holds a name read from a directory: a
+//! drop-in file or a user's preferences directory can be named anything,
+//! including a credential or text with a line break, so the drop-in directory
+//! and the per-user preferences are each one source with the directory's fixed
+//! path and a count. It never holds a key name read from a file either, for the
+//! same reason: a key that is in a table is reported under the table's name,
+//! and a top-level key of a Codex file that is in no table is only counted. A
+//! file's text is parsed, the names of the keys in the tables are looked up,
+//! values are read only to tell whether a switch is on, and the text is
+//! dropped.
 //! A file that cannot be read or parsed is reported as present and unreadable,
 //! without the error, which could quote the file. Managed preferences are
 //! reported as present and are not opened. Settings a provider fetches from its
@@ -34,7 +40,8 @@
 //! regular file, and at most [`MAX_MANAGED_FILE_BYTES`] are read, so a pipe or
 //! a device put where a file belongs cannot hang doctor. A drop-in directory is
 //! read up to [`MAX_DROP_IN_FILES`] files, [`MAX_DIRECTORY_ENTRIES`] entries
-//! and [`MAX_MANAGED_FILE_BYTES`] in all, and the report says when a limit
+//! and [`MAX_MANAGED_FILE_BYTES`] in all, counted as the bytes read from disk
+//! whether or not they turn out to be text, and the report says when a limit
 //! stopped it.
 //!
 //! **Symbolic links.** Under the real root `/` links are followed, because the
@@ -43,7 +50,11 @@
 //! root is opened, listed or reported: every path is resolved first and must
 //! stay under the resolved root (see [`SystemPaths::inside`]). A source that is
 //! a link out of the root is reported as present and unreadable; a source whose
-//! directory is outside the root is not reported at all.
+//! directory is outside the root is not reported at all. The check and the
+//! open are two steps, not one: a link swapped in between them would be
+//! followed. That is accepted, because an injected root exists only in builds
+//! with debug assertions, for tests, and no test writes its fixtures while a
+//! scan runs.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -64,6 +75,29 @@ pub const MAX_DROP_IN_FILES: usize = 64;
 
 /// Most entries of one directory that are looked at, whatever they are.
 pub const MAX_DIRECTORY_ENTRIES: usize = 4096;
+
+/// The bounds of a scan. [`Limits::default`] is what doctor uses; a test passes
+/// smaller ones so that reaching a bound does not take thousands of files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Most bytes of one file that are read, and most bytes read from one
+    /// drop-in directory in all.
+    pub file_bytes: u64,
+    /// Most files of a drop-in directory that are read.
+    pub drop_in_files: usize,
+    /// Most entries of one directory that are looked at.
+    pub directory_entries: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            file_bytes: MAX_MANAGED_FILE_BYTES,
+            drop_in_files: MAX_DROP_IN_FILES,
+            directory_entries: MAX_DIRECTORY_ENTRIES,
+        }
+    }
+}
 
 /// The layout of system locations to look in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,9 +231,10 @@ pub enum ManagedSourceKind {
 pub enum ManagedSourceState {
     /// It was read and parsed, and `keys` lists what was found in it.
     Read,
-    /// A directory of which some files were read and some could not be, or
-    /// were left out by a limit. `keys` lists what was found in those read, and
-    /// `files` says how many were not.
+    /// A directory that was not gone through completely: some of its files
+    /// could not be read, or a limit stopped the scan (`files.limit_reached`),
+    /// in which case there may be files that were never looked at. `keys`
+    /// lists what was found in the files read.
     PartlyRead,
     /// It is there and could not be read or parsed, so nothing is known about
     /// what it sets.
@@ -250,17 +285,21 @@ pub struct ManagedSource {
     /// does not depend on a key in it. Fixed text for the kind.
     pub note: Option<String>,
     /// The keys in it that can affect a delega launch, by name, in the order of
-    /// the provider's table (Claude Code) or of the names (Codex). For a
-    /// directory, the keys of all its files together. Empty when the source was
-    /// not read or sets none of them.
+    /// the provider's table (Claude Code) or of the names (Codex). Every name
+    /// is one this build knows, never text from the file. For a directory, the
+    /// keys of all its files together. Empty when the source was not read or
+    /// sets none of them.
     pub keys: Vec<ManagedKey>,
+    /// For a Codex file, how many of its top-level keys are in no table of
+    /// this build. They are counted and not named: such a key may be a typing
+    /// mistake Codex ignores, and its name is whatever the file says. 0 for
+    /// every other kind of source.
+    pub other_keys: usize,
 }
 
 /// A Claude Code settings key, as the path to it, and what it does to a launch.
 type ClaudeKey = (&'static [&'static str], &'static str);
 
-const MCP_REFUSED: &str =
-    "restricts MCP servers, so servers passed with --mcp-config can be refused";
 const HOOK_OFF: &str = "delega's command hook, passed with --settings, does not run, so exact \
                         command grants are not checked by it";
 
@@ -286,27 +325,39 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
         &["disableSideloadFlags"],
         "Claude Code rejects --mcp-config at startup, which delega passes on every run",
     ),
-    (&["allowManagedMcpServersOnly"], MCP_REFUSED),
-    (&["allowedMcpServers"], MCP_REFUSED),
-    (&["deniedMcpServers"], MCP_REFUSED),
+    (
+        &["allowManagedMcpServersOnly"],
+        "only the managed allowlist of MCP servers counts, so servers passed with --mcp-config \
+         can be refused",
+    ),
+    (
+        &["allowedMcpServers"],
+        "holds the managed allowlist of MCP servers, which servers passed with --mcp-config are \
+         checked against",
+    ),
+    (
+        &["deniedMcpServers"],
+        "holds the managed list of blocked MCP servers, which servers passed with --mcp-config \
+         are checked against",
+    ),
     (
         &["permissions", "allow"],
-        "managed allow rules apply beside the tools granted with --allowedTools, so a worker can \
-         be allowed more than the request grants",
+        "holds managed allow rules, which apply beside the tools granted with --allowedTools, so \
+         a worker can be allowed more than the request grants",
     ),
     (
         &["permissions", "deny"],
-        "managed deny rules apply over the tools granted with --allowedTools",
+        "holds managed deny rules, which apply over the tools granted with --allowedTools",
     ),
     (
         &["permissions", "ask"],
-        "managed ask rules apply over the tools granted with --allowedTools, and a call that \
-         would ask is denied under --permission-mode dontAsk",
+        "holds managed ask rules, which apply over the tools granted with --allowedTools; a call \
+         that would ask is denied under --permission-mode dontAsk",
     ),
     (
         &["permissions", "additionalDirectories"],
-        "adds working directories beside the ones passed with --add-dir, so a worker can reach \
-         directories the request did not name",
+        "holds managed working directories, which are added beside the ones passed with \
+         --add-dir, so a worker can reach directories the request did not name",
     ),
     (
         &["permissions", "blockReadsOutsideWorkingDirectories"],
@@ -334,11 +385,11 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
     ),
     (
         &["forceLoginMethod"],
-        "restricts which kind of account the worker may be logged in with",
+        "controls which kind of account the worker may be logged in with",
     ),
     (
         &["forceLoginOrgUUID"],
-        "restricts which organization the worker's login may belong to",
+        "controls which organization the worker's login may belong to",
     ),
     (
         &["enforceAnthropicSignIn"],
@@ -346,24 +397,26 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
     ),
     (
         &["allowedProviders"],
-        "a worker that reaches Claude through a service not listed is refused at startup",
+        "lists the services a worker may reach Claude through; one that uses another is refused \
+         at startup",
     ),
     (
         &["apiKeyHelper"],
-        "the worker's credential comes from a managed command, not from the environment delega \
-         passes",
+        "names a command that supplies the worker's credential when the environment delega \
+         passes holds no ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY, which come first",
     ),
     (
         &["env"],
-        "sets environment variables in the worker, after delega's environment policy has run",
+        "holds environment variables Claude Code sets in the worker, after delega's environment \
+         policy has run",
     ),
     (
         &["availableModels"],
-        "limits the models a --model passed by delega may name",
+        "lists the models a --model passed by delega may name",
     ),
     (
         &["deniedModels"],
-        "blocks models a --model passed by delega may name",
+        "lists models a --model passed by delega may not name",
     ),
     (
         &["modelOverrides"],
@@ -372,18 +425,41 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
     ),
     (
         &["requiredMinimumVersion"],
-        "Claude Code refuses to start when it is older than this",
+        "sets the oldest Claude Code version that may start",
     ),
     (
         &["requiredMaximumVersion"],
-        "Claude Code refuses to start when it is newer than this",
+        "sets the newest Claude Code version that may start",
     ),
     (
         &["policyHelper"],
-        "managed settings are computed by a command at startup, and doctor cannot see what it \
+        "names a command that computes managed settings at startup; doctor cannot see what it \
          returns",
     ),
 ];
+
+/// The keys of [`CLAUDE_KEYS`] that are switches: each is reported unless its
+/// value is `false`. Anything but `false` counts as on, because Claude Code
+/// reads a managed key that has one restrictive value as that value when it
+/// cannot read what was written (its managed settings page, "Keys that fail
+/// closed"), and treats an invalid Boolean in `sandbox` as the strictest one.
+const CLAUDE_SWITCHES: &[&str] = &[
+    "allowManagedPermissionRulesOnly",
+    "allowManagedHooksOnly",
+    "strictPluginOnlyCustomization",
+    "disableSideloadFlags",
+    "allowManagedMcpServersOnly",
+    "permissions.blockReadsOutsideWorkingDirectories",
+    "permissions.blockWritesOutsideWorkingDirectories",
+    "sandbox.enabled",
+    "sandbox.filesystem.allowManagedReadPathsOnly",
+    "sandbox.network.allowManagedDomainsOnly",
+    "enforceAnthropicSignIn",
+];
+
+/// The one switch that is reported only when its value is `true`: Claude Code
+/// drops an invalid `disableAllHooks` and does not treat it as on.
+const CLAUDE_ONLY_TRUE: &[&str] = &["disableAllHooks"];
 
 /// What the keys of `requirements.toml` that bear on something delega passes
 /// do to a launch.
@@ -468,8 +544,6 @@ const CODEX_REQUIREMENT_NAMES: &[&str] = &[
 
 const CODEX_REQUIREMENT_KNOWN: &str =
     "a requirement Codex enforces whatever settings delega passes";
-const CODEX_REQUIREMENT_UNKNOWN: &str =
-    "not a requirements key this version of doctor knows; Codex may ignore it";
 
 /// What the keys of Codex's legacy managed configuration that delega also
 /// passes, or that Codex turns into requirements, do to a launch.
@@ -508,10 +582,6 @@ const CODEX_MANAGED_CONFIG_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
-const CODEX_MANAGED_CONFIG_OTHER: &str = "not a setting delega passes; a key Codex knows applies \
-                                          whatever --ignore-user-config says, and one it does not \
-                                          know is ignored";
-
 const MCP_FILE_NOTE: &str = "with this file in place Claude Code exits at startup when it is \
                              given --strict-mcp-config, which delega passes on every run";
 const CLAUDE_PREFERENCES_NOTE: &str = "can set any managed Claude Code key; doctor does not read \
@@ -526,6 +596,11 @@ const USER_PREFERENCES_NOTE: &str = "managed preferences of the provider in user
 /// order: files, the drop-in directory, then managed preferences. Nothing is
 /// returned for a source that is absent.
 pub fn scan(provider: Provider, system: &SystemPaths) -> Vec<ManagedSource> {
+    scan_with(provider, system, &Limits::default())
+}
+
+/// [`scan`] with the bounds given.
+pub fn scan_with(provider: Provider, system: &SystemPaths, limits: &Limits) -> Vec<ManagedSource> {
     let mut found = Vec::new();
     match provider {
         Provider::Claude => {
@@ -536,19 +611,22 @@ pub fn scan(provider: Provider, system: &SystemPaths) -> Vec<ManagedSource> {
             file_source(
                 &mut found,
                 system,
+                limits,
                 &dir.join("managed-settings.json"),
                 ManagedSourceKind::SettingsFile,
             );
-            drop_ins(&mut found, system, &dir.join("managed-settings.d"));
+            drop_ins(&mut found, system, limits, &dir.join("managed-settings.d"));
             file_source(
                 &mut found,
                 system,
+                limits,
                 &dir.join("managed-mcp.json"),
                 ManagedSourceKind::McpFile,
             );
             preferences(
                 &mut found,
                 system,
+                limits,
                 "com.anthropic.claudecode.plist",
                 CLAUDE_PREFERENCES_NOTE,
             );
@@ -558,18 +636,21 @@ pub fn scan(provider: Provider, system: &SystemPaths) -> Vec<ManagedSource> {
             file_source(
                 &mut found,
                 system,
+                limits,
                 &dir.join("requirements.toml"),
                 ManagedSourceKind::RequirementsFile,
             );
             file_source(
                 &mut found,
                 system,
+                limits,
                 &dir.join("managed_config.toml"),
                 ManagedSourceKind::ManagedConfigFile,
             );
             preferences(
                 &mut found,
                 system,
+                limits,
                 "com.openai.codex.plist",
                 CODEX_PREFERENCES_NOTE,
             );
@@ -578,13 +659,15 @@ pub fn scan(provider: Provider, system: &SystemPaths) -> Vec<ManagedSource> {
     found
 }
 
-/// The text of the regular file at `path`, when it is at most `limit` bytes.
+/// The bytes of the regular file at `path`, when it holds at most `limit`.
+/// `charged` gets the number of bytes read from the file, whatever comes of
+/// them, so a caller with a total to keep to can count them.
 ///
 /// The file is opened without blocking and the opened handle is judged, not
 /// the path: a pipe, a device or a directory swapped in after any earlier look
 /// is refused here, and opening a pipe with no writer returns at once. Links
 /// are followed; the caller has decided that this path may be opened.
-fn read_text(path: &Path, limit: u64) -> Result<String, Unread> {
+fn read_bytes(path: &Path, limit: u64, charged: &mut u64) -> Result<Vec<u8>, Unread> {
     let handle = rustix::fs::open(
         path,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
@@ -600,39 +683,54 @@ fn read_text(path: &Path, limit: u64) -> Result<String, Unread> {
         return Err(Unread::OverLimit);
     }
     let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Unread::Unusable)?;
+    let read = file.take(limit + 1).read_to_end(&mut bytes);
+    *charged = bytes.len() as u64;
+    read.map_err(|_| Unread::Unusable)?;
     if bytes.len() as u64 > limit {
         return Err(Unread::OverLimit);
     }
-    let text = String::from_utf8(bytes).map_err(|_| Unread::Unusable)?;
-    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+    Ok(bytes)
 }
 
-/// Why a file gave no text.
+/// The text in `bytes`, without a byte order mark, when they are UTF-8.
+fn decode(bytes: Vec<u8>) -> Option<String> {
+    let text = String::from_utf8(bytes).ok()?;
+    Some(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+}
+
+/// Why a file gave no bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unread {
     /// It is a regular file with more bytes than the limit given.
     OverLimit,
-    /// It could not be opened or read, is not a regular file or is not UTF-8.
+    /// It could not be opened or read, or is not a regular file.
     Unusable,
+}
+
+/// What a file's text holds: the keys of a table, and how many others.
+#[derive(Debug, Default)]
+struct Found {
+    keys: Vec<ManagedKey>,
+    other: usize,
 }
 
 fn file_source(
     found: &mut Vec<ManagedSource>,
     system: &SystemPaths,
+    limits: &Limits,
     path: &Path,
     kind: ManagedSourceKind,
 ) {
     let keys = match system.presence(path) {
         Presence::Absent => return,
         Presence::Unusable => None,
-        Presence::Usable => read_text(path, MAX_MANAGED_FILE_BYTES)
+        Presence::Usable => read_bytes(path, limits.file_bytes, &mut 0)
             .ok()
+            .and_then(decode)
             .and_then(|text| keys_of(kind, &text)),
     };
     let read = keys.is_some();
+    let keys = keys.unwrap_or_default();
     found.push(ManagedSource {
         path: path.display().to_string(),
         kind,
@@ -643,89 +741,101 @@ fn file_source(
         },
         files: None,
         note: (kind == ManagedSourceKind::McpFile && read).then(|| MCP_FILE_NOTE.to_string()),
-        keys: keys.unwrap_or_default(),
+        keys: keys.keys,
+        other_keys: keys.other,
     });
 }
 
-/// The relevant key names in `text`, or `None` when it does not parse as the
-/// kind's format with a table at the top.
-fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Vec<ManagedKey>> {
+/// What `text` holds of the kind's tables, or `None` when it does not parse
+/// as the kind's format with a table at the top.
+fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
     match kind {
         ManagedSourceKind::SettingsFile | ManagedSourceKind::SettingsDropIns => {
             // Claude Code counts an empty managed settings file as `{}`.
             if text.is_empty() {
-                return Some(Vec::new());
+                return Some(Found::default());
             }
             let value: Value = serde_json::from_str(text).ok()?;
             value.as_object()?;
-            Some(claude_keys(&value))
+            Some(Found {
+                keys: claude_keys(&value),
+                other: 0,
+            })
         }
         ManagedSourceKind::McpFile => {
             let value: Value = serde_json::from_str(text).ok()?;
             value.as_object()?;
-            Some(Vec::new())
+            Some(Found::default())
         }
-        ManagedSourceKind::RequirementsFile => codex_keys(text, |name| {
-            specific(CODEX_REQUIREMENT_KEYS, name).unwrap_or(
-                if CODEX_REQUIREMENT_NAMES.contains(&name) {
-                    CODEX_REQUIREMENT_KNOWN
-                } else {
-                    CODEX_REQUIREMENT_UNKNOWN
-                },
-            )
-        }),
-        ManagedSourceKind::ManagedConfigFile => codex_keys(text, |name| {
-            specific(CODEX_MANAGED_CONFIG_KEYS, name).unwrap_or(CODEX_MANAGED_CONFIG_OTHER)
-        }),
+        ManagedSourceKind::RequirementsFile => {
+            let general = CODEX_REQUIREMENT_NAMES
+                .iter()
+                .map(|name| (*name, CODEX_REQUIREMENT_KNOWN));
+            codex_keys(text, CODEX_REQUIREMENT_KEYS.iter().copied().chain(general))
+        }
+        ManagedSourceKind::ManagedConfigFile => {
+            codex_keys(text, CODEX_MANAGED_CONFIG_KEYS.iter().copied())
+        }
         ManagedSourceKind::ManagedPreferences | ManagedSourceKind::UserManagedPreferences => None,
     }
 }
 
-fn specific(table: &[(&str, &'static str)], name: &str) -> Option<&'static str> {
-    table
-        .iter()
-        .find(|(key, _)| *key == name)
-        .map(|(_, effect)| *effect)
+/// Whether the value of a Claude Code key means the key is in force. A key
+/// that is not a switch is in force by being there. The value is looked at and
+/// goes no further.
+fn in_force(name: &str, value: &Value) -> bool {
+    if CLAUDE_ONLY_TRUE.contains(&name) {
+        value == &Value::Bool(true)
+    } else if CLAUDE_SWITCHES.contains(&name) {
+        value != &Value::Bool(false)
+    } else {
+        true
+    }
 }
 
 fn claude_keys(settings: &Value) -> Vec<ManagedKey> {
     CLAUDE_KEYS
         .iter()
-        .filter(|(path, _)| {
+        .map(|(path, effect)| (path, path.join("."), effect))
+        .filter(|(path, name, _)| {
             path.iter()
                 .try_fold(settings, |value, part| value.as_object()?.get(*part))
-                .is_some()
+                .is_some_and(|value| in_force(name, value))
         })
-        .map(|(path, effect)| ManagedKey {
-            name: path.join("."),
+        .map(|(_, name, effect)| ManagedKey {
+            name,
             effect: (*effect).to_string(),
         })
         .collect()
 }
 
-/// Every top-level key of a Codex file, by name, with the effect `effect`
-/// gives for it. A key Codex does not know gets a reason that claims nothing:
-/// the name may be a typing mistake that Codex ignores.
-fn codex_keys(text: &str, effect: impl Fn(&str) -> &'static str) -> Option<Vec<ManagedKey>> {
-    let table: toml::Table = text.parse().ok()?;
-    let mut names: Vec<&String> = table.keys().collect();
-    names.sort();
-    Some(
-        names
-            .into_iter()
-            .map(|name| ManagedKey {
-                name: name.clone(),
-                effect: effect(name).to_string(),
-            })
-            .collect(),
-    )
+/// The top-level keys of a Codex file that are in `table`, under the table's
+/// own names and in the order of the names, and the number of the others. A
+/// key that is in no table is never named: its name is whatever the file says,
+/// which can be a credential or text with a line break, and it may be a typing
+/// mistake Codex ignores.
+fn codex_keys(
+    text: &str,
+    table: impl Iterator<Item = (&'static str, &'static str)>,
+) -> Option<Found> {
+    let parsed: toml::Table = text.parse().ok()?;
+    let mut keys: Vec<ManagedKey> = table
+        .filter(|(name, _)| parsed.contains_key(*name))
+        .map(|(name, effect)| ManagedKey {
+            name: name.to_string(),
+            effect: effect.to_string(),
+        })
+        .collect();
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+    let other = parsed.len() - keys.len();
+    Some(Found { keys, other })
 }
 
 /// The drop-in directory as one source: how many `*.json` files that are not
 /// hidden it holds, as Claude Code reads them, and the keys of those files
 /// together in the table's order. No file is named. A directory that is there
 /// and cannot be listed is unreadable.
-fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, dir: &Path) {
+fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, limits: &Limits, dir: &Path) {
     let kind = ManagedSourceKind::SettingsDropIns;
     let entries = match system.presence(dir) {
         Presence::Absent => return,
@@ -739,6 +849,7 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, dir: &Path) {
         files: None,
         note: None,
         keys: Vec::new(),
+        other_keys: 0,
     };
     let Some(entries) = entries else {
         found.push(source);
@@ -749,10 +860,10 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, dir: &Path) {
         unreadable: 0,
         limit_reached: false,
     };
-    let mut budget = MAX_MANAGED_FILE_BYTES;
+    let mut budget = limits.file_bytes;
     let mut names: Vec<String> = Vec::new();
     for (seen, entry) in entries.enumerate() {
-        if seen == MAX_DIRECTORY_ENTRIES {
+        if seen == limits.directory_entries {
             counts.limit_reached = true;
             break;
         }
@@ -765,33 +876,36 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, dir: &Path) {
         if name.starts_with('.') || !name.ends_with(".json") {
             continue;
         }
-        if counts.found == MAX_DROP_IN_FILES {
+        if counts.found == limits.drop_in_files {
             counts.limit_reached = true;
             break;
         }
         counts.found += 1;
         let path = entry.path();
-        // Never more than what is left of the total is read. A file that
-        // would fit alone and does not fit in the rest is left out by the
-        // limit; it is counted with the unreadable ones, since its keys are
-        // not known, and the report says a limit was reached.
-        let text = if system.inside(&path) {
-            read_text(&path, budget)
-        } else {
-            Err(Unread::Unusable)
-        };
-        let text = match text {
-            Ok(text) => text,
+        // Never more than what is left of the total is read, counted as the
+        // bytes that came off the disk. Once the total is spent no further
+        // file is opened. A file left out this way is counted with the
+        // unreadable ones, since its keys are not known, and the report says
+        // a limit was reached.
+        if budget == 0 || !system.inside(&path) {
+            counts.unreadable += 1;
+            counts.limit_reached |= budget == 0;
+            continue;
+        }
+        let mut charged = 0;
+        let bytes = read_bytes(&path, budget, &mut charged);
+        let within_total = budget;
+        budget = budget.saturating_sub(charged);
+        let found_keys = match bytes {
+            Ok(bytes) => decode(bytes).and_then(|text| keys_of(kind, &text)),
             Err(reason) => {
-                counts.unreadable += 1;
                 counts.limit_reached |=
-                    reason == Unread::OverLimit && budget < MAX_MANAGED_FILE_BYTES;
-                continue;
+                    reason == Unread::OverLimit && within_total < limits.file_bytes;
+                None
             }
         };
-        budget -= text.len() as u64;
-        match keys_of(kind, &text) {
-            Some(keys) => names.extend(keys.into_iter().map(|key| key.name)),
+        match found_keys {
+            Some(keys) => names.extend(keys.keys.into_iter().map(|key| key.name)),
             None => counts.unreadable += 1,
         }
     }
@@ -808,7 +922,11 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, dir: &Path) {
             effect: effect.to_string(),
         })
         .collect();
-    source.state = if counts.unreadable == 0 && !counts.limit_reached {
+    // A limit means there may be files that were never looked at, so the
+    // directory is partly read whatever became of the ones that were.
+    source.state = if counts.limit_reached {
+        ManagedSourceState::PartlyRead
+    } else if counts.unreadable == 0 {
         ManagedSourceState::Read
     } else if counts.unreadable == counts.found {
         ManagedSourceState::Unreadable
@@ -822,7 +940,13 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, dir: &Path) {
 /// The managed preferences of a domain on macOS: the file for the whole
 /// system, and, as one source, the files in users' directories. None is
 /// opened, and no user's directory is named.
-fn preferences(found: &mut Vec<ManagedSource>, system: &SystemPaths, file: &str, note: &str) {
+fn preferences(
+    found: &mut Vec<ManagedSource>,
+    system: &SystemPaths,
+    limits: &Limits,
+    file: &str,
+    note: &str,
+) {
     if system.platform != Platform::Macos {
         return;
     }
@@ -836,6 +960,7 @@ fn preferences(found: &mut Vec<ManagedSource>, system: &SystemPaths, file: &str,
             files: None,
             note: Some(note.to_string()),
             keys: Vec::new(),
+            other_keys: 0,
         });
     }
     if !system.inside(&dir) {
@@ -850,7 +975,7 @@ fn preferences(found: &mut Vec<ManagedSource>, system: &SystemPaths, file: &str,
         limit_reached: false,
     };
     for (seen, entry) in entries.enumerate() {
-        if seen == MAX_DIRECTORY_ENTRIES {
+        if seen == limits.directory_entries {
             counts.limit_reached = true;
             break;
         }
@@ -866,15 +991,22 @@ fn preferences(found: &mut Vec<ManagedSource>, system: &SystemPaths, file: &str,
             counts.found += 1;
         }
     }
-    if counts.found == 0 {
+    // A limit that stopped the listing is reported even when no user's file
+    // was seen before it: there may be one further on.
+    if counts.found == 0 && !counts.limit_reached {
         return;
     }
     found.push(ManagedSource {
         path: dir.display().to_string(),
         kind: ManagedSourceKind::UserManagedPreferences,
-        state: ManagedSourceState::NotInspected,
+        state: if counts.limit_reached {
+            ManagedSourceState::PartlyRead
+        } else {
+            ManagedSourceState::NotInspected
+        },
         files: Some(counts),
         note: Some(USER_PREFERENCES_NOTE.to_string()),
         keys: Vec::new(),
+        other_keys: 0,
     });
 }

@@ -288,7 +288,8 @@ fn report_with_managed_settings() -> (tempfile::TempDir, Report) {
     write(
         "etc/codex/requirements.toml",
         format!(
-            "allowed_sandbox_modes = [\"read-only\"]\ndefault_permissions = \"{MANAGED_SECRET}\"\n"
+            "allowed_sandbox_modes = [\"read-only\"]\ndefault_permissions = \"{MANAGED_SECRET}\"\n\
+             \"{MANAGED_SECRET}\\nproblems: forged\" = true\n"
         ),
     );
     let system = SystemPaths {
@@ -330,6 +331,7 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         "etc/codex/requirements.toml (read)".to_string(),
         "      allowed_sandbox_modes: ".to_string(),
         "      default_permissions: ".to_string(),
+        "      1 other top-level key is not named: doctor names only keys it knows".to_string(),
     ] {
         assert!(shown.contains(&expected), "{expected}\n{shown}");
     }
@@ -420,6 +422,10 @@ fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
     assert_eq!(codex[0]["kind"], "requirements_file");
     assert_eq!(codex[0]["keys"][0]["name"], "allowed_sandbox_modes");
     assert_eq!(codex[0]["keys"][1]["name"], "default_permissions");
+    // The key with a hostile name is counted and nowhere named.
+    assert_eq!(codex[0]["keys"].as_array().expect("keys").len(), 2);
+    assert_eq!(codex[0]["other_keys"], 1);
+    assert_eq!(claude[0]["other_keys"], 0);
 }
 
 #[test]

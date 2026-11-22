@@ -557,6 +557,19 @@ fn managed_text(out: &mut String, sources: &[ManagedSource]) {
         for key in &source.keys {
             let _ = writeln!(out, "      {}: {}", key.name, key.effect);
         }
+        if source.other_keys > 0 {
+            let noun = if source.other_keys == 1 {
+                "key is"
+            } else {
+                "keys are"
+            };
+            let _ = writeln!(
+                out,
+                "      {} other top-level {noun} not named: doctor names only keys it knows, and \
+                 Codex may ignore a key it does not know",
+                source.other_keys
+            );
+        }
     }
 }
 
