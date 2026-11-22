@@ -227,11 +227,39 @@ marker never joins a word). After both cuts and the marker, the finished excerpt
 is redacted once more, so neither cut can leave a newly key-shaped string (such
 as the end of `xsk-ant-...` without its `x`) unredacted.
 
-The remaining limit: when standard error was longer than its 64 KiB capture,
-the start of the capture is a cut made before redaction. A secret cut there
-(part of a key, or a token whose `Bearer` was not captured) is not recognised.
-It could show only if redaction removes nearly all of the capture, so that the
-capture's start reaches the excerpt.
+When standard error was longer than its 64 KiB capture, the start of the
+capture is a cut made before redaction, and it can fall inside a secret: part of
+a key, a token whose `Bearer` was not captured, a private key whose `BEGIN` line
+was not captured, or half of a multi-byte character. The redactor cannot
+recognise what is left of it. Two things keep that text out of the excerpt, and
+neither applies to a capture that was not cut:
+
+- When the capture begins with the end of a value of a redacted variable (see
+  below), at least 6 characters of it, that end is replaced with `[redacted]`,
+  however long it is, in the same pass as the whole values, so a whole value
+  that overlaps it is replaced with it. If the cut split a character, the
+  bytes left of it (at most 3, each decoded as U+FFFD) are stepped over first
+  and go with the value. Other U+FFFD characters are text like any other.
+- The excerpt is taken only from redacted text after a guard at its start. The
+  guard is 13664 bytes: redaction keeps the order of the text and lengthens it
+  by at most 10 bytes for every 6 (a 6-character value becomes `[redacted]`,
+  and a replacement is never searched again, see below),
+  so the first 8 KiB of the decoded capture end up within the first
+  8192 * 10 / 6, rounded up, plus 10 bytes of the redacted text. The guard is
+  cut from text that is already redacted, so it cannot split a secret that the
+  capture holds whole.
+
+A cut capture can end up with no excerpt: redaction can remove most of it so
+that nothing but whitespace is left after the guard, or text can be left after
+the guard while the last 8 KiB are blank. In both cases the message says so in
+place of the excerpt: `(standard error not shown: the capture was cut and
+nothing was left to show after redaction and the cuts)`. A capture that was not
+cut and has no text (a provider that wrote no standard error, or only
+whitespace) gets neither an excerpt nor this note.
+
+The remaining limit: a credential-shaped secret that the capture's start cuts
+and of which more than 8 KiB was captured (a very long token or private key
+body, not a redacted variable's value) can still show its tail.
 
 A provider error message is kept whole and cut to its first 500 characters
 after redaction. Two kinds of text are replaced with `[redacted]`:
@@ -241,6 +269,31 @@ after redaction. Two kinds of text are replaced with `[redacted]`:
 - strings shaped like API keys (`sk-`, `sk-ant-`), forge tokens (`ghp_`, `gho_`,
   `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack tokens, AWS access key ids, JSON
   web tokens, `Bearer` tokens and private key blocks.
+
+The values and private key blocks are replaced in one pass over the text as
+the provider wrote it. Every occurrence of every value is found, occurrences
+that overlap included. A private key block goes from a `-----BEGIN ... PRIVATE
+KEY-----` line through its end line, or to the end of the text when it has
+none. An end line is `-----END `, a label ending in `PRIVATE KEY` on the same
+line, and `-----`; a `PRIVATE KEY-----` anywhere else, a `BEGIN` line included,
+ends nothing, so a `BEGIN` line with no key of its own takes the block after it
+with it. Blocks are looked for twice: in the text as written, and in the text
+with the values replaced, with what is found there mapped back. Both findings
+count, because a value can lie on a block's markers and each way then misses a
+shape the other finds: as written, a value that holds a whole end line inside a
+key body ends the block there; with values replaced, a value that overlaps a
+`BEGIN` marker has removed it. Stretches that overlap or touch are replaced
+together by one `[redacted]`. The replacements are not searched for values
+again, so a value that happens to match inside `[redacted]` cannot lengthen the
+text. The key shapes and `Bearer` tokens are replaced after that, and only
+shorten the text.
+
+Taking both findings removes at least what each removes alone.
+
+The remaining limit: private key blocks are found by their begin and end
+markers. Known values that overlap or imitate a block's markers can make both
+looks miss the block or end it too early, and text after that point can then
+show.
 
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,

@@ -78,6 +78,12 @@ pub const MAX_REASONS: usize = 64;
 /// Most bytes of redacted provider standard error read for an error message,
 /// from the end.
 pub const STDERR_SCAN_BYTES: usize = 8 * 1024;
+/// How much of the start of a cut standard error capture is never shown, in
+/// bytes of the decoded capture. When standard error was longer than
+/// [`MAX_STDERR_BYTES`], the capture's start can fall inside a secret that the
+/// redactor then cannot recognise. The excerpt is taken only from redacted
+/// text after the redacted image of this much of the capture's start.
+pub const STDERR_CUT_START_BYTES: usize = 8 * 1024;
 /// Shortest environment value that is removed from provider text. Shorter
 /// values would also remove ordinary words.
 pub const MIN_REDACTED_VALUE_CHARS: usize = 6;

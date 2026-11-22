@@ -1,0 +1,820 @@
+//! The standard error excerpt and the guard at the start of a cut capture.
+
+use crate::process::Captured;
+use crate::provider::limits::{
+    MIN_REDACTED_VALUE_CHARS, STDERR_CUT_START_BYTES, STDERR_EXCERPT_CHARS,
+};
+use crate::provider::redact::{MASK, Redactor, private_key_blocks};
+use crate::provider::settle::{STDERR_CUT_GUARD_BYTES, STDERR_NOT_SHOWN, excerpt, stderr_note};
+
+/// Twenty long keys, which redact to twenty markers: less than one excerpt.
+fn keys() -> String {
+    format!("sk-ant-{}\n", "a".repeat(2000)).repeat(20)
+}
+
+fn masks() -> String {
+    vec![MASK; 20].join(" ")
+}
+
+fn capture(text: &[u8], truncated: bool) -> Captured {
+    Captured {
+        bytes: text.to_vec(),
+        total_bytes: text.len() as u64 + if truncated { 1000 } else { 0 },
+        truncated,
+    }
+}
+
+fn none() -> Redactor {
+    Redactor::default()
+}
+
+/// A cut capture whose first [`STDERR_CUT_START_BYTES`] are `unit` over and
+/// over and, as their last two bytes, the sentinel `ZQ`; then the keys, which
+/// redact to less than one excerpt. Without the guard the sentinel is in the
+/// excerpt.
+fn sentinel_at_the_end_of_the_guarded_start(unit: &str) -> Captured {
+    let count = (STDERR_CUT_START_BYTES - 2) / unit.len();
+    let pad = ".".repeat(STDERR_CUT_START_BYTES - 2 - count * unit.len());
+    let text = format!("{pad}{}ZQ\n{}", unit.repeat(count), keys());
+    assert_eq!(text.find("ZQ"), Some(STDERR_CUT_START_BYTES - 2));
+    capture(text.as_bytes(), true)
+}
+
+#[test]
+fn the_guard_covers_the_redacted_image_of_the_start_of_a_cut_capture() {
+    assert_eq!(STDERR_CUT_START_BYTES, 8 * 1024);
+    assert_eq!(STDERR_CUT_GUARD_BYTES, 13_664);
+    // The text that redaction lengthens most: the shortest known value over
+    // and over. Occurrences that touch are one span, so a space keeps them
+    // apart and each becomes its own marker.
+    let value = "v".repeat(MIN_REDACTED_VALUE_CHARS);
+    let redactor = Redactor::new([value.clone()]);
+    let unit = format!("{value} ");
+    assert_eq!(
+        redactor.apply(&unit.repeat(100)).len(),
+        100 * (MASK.len() + 1)
+    );
+    let cut = sentinel_at_the_end_of_the_guarded_start(&unit);
+    // The start grew, and the sentinel after it is still before the guard.
+    let image = redactor.apply_cut(&cut.bytes);
+    let at = image.find("ZQ").expect("the sentinel is not a secret");
+    assert!(at > STDERR_CUT_START_BYTES * 3 / 2, "{at}");
+    assert!(at + 2 <= STDERR_CUT_GUARD_BYTES, "{at}");
+    assert_eq!(excerpt(&cut, &redactor), None);
+    // Not cut, the same text shows it: the tail redacts short enough.
+    let shown = excerpt(&capture(&cut.bytes, false), &redactor).expect("not cut");
+    assert!(shown.contains(" ZQ [redacted]"), "{shown}");
+}
+
+#[test]
+fn a_value_that_matches_inside_a_marker_does_not_lengthen_the_text_past_the_guard() {
+    // "redact" is in "[redacted]". Replaced one value after another, each
+    // seven bytes became fourteen and the sentinel moved past the guard.
+    let redactor = Redactor::new(["abcdefg".to_string(), "redact".to_string()]);
+    assert_eq!(redactor.apply("abcdefg"), MASK);
+    assert_eq!(
+        redactor.apply("x abcdefg y redact z"),
+        "x [redacted] y [redacted] z"
+    );
+    for unit in ["abcdefg", "abcdefg "] {
+        let cut = sentinel_at_the_end_of_the_guarded_start(unit);
+        let out = excerpt(&cut, &redactor);
+        assert!(!out.clone().unwrap_or_default().contains("ZQ"), "{out:?}");
+    }
+}
+
+#[test]
+fn a_cut_start_that_ends_one_value_and_begins_another_hides_the_whole_other_value() {
+    // The capture starts with all of `long`, whose first six characters also
+    // end `other`. Masking those six first left the rest of `long` unmatched.
+    let long: String = format!(
+        "shared{}",
+        (0..2500).map(|i| format!("w{i:05}k")).collect::<String>()
+    );
+    assert!(long.len() > STDERR_CUT_GUARD_BYTES);
+    let redactor = Redactor::new(["another-value-shared".to_string(), long.clone()]);
+    let text = format!("{long}\n{}", keys());
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor);
+    assert!(!out.clone().unwrap_or_default().contains('k'), "{out:?}");
+    assert_eq!(out, None);
+    assert_eq!(
+        redactor.apply_cut(format!("{long} rest").as_bytes()),
+        "[redacted] rest"
+    );
+}
+
+#[test]
+fn replacement_characters_that_are_part_of_a_value_are_not_stepped_over_at_a_cut_start() {
+    // The value ends in 6000 literal U+FFFD, and the capture keeps 5500 of
+    // them, more than the guard removes. Only replacement characters the cut
+    // itself made may be stepped over; these are the value.
+    let value = format!("known-{}", "\u{FFFD}".repeat(6000));
+    let redactor = Redactor::new([value]);
+    let kept = "\u{FFFD}".repeat(5500);
+    assert!(kept.len() > STDERR_CUT_GUARD_BYTES);
+    let text = format!("{kept}\n{}", keys());
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor);
+    assert!(
+        !out.clone().unwrap_or_default().contains('\u{FFFD}'),
+        "{out:?}"
+    );
+    assert_eq!(out, None);
+}
+
+#[test]
+fn a_cut_capture_shows_nothing_from_before_the_guard() {
+    for fragment in [
+        "mnopqrstuvwxyz0123456789\n".to_string(),
+        "abcdefghijklmnop123\n".to_string(),
+        "cutbodyline0123456789\n-----END RSA PRIVATE KEY-----\n".to_string(),
+        // A fragment as long as the guarded start, in distinct pieces.
+        (0..1170).map(|i| format!("p{i:04}z\n")).collect::<String>(),
+    ] {
+        let text = format!("{fragment}{}", keys());
+        let shown = excerpt(&capture(text.as_bytes(), false), &none()).expect("not cut");
+        let last = fragment.split_whitespace().last().expect("a word");
+        assert!(shown.contains(last), "not cut, the start shows: {shown}");
+        assert_eq!(excerpt(&capture(text.as_bytes(), true), &none()), None);
+    }
+}
+
+#[test]
+fn a_cut_capture_shows_only_text_after_the_guard() {
+    // The fragment, lines up to the guard, then lines after it.
+    let fragment = "mnopqrstuvwxyz0123456789\n";
+    let lines = (STDERR_CUT_GUARD_BYTES - fragment.len()) / 7;
+    let pad = "\n".repeat(STDERR_CUT_GUARD_BYTES - fragment.len() - lines * 7);
+    let before = format!("{}{pad}", "before\n".repeat(lines));
+    let text = format!("{fragment}{before}after one\nafter two\n");
+    assert_eq!(fragment.len() + before.len(), STDERR_CUT_GUARD_BYTES);
+    let out = excerpt(&capture(text.as_bytes(), true), &none()).expect("excerpt");
+    assert!(!out.contains("before"), "{out}");
+    assert!(out.ends_with("after one after two"), "{out}");
+    assert!(out.len() < 40, "{out}");
+}
+
+#[test]
+fn a_cut_capture_with_only_whitespace_after_the_guard_has_no_excerpt() {
+    let text = format!("fragment{}", "\n".repeat(20_000));
+    assert_eq!(excerpt(&capture(text.as_bytes(), true), &none()), None);
+    // Not cut, the same start is shown when it is within the last 8 KiB.
+    let text = format!("fragment{}", "\n".repeat(1000));
+    assert_eq!(
+        excerpt(&capture(text.as_bytes(), false), &none()).as_deref(),
+        Some("fragment")
+    );
+    assert_eq!(excerpt(&capture(text.as_bytes(), true), &none()), None);
+    assert_eq!(excerpt(&capture(b"", true), &none()), None);
+}
+
+#[test]
+fn the_guard_moves_forward_to_a_character_boundary() {
+    // Three-byte characters: the guard, not a multiple of three, falls
+    // inside one.
+    assert_ne!(STDERR_CUT_GUARD_BYTES % 3, 0);
+    let text = "\u{20AC}".repeat(6000);
+    let out = excerpt(&capture(text.as_bytes(), true), &none()).expect("excerpt");
+    assert_eq!(
+        out,
+        format!("... {}", "\u{20AC}".repeat(STDERR_EXCERPT_CHARS))
+    );
+}
+
+#[test]
+fn a_character_cut_by_the_start_of_a_capture_is_not_shown() {
+    // The second byte of a two-byte character, as the capture's first byte.
+    let mut bytes = vec![0xA9, b'\n'];
+    bytes.extend_from_slice(keys().as_bytes());
+    let shown = excerpt(&capture(&bytes, false), &none()).expect("not cut");
+    assert_eq!(shown, format!("\u{FFFD} {}", masks()));
+    assert_eq!(excerpt(&capture(&bytes, true), &none()), None);
+}
+
+#[test]
+fn a_capture_that_was_not_cut_keeps_its_excerpt() {
+    let redactor = Redactor::new(["known-value-0123456789".to_string()]);
+    // The end of a known value at the start is left alone when nothing was
+    // cut: it is ordinary text there.
+    let text = format!("0123456789 first words\n{}", keys());
+    assert_eq!(
+        excerpt(&capture(text.as_bytes(), false), &redactor),
+        Some(format!("0123456789 first words {}", masks()))
+    );
+    let long = format!("start {} end", "b".repeat(400));
+    assert_eq!(
+        excerpt(&capture(long.as_bytes(), false), &redactor),
+        Some(format!("... {} end", "b".repeat(STDERR_EXCERPT_CHARS - 4)))
+    );
+}
+
+#[test]
+fn the_end_of_a_known_value_longer_than_the_guard_is_masked_at_a_cut_start() {
+    let value: String = (0..3000).map(|i| format!("v{i:05}q")).collect();
+    let redactor = Redactor::new([value.clone()]);
+    // The capture starts inside the value and keeps more of it than the
+    // guard removes.
+    let kept = &value[value.len() - 16_000..];
+    assert!(kept.len() > STDERR_CUT_GUARD_BYTES);
+    let text = format!("{kept}\n{}", keys());
+    assert_eq!(excerpt(&capture(text.as_bytes(), true), &redactor), None);
+    // With text after the guard, the excerpt has none of the value.
+    let text = format!("{kept}\n{}", "shown ".repeat(4000));
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor).expect("excerpt");
+    assert!(!out.contains('q'), "{out}");
+    assert!(out.ends_with("shown shown"), "{out}");
+}
+
+#[test]
+fn known_values_are_replaced_in_one_pass_with_overlaps_merged() {
+    let redactor = Redactor::new([
+        "abab-abab".to_string(),
+        "secret-one".to_string(),
+        "one-and-two".to_string(),
+        "redact".to_string(),
+    ]);
+    // An occurrence that overlaps the one before it is found too.
+    assert_eq!(redactor.apply("x abab-abab-abab y"), "x [redacted] y");
+    // Two values that overlap, and two that touch, are one marker.
+    assert_eq!(redactor.apply("a secret-one-and-two b"), "a [redacted] b");
+    assert_eq!(
+        redactor.apply("a secret-oneone-and-two b"),
+        "a [redacted] b"
+    );
+    // A marker is not searched for values.
+    assert_eq!(
+        redactor.apply("secret-one, redact"),
+        "[redacted], [redacted]"
+    );
+    let plain = "nothing of the kind: abab-aba, secret-on";
+    assert_eq!(redactor.apply(plain), plain);
+}
+
+#[test]
+fn apply_cut_replaces_the_longest_known_value_end_and_nothing_else() {
+    let redactor = Redactor::new([
+        "alpha-secret-tail".to_string(),
+        "other-long-secret-tail".to_string(),
+        "caf\u{e9}-secret-\u{e9}t\u{e9}-value".to_string(),
+    ]);
+    let cut = |text: &str| redactor.apply_cut(text.as_bytes());
+    // "secret-tail" ends both values; the longer end wins.
+    assert_eq!(cut("long-secret-tail then text"), "[redacted] then text");
+    assert_eq!(cut("secret-tail then text"), "[redacted] then text");
+    // An end shorter than the shortest redacted value is left.
+    assert_eq!(MIN_REDACTED_VALUE_CHARS, 6);
+    assert_eq!(cut("t-tail then"), "[redacted] then");
+    assert_eq!(cut("-tail then"), "-tail then");
+    // A whole value, at the start and later, as `apply` does it.
+    assert_eq!(cut("alpha-secret-tail then"), "[redacted] then");
+    assert_eq!(
+        cut("t-tail, alpha-secret-tail then"),
+        "[redacted], [redacted] then"
+    );
+    // The end of a value only counts at the very start.
+    assert_eq!(cut("x secret-tail"), "x secret-tail");
+    assert_eq!(redactor.apply("secret-tail then"), "secret-tail then");
+    // Characters are counted, not bytes.
+    assert_eq!(cut("\u{e9}-value rest"), "[redacted] rest");
+    assert_eq!(cut("-value rest"), "[redacted] rest");
+    assert_eq!(cut("value rest"), "value rest");
+    assert_eq!(none().apply_cut(b"anything"), "anything");
+    assert_eq!(none().apply_cut(b""), "");
+}
+
+#[test]
+fn apply_cut_steps_over_only_the_bytes_of_a_character_the_cut_split() {
+    let redactor = Redactor::new([
+        "caf\u{e9}-secret-value".to_string(),
+        "\u{1F600}-emoji-value".to_string(),
+        "x\u{FFFD}\u{FFFD}-literal-value".to_string(),
+    ]);
+    // The second byte of the two-byte character, then the rest of the value.
+    assert_eq!(
+        redactor.apply_cut(b"\xA9-secret-value rest"),
+        "[redacted] rest"
+    );
+    // The last three bytes of a four-byte character.
+    assert_eq!(
+        redactor.apply_cut(b"\x9F\x98\x80-emoji-value rest"),
+        "[redacted] rest"
+    );
+    // Four stray bytes are not one cut character: three are stepped over and
+    // the fourth is in the way.
+    assert_eq!(
+        redactor.apply_cut(b"\x80\x80\x80\x80-emoji-value rest"),
+        "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}-emoji-value rest"
+    );
+    // Replacement characters that were written as such are text: they match
+    // a value that holds them, and are not stepped over for one that does not.
+    assert_eq!(
+        redactor.apply_cut("\u{FFFD}\u{FFFD}-literal-value rest".as_bytes()),
+        "[redacted] rest"
+    );
+    assert_eq!(
+        redactor.apply_cut("\u{FFFD}-secret-value rest".as_bytes()),
+        "\u{FFFD}-secret-value rest"
+    );
+    // A cut character with no value after it stays as it decoded.
+    assert_eq!(redactor.apply_cut(b"\xA9 plain"), "\u{FFFD} plain");
+}
+
+#[test]
+fn a_value_that_overlaps_a_private_key_begin_marker_does_not_hide_the_key() {
+    // The two values overlap, and together they cover the block's begin
+    // marker. Replaced before the block was looked for, they left a body
+    // with no marker in front of it.
+    let redactor = Redactor::new([
+        "a-long-prefix-OVERLAP".to_string(),
+        "OVERLAP-----BEGIN".to_string(),
+    ]);
+    let block = "a-long-prefix-OVERLAP-----BEGIN PRIVATE KEY-----\nMIIEkeybody0123456789\n\
+                 -----END PRIVATE KEY-----";
+    let out = redactor.apply(&format!("before {block} after"));
+    assert!(!out.contains("MIIEkeybody"), "{out}");
+    assert_eq!(out, "before [redacted] after");
+    // A block with no end line goes to the end of the text, as before.
+    let open = "a-long-prefix-OVERLAP-----BEGIN RSA PRIVATE KEY-----\nMIIEkeybody0123456789\nmore";
+    assert_eq!(
+        redactor.apply(&format!("before {open}")),
+        "before [redacted]"
+    );
+    // A value across the end line. With the value replaced the block has no
+    // end line left, and a block without one goes to the end of the text:
+    // more is removed than the block, never less.
+    let redactor = Redactor::new(["KEY-----tail-of-value".to_string()]);
+    let text =
+        "x -----BEGIN PRIVATE KEY-----\nMIIEkeybody\n-----END PRIVATE KEY-----tail-of-value y";
+    assert_eq!(redactor.apply(text), "x [redacted]");
+    // A begin marker that is not a key is only text, with or without a value
+    // on it.
+    let redactor = Redactor::new(["OVERLAP-----BEGIN".to_string()]);
+    assert_eq!(
+        redactor.apply("x OVERLAP-----BEGIN CERTIFICATE-----\nMIIB\n y"),
+        "x [redacted] CERTIFICATE-----\nMIIB\n y"
+    );
+    // The same in a cut capture, through the excerpt.
+    let redactor = Redactor::new([
+        "a-long-prefix-OVERLAP".to_string(),
+        "OVERLAP-----BEGIN".to_string(),
+    ]);
+    let text = format!("{}{block}\nend\n", "plain line\n".repeat(1500));
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor).expect("excerpt");
+    assert!(!out.contains("MIIEkeybody"), "{out}");
+    assert!(out.ends_with("plain line [redacted] end"), "{out}");
+}
+
+#[test]
+fn many_repetitive_values_on_a_repetitive_capture_are_one_marker() {
+    // Every one of these 500 values occurs at nearly every byte of the
+    // capture: about 32 million occurrences. They are marked on the text, not
+    // collected.
+    let redactor = Redactor::new((6..=505).map(|len| "a".repeat(len)));
+    let all = "a".repeat(64 * 1024);
+    // Five do not make a value, so the runs at the ends are kept.
+    let text = format!("aaaaa {all} aaaaa");
+    assert_eq!(redactor.apply(&text), "aaaaa [redacted] aaaaa");
+    assert_eq!(redactor.apply_cut(all.as_bytes()), MASK);
+    // Runs that do not touch stay apart, and what is between them is kept.
+    let runs = format!("{} ", "a".repeat(654)).repeat(100);
+    assert_eq!(redactor.apply(&runs), "[redacted] ".repeat(100));
+}
+
+#[test]
+fn a_cut_capture_with_no_excerpt_says_so_whatever_left_it_without_one() {
+    let note = format!(" {STDERR_NOT_SHOWN}");
+    // A word after the guard, and a blank last 8 KiB: the guard left text,
+    // and still there is nothing to show.
+    let mut blank_end = vec![b' '; 64 * 1024];
+    blank_end[30_000..30_004].copy_from_slice(b"word");
+    const { assert!(30_000 > STDERR_CUT_GUARD_BYTES) };
+    assert_eq!(excerpt(&capture(&blank_end, true), &none()), None);
+    assert_eq!(stderr_note(&capture(&blank_end, true), &none()), note);
+    // Nothing after the guard.
+    let short = format!("fragment\n{}", keys());
+    assert_eq!(stderr_note(&capture(short.as_bytes(), true), &none()), note);
+    // With an excerpt, the excerpt.
+    let text = "shown ".repeat(4000);
+    assert_eq!(
+        stderr_note(&capture(text.as_bytes(), true), &none()),
+        format!(
+            "; its standard error ended with: ... {}",
+            " shown".repeat(50)
+        )
+    );
+    // A capture that was not cut says nothing when it has no text.
+    assert_eq!(stderr_note(&capture(&blank_end, false), &none()), "");
+    assert_eq!(stderr_note(&capture(b"", false), &none()), "");
+    assert_eq!(stderr_note(&capture(b" \n ", false), &none()), "");
+}
+
+/// `apply` and `apply_cut` of `text` with these known values: neither may
+/// show any of `bodies`.
+fn hides_bodies(values: &[&str], text: &str, bodies: &[&str]) {
+    let redactor = Redactor::new(values.iter().map(|v| v.to_string()));
+    for (which, out) in [
+        ("apply", redactor.apply(text)),
+        ("apply_cut", redactor.apply_cut(text.as_bytes())),
+    ] {
+        for body in bodies {
+            assert!(
+                !out.contains(body),
+                "{which} shows {body}\nvalues: {values:?}\ntext: {text}\nout: {out}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_begin_line_that_is_a_known_value_does_not_expose_the_key_after_it() {
+    // On the text as given, the first begin line has no key of its own and
+    // takes the next block's begin line for its end; the value covers the
+    // first line; the second key's body was left.
+    let text = "-----BEGIN RSA PRIVATE KEY-----\n-----BEGIN PRIVATE KEY-----\nMIIEsecondbody0123\n\
+                -----END PRIVATE KEY-----\nafter";
+    hides_bodies(
+        &["-----BEGIN RSA PRIVATE KEY-----"],
+        text,
+        &["MIIEsecondbody0123"],
+    );
+    let redactor = Redactor::new(["-----BEGIN RSA PRIVATE KEY-----".to_string()]);
+    assert_eq!(redactor.apply(text), "[redacted]\nafter");
+}
+
+#[test]
+fn a_known_value_with_the_end_marker_inside_a_key_body_does_not_end_the_key_early() {
+    let text = "-----BEGIN PRIVATE KEY-----\nMIIEfirstline\nvalue-with-PRIVATE KEY-----\n\
+                MIIEafterthevalue\n-----END PRIVATE KEY-----\nafter";
+    hides_bodies(
+        &["value-with-PRIVATE KEY-----"],
+        text,
+        &["MIIEfirstline", "MIIEafterthevalue"],
+    );
+    let redactor = Redactor::new(["value-with-PRIVATE KEY-----".to_string()]);
+    assert_eq!(redactor.apply(text), "[redacted]\nafter");
+}
+
+#[test]
+fn known_values_on_private_key_markers_never_expose_a_key_body() {
+    const BLOCK: &str = "-----BEGIN PRIVATE KEY-----\nMIIEbodyone\nMIIEbodytwo\n\
+                         -----END PRIVATE KEY-----";
+    const RSA: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIErsabody\n-----END RSA PRIVATE KEY-----";
+    let one = ["MIIEbodyone", "MIIEbodytwo"];
+    let both = ["MIIEbodyone", "MIIEbodytwo", "MIIErsabody"];
+    let adjacent = format!("{BLOCK}\n{RSA}\nafter");
+    let touching = format!("{BLOCK}{RSA}");
+    let after_prefix = format!("a-long-prefix-OVERLAP{BLOCK}\nafter");
+    let lone_then_block = format!("-----BEGIN EC PRIVATE KEY-----\n{BLOCK}\nafter");
+    let lone_then_both = format!("-----BEGIN EC PRIVATE KEY-----\n{adjacent}");
+    let piece_at_start = "-----BEGIN PRIVATE KEY-----\nMIIEbodyone\npiece-PRIVATE KEY-----\n\
+                          MIIEbodytwo\n-----END PRIVATE KEY-----\nafter";
+    let early_piece = format!("a-long-prefix-OVERLAP{piece_at_start}");
+    let open = "before\n-----BEGIN PRIVATE KEY-----\nMIIEbodyone\nMIIEbodytwo";
+    let cases: &[(&[&str], &str, &[&str])] = &[
+        // No value at all: two blocks, and a begin line with no key of its
+        // own right before a block.
+        (&[], &adjacent, &both),
+        (&[], &lone_then_block, &one),
+        (&[], &lone_then_both, &both),
+        // That begin line and a value on the next block's begin marker.
+        (
+            &["-----BEGIN EC PRIVATE KEY-----", "-BEGIN PRIV"],
+            &lone_then_block,
+            &one,
+        ),
+        // A value on a begin marker and one in the body holding the end
+        // marker, and the same where the marker starts the text and ends a
+        // value (for a cut capture).
+        (
+            &[
+                "OVERLAP-----BEGIN",
+                "bodyone\nMIIEbodytwo\n-----END PRIVATE KEY",
+            ],
+            &after_prefix,
+            &one,
+        ),
+        (
+            &["OVERLAP-----BEGIN", "piece-PRIVATE KEY-----"],
+            &early_piece,
+            &one,
+        ),
+        (
+            &["before-----BEGIN", "piece-PRIVATE KEY-----"],
+            piece_at_start,
+            &one,
+        ),
+        // A value that is a whole begin line.
+        (&["-----BEGIN PRIVATE KEY-----"], &adjacent, &both),
+        (&["-----BEGIN RSA PRIVATE KEY-----"], &adjacent, &both),
+        (
+            &[
+                "-----BEGIN PRIVATE KEY-----",
+                "-----BEGIN RSA PRIVATE KEY-----",
+            ],
+            &adjacent,
+            &both,
+        ),
+        (&["-----BEGIN PRIVATE KEY-----"], open, &one),
+        (&["-----BEGIN EC PRIVATE KEY-----"], &lone_then_block, &one),
+        // A value that overlaps a begin marker, from before it and from
+        // inside it.
+        (
+            &["a-long-prefix-OVERLAP", "OVERLAP-----BEGIN"],
+            &after_prefix,
+            &one,
+        ),
+        (&["OVERLAP-----BEGIN PRIVATE"], &after_prefix, &one),
+        (&["GIN PRIVATE KEY-----\nMIIEbody"], &adjacent, &both),
+        (&["-BEGIN RSA"], &adjacent, &both),
+        // A value that is a whole block, a whole end line, or part of one.
+        (&[BLOCK], &adjacent, &both),
+        (&[RSA], &adjacent, &both),
+        (&[BLOCK, RSA], &touching, &both),
+        (&["-----END PRIVATE KEY-----"], &adjacent, &both),
+        (&["-----END RSA PRIVATE KEY-----"], &adjacent, &both),
+        (&["KEY-----\n-----BEGIN RSA"], &adjacent, &both),
+        // Two blocks with nothing between them, and a value across the seam.
+        (&[], &touching, &both),
+        (&["KEY----------BEGIN"], &touching, &both),
+        // Values in a body.
+        (&["MIIEbodyone"], &adjacent, &both),
+        (&["bodyone\nMIIEbody"], &adjacent, &both),
+    ];
+    for (values, text, bodies) in cases {
+        hides_bodies(values, text, bodies);
+    }
+}
+
+/// A small fixed-seed generator (a 64-bit linear congruential one), so the
+/// test below is the same on every run.
+struct Seeded(u64);
+
+impl Seeded {
+    fn below(&mut self, limit: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 33) as usize) % limit
+    }
+
+    fn chance(&mut self, of: usize) -> bool {
+        self.below(of) == 0
+    }
+}
+
+/// A generated text of plain lines and private key blocks, the values to know
+/// for it, and its key body lines. The blocks are whole (the last one can
+/// lack its end line) and each has its own label. Around and in them, by
+/// chance: a begin line with no key of its own before a block; a line holding
+/// `PRIVATE KEY-----` in a body; and as known values those lines, body lines,
+/// plain lines, a block's begin line or end line or a part of either, the end
+/// of the line before a block with its begin marker, whole blocks, and
+/// stretches of the text picked anywhere.
+///
+/// One thing is never generated: a whole end line inside a key body. The
+/// block ends there, whatever is known.
+fn generated_keys(random: &mut Seeded, round: usize) -> (String, Vec<String>, Vec<String>) {
+    let mut text = String::new();
+    let mut values: Vec<String> = Vec::new();
+    let mut bodies: Vec<String> = Vec::new();
+    let units = 1 + random.below(6);
+    for unit in 0..units {
+        let id = format!("{round}x{unit}");
+        if random.chance(3) {
+            let line = format!("plain line {id} of ordinary text");
+            text.push_str(&line);
+            text.push('\n');
+            if random.chance(4) {
+                values.push(line);
+            }
+            continue;
+        }
+        if random.chance(4) {
+            let lone = format!("-----BEGIN L{id} PRIVATE KEY-----");
+            text.push_str(&lone);
+            text.push('\n');
+            if random.chance(2) {
+                values.push(lone);
+            }
+        }
+        let begin = format!("-----BEGIN K{id} PRIVATE KEY-----");
+        let end = format!("-----END K{id} PRIVATE KEY-----");
+        let before = text.strip_suffix('\n').filter(|t| t.len() >= 8);
+        match (random.below(6), before) {
+            (0, _) => values.push(begin.clone()),
+            (1, Some(before)) => {
+                values.push(format!("{}\n-----BEGIN", &before[before.len() - 8..]));
+            }
+            (2, _) => values.push(format!("-----BEGIN K{id} PRIV")),
+            _ => {}
+        }
+        let mut block = format!("{begin}\n");
+        for line in 0..1 + random.below(3) {
+            let body = format!("MIIE{id}y{line}Body");
+            block.push_str(&body);
+            block.push('\n');
+            if random.chance(5) {
+                values.push(body.clone());
+            }
+            bodies.push(body);
+            if random.chance(4) {
+                let piece = format!("piece{id}y{line}-PRIVATE KEY-----");
+                block.push_str(&piece);
+                block.push('\n');
+                if random.chance(2) {
+                    values.push(piece);
+                }
+            }
+        }
+        if unit + 1 == units && random.chance(3) {
+            text.push_str(&block);
+            continue;
+        }
+        block.push_str(&end);
+        match random.below(8) {
+            0 => values.push(end),
+            1 => values.push(format!("KEY-----\n-----END K{id}")),
+            2 => values.push(format!("K{id} PRIVATE KEY-----")),
+            3 => values.push(block.clone()),
+            _ => {}
+        }
+        text.push_str(&block);
+        text.push('\n');
+    }
+    // Stretches of the text, wherever they fall.
+    for _ in 0..random.below(4) {
+        let len = 6 + random.below(40);
+        if text.len() > len {
+            let start = random.below(text.len() - len);
+            values.push(text[start..start + len].to_string());
+        }
+    }
+    (text, values, bodies)
+}
+
+#[test]
+fn generated_values_on_private_key_markers_never_expose_a_key_body() {
+    let mut random = Seeded(0x00C0_FFEE);
+    let mut blocks = 0;
+    for round in 0..600 {
+        let (text, values, bodies) = generated_keys(&mut random, round);
+        blocks += bodies.len();
+        let values: Vec<&str> = values.iter().map(String::as_str).collect();
+        let bodies: Vec<&str> = bodies.iter().map(String::as_str).collect();
+        hides_bodies(&values, &text, &bodies);
+        // And with no value known at all.
+        hides_bodies(&[], &text, &bodies);
+    }
+    assert!(blocks > 1000, "{blocks}");
+}
+
+/// The rule private key blocks were found by before an end had to be an end
+/// line: a block ended at the first `PRIVATE KEY-----` after its begin line,
+/// whatever line that was in. Kept here only to compare with.
+fn earlier_private_key_blocks(text: &str) -> Vec<(usize, usize)> {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "PRIVATE KEY-----";
+    let mut blocks = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(BEGIN) {
+        let start = from + at;
+        let label = start + BEGIN.len();
+        let after = &text.as_bytes()[label..];
+        let window = &after[..after.len().min(64)];
+        let label_end = window.windows(5).position(|w| w == b"-----");
+        let Some(label_end) = label_end.filter(|i| after[..*i].ends_with(b"PRIVATE KEY")) else {
+            from = label;
+            continue;
+        };
+        let body = label + label_end + 5;
+        from = text[body..]
+            .find(END)
+            .map_or(text.len(), |end| body + end + END.len());
+        blocks.push((start, from));
+    }
+    blocks
+}
+
+/// Every byte the earlier rule took for part of a private key is part of one
+/// by the rule in use.
+fn covers_what_the_earlier_rule_covered(text: &str) {
+    let mut covered = vec![false; text.len()];
+    private_key_blocks(text, |start, end| covered[start..end].fill(true));
+    for (start, end) in earlier_private_key_blocks(text) {
+        let missed = covered[start..end].iter().position(|byte| !byte);
+        assert_eq!(
+            missed.map(|at| start + at),
+            None,
+            "the earlier rule covered {start}..{end} of {text:?}"
+        );
+    }
+}
+
+#[test]
+fn the_end_line_rule_covers_every_byte_the_earlier_private_key_rule_covered() {
+    const BLOCK: &str = "-----BEGIN PRIVATE KEY-----\nMIIEbodyone\n-----END PRIVATE KEY-----";
+    for text in [
+        BLOCK.to_string(),
+        format!("{BLOCK}\n{BLOCK}\nafter"),
+        format!("{BLOCK}{BLOCK}"),
+        // The dashes that close an end line open the next begin line.
+        "-----BEGIN PRIVATE KEY-----\nb\n-----END PRIVATE KEY-----BEGIN PRIVATE KEY-----\nb2\n\
+         -----END PRIVATE KEY-----\ntail"
+            .to_string(),
+        // The same after an early `PRIVATE KEY-----`, where the earlier rule
+        // ended the first block and so found the second.
+        "-----BEGIN PRIVATE KEY-----\nxPRIVATE KEY-----\nb\n-----END PRIVATE KEY-----BEGIN \
+         PRIVATE KEY-----\nb2\n-----END PRIVATE KEY-----\ntail"
+            .to_string(),
+        format!("-----BEGIN RSA PRIVATE KEY-----\n{BLOCK}\nafter"),
+        "-----BEGIN PRIVATE KEY-----END PRIVATE KEY-----\nafter".to_string(),
+        "-----BEGIN PRIVATE KEY-----\nb\n-----END PRIVATE\nKEY-----\nafter".to_string(),
+        "-----BEGIN PRIVATE KEY-----\nb\n-----END CERTIFICATE-----\nPRIVATE KEY-----\nafter"
+            .to_string(),
+        "-----BEGIN PRIVATE KEY-----\nopen body".to_string(),
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----".to_string(),
+    ] {
+        covers_what_the_earlier_rule_covered(&text);
+    }
+    let mut random = Seeded(0x5EED);
+    // The generated key texts, and then marker pieces in any order, which
+    // put markers into each other in ways no key text does.
+    for round in 0..300 {
+        covers_what_the_earlier_rule_covered(&generated_keys(&mut random, round).0);
+    }
+    const PIECES: [&str; 14] = [
+        "-----BEGIN ",
+        "-----END ",
+        "PRIVATE KEY-----",
+        "PRIVATE KEY",
+        "-----",
+        "--",
+        "RSA ",
+        "BEGIN ",
+        "END ",
+        "\n",
+        " ",
+        "body",
+        "CERTIFICATE-----",
+        "0123456789012345678901234567890123456789",
+    ];
+    for _ in 0..20_000 {
+        let text: String = (0..1 + random.below(24))
+            .map(|_| PIECES[random.below(PIECES.len())])
+            .collect();
+        covers_what_the_earlier_rule_covered(&text);
+    }
+}
+
+#[test]
+fn a_private_key_block_ends_only_at_an_end_line() {
+    let redactor = none();
+    // `PRIVATE KEY-----` in a begin line or in a body ends nothing.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN RSA PRIVATE KEY-----\n-----BEGIN PRIVATE KEY-----\nMIIEbody\n-----END \
+             PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\nxPRIVATE KEY-----\nMIIEtwo\n-----END RSA \
+             PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    // An end marker with another label, or with its label on two lines, is
+    // not an end line, and a block with none goes to the end of the text.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END CERTIFICATE-----\nMIIEtwo\n-----END \
+             PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    assert_eq!(
+        redactor.apply("a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END PRIVATE\nKEY-----\nb"),
+        "a [redacted]"
+    );
+    assert_eq!(
+        redactor.apply("a -----BEGIN PRIVATE KEY-----\nMIIEone\nPRIVATE KEY-----\nb"),
+        "a [redacted]"
+    );
+    // The dashes that close an end line can open the next begin line.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END PRIVATE KEY-----BEGIN PRIVATE \
+             KEY-----\nMIIEtwo\n-----END PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nb"
+    );
+    // Blocks one after another stay apart.
+    assert_eq!(
+        redactor.apply(
+            "a -----BEGIN PRIVATE KEY-----\nMIIEone\n-----END PRIVATE KEY-----\nbetween\n\
+             -----BEGIN PRIVATE KEY-----\nMIIEtwo\n-----END PRIVATE KEY-----\nb"
+        ),
+        "a [redacted]\nbetween\n[redacted]\nb"
+    );
+}

@@ -396,9 +396,11 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
 /// builds), and that count must stay within a constant factor of the length of
 /// the input at two sizes. A counted search that looked at the rest of the text
 /// for every begin marker counts a number that grows with the square of the
-/// length, far over the factor. Linear work counts about four times the length
-/// here: once for the search, and at most 64 bytes of label window for each 22
-/// byte marker.
+/// length, far over the factor. Linear work counts about eight times the
+/// length here: the scan runs twice when the text holds no known value (on the
+/// text as given, and on the result; a third time, on the text with the values
+/// replaced, when it holds one), and each run counts the text once for the
+/// search and at most 64 bytes of label window for each 22 byte marker.
 ///
 /// The test sees only searches that call `redact::examined`: a new search in
 /// the scan must call it too, or this test cannot see it. The count must also
@@ -407,7 +409,7 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
 /// zero.
 #[test]
 fn private_key_removal_is_linear_in_the_input() {
-    const FACTOR: usize = 8;
+    const FACTOR: usize = 12;
     let redactor = Redactor::default();
     for repeats in [12_500, 100_000] {
         // Many begin markers that are not keys, and many unterminated labels.
@@ -416,6 +418,21 @@ fn private_key_removal_is_linear_in_the_input() {
         let out = redactor.apply(&noise);
         let examined = crate::provider::redact::take_examined();
         assert_eq!(out.len(), noise.len());
+        // The same for end markers that are not a key's, inside a key block
+        // that never ends: the search for its end line looks at each once.
+        let open = format!(
+            "-----BEGIN PRIVATE KEY-----{}",
+            "-----END CERTIFICATE".repeat(repeats)
+        );
+        let out = redactor.apply(&open);
+        let examined_open = crate::provider::redact::take_examined();
+        assert_eq!(out, "[redacted]");
+        assert!(
+            examined_open >= open.len() && examined_open <= FACTOR * open.len(),
+            "{} bytes were scanned for {} bytes of a block with no end line",
+            examined_open,
+            open.len()
+        );
         assert!(
             examined >= noise.len(),
             "only {} bytes were counted for {} bytes of input: the scan no longer counts \
@@ -428,7 +445,7 @@ fn private_key_removal_is_linear_in_the_input() {
             "{} bytes were scanned for {} bytes of input; linear is about {}",
             examined,
             noise.len(),
-            4 * noise.len()
+            8 * noise.len()
         );
     }
     let keys = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".repeat(50_000);
