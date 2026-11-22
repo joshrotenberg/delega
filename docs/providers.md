@@ -54,6 +54,9 @@ there is one), plus the process inspection check. A failed or timed-out Claude p
 command refuses the same condition as `unsupported_provider_version`. It never
 prints a value or a rule.
 
+It also names the managed (administrator) settings it finds for each provider,
+as a notice that changes no verdict ([Managed settings](#managed-settings)).
+
 ## Run sequence
 
 1. Validate the request (`Request::validate`), the `native_args`, and the
@@ -514,7 +517,8 @@ variables), not from the calling process.
    submodule's does, is not a linked worktree and gets no note.
 
 Home and configuration directories are resolved to their real paths, so paths in
-notes are real paths. Managed (enterprise) settings are not read. A missing file contributes nothing, and an empty
+notes are real paths. Managed (administrator) settings are not read for deny rules: Claude Code applies them itself
+([Managed settings](#managed-settings)). A missing file contributes nothing, and an empty
 file (or one with only whitespace) is a file with no rules. A UTF-8 byte order
 mark is ignored.
 
@@ -625,7 +629,9 @@ ignores them.
 - `full` is the nine built-in tools. Sub-agents, MCP tools and background tasks
   stay off, and a note says so.
 - `NotebookEdit` is not granted in `write`.
-- The provider's own managed policy is not inspected.
+- The provider's own managed policy is applied by the provider over what delega
+  passes, and no run reads it. `delega doctor` reports the local sources
+  ([Managed settings](#managed-settings)).
 
 ### Resume, ephemeral, effort
 
@@ -792,7 +798,9 @@ effect. A Codex `full` run is not refused: it asks for nothing confined.
   A note says so on every run.
 - `--ignore-user-config` ignores the user's Codex configuration, but Codex may
   still load its own `AGENTS.md` files.
-- The provider's own managed policy is not inspected.
+- The provider's own managed policy is applied by the provider over what delega
+  passes, and no run reads it. `delega doctor` reports the local sources
+  ([Managed settings](#managed-settings)).
 
 ### Stream
 
@@ -1069,12 +1077,131 @@ each.
 | Codex at a usage limit, as an earlier runner recorded it, writes `error` and `turn.failed` messages "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at ...", and `codex_error_info: "usage_limit_exceeded"` can appear on such events; capacity failures say "unexpected status 429", "503" or "529", "rate limit", "overloaded" or "at capacity"; a context overflow says "context window" or carries `codex_error_info` `context_window_exceeded` | Matched as described in the Codex [Stream](#stream-1) section. A context overflow was `provider_usage_limit` before #116 and is now `provider_context_exhausted`. |
 | Claude Code names `error_max_turns` and `error_max_budget_usd` as result subtypes | They become the `provider_turn_limit` and `provider_budget_limit` error kinds. |
 
+## Managed settings
+
+Both providers read managed (administrator) settings themselves, above anything
+on the command line. delega does not apply them and cannot turn them off, so
+they can change what a worker gets with nothing in the result saying why.
+`delega doctor` ([api.md](api.md#doctor)) looks for the local sources of each
+provider and lists the keys present in them that bear on what delega passes at
+launch, each with a category. It says once per provider that these keys can
+change how the provider treats what delega passes, and points at the provider's
+reference. It does not say what a key does, or whether a key is on: read the
+file and the provider's reference for that.
+
+It reports the fixed paths below, counts, key names and categories, never a
+value. Nothing it prints is copied from a file or a directory. A drop-in file or
+a user's preferences directory can be named anything, so each of those is one
+source with a count. A key is named only when it is one doctor knows, under
+doctor's own spelling; a key of a Codex file that doctor does not know is
+counted (`other_keys`) and not named. It is a notice: it adds no problem and
+does not change `ready` or the exit status.
+
+**Sources looked for.** Windows is out of scope.
+
+| Provider | Source | Where | Reported |
+| --- | --- | --- | --- |
+| Claude Code | `managed-settings.json` | `/Library/Application Support/ClaudeCode` on macOS, `/etc/claude-code` on Linux | The keys below that are present. |
+| Claude Code | `managed-settings.d/*.json`, hidden files left out | The same directory | The directory once, with the number of files, how many could not be read, and the keys below from all of them together. No file is named. |
+| Claude Code | `managed-mcp.json` | The same directory | Its presence, with a pointer to Claude Code's [managed MCP reference](https://code.claude.com/docs/en/managed-mcp), which describes what the file does to `--strict-mcp-config` and `--mcp-config`. delega passes both on every run. Server names are not read. |
+| Claude Code | Managed preferences domain `com.anthropic.claudecode` | macOS: `/Library/Managed Preferences/com.anthropic.claudecode.plist` and the same file in each user's directory there | The system file as present, not inspected; the users' files as one source with a count. No user is named. |
+| Codex | `requirements.toml` | `/etc/codex` on macOS and Linux | The top-level keys Codex reads, by name, and a count of the others. |
+| Codex | `managed_config.toml` (legacy) | `/etc/codex` on macOS and Linux | The top-level keys listed below, by name, and a count of the others. |
+| Codex | Managed preferences domain `com.openai.codex` (`config_toml_base64`, `requirements_toml_base64`) | macOS: `/Library/Managed Preferences/com.openai.codex.plist` and the same file in each user's directory there | As for Claude Code. |
+
+A file that parses is `read`. An empty `managed-settings.json` or drop-in file is
+read as `{}`. A file that is there and cannot be read or parsed (no permission,
+not a regular file, over 4 MiB, not JSON or TOML, no object at the top) is
+`unreadable`, with no content and no error text. Values are skipped, not
+converted, so a number too large for doctor to hold does not make a file
+unreadable or hide its keys. Managed preferences are `not_inspected`: doctor
+does not open them, so it cannot say which keys they set, and a file in another
+user's directory does not apply to this user.
+
+A file is opened without blocking and must be a regular file once open, so a
+pipe or a device in its place is `unreadable` and cannot hang doctor. Symbolic
+links are followed, as the providers follow them. The drop-in directory is read
+up to 64 files, 4096 directory entries and 4 MiB in all, counted as bytes read
+from disk whether or not they are text, and never a byte more: a file that
+grows while it is read is cut off at what is left of the total. When some of its files cannot be read
+the directory is `partly_read` and the report says how many. When a limit stops
+the scan the directory is `partly_read` with `limit_reached`, even if no drop-in
+file was seen before the limit, because there may be files that were never
+looked at. The same holds for the users' preferences: a listing cut off at 4096
+entries is reported as `partly_read` with `limit_reached`. The size of a file is
+taken before and after it is read. A file whose size changed meanwhile, or that
+holds more than was read, is not reported as read. A single file is then
+`partly_read` with no keys, and that is the only case in which a single file has
+`files` (one found, one not read, `limit_reached`). A drop-in file is counted as
+not read and marks its directory `partly_read` with `limit_reached`.
+
+**Claude Code keys.** Doctor lists these keys when they are present, whatever
+their value, with the category shown. A key that is not in this table is not
+listed. Nested keys are given as dotted names. The category places a key; what
+the key does is in Claude Code's
+[settings reference](https://code.claude.com/docs/en/settings-reference).
+
+| Category | Keys |
+| --- | --- |
+| `permissions` | `allowManagedPermissionRulesOnly`, `permissions.allow`, `permissions.deny`, `permissions.ask`, `permissions.additionalDirectories`, `permissions.blockReadsOutsideWorkingDirectories`, `permissions.blockWritesOutsideWorkingDirectories` |
+| `hooks` | `allowManagedHooksOnly`, `disableAllHooks` |
+| `plugins` | `strictPluginOnlyCustomization` |
+| `mcp` | `disableSideloadFlags`, `allowManagedMcpServersOnly`, `allowedMcpServers`, `deniedMcpServers` |
+| `sandbox` | `sandbox.enabled`, `sandbox.filesystem.allowManagedReadPathsOnly`, `sandbox.network.allowManagedDomainsOnly` |
+| `authentication` | `forceLoginMethod`, `forceLoginOrgUUID`, `enforceAnthropicSignIn`, `allowedProviders`, `apiKeyHelper` |
+| `environment` | `env` (the variable names in it are not listed) |
+| `model` | `availableModels`, `deniedModels`, `modelOverrides` |
+| `version` | `requiredMinimumVersion`, `requiredMaximumVersion` |
+| `policy` | `policyHelper` |
+
+They are listed because each bears on something delega passes at launch: the
+tools granted with `--allowedTools` and the deny rules and command hook in
+`--settings`, `--permission-mode dontAsk`, `--strict-mcp-config` and
+`--mcp-config`, the `--add-dir` directories, `--model`, and the environment a
+worker gets, which carries its credential.
+
+Two keys are not listed: `permissions.disableBypassPermissionsMode` and
+`permissions.defaultMode`.
+
+**Codex keys.** A top-level key is named only when doctor knows it. Any other
+key is counted in `other_keys` and not named, and the text report says how many
+there are. What a key does is in Codex's source: `ConfigRequirementsToml` in
+`codex-rs/config/src/config_requirements.rs` and the layering described in
+`codex-rs/config/src/loader/README.md`, both in
+<https://github.com/openai/codex>.
+
+| Category | File | Keys named |
+| --- | --- | --- |
+| `codex_requirements` | `requirements.toml` | The fields of `ConfigRequirementsToml` and the aliases it accepts, such as `allowed_approval_policies`, `allowed_sandbox_modes`, `allowed_permission_profiles`, `default_permissions`, `mcp_servers`, `allow_login_shell` and `rules`. |
+| `codex_config` | `managed_config.toml` | The settings delega also passes with `-c` (`approval_policy`, `sandbox_mode`, `allow_login_shell`, `sandbox_workspace_write`, `developer_instructions`, `model_reasoning_effort`, `mcp_servers`) and `approvals_reviewer`. |
+
+Both files are read by Codex whatever is on the command line:
+`--ignore-user-config` leaves out the user's `config.toml` only.
+
+**What doctor cannot see.**
+
+- Settings a provider fetches from its server: Claude Code's server-managed
+  settings from the claude.ai admin console or a gateway, and Codex's
+  cloud-managed configuration and requirements. Nothing local says they exist.
+- The content of managed preferences, and what a `policyHelper` returns.
+- Policy an embedding host passes to Claude Code.
+- `/etc/codex/config.toml`, the system configuration layer of Codex. Codex's
+  loader documents it as the lowest layer, below the `-c` settings, and it is
+  not reported.
+- Windows locations (the registry and `%ProgramData%`).
+
+So an empty report does not prove that no managed policy applies. In Claude
+Code, `/status` names the managed sources in force.
+
 ## Not done
 
 - **User instructions for Claude Code.** The earlier project also copied the
   user's `CLAUDE.md` into the launch. This layer does not read it. The
   `permissions.deny` rules are carried over (see [Deny rules](#deny-rules)).
-- **Managed settings.** Enterprise managed deny rules are not read.
+- **Managed settings.** No run reads or applies them, and a result does not say
+  that one changed it. `delega doctor` names the local sources and the keys in
+  them that matter ([Managed settings](#managed-settings)); settings a provider
+  fetches from its server cannot be seen.
 - **Command shape in the result.** The contract's `provenance` has no field for
   it. `dry_run` reports the shape; a run records the executable and version.
 - **Live asking** (`on_request: ask`), as in [api.md](api.md).

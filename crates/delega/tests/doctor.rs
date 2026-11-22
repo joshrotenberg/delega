@@ -2,7 +2,9 @@
 //!
 //! Every test points `DELEGA_CLAUDE_BIN` and `DELEGA_CODEX_BIN` at fakes, so no
 //! real provider CLI is started, and runs in the rig's directories, so nothing
-//! reads the real home directory.
+//! reads the real home directory. Every doctor command starts from
+//! `Rig::doctor_command`, so managed settings are looked for under the rig's
+//! own directory and never under the real system locations.
 
 mod support;
 
@@ -17,7 +19,7 @@ use support::{Guarded, Rig, text};
 const SECRET: &str = "distinctive-value-7731";
 
 fn doctor_command(rig: &Rig, args: &[&str]) -> Command {
-    let mut command = rig.command();
+    let mut command = rig.doctor_command();
     command
         .current_dir(&rig.work)
         .env("HTTPS_PROXY", format!("http://user:{SECRET}@proxy.example"))
@@ -412,7 +414,7 @@ fn deny_rules_are_counted_with_their_files_and_never_printed() {
 fn unavailable_process_inspection_is_named_and_exits_one() {
     let rig = Rig::new();
     let out = rig
-        .command()
+        .doctor_command()
         .current_dir(&rig.work)
         .env("DELEGA_TEST_NO_PROCESS_LISTING", "1")
         .args(["doctor", "--output", "json"])
@@ -437,7 +439,7 @@ fn unavailable_process_inspection_is_named_and_exits_one() {
     assert_eq!(provider(&report, "claude")["ready"], true);
     assert_eq!(provider(&report, "codex")["ready"], true);
     let shown = rig
-        .command()
+        .doctor_command()
         .current_dir(&rig.work)
         .env("DELEGA_TEST_NO_PROCESS_LISTING", "1")
         .arg("doctor")
@@ -465,6 +467,7 @@ fn doctor_cannot_run_without_a_usable_current_directory_and_exits_two() {
     let mut command = Command::new("/bin/sh");
     rig.configure(&mut command);
     let out = command
+        .env(support::SYSTEM_ROOT_ENV, rig.system_root())
         .arg("-c")
         .arg(format!(
             "cd '{0}' && rmdir '{0}' && exec '{1}' doctor",
@@ -530,4 +533,130 @@ fn an_executable_that_cannot_be_started_stops_every_run_with_it() {
             .expect("run delega");
         assert_ne!(ran.status.code(), Some(0), "{name}");
     }
+}
+
+/// Write a file under the directory doctor looks for system locations in
+/// (`Rig::doctor_command` points `DELEGA_TEST_SYSTEM_ROOT` at it), never under
+/// the real `/`.
+fn system_file(rig: &Rig, relative: &str, content: &str) -> PathBuf {
+    let path = rig.system_root().join(relative);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create directories");
+    std::fs::write(&path, content).expect("write file");
+    path
+}
+
+/// Claude Code's managed settings directory on the system the tests run on.
+fn claude_managed_dir() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Library/Application Support/ClaudeCode"
+    } else {
+        "etc/claude-code"
+    }
+}
+
+#[test]
+fn no_managed_settings_are_reported_when_the_system_has_none() {
+    let rig = Rig::new();
+    let out = doctor_with(&rig, &["--output", "json"], |_| {});
+    let report = json_of(&out);
+    for name in ["claude", "codex"] {
+        assert_eq!(
+            provider(&report, name)["managed_settings"],
+            serde_json::json!([]),
+            "{name}"
+        );
+    }
+    let shown = doctor_with(&rig, &[], |_| {});
+    assert!(
+        !text(&shown.stdout).contains("managed settings"),
+        "{}",
+        text(&shown.stdout)
+    );
+}
+
+#[test]
+fn managed_settings_are_named_for_both_providers_without_values_and_stop_nothing() {
+    let rig = Rig::new();
+    let settings = system_file(
+        &rig,
+        &format!("{}/managed-settings.json", claude_managed_dir()),
+        &format!(
+            r#"{{"allowManagedPermissionRulesOnly":true,"apiKeyHelper":"/bin/{SECRET}",
+                "env":{{"TOKEN":"{SECRET}"}},"model":"{SECRET}"}}"#
+        ),
+    );
+    let mcp = system_file(
+        &rig,
+        &format!("{}/managed-mcp.json", claude_managed_dir()),
+        &format!(r#"{{"mcpServers":{{"{SECRET}":{{"command":"x"}}}}}}"#),
+    );
+    let broken = system_file(
+        &rig,
+        "etc/codex/managed_config.toml",
+        &format!("sandbox_mode = [\n{SECRET}"),
+    );
+    let requirements = system_file(
+        &rig,
+        "etc/codex/requirements.toml",
+        &format!("allowed_sandbox_modes = [\"read-only\"]\ndefault_permissions = \"{SECRET}\"\n"),
+    );
+    let out = doctor_with(&rig, &["--output", "json"], |_| {});
+    // A notice: the exit status, readiness and the problems are as without them.
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let report = json_of(&out);
+    assert_eq!(report["ready"], true);
+    assert_eq!(report["problems"], serde_json::json!([]));
+    let claude = provider(&report, "claude");
+    assert_eq!(claude["ready"], true);
+    let sources = claude["managed_settings"].as_array().expect("sources");
+    assert_eq!(sources.len(), 2, "{sources:?}");
+    assert_eq!(sources[0]["path"], settings.display().to_string());
+    assert_eq!(sources[0]["kind"], "settings_file");
+    assert_eq!(sources[0]["state"], "read");
+    let names: Vec<&str> = sources[0]["keys"]
+        .as_array()
+        .expect("keys")
+        .iter()
+        .map(|k| k["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        names,
+        ["allowManagedPermissionRulesOnly", "apiKeyHelper", "env"]
+    );
+    assert_eq!(sources[1]["path"], mcp.display().to_string());
+    assert_eq!(sources[1]["kind"], "mcp_file");
+    let codex = provider(&report, "codex");
+    assert_eq!(codex["ready"], true);
+    let sources = codex["managed_settings"].as_array().expect("sources");
+    assert_eq!(sources.len(), 2, "{sources:?}");
+    assert_eq!(sources[0]["path"], requirements.display().to_string());
+    assert_eq!(sources[0]["keys"][0]["name"], "allowed_sandbox_modes");
+    assert_eq!(sources[0]["keys"][1]["name"], "default_permissions");
+    assert_eq!(sources[1]["path"], broken.display().to_string());
+    assert_eq!(sources[1]["state"], "unreadable");
+    assert_eq!(sources[1]["keys"], serde_json::json!([]));
+    assert_no_value(&out);
+
+    let shown = doctor_with(&rig, &[], |_| {});
+    assert_eq!(shown.status.code(), Some(0));
+    let report = text(&shown.stdout);
+    for expected in [
+        "a run can go ahead",
+        "claude: ready",
+        "codex: ready",
+        "managed settings: 2 found",
+        "managed-settings.json (read)",
+        "These managed keys can change how Claude Code treats what delega passes at launch",
+        "permissions: allowManagedPermissionRulesOnly",
+        "authentication: apiKeyHelper",
+        "--strict-mcp-config",
+        "requirements.toml (read)",
+        "These managed keys can change how Codex treats what delega passes at launch",
+        "codex_requirements: allowed_sandbox_modes, default_permissions",
+        "managed_config.toml (present, could not be read or parsed)",
+        "problems: none",
+    ] {
+        assert!(report.contains(expected), "{expected}\n{report}");
+    }
+    assert_no_value(&shown);
 }

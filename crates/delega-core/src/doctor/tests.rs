@@ -68,6 +68,7 @@ fn full_report() -> Report {
                     }],
                     applied: 2,
                 }),
+                managed_settings: Vec::new(),
                 ready: true,
             },
             ProviderCheck {
@@ -78,6 +79,7 @@ fn full_report() -> Report {
                 command_hook: None,
                 env: None,
                 deny_rules: None,
+                managed_settings: Vec::new(),
                 ready: false,
             },
         ],
@@ -233,4 +235,325 @@ fn the_limits_follow_the_supervisor_limits_given() {
         Limits::with_supervisor(&crate::supervisor::Limits::default()),
         Limits::current()
     );
+}
+
+/// A value no output may contain.
+const MANAGED_SECRET: &str = "sk-distinctive-managed-value-9093";
+
+/// A report whose providers carry what a scan of a temporary root found: for
+/// Claude Code a settings file, a drop-in directory with one file that parses
+/// and one that does not, an MCP file and managed preferences for the system
+/// and for a user, and for Codex a requirements file. Every file holds
+/// [`MANAGED_SECRET`], and so do the names of the drop-in files and of the
+/// user's directory; one drop-in name also carries a forged report line.
+fn report_with_managed_settings() -> (tempfile::TempDir, Report) {
+    use crate::provider::managed::{Platform, SystemPaths, scan};
+    let root = tempfile::tempdir().expect("temporary root");
+    let write = |relative: &str, content: String| {
+        let path = root.path().join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create directories");
+        std::fs::write(path, content).expect("write file");
+    };
+    let claude = "Library/Application Support/ClaudeCode";
+    write(
+        &format!("{claude}/managed-settings.json"),
+        format!(
+            r#"{{"allowManagedPermissionRulesOnly":true,"apiKeyHelper":"/bin/{MANAGED_SECRET}",
+                "env":{{"TOKEN":"{MANAGED_SECRET}"}},"model":"{MANAGED_SECRET}",
+                "permissions":{{"deny":["Read(./{MANAGED_SECRET})"]}}}}"#
+        ),
+    );
+    write(
+        &format!("{claude}/managed-settings.d/10-{MANAGED_SECRET}.json"),
+        format!("not json {MANAGED_SECRET}"),
+    );
+    write(
+        &format!("{claude}/managed-settings.d/20-x\nproblems: forged-{MANAGED_SECRET}.json"),
+        r#"{"disableAllHooks":true}"#.to_string(),
+    );
+    write(
+        &format!(
+            "Library/Managed Preferences/u-{MANAGED_SECRET}\nforged/com.anthropic.claudecode.plist"
+        ),
+        MANAGED_SECRET.to_string(),
+    );
+    write(
+        &format!("{claude}/managed-mcp.json"),
+        format!(r#"{{"mcpServers":{{"{MANAGED_SECRET}":{{"command":"x"}}}}}}"#),
+    );
+    write(
+        "Library/Managed Preferences/com.anthropic.claudecode.plist",
+        MANAGED_SECRET.to_string(),
+    );
+    write(
+        "etc/codex/requirements.toml",
+        format!(
+            "allowed_sandbox_modes = [\"read-only\"]\ndefault_permissions = \"{MANAGED_SECRET}\"\n\
+             \"{MANAGED_SECRET}\\nproblems: forged\" = true\n"
+        ),
+    );
+    let system = SystemPaths {
+        root: root.path().to_path_buf(),
+        platform: Platform::Macos,
+    };
+    let mut report = full_report();
+    for found in &mut report.providers {
+        found.managed_settings = scan(found.provider, &system);
+    }
+    (root, report)
+}
+
+#[test]
+fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
+    let (root, report) = report_with_managed_settings();
+    let shown = report.to_text();
+    let dir = root
+        .path()
+        .join("Library/Application Support/ClaudeCode")
+        .display()
+        .to_string();
+    for expected in [
+        "  managed settings: 5 found\n".to_string(),
+        "    These managed keys can change how Claude Code treats what delega passes at launch; \
+         see https://code.claude.com/docs/en/settings-reference.\n"
+            .to_string(),
+        "doctor does not say whether a key is on".to_string(),
+        "docs/providers.md".to_string(),
+        format!("    {dir}/managed-settings.json (read)"),
+        "      permissions: allowManagedPermissionRulesOnly, permissions.deny\n".to_string(),
+        "      authentication: apiKeyHelper\n".to_string(),
+        "      environment: env\n".to_string(),
+        format!("    {dir}/managed-settings.d (partly read; 2 files, 1 not read)\n"),
+        "      hooks: disableAllHooks\n".to_string(),
+        "Library/Managed Preferences (present, not inspected; 1 file)\n".to_string(),
+        format!("    {dir}/managed-mcp.json (read)"),
+        "--strict-mcp-config".to_string(),
+        "com.anthropic.claudecode.plist (present, not inspected)".to_string(),
+        "  managed settings: 1 found\n".to_string(),
+        "    These managed keys can change how Codex treats what delega passes at launch; see "
+            .to_string(),
+        "etc/codex/requirements.toml (read)".to_string(),
+        "      codex_requirements: allowed_sandbox_modes, default_permissions\n".to_string(),
+        "      1 other top-level key is not named: doctor names only keys it knows".to_string(),
+    ] {
+        assert!(shown.contains(&expected), "{expected}\n{shown}");
+    }
+    assert!(!shown.contains(MANAGED_SECRET), "{shown}");
+    // No name read from a directory is shown, so none can forge a line.
+    assert!(!shown.contains("forged"), "{shown}");
+    assert_eq!(
+        shown.lines().filter(|l| l.starts_with("problems")).count(),
+        1,
+        "{shown}"
+    );
+    // A key that does not affect a launch is not shown.
+    assert!(!shown.contains("model:"), "{shown}");
+}
+
+#[test]
+fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
+    let (_root, report) = report_with_managed_settings();
+    let json = report.to_json();
+    assert!(!json.contains(MANAGED_SECRET), "{json}");
+    assert!(!json.contains("forged"), "{json}");
+    let document: Value = serde_json::from_str(&json).expect("report is JSON");
+    let schema: Value = serde_json::from_str(DOCTOR_SCHEMA).expect("schema is JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    assert!(validator.is_valid(&document), "{document}");
+    let claude = document["providers"][0]["managed_settings"]
+        .as_array()
+        .expect("sources");
+    let shape: Vec<(&str, &str)> = claude
+        .iter()
+        .map(|s| {
+            (
+                s["kind"].as_str().expect("kind"),
+                s["state"].as_str().expect("state"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("settings_file", "read"),
+            ("settings_drop_ins", "partly_read"),
+            ("mcp_file", "read"),
+            ("managed_preferences", "not_inspected"),
+            ("user_managed_preferences", "not_inspected"),
+        ]
+    );
+    let names: Vec<&str> = claude[0]["keys"]
+        .as_array()
+        .expect("keys")
+        .iter()
+        .map(|k| k["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "allowManagedPermissionRulesOnly",
+            "permissions.deny",
+            "apiKeyHelper",
+            "env"
+        ]
+    );
+    // A key is a name and a category, nothing else: no sentence about it.
+    for key in claude[0]["keys"].as_array().expect("keys") {
+        let fields: Vec<&String> = key.as_object().expect("object").keys().collect();
+        assert_eq!(fields, ["category", "name"]);
+        assert!(key["category"].as_str().is_some_and(|c| !c.contains(' ')));
+    }
+    assert_eq!(claude[0]["files"], Value::Null);
+    assert_eq!(claude[1]["keys"][0]["name"], "disableAllHooks");
+    assert_eq!(
+        claude[1]["files"],
+        json!({"found": 2, "limit_reached": false, "unreadable": 1})
+    );
+    assert_eq!(claude[1]["note"], Value::Null);
+    assert_eq!(claude[4]["files"]["found"], 1);
+    // Every path ends in a fixed name, never one read from a directory.
+    for (source, end) in claude.iter().zip([
+        "/ClaudeCode/managed-settings.json",
+        "/ClaudeCode/managed-settings.d",
+        "/ClaudeCode/managed-mcp.json",
+        "/Managed Preferences/com.anthropic.claudecode.plist",
+        "/Library/Managed Preferences",
+    ]) {
+        let path = source["path"].as_str().expect("path");
+        assert!(path.ends_with(end), "{path}");
+    }
+    let codex = &document["providers"][1]["managed_settings"];
+    assert_eq!(codex[0]["kind"], "requirements_file");
+    assert_eq!(codex[0]["keys"][0]["name"], "allowed_sandbox_modes");
+    assert_eq!(codex[0]["keys"][1]["name"], "default_permissions");
+    // The key with a hostile name is counted and nowhere named.
+    assert_eq!(codex[0]["keys"].as_array().expect("keys").len(), 2);
+    assert_eq!(codex[0]["other_keys"], 1);
+    assert_eq!(claude[0]["other_keys"], 0);
+}
+
+#[test]
+fn managed_settings_are_a_notice_that_adds_no_problem_and_keeps_the_exit_status() {
+    let plain = full_report();
+    let (_root, report) = report_with_managed_settings();
+    assert_eq!(report.problems, plain.problems);
+    assert_eq!(report.ready, plain.ready);
+    assert_eq!(report.exit_status(), plain.exit_status());
+    let mut ready = report;
+    ready.ready = true;
+    assert_eq!(ready.exit_status(), 0);
+}
+
+#[test]
+fn no_managed_settings_block_is_shown_when_none_was_found() {
+    let report = full_report();
+    assert!(!report.to_text().contains("managed settings"));
+    let document: Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    assert_eq!(document["providers"][0]["managed_settings"], json!([]));
+    assert_eq!(document["providers"][1]["managed_settings"], json!([]));
+}
+
+#[test]
+fn a_codex_file_with_only_unrecognized_keys_is_said_to_hold_none_doctor_recognizes() {
+    use crate::provider::managed::{Platform, SystemPaths, scan};
+    let root = tempfile::tempdir().expect("temporary root");
+    std::fs::create_dir_all(root.path().join("etc/codex")).expect("create directory");
+    std::fs::write(
+        root.path().join("etc/codex/managed_config.toml"),
+        "model = \"x\"\nmodel_provider = \"y\"\n",
+    )
+    .expect("write file");
+    std::fs::write(root.path().join("etc/codex/requirements.toml"), "").expect("write file");
+    let system = SystemPaths {
+        root: root.path().to_path_buf(),
+        platform: Platform::Linux,
+    };
+    let mut report = full_report();
+    report.providers[1].managed_settings = scan(Provider::Codex, &system);
+    let shown = report.to_text();
+    // The file may well change a launch: doctor only says it knows none of
+    // its keys, and how many there are.
+    for expected in [
+        "managed_config.toml (read, holds no keys doctor recognizes)\n",
+        "      2 other top-level keys are not named: ",
+        "requirements.toml (read, holds none of the keys doctor lists)\n",
+    ] {
+        assert!(shown.contains(expected), "{expected}\n{shown}");
+    }
+    assert!(!shown.contains("sets nothing"), "{shown}");
+}
+
+#[test]
+fn the_text_says_once_per_provider_what_managed_keys_can_do_and_nothing_per_key() {
+    let (_root, report) = report_with_managed_settings();
+    let shown = report.to_text();
+    // One sentence for each provider that has sources, whatever their number.
+    assert_eq!(
+        shown.matches("These managed keys can change how").count(),
+        2
+    );
+    assert_eq!(shown.matches("settings-reference").count(), 1);
+    // A key line is a category and names: no verb says what a key does.
+    for line in shown.lines().filter(|l| l.starts_with("      ")) {
+        for claim in [
+            "ignored", "refuse", "reject", "enforce", "limits", "replaces",
+        ] {
+            assert!(!line.contains(claim), "{line}");
+        }
+    }
+}
+
+#[test]
+fn a_single_file_that_changed_under_the_read_is_not_said_to_have_more_files() {
+    use crate::provider::managed::{
+        ManagedFileCounts, ManagedSource, ManagedSourceKind, ManagedSourceState,
+    };
+    let counts = ManagedFileCounts {
+        found: 1,
+        unreadable: 1,
+        limit_reached: true,
+    };
+    let mut report = full_report();
+    report.providers[1].managed_settings = vec![
+        ManagedSource {
+            path: "/etc/codex/requirements.toml".to_string(),
+            kind: ManagedSourceKind::RequirementsFile,
+            state: ManagedSourceState::PartlyRead,
+            files: Some(counts),
+            note: Some("the file changed size while doctor read it".to_string()),
+            keys: Vec::new(),
+            other_keys: 0,
+        },
+        ManagedSource {
+            path: "/Library/Managed Preferences".to_string(),
+            kind: ManagedSourceKind::UserManagedPreferences,
+            state: ManagedSourceState::PartlyRead,
+            files: Some(ManagedFileCounts {
+                found: 0,
+                unreadable: 0,
+                limit_reached: true,
+            }),
+            note: None,
+            keys: Vec::new(),
+            other_keys: 0,
+        },
+    ];
+    let shown = report.to_text();
+    // One file: its state and its note, no count and no talk of more files.
+    assert!(
+        shown.contains(
+            "    /etc/codex/requirements.toml (partly read)\n      the file changed size while \
+             doctor read it\n"
+        ),
+        "{shown}"
+    );
+    // A directory still says so.
+    assert!(
+        shown.contains(
+            "    /Library/Managed Preferences (partly read; 0 files, a limit was reached so \
+             there may be more)\n"
+        ),
+        "{shown}"
+    );
+    assert_eq!(shown.matches("there may be more").count(), 1, "{shown}");
 }

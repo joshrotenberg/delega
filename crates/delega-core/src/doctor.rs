@@ -9,6 +9,10 @@
 //! A report holds names, counts and paths. It never holds an environment
 //! value, a deny rule or the content of a file.
 //!
+//! Managed (administrator) settings found for a provider are listed with the
+//! provider ([`provider::managed`]). They are a notice: they add no problem and
+//! do not change `ready` or the exit status.
+//!
 //! To regenerate the schema after changing a type here, run
 //! `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`
 //! and commit the changed file. Embedding reads the file at compile time, so
@@ -26,6 +30,9 @@ use crate::contract::request::Provider;
 use crate::provider::doctor::{self, Blocks, Problem, ProviderCheck};
 use crate::provider::limits::{
     MAX_OUTPUT_BYTES, MAX_STDERR_BYTES, MIN_CLAUDE_HOOK_VERSION, VERSION_PROBE_TIMEOUT,
+};
+use crate::provider::managed::{
+    self, ManagedSource, ManagedSourceKind, ManagedSourceState, SystemPaths,
 };
 use crate::provider::{ProviderOptions, Refusal};
 use crate::supervisor::limits as supervisor;
@@ -278,6 +285,16 @@ pub async fn diagnose_with(
     options: &ProviderOptions,
     status: &crate::config::Status,
 ) -> Result<Report, Refusal> {
+    diagnose_at(options, status, &SystemPaths::default()).await
+}
+
+/// [`diagnose_with`] with the system locations of managed settings looked for
+/// under `system`, so a test can point them at a temporary directory.
+pub async fn diagnose_at(
+    options: &ProviderOptions,
+    status: &crate::config::Status,
+    system: &SystemPaths,
+) -> Result<Report, Refusal> {
     let (claude, codex) = tokio::join!(
         doctor::check(Provider::Claude, options),
         doctor::check(Provider::Codex, options)
@@ -286,8 +303,9 @@ pub async fn diagnose_with(
     let mut providers = Vec::new();
     let mut problems = Vec::new();
     for checked in [claude?, codex?] {
-        let (found, found_problems) = checked;
+        let (mut found, found_problems) = checked;
         let provider = found.provider;
+        found.managed_settings = managed::scan(provider, system);
         problems.extend(
             found_problems
                 .into_iter()
@@ -497,6 +515,86 @@ fn provider_text(out: &mut String, found: &ProviderCheck) {
         }
         for file in &deny.skipped {
             let _ = writeln!(out, "    {} ignored: {}", file.path, file.reason);
+        }
+    }
+    managed_text(out, found.provider, &found.managed_settings);
+}
+
+/// The managed settings block of one provider. Nothing when none was found.
+fn managed_text(out: &mut String, provider: Provider, sources: &[ManagedSource]) {
+    if sources.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "  managed settings: {} found", sources.len());
+    // Said once for every key below. No line says what one key does.
+    let _ = writeln!(out, "    {}", managed::guidance(provider));
+    out.push_str(
+        "    Keys are listed because they are present, by category; doctor does not say whether \
+         a key is on (docs/providers.md, Managed settings).\n",
+    );
+    for source in sources {
+        let state = match source.state {
+            ManagedSourceState::Read if source.keys.is_empty() && source.note.is_none() => {
+                if source.other_keys > 0 {
+                    "read, holds no keys doctor recognizes"
+                } else {
+                    "read, holds none of the keys doctor lists"
+                }
+            }
+            ManagedSourceState::Read => "read",
+            ManagedSourceState::PartlyRead => "partly read",
+            ManagedSourceState::Unreadable => "present, could not be read or parsed",
+            ManagedSourceState::NotInspected => "present, not inspected",
+        };
+        // Only a directory has files to count. A single file carries counts
+        // when it changed under the read, which its note says in words.
+        let directory = matches!(
+            source.kind,
+            ManagedSourceKind::SettingsDropIns | ManagedSourceKind::UserManagedPreferences
+        );
+        let counted = source.files.filter(|_| directory);
+        let files = counted.map_or_else(String::new, |files| {
+            let noun = if files.found == 1 { "file" } else { "files" };
+            let mut text = format!("; {} {noun}", files.found);
+            if files.unreadable > 0 {
+                let _ = write!(text, ", {} not read", files.unreadable);
+            }
+            if files.limit_reached {
+                text.push_str(", a limit was reached so there may be more");
+            }
+            text
+        });
+        let _ = writeln!(out, "    {} ({state}{files})", source.path);
+        if let Some(note) = &source.note {
+            let _ = writeln!(out, "      {note}");
+        }
+        // One line per category, in the order the categories first appear.
+        let mut categories = Vec::new();
+        for key in &source.keys {
+            if !categories.contains(&key.category) {
+                categories.push(key.category);
+            }
+        }
+        for category in categories {
+            let names: Vec<&str> = source
+                .keys
+                .iter()
+                .filter(|key| key.category == category)
+                .map(|key| key.name.as_str())
+                .collect();
+            let _ = writeln!(out, "      {}: {}", category.as_str(), names.join(", "));
+        }
+        if source.other_keys > 0 {
+            let noun = if source.other_keys == 1 {
+                "key is"
+            } else {
+                "keys are"
+            };
+            let _ = writeln!(
+                out,
+                "      {} other top-level {noun} not named: doctor names only keys it knows",
+                source.other_keys
+            );
         }
     }
 }

@@ -48,6 +48,7 @@ mod facts;
 pub mod hook;
 mod launch;
 pub mod limits;
+pub mod managed;
 pub mod native_args;
 mod options;
 mod permissions;

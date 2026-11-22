@@ -575,7 +575,7 @@ Behavior:
   override. There is no flag for it. `--allow-command` for Claude Code is enforced by this executable's own
   hidden `command-guard` subcommand, which Claude Code starts before a `Bash`
   call; it is not part of the public surface.
-- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface.
+- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface. `DELEGA_TEST_SYSTEM_ROOT`, when set to an absolute path, makes `delega doctor` look for managed settings under that directory in place of `/`, so the tests never read the real system locations. It is honoured only in a build with debug assertions, which is what `cargo test` builds: a release build ignores it, so a variable inherited from the environment cannot hide what is on the system. Under such a directory doctor opens nothing that resolves outside it. It changes no run and is not part of the public surface either.
 - **Scope.** The CLI runs in the foreground only. It does not list or stop runs
   started by another process; supervising several workers is done over MCP.
 
@@ -604,7 +604,40 @@ It reports, for `claude` and `codex` each:
   provider, set by delega) and how many of the caller's would be withheld, as
   counts only;
 - for Claude Code, the deny rules a run would apply: the settings files read with
-  their rule counts, the local files ignored and why, and the number applied.
+  their rule counts, the local files ignored and why, and the number applied;
+- the managed (administrator) settings found on this system for the provider
+  (`managed_settings`): each source's `path`, its `kind` (`settings_file`,
+  `settings_drop_ins`, `mcp_file`, `requirements_file`, `managed_config_file`,
+  `managed_preferences` or `user_managed_preferences`), its `state` (`read`,
+  `partly_read` for a directory of which some files were not read or whose
+  scan a limit cut short, and for a single file that changed size while it was
+  read, `unreadable` when it is there and could not be read or parsed,
+  `not_inspected` for managed preferences, which doctor does not open), `files`
+  for a source that is a directory (`found`, `unreadable` and `limit_reached`).
+  For a single file `files` is null, except when the file changed size while it
+  was read: then it is one found, one not read and `limit_reached`, and no key
+  is reported from the file. Each source also has a `note` when something is
+  known of it that does not depend on a key, and
+  `keys`: the keys present in it that bear on what delega passes at launch,
+  each a `name` and a `category` (`permissions`, `hooks`, `mcp`, `plugins`,
+  `sandbox`, `authentication`, `environment`, `model`, `version`, `policy`,
+  `codex_requirements` or `codex_config`), and `other_keys`: for a Codex file,
+  how many top-level keys doctor does not know, which are counted and not
+  named. A key is listed because it is present: no value is read, and nothing
+  says what a key does or whether it is on. The text report says once per
+  provider that these keys can change how the provider treats what delega
+  passes, with a link to the provider's reference. Never a value, and never
+  text copied from a file or a directory: every `path` is one of the fixed
+  locations and every key name is one doctor knows. The list is empty, and the
+  text report prints nothing, when no source is found.
+  [providers.md](providers.md#managed-settings) lists the locations, the keys
+  and what doctor cannot see, such as settings a provider fetches from its
+  server.
+
+**Managed settings are a notice.** They are not in `problems`, and they do not
+change a provider's `ready`, the report's `ready` or the exit status: a provider
+applies them itself and delega cannot tell from a file whether a given run will
+be refused.
 
 It also reports the configuration file: the path it looked at and what chose it
 (`DELEGA_CONFIG`, `XDG_CONFIG_HOME` or `HOME`; null when there is nowhere to
@@ -656,7 +689,9 @@ over its bound, is reported under its own kind and blocks `run`. A provider is
 `schemas/doctor.schema.json`, generated from the types, checked by a test and
 updated like the other schemas with `DELEGA_UPDATE_SCHEMAS=1`. Keys are in
 alphabetical order. `env` and `deny_rules` are null when the launch could not be
-built, and `deny_rules` and `command_hook` are null for Codex.
+built, and `deny_rules` and `command_hook` are null for Codex. `managed_settings`
+is always a list. It was added to version 1 of the document, so a report from an
+earlier build has no such field.
 
 **Exit status.** 0 when a run can go ahead: at least one provider is ready,
 process inspection works and the configuration file, if there is one, can be
