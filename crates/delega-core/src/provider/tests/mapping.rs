@@ -172,9 +172,9 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
     );
     for part in [
         "wider than requested: commands inside the sandbox can read",
-        "TMPDIR",
+        "commands can write anywhere in it, and other Claude Code sessions",
         "bubblewrap and socat",
-        "listed in permissions.denied",
+        "git -c name=value) are denied and listed in permissions.denied",
     ] {
         assert!(
             plan.notes.iter().any(|n| n.contains(part)),
@@ -527,8 +527,15 @@ fn codex_build_mode_is_workspace_write_without_network_but_with_temporary_direct
     assert_eq!(plan.mapping.mode, Mode::Build);
     assert!(plan.notes.iter().any(|n| {
         n.contains("wider than requested: the workspace-write sandbox")
-            && n.contains("the temporary directories")
+            && n.contains("anywhere under /tmp and $TMPDIR, including a permissions.directories")
     }));
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains(".git unwritable") && n.contains("commit the worker's changes")),
+        "{:?}",
+        plan.notes
+    );
 }
 
 #[test]

@@ -362,17 +362,19 @@ fn build_grants(
         .collect::<Result<Vec<_>, _>>()?;
     notes.extend([
         "build runs Bash inside Claude Code's sandbox, which approves sandboxed commands; \
-         commands write only to the working directory and Claude Code's temporary directory, \
-         permissions.directories is denied for writing, and the network is refused"
+         commands write only to the working directory and Claude Code's per-user temporary \
+         directory, permissions.directories is denied for writing, and the network is refused"
             .to_string(),
         "wider than requested: commands inside the sandbox can read files outside the working \
          directory and permissions.directories"
             .to_string(),
-        "Claude Code sets TMPDIR to its own per-user directory; the rest of /tmp is not writable \
-         by commands"
+        "Claude Code sets TMPDIR to its own per-user temporary directory under /tmp; commands can \
+         write anywhere in it, and other Claude Code sessions of the same user also use it; the \
+         rest of /tmp is not writable by commands"
             .to_string(),
         "commands Claude Code does not approve inside the sandbox (for example one starting with \
-         a variable assignment, or eval) are denied and listed in permissions.denied"
+         a variable assignment, eval, or git -c name=value) are denied and listed in \
+         permissions.denied"
             .to_string(),
         "on Linux the sandbox needs bubblewrap and socat; without them Claude Code fails at \
          startup rather than run commands unsandboxed"
