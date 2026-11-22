@@ -11,8 +11,9 @@ use tempfile::TempDir;
 
 use crate::contract::request::Provider;
 use crate::provider::managed::{
-    Limits, MAX_DROP_IN_FILES, MAX_MANAGED_FILE_BYTES, ManagedFileCounts, ManagedSource,
-    ManagedSourceKind, ManagedSourceState, Platform, SystemPaths, scan, scan_with,
+    CLAUDE_GUIDANCE, CODEX_GUIDANCE, Limits, MAX_DROP_IN_FILES, MAX_MANAGED_FILE_BYTES,
+    ManagedFileCounts, ManagedKeyCategory, ManagedSource, ManagedSourceKind, ManagedSourceState,
+    Platform, SystemPaths, Unread, guidance, read_stable, scan, scan_with,
 };
 use crate::test_spawn::Guarded;
 
@@ -91,13 +92,7 @@ fn claude_names(json: &str) -> Vec<String> {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].kind, ManagedSourceKind::SettingsFile);
     assert_eq!(found[0].state, ManagedSourceState::Read);
-    assert!(
-        found[0]
-            .keys
-            .iter()
-            .all(|k| !k.effect.is_empty() && !k.effect.contains(SECRET)),
-        "{found:?}"
-    );
+    assert!(!format!("{found:?}").contains(SECRET), "{found:?}");
     found[0].keys.iter().map(|k| k.name.clone()).collect()
 }
 
@@ -156,8 +151,8 @@ fn the_key_that_makes_command_line_grants_ignored_is_named() {
         &format!("{MAC_CLAUDE}/managed-settings.json"),
         r#"{"allowManagedPermissionRulesOnly":true}"#,
     );
-    let effect = &root.mac(Provider::Claude)[0].keys[0].effect;
-    assert!(effect.contains("--allowedTools"), "{effect}");
+    let key = &root.mac(Provider::Claude)[0].keys[0];
+    assert_eq!(key.category, ManagedKeyCategory::Permissions);
 }
 
 #[test]
@@ -435,17 +430,12 @@ fn the_known_keys_of_a_codex_requirements_file_are_named_and_the_others_counted(
         );
         // A key this build does not know is counted, not named.
         assert_eq!(found[0].other_keys, 1);
-        let effect = |name: &str| {
+        assert!(
             found[0]
                 .keys
                 .iter()
-                .find(|k| k.name == name)
-                .expect("key")
-                .effect
-                .clone()
-        };
-        assert!(effect("allowed_approval_policies").contains("approval_policy"));
-        assert!(effect("allowed_sandbox_modes").contains("sandbox_mode"));
+                .all(|k| k.category == ManagedKeyCategory::CodexRequirements)
+        );
         assert!(!format!("{found:?}").contains(SECRET), "{found:?}");
     }
     assert_eq!(root.scan(Provider::Claude, Platform::Linux), Vec::new());
@@ -471,9 +461,10 @@ fn the_keys_of_a_codex_managed_config_that_delega_also_passes_are_named() {
     assert_eq!(found[0].state, ManagedSourceState::Read);
     assert_eq!(names(&found[0]), ["approval_policy", "sandbox_mode"]);
     assert!(
-        found[0].keys[0]
-            .effect
-            .contains("approval_policy=\"never\"")
+        found[0]
+            .keys
+            .iter()
+            .all(|k| k.category == ManagedKeyCategory::CodexConfig)
     );
     // `model` and `shell_environment_policy` are counted, not named.
     assert_eq!(found[0].other_keys, 2);
@@ -516,59 +507,6 @@ fn a_file_over_the_size_bound_is_unreadable_and_is_not_parsed() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].state, ManagedSourceState::Unreadable);
     assert_eq!(found[0].keys, Vec::new());
-}
-
-#[test]
-fn no_effect_or_note_holds_an_em_dash_or_is_left_empty() {
-    let root = Root::new();
-    root.write(
-        &format!("{MAC_CLAUDE}/managed-settings.json"),
-        r#"{"allowManagedPermissionRulesOnly":1,"allowManagedHooksOnly":1,"disableAllHooks":true,
-            "strictPluginOnlyCustomization":1,"disableSideloadFlags":1,
-            "allowManagedMcpServersOnly":1,"allowedMcpServers":1,"deniedMcpServers":1,
-            "permissions":{"allow":1,"deny":1,"ask":1,"additionalDirectories":1,
-              "blockReadsOutsideWorkingDirectories":1,"blockWritesOutsideWorkingDirectories":1},
-            "sandbox":{"enabled":1,"filesystem":{"allowManagedReadPathsOnly":1},
-              "network":{"allowManagedDomainsOnly":1}},
-            "forceLoginMethod":1,"forceLoginOrgUUID":1,"enforceAnthropicSignIn":1,
-            "allowedProviders":1,"apiKeyHelper":1,"env":1,"availableModels":1,"deniedModels":1,"modelOverrides":1,
-            "requiredMinimumVersion":1,"requiredMaximumVersion":1,"policyHelper":1}"#,
-    );
-    root.write(&format!("{MAC_CLAUDE}/managed-mcp.json"), "{}");
-    root.write(&format!("{PREFERENCES}/com.anthropic.claudecode.plist"), "");
-    root.write(&format!("{PREFERENCES}/com.openai.codex.plist"), "");
-    root.write(
-        "etc/codex/requirements.toml",
-        "allowed_approval_policies = 1\nallowed_sandbox_modes = 1\nallow_login_shell = 1\n\
-         allowed_permission_profiles = 1\ndefault_permissions = 1\nmcp_servers = 1\nother = 1\n",
-    );
-    root.write(
-        "etc/codex/managed_config.toml",
-        "approval_policy = 1\nsandbox_mode = 1\napprovals_reviewer = 1\nother = 1\n",
-    );
-    let claude = root.mac(Provider::Claude);
-    // Every key of the table was found, so every effect is checked.
-    assert_eq!(claude[0].keys.len(), 29, "{:?}", claude[0].keys);
-    let codex = root.mac(Provider::Codex);
-    for source in claude.iter().chain(&codex) {
-        for words in source
-            .keys
-            .iter()
-            .map(|k| &k.effect)
-            .chain(source.note.iter())
-        {
-            assert!(!words.is_empty() && !words.contains('\u{2014}'), "{words}");
-            assert!(!words.contains("  "), "{words}");
-        }
-    }
-}
-
-fn counts(found: usize, unreadable: usize, limit_reached: bool) -> Option<ManagedFileCounts> {
-    Some(ManagedFileCounts {
-        found,
-        unreadable,
-        limit_reached,
-    })
 }
 
 #[test]
@@ -879,13 +817,11 @@ fn a_key_name_written_in_a_codex_file_never_reaches_the_report() {
     let found = root.scan(Provider::Codex, Platform::Linux);
     assert_eq!(found.len(), 2, "{found:?}");
     // Known names are reported; the hostile key and the typing mistake are
-    // counted, and nothing says Codex enforces them.
+    // counted.
     assert_eq!(names(&found[0]), ["allowed_sandbox_modes", "rules"]);
     assert_eq!(found[0].other_keys, 2);
-    assert!(found[0].keys[1].effect.contains("enforces"));
     assert_eq!(names(&found[1]), ["allow_login_shell"]);
     assert_eq!(found[1].other_keys, 2);
-    assert!(found[1].keys[0].effect.contains("allow_login_shell=false"));
     for shown in [
         format!("{found:?}"),
         serde_json::to_string(&found).expect("JSON"),
@@ -987,6 +923,14 @@ fn the_bounds_doctor_uses_are_the_documented_ones() {
     assert_eq!(MAX_DROP_IN_FILES, 64);
 }
 
+fn counts(found: usize, unreadable: usize, limit_reached: bool) -> Option<ManagedFileCounts> {
+    Some(ManagedFileCounts {
+        found,
+        unreadable,
+        limit_reached,
+    })
+}
+
 /// One settings object with every key of the table present, each set to
 /// `value`.
 fn every_claude_key(value: &str) -> String {
@@ -1020,83 +964,6 @@ fn a_key_that_is_present_is_listed_whatever_its_value() {
         claude_names(r#"{"disableSideloadFlags":false,"sandbox":{"enabled":false}}"#),
         ["disableSideloadFlags", "sandbox.enabled"]
     );
-}
-
-#[test]
-fn no_reason_says_that_a_restriction_is_in_force() {
-    let root = Root::new();
-    root.write(
-        &format!("{MAC_CLAUDE}/managed-settings.json"),
-        &every_claude_key("false"),
-    );
-    let found = root.mac(Provider::Claude);
-    assert_eq!(found[0].keys.len(), 29);
-    for key in &found[0].keys {
-        // Every reason opens with what the key controls or holds.
-        assert!(
-            ["controls ", "holds ", "lists ", "names ", "maps ", "sets "]
-                .iter()
-                .any(|opening| key.effect.starts_with(opening)),
-            "{}: {}",
-            key.name,
-            key.effect
-        );
-        // And none states an outcome as a fact about this system: an
-        // outcome is always under a "whether" or a "when".
-        for claim in [
-            " are ignored, ",
-            "does not run,",
-            "Claude Code rejects",
-            "is refused,",
-        ] {
-            assert!(
-                !key.effect.contains(claim)
-                    || key.effect.contains("when ")
-                    || key.effect.contains("whether "),
-                "{}: {}",
-                key.name,
-                key.effect
-            );
-        }
-    }
-    let effect = |name: &str| {
-        found[0]
-            .keys
-            .iter()
-            .find(|k| k.name == name)
-            .expect("key")
-            .effect
-            .clone()
-    };
-    assert!(effect("disableSideloadFlags").starts_with("controls whether Claude Code rejects"));
-    assert!(effect("sandbox.enabled").starts_with("controls whether Bash commands run"));
-    assert!(effect("allowManagedPermissionRulesOnly").contains("when enabled"));
-    // The helper is one source of a credential among several that come first.
-    let helper = effect("apiKeyHelper");
-    assert!(
-        helper.starts_with("names a command that can supply"),
-        "{helper}"
-    );
-    assert!(
-        helper.contains("cloud provider settings come first"),
-        "{helper}"
-    );
-}
-
-#[test]
-fn a_read_never_takes_a_byte_past_its_limit_however_much_there_is() {
-    use crate::provider::managed::read_at_most;
-    // A source with no end stands for a file that keeps growing.
-    for limit in [0_u64, 1, 10, 4096] {
-        let mut charged = u64::MAX;
-        let bytes = read_at_most(std::io::repeat(b' '), limit, &mut charged).expect("read");
-        assert_eq!(bytes.len() as u64, limit);
-        assert_eq!(charged, limit);
-    }
-    // A short source is read whole and charged for what it held.
-    let mut charged = 0;
-    let bytes = read_at_most(&b"abc"[..], u64::MAX, &mut charged).expect("read");
-    assert_eq!((bytes.as_slice(), charged), (&b"abc"[..], 3));
 }
 
 #[test]
@@ -1157,4 +1024,234 @@ fn a_bound_of_the_largest_number_does_not_overflow() {
     assert_eq!(claude[1].files, counts(1, 0, false));
     let codex = scan_with(Provider::Codex, &system, &unbounded);
     assert_eq!(names(&codex[0]), ["rules"]);
+}
+
+#[test]
+fn every_listed_key_has_the_category_of_its_table() {
+    use ManagedKeyCategory::{
+        Authentication, Environment, Hooks, Mcp, Model, Permissions, Plugins, Policy, Sandbox,
+        Version,
+    };
+    let root = Root::new();
+    root.write(
+        &format!("{MAC_CLAUDE}/managed-settings.json"),
+        &every_claude_key("true"),
+    );
+    let found = root.mac(Provider::Claude);
+    let listed: Vec<(&str, ManagedKeyCategory)> = found[0]
+        .keys
+        .iter()
+        .map(|k| (k.name.as_str(), k.category))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("allowManagedPermissionRulesOnly", Permissions),
+            ("allowManagedHooksOnly", Hooks),
+            ("disableAllHooks", Hooks),
+            ("strictPluginOnlyCustomization", Plugins),
+            ("disableSideloadFlags", Mcp),
+            ("allowManagedMcpServersOnly", Mcp),
+            ("allowedMcpServers", Mcp),
+            ("deniedMcpServers", Mcp),
+            ("permissions.allow", Permissions),
+            ("permissions.deny", Permissions),
+            ("permissions.ask", Permissions),
+            ("permissions.additionalDirectories", Permissions),
+            (
+                "permissions.blockReadsOutsideWorkingDirectories",
+                Permissions
+            ),
+            (
+                "permissions.blockWritesOutsideWorkingDirectories",
+                Permissions
+            ),
+            ("sandbox.enabled", Sandbox),
+            ("sandbox.filesystem.allowManagedReadPathsOnly", Sandbox),
+            ("sandbox.network.allowManagedDomainsOnly", Sandbox),
+            ("forceLoginMethod", Authentication),
+            ("forceLoginOrgUUID", Authentication),
+            ("enforceAnthropicSignIn", Authentication),
+            ("allowedProviders", Authentication),
+            ("apiKeyHelper", Authentication),
+            ("env", Environment),
+            ("availableModels", Model),
+            ("deniedModels", Model),
+            ("modelOverrides", Model),
+            ("requiredMinimumVersion", Version),
+            ("requiredMaximumVersion", Version),
+            ("policyHelper", Policy),
+        ]
+    );
+    // A key is a name and a category in the JSON, and nothing about what it
+    // does: no sentence of its own.
+    let json = serde_json::to_value(&found[0].keys[0]).expect("JSON");
+    assert_eq!(
+        json,
+        serde_json::json!({"name": "allowManagedPermissionRulesOnly", "category": "permissions"})
+    );
+    assert_eq!(
+        ManagedKeyCategory::CodexRequirements.as_str(),
+        "codex_requirements"
+    );
+    assert_eq!(
+        serde_json::to_value(ManagedKeyCategory::CodexConfig).expect("JSON"),
+        "codex_config"
+    );
+}
+
+#[test]
+fn one_sentence_per_provider_points_at_the_providers_reference() {
+    assert_eq!(guidance(Provider::Claude), CLAUDE_GUIDANCE);
+    assert_eq!(guidance(Provider::Codex), CODEX_GUIDANCE);
+    assert_eq!(
+        CLAUDE_GUIDANCE,
+        "These managed keys can change how Claude Code treats what delega passes at launch; see \
+         https://code.claude.com/docs/en/settings-reference."
+    );
+    assert!(CODEX_GUIDANCE.starts_with(
+        "These managed keys can change how Codex treats what delega passes at launch; see "
+    ));
+    assert!(CODEX_GUIDANCE.contains("https://github.com/openai/codex"));
+    for sentence in [CLAUDE_GUIDANCE, CODEX_GUIDANCE] {
+        assert!(
+            !sentence.contains('\u{2014}') && !sentence.contains("  "),
+            "{sentence}"
+        );
+    }
+    // The notes of sources hold no em dash or doubled space either.
+    let root = Root::new();
+    root.write(&format!("{MAC_CLAUDE}/managed-mcp.json"), "{}");
+    root.write(&format!("{PREFERENCES}/com.anthropic.claudecode.plist"), "");
+    root.write(&format!("{PREFERENCES}/u/com.openai.codex.plist"), "");
+    root.write(&format!("{PREFERENCES}/com.openai.codex.plist"), "");
+    let claude = root.mac(Provider::Claude);
+    let codex = root.mac(Provider::Codex);
+    let notes: Vec<&String> = claude
+        .iter()
+        .chain(&codex)
+        .filter_map(|s| s.note.as_ref())
+        .collect();
+    assert_eq!(notes.len(), 4, "{notes:?}");
+    for note in notes {
+        assert!(
+            !note.is_empty() && !note.contains('\u{2014}') && !note.contains("  "),
+            "{note}"
+        );
+    }
+}
+
+#[test]
+fn a_number_no_type_can_hold_does_not_hide_the_keys_of_a_file() {
+    // `1e400` is valid JSON. Values are skipped, not converted, so the keys
+    // beside it and under it are still found.
+    assert_eq!(
+        claude_names(
+            r#"{"cleanupPeriodDays":1e400,"disableAllHooks":1e400,
+                "big":123456789012345678901234567890123456789012345678901234567890,
+                "permissions":{"deny":1e400,"other":-1e400},
+                "sandbox":{"enabled":1e400,"network":{"allowManagedDomainsOnly":1E+999}}}"#
+        ),
+        [
+            "disableAllHooks",
+            "permissions.deny",
+            "sandbox.enabled",
+            "sandbox.network.allowManagedDomainsOnly"
+        ]
+    );
+    // The MCP file is judged the same way.
+    let root = Root::new();
+    root.write(
+        &format!("{MAC_CLAUDE}/managed-mcp.json"),
+        r#"{"mcpServers":{"a":{"timeout":1e400}}}"#,
+    );
+    assert_eq!(
+        root.mac(Provider::Claude)[0].state,
+        ManagedSourceState::Read
+    );
+    // What is not JSON is still refused: skipping values checks their syntax.
+    for broken in [
+        r#"{"disableAllHooks":1e}"#,
+        r#"{"disableAllHooks":tru}"#,
+        r#"{"a":1} x"#,
+    ] {
+        let root = Root::new();
+        root.write(&format!("{MAC_CLAUDE}/managed-settings.json"), broken);
+        assert_eq!(
+            root.mac(Provider::Claude)[0].state,
+            ManagedSourceState::Unreadable,
+            "{broken}"
+        );
+    }
+    // A nested object that is not an object loses its own keys only.
+    assert_eq!(
+        claude_names(r#"{"permissions":"x","sandbox":{"enabled":true},"env":{}}"#),
+        ["sandbox.enabled", "env"]
+    );
+}
+
+#[test]
+fn a_float_out_of_range_does_not_hide_the_keys_of_a_codex_file() {
+    let root = Root::new();
+    root.write(
+        "etc/codex/requirements.toml",
+        "huge = 1e400\nallowed_sandbox_modes = [\"read-only\"]\n",
+    );
+    let found = root.scan(Provider::Codex, Platform::Linux);
+    assert_eq!(found[0].state, ManagedSourceState::Read, "{found:?}");
+    assert_eq!(names(&found[0]), ["allowed_sandbox_modes"]);
+    assert_eq!(found[0].other_keys, 1);
+}
+
+/// A source whose reported size follows a script, for a file that changes
+/// while it is read.
+struct Scripted {
+    data: std::io::Cursor<Vec<u8>>,
+    sizes: std::cell::RefCell<Vec<u64>>,
+}
+
+impl std::io::Read for Scripted {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.data.read(buffer)
+    }
+}
+
+/// Read `data` when the size is `before` at the first look and `after` at the
+/// second. Returns the outcome and the bytes charged.
+fn scripted(data: &[u8], before: u64, after: u64, limit: u64) -> (Result<Vec<u8>, Unread>, u64) {
+    let mut source = Scripted {
+        data: std::io::Cursor::new(data.to_vec()),
+        sizes: std::cell::RefCell::new(vec![after, before]),
+    };
+    let mut charged = u64::MAX;
+    let outcome = read_stable(
+        &mut source,
+        |source| Ok(source.sizes.borrow_mut().pop().expect("a size")),
+        limit,
+        &mut charged,
+    );
+    (outcome, charged)
+}
+
+#[test]
+fn a_file_whose_size_changes_under_the_read_is_not_reported_as_read() {
+    // Unchanged and wholly read.
+    assert_eq!(scripted(b"abc", 3, 3, 10), (Ok(b"abc".to_vec()), 3));
+    assert_eq!(scripted(b"abc", 3, 3, 3), (Ok(b"abc".to_vec()), 3));
+    assert_eq!(scripted(b"", 0, 0, 0), (Ok(Vec::new()), 0));
+    // A short read, then the file grew: within the limit, and past it.
+    assert_eq!(scripted(b"abc", 3, 5, 10), (Err(Unread::Changed), 3));
+    assert_eq!(scripted(b"abc", 3, 5000, 10), (Err(Unread::Changed), 3));
+    // It grew before the read finished: more came than the first size said.
+    assert_eq!(scripted(b"abcde", 3, 5, 10), (Err(Unread::Changed), 5));
+    // It shrank.
+    assert_eq!(scripted(b"ab", 3, 2, 10), (Err(Unread::Changed), 2));
+    // The read stops at the limit and never charges past it, however much
+    // the file went on to hold.
+    assert_eq!(scripted(b"abcdefgh", 3, 8, 4), (Err(Unread::Changed), 4));
+    assert_eq!(scripted(&[b' '; 4096], 10, 4096, 16).1, 16);
+    // Larger than allowed at the first look: nothing is read or charged.
+    assert_eq!(scripted(b"abcdef", 6, 6, 5), (Err(Unread::OverLimit), 0));
+    // The largest bound does not overflow.
+    assert_eq!(scripted(b"abc", 3, 3, u64::MAX), (Ok(b"abc".to_vec()), 3));
 }

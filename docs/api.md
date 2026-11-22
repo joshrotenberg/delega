@@ -614,14 +614,20 @@ It reports, for `claude` and `codex` each:
   preferences, which doctor does not open), `files` for a source that is a
   directory (`found`, `unreadable` and `limit_reached`; null for a single
   file), a `note` when the presence of the source matters by itself, and
-  `keys`: the names of the keys present in it that can change how a delega
-  launch is honoured, each with its `effect`, which is what the key controls
-  and not whether it is on (no value is read), and `other_keys`: for a Codex file, how many
-  top-level keys doctor does not know, which are counted and not named. Never a
-  value, and never text copied from a file or a directory: every `path` is one
-  of the fixed locations and every key name is one doctor knows. A source whose
-  scan a limit cut short is `partly_read` with `files.limit_reached`. The list
-  is empty, and the text report prints nothing, when no source is found.
+  `keys`: the keys present in it that bear on what delega passes at launch,
+  each a `name` and a `category` (`permissions`, `hooks`, `mcp`, `plugins`,
+  `sandbox`, `authentication`, `environment`, `model`, `version`, `policy`,
+  `codex_requirements` or `codex_config`), and `other_keys`: for a Codex file,
+  how many top-level keys doctor does not know, which are counted and not
+  named. A key is listed because it is present: no value is read, and nothing
+  says what a key does or whether it is on. The text report says once per
+  provider that these keys can change how the provider treats what delega
+  passes, with a link to the provider's reference. Never a value, and never
+  text copied from a file or a directory: every `path` is one of the fixed
+  locations and every key name is one doctor knows. A source whose scan a limit
+  cut short, or a file that changed size while it was read, is `partly_read`
+  with `files.limit_reached`. The list is empty, and the text report prints
+  nothing, when no source is found.
   [providers.md](providers.md#managed-settings) lists the locations, the keys
   and what doctor cannot see, such as settings a provider fetches from its
   server.

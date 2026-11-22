@@ -1081,14 +1081,17 @@ each.
 
 Both providers read managed (administrator) settings themselves, above anything
 on the command line. delega does not apply them and cannot turn them off, so
-they can change what a worker gets with nothing in the result saying why: a
-grant ignored, an MCP configuration refused, delega's command hook not run.
+they can change what a worker gets with nothing in the result saying why.
 `delega doctor` ([api.md](api.md#doctor)) looks for the local sources of each
-provider and names the keys in them that change how a delega launch is
-honoured, with what each controls. It reports the fixed paths below, counts and
-key names, never a value, and it does not say whether a key is on.
-Nothing it prints is copied from a file or a directory. A drop-in file or a
-user's preferences directory can be named anything, so each of those is one
+provider and lists the keys present in them that bear on what delega passes at
+launch, each with a category. It says once per provider that these keys can
+change how the provider treats what delega passes, and points at the provider's
+reference. It does not say what a key does, or whether a key is on: read the
+file and the provider's reference for that.
+
+It reports the fixed paths below, counts, key names and categories, never a
+value. Nothing it prints is copied from a file or a directory. A drop-in file or
+a user's preferences directory can be named anything, so each of those is one
 source with a count. A key is named only when it is one doctor knows, under
 doctor's own spelling; a key of a Codex file that doctor does not know is
 counted (`other_keys`) and not named. It is a notice: it adds no problem and
@@ -1098,21 +1101,22 @@ does not change `ready` or the exit status.
 
 | Provider | Source | Where | Reported |
 | --- | --- | --- | --- |
-| Claude Code | `managed-settings.json` | `/Library/Application Support/ClaudeCode` on macOS, `/etc/claude-code` on Linux | The keys below. |
+| Claude Code | `managed-settings.json` | `/Library/Application Support/ClaudeCode` on macOS, `/etc/claude-code` on Linux | The keys below that are present. |
 | Claude Code | `managed-settings.d/*.json`, hidden files left out | The same directory | The directory once, with the number of files, how many could not be read, and the keys below from all of them together. No file is named. |
-| Claude Code | `managed-mcp.json` | The same directory | Its presence. Server names are not read. |
+| Claude Code | `managed-mcp.json` | The same directory | Its presence, with a pointer to Claude Code's [managed MCP reference](https://code.claude.com/docs/en/managed-mcp), which describes what the file does to `--strict-mcp-config` and `--mcp-config`. delega passes both on every run. Server names are not read. |
 | Claude Code | Managed preferences domain `com.anthropic.claudecode` | macOS: `/Library/Managed Preferences/com.anthropic.claudecode.plist` and the same file in each user's directory there | The system file as present, not inspected; the users' files as one source with a count. No user is named. |
 | Codex | `requirements.toml` | `/etc/codex` on macOS and Linux | The top-level keys Codex reads, by name, and a count of the others. |
-| Codex | `managed_config.toml` (legacy) | `/etc/codex` on macOS and Linux | The top-level keys delega also passes or Codex enforces, by name, and a count of the others. |
+| Codex | `managed_config.toml` (legacy) | `/etc/codex` on macOS and Linux | The top-level keys listed below, by name, and a count of the others. |
 | Codex | Managed preferences domain `com.openai.codex` (`config_toml_base64`, `requirements_toml_base64`) | macOS: `/Library/Managed Preferences/com.openai.codex.plist` and the same file in each user's directory there | As for Claude Code. |
 
 A file that parses is `read`. An empty `managed-settings.json` or drop-in file is
-read as `{}`, as Claude Code reads it. A file that is there and cannot be read
-or parsed (no permission, not a regular file, over 4 MiB, not JSON or TOML, no
-object at the top) is `unreadable`, with no content and no error text; Claude
-Code refuses to start on a managed file it cannot parse. Managed preferences are
-`not_inspected`: doctor does not open them, so it cannot say which keys they
-set, and a file in another user's directory does not apply to this user.
+read as `{}`. A file that is there and cannot be read or parsed (no permission,
+not a regular file, over 4 MiB, not JSON or TOML, no object at the top) is
+`unreadable`, with no content and no error text. Values are skipped, not
+converted, so a number too large for doctor to hold does not make a file
+unreadable or hide its keys. Managed preferences are `not_inspected`: doctor
+does not open them, so it cannot say which keys they set, and a file in another
+user's directory does not apply to this user.
 
 A file is opened without blocking and must be a regular file once open, so a
 pipe or a device in its place is `unreadable` and cannot hang doctor. Symbolic
@@ -1124,70 +1128,57 @@ the directory is `partly_read` and the report says how many. When a limit stops
 the scan the directory is `partly_read` with `limit_reached`, even if no drop-in
 file was seen before the limit, because there may be files that were never
 looked at. The same holds for the users' preferences: a listing cut off at 4096
-entries is reported as `partly_read` with `limit_reached`.
+entries is reported as `partly_read` with `limit_reached`. The size of a file is
+taken before and after it is read. A file whose size changed meanwhile, or that
+holds more than was read, is not reported as read: a single file is
+`partly_read` with `limit_reached` and no keys, and a drop-in file is counted as
+not read and marks its directory the same way.
 
-**Claude Code keys.** Doctor lists the managed keys present that can affect a
-launch and what each controls. It does not say whether a key is on: a key is
-listed because it is present, whatever its value, and no value is read. How
-Claude Code reads a value (a string where a Boolean belongs, `null`, an empty
-list, a key that fails closed when it cannot be parsed) is not reproduced, so a
-key set to `false` is listed like one set to `true`; read the file to see which
-it is. A key that is not in this table is not listed. Nested keys are given as
-dotted names.
+**Claude Code keys.** Doctor lists these keys when they are present, whatever
+their value, with the category shown. A key that is not in this table is not
+listed. Nested keys are given as dotted names. The category places a key; what
+the key does is in Claude Code's
+[settings reference](https://code.claude.com/docs/en/settings-reference).
 
-| Key | What it controls |
+| Category | Keys |
 | --- | --- |
-| `allowManagedPermissionRulesOnly` | Whether only managed permission rules count. When enabled, the tools granted with `--allowedTools` and the deny rules passed in `--settings` are ignored, so under `--permission-mode dontAsk` a worker is denied what the request granted. |
-| `allowManagedHooksOnly`, `disableAllHooks` | Whether only managed hooks run, or hooks are turned off, and so whether the command hook passed with `--settings` runs. When it does not, exact command grants are not checked by it. |
-| `strictPluginOnlyCustomization` | Whether hooks and MCP servers that do not come from a plugin are blocked, which would cover the hook in `--settings` and the servers in `--mcp-config`. |
-| `disableSideloadFlags` | Whether Claude Code rejects `--mcp-config` at startup, which every run passes. |
-| `allowManagedMcpServersOnly` | Whether only the managed allowlist of MCP servers counts. When enabled, servers passed with `--mcp-config` can be refused. |
-| `allowedMcpServers`, `deniedMcpServers` | Hold the managed allowlist and the list of blocked MCP servers, which servers passed with `--mcp-config` are checked against. |
-| `managed-mcp.json` (the file) | With the file in place Claude Code exits at startup when it is given `--strict-mcp-config`, which every run passes. |
-| `permissions.allow`, `permissions.deny`, `permissions.ask` | Hold managed rules, which apply beside the tools granted with `--allowedTools`: an allow rule can grant more than the request, a deny rule less, and a call that would ask is denied. |
-| `permissions.additionalDirectories` | Holds managed working directories, which are added beside the ones passed with `--add-dir`, so a worker can reach directories the request did not name. |
-| `permissions.blockReadsOutsideWorkingDirectories`, `permissions.blockWritesOutsideWorkingDirectories` | Whether file tools refuse paths outside the working directories, which are the ones passed with `--add-dir` and any managed `permissions.additionalDirectories`, whatever the request grants. |
-| `sandbox.enabled` | Whether Bash commands run in Claude Code's sandbox, whatever the request grants. |
-| `sandbox.filesystem.allowManagedReadPathsOnly` | Whether only managed sandbox read paths count. When enabled, a sandboxed command may not read a directory passed with `--add-dir`. |
-| `sandbox.network.allowManagedDomainsOnly` | Whether sandboxed commands reach only the network domains managed settings allow. When enabled, any other domain is blocked without asking. The sandbox allowlist does not limit the `WebFetch` tool itself, which follows permission rules. |
-| `forceLoginMethod`, `forceLoginOrgUUID`, `allowedProviders` | Which kind of account, which organization and which service the worker may use; a worker that uses another is refused. |
-| `enforceAnthropicSignIn` | Whether a claude.ai login is required. When enabled, a worker authenticated another way is refused. |
-| `apiKeyHelper` | Names a command that can supply the worker's credential. Environment credentials and cloud provider settings come first, as Claude Code's [authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence) describes, so a worker launched with one of those does not use the helper. |
-| `env` | Holds variables Claude Code sets in the worker after the [environment policy](#environment-policy) has run. The variable names are not listed. |
-| `availableModels`, `deniedModels` | List the models a `--model` may and may not name. |
-| `modelOverrides` | Maps model IDs to provider model IDs, so a model named with `--model` can be sent to a different one. |
-| `requiredMinimumVersion`, `requiredMaximumVersion` | Set the oldest and the newest Claude Code version that may start. |
-| `policyHelper` | Names a command that computes managed settings at startup; doctor cannot see what it returns. |
+| `permissions` | `allowManagedPermissionRulesOnly`, `permissions.allow`, `permissions.deny`, `permissions.ask`, `permissions.additionalDirectories`, `permissions.blockReadsOutsideWorkingDirectories`, `permissions.blockWritesOutsideWorkingDirectories` |
+| `hooks` | `allowManagedHooksOnly`, `disableAllHooks` |
+| `plugins` | `strictPluginOnlyCustomization` |
+| `mcp` | `disableSideloadFlags`, `allowManagedMcpServersOnly`, `allowedMcpServers`, `deniedMcpServers` |
+| `sandbox` | `sandbox.enabled`, `sandbox.filesystem.allowManagedReadPathsOnly`, `sandbox.network.allowManagedDomainsOnly` |
+| `authentication` | `forceLoginMethod`, `forceLoginOrgUUID`, `enforceAnthropicSignIn`, `allowedProviders`, `apiKeyHelper` |
+| `environment` | `env` (the variable names in it are not listed) |
+| `model` | `availableModels`, `deniedModels`, `modelOverrides` |
+| `version` | `requiredMinimumVersion`, `requiredMaximumVersion` |
+| `policy` | `policyHelper` |
+
+They are listed because each bears on something delega passes at launch: the
+tools granted with `--allowedTools` and the deny rules and command hook in
+`--settings`, `--permission-mode dontAsk`, `--strict-mcp-config` and
+`--mcp-config`, the `--add-dir` directories, `--model`, and the environment a
+worker gets, which carries its credential.
 
 Two keys are left out on purpose. `permissions.disableBypassPermissionsMode`
-blocks `--dangerously-skip-permissions`, which delega never passes: `full` is
+is about `--dangerously-skip-permissions`, which delega never passes: `full` is
 `--permission-mode dontAsk` with every built-in tool granted.
 `permissions.defaultMode` sets a default that the `--permission-mode` delega
 passes takes precedence over.
 
-**Codex keys.** Both files apply whatever is on the command line. A top-level
-key is named only when doctor knows it. Any other key is counted in
-`other_keys` and not named, and the text report says how many there are: a key
-doctor does not know may be a typing mistake, which Codex ignores, and its name
-is whatever the file says.
+**Codex keys.** A top-level key is named only when doctor knows it. Any other
+key is counted in `other_keys` and not named, and the text report says how many
+there are. What a key does is in Codex's source: `ConfigRequirementsToml` in
+`codex-rs/config/src/config_requirements.rs` and the layering described in
+`codex-rs/config/src/loader/README.md`, both in
+<https://github.com/openai/codex>.
 
-- `requirements.toml` holds constraints Codex enforces.
-  `allowed_approval_policies` and `allowed_sandbox_modes` limit the
-  `-c approval_policy="never"` and `-c sandbox_mode=...` every run passes, and
-  `allowed_permission_profiles`, `default_permissions`, `mcp_servers` and
-  `allow_login_shell` bear on the other settings a run passes. Another key
-  Codex reads (the fields of `ConfigRequirementsToml` in its source) is
-  named as a requirement Codex enforces.
-- `managed_config.toml` is a configuration layer above the `-c` settings. A key
-  delega also passes (`approval_policy`, `sandbox_mode`, `allow_login_shell`,
-  `sandbox_workspace_write`, `developer_instructions`,
-  `model_reasoning_effort`, `mcp_servers`) is named as replacing it, and
-  `approval_policy`, `sandbox_mode` and `approvals_reviewer` are also enforced
-  as requirements. Every other key of the file, such as `model`, is counted
-  only, although Codex applies the ones it knows.
+| Category | File | Keys named |
+| --- | --- | --- |
+| `codex_requirements` | `requirements.toml` | The fields of `ConfigRequirementsToml` and the aliases it accepts, such as `allowed_approval_policies`, `allowed_sandbox_modes`, `allowed_permission_profiles`, `default_permissions`, `mcp_servers`, `allow_login_shell` and `rules`. |
+| `codex_config` | `managed_config.toml` | The settings delega also passes with `-c` (`approval_policy`, `sandbox_mode`, `allow_login_shell`, `sandbox_workspace_write`, `developer_instructions`, `model_reasoning_effort`, `mcp_servers`) and `approvals_reviewer`. |
 
-`--ignore-user-config` leaves out the user's `config.toml` only, not these
-files.
+Both files are read by Codex whatever is on the command line:
+`--ignore-user-config` leaves out the user's `config.toml` only.
 
 **What doctor cannot see.**
 
@@ -1196,8 +1187,8 @@ files.
   cloud-managed configuration and requirements. Nothing local says they exist.
 - The content of managed preferences, and what a `policyHelper` returns.
 - Policy an embedding host passes to Claude Code.
-- `/etc/codex/config.toml`, the system configuration layer of Codex. It sits
-  below the `-c` settings, so it does not override what delega passes, and it is
+- `/etc/codex/config.toml`, the system configuration layer of Codex. Codex's
+  loader documents it as the lowest layer, below the `-c` settings, and it is
   not reported.
 - Windows locations (the registry and `%ProgramData%`).
 

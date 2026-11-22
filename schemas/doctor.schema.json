@@ -317,9 +317,9 @@
       "description": "A key in a managed source that can change how a delega launch is honoured.",
       "type": "object",
       "properties": {
-        "effect": {
-          "description": "What the key controls that bears on a delega launch. Fixed text for the\nkey: it does not say whether the key is on, since no value is read.",
-          "type": "string"
+        "category": {
+          "description": "What the key is about. Not what it does: no value is read, and what a\nkey does is for the provider's reference to say.",
+          "$ref": "#/$defs/ManagedKeyCategory"
         },
         "name": {
           "description": "The key's name, dotted when it is nested, such as `permissions.deny`.\nNever its value.",
@@ -328,7 +328,72 @@
       },
       "required": [
         "name",
-        "effect"
+        "category"
+      ]
+    },
+    "ManagedKeyCategory": {
+      "description": "What a managed key is about. It places the key; it says nothing about what\nthe key does on this system.",
+      "oneOf": [
+        {
+          "description": "Permission rules, working directories and what tools may touch.",
+          "type": "string",
+          "const": "permissions"
+        },
+        {
+          "description": "Hooks.",
+          "type": "string",
+          "const": "hooks"
+        },
+        {
+          "description": "MCP servers and the flags that configure them.",
+          "type": "string",
+          "const": "mcp"
+        },
+        {
+          "description": "Plugins and other customization sources.",
+          "type": "string",
+          "const": "plugins"
+        },
+        {
+          "description": "Sandboxing of commands.",
+          "type": "string",
+          "const": "sandbox"
+        },
+        {
+          "description": "Login, credentials and which service is used.",
+          "type": "string",
+          "const": "authentication"
+        },
+        {
+          "description": "Environment variables.",
+          "type": "string",
+          "const": "environment"
+        },
+        {
+          "description": "Which models may be used.",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "Which provider versions may start.",
+          "type": "string",
+          "const": "version"
+        },
+        {
+          "description": "How managed settings themselves are computed.",
+          "type": "string",
+          "const": "policy"
+        },
+        {
+          "description": "A key of Codex's `requirements.toml`.",
+          "type": "string",
+          "const": "codex_requirements"
+        },
+        {
+          "description": "A key of Codex's legacy `managed_config.toml`.",
+          "type": "string",
+          "const": "codex_config"
+        }
       ]
     },
     "ManagedSource": {
@@ -336,7 +401,7 @@
       "type": "object",
       "properties": {
         "files": {
-          "description": "For a source that is a directory, how many files it holds. Null for a\nsingle file.",
+          "description": "For a source that is a directory, how many files it holds. Null for a\nsingle file, unless the file changed size while it was read: then it is\none file found, not read, with `limit_reached`, and the state is\n`partly_read`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ManagedFileCounts"
@@ -358,7 +423,7 @@
           "$ref": "#/$defs/ManagedSourceKind"
         },
         "note": {
-          "description": "What the presence of the source means for a delega launch, when that\ndoes not depend on a key in it. Fixed text for the kind.",
+          "description": "What is known of the source that does not depend on a key in it. Fixed\ntext for the kind.",
           "type": [
             "string",
             "null"

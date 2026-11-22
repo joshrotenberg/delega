@@ -515,19 +515,20 @@ fn provider_text(out: &mut String, found: &ProviderCheck) {
             let _ = writeln!(out, "    {} ignored: {}", file.path, file.reason);
         }
     }
-    managed_text(out, &found.managed_settings);
+    managed_text(out, found.provider, &found.managed_settings);
 }
 
 /// The managed settings block of one provider. Nothing when none was found.
-fn managed_text(out: &mut String, sources: &[ManagedSource]) {
+fn managed_text(out: &mut String, provider: Provider, sources: &[ManagedSource]) {
     if sources.is_empty() {
         return;
     }
-    let _ = writeln!(
-        out,
-        "  managed settings: {} found; the provider applies them over what delega passes (see \
-         docs/providers.md, Managed settings)",
-        sources.len()
+    let _ = writeln!(out, "  managed settings: {} found", sources.len());
+    // Said once for every key below. No line says what one key does.
+    let _ = writeln!(out, "    {}", managed::guidance(provider));
+    out.push_str(
+        "    Keys are listed because they are present, by category; doctor does not say whether \
+         a key is on (docs/providers.md, Managed settings).\n",
     );
     for source in sources {
         let state = match source.state {
@@ -558,8 +559,21 @@ fn managed_text(out: &mut String, sources: &[ManagedSource]) {
         if let Some(note) = &source.note {
             let _ = writeln!(out, "      {note}");
         }
+        // One line per category, in the order the categories first appear.
+        let mut categories = Vec::new();
         for key in &source.keys {
-            let _ = writeln!(out, "      {}: {}", key.name, key.effect);
+            if !categories.contains(&key.category) {
+                categories.push(key.category);
+            }
+        }
+        for category in categories {
+            let names: Vec<&str> = source
+                .keys
+                .iter()
+                .filter(|key| key.category == category)
+                .map(|key| key.name.as_str())
+                .collect();
+            let _ = writeln!(out, "      {}: {}", category.as_str(), names.join(", "));
         }
         if source.other_keys > 0 {
             let noun = if source.other_keys == 1 {
@@ -569,8 +583,7 @@ fn managed_text(out: &mut String, sources: &[ManagedSource]) {
             };
             let _ = writeln!(
                 out,
-                "      {} other top-level {noun} not named: doctor names only keys it knows, and \
-                 Codex may ignore a key it does not know",
+                "      {} other top-level {noun} not named: doctor names only keys it knows",
                 source.other_keys
             );
         }

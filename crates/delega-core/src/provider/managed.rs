@@ -2,10 +2,9 @@
 //!
 //! delega does not apply managed settings and cannot switch them off: each
 //! provider reads them itself, above everything delega passes on the command
-//! line. They can make a grant ignored, an MCP configuration refused or
-//! delega's command hook not run, with nothing in a result saying why.
-//! [`scan`] looks for the local sources of one provider and names the keys in
-//! them that change how a delega launch is honoured.
+//! line. They can change what a worker gets, with nothing in a result saying
+//! why. [`scan`] looks for the local sources of one provider and names the keys
+//! present in them that bear on what delega passes at launch.
 //!
 //! Sources, as each provider documents them:
 //!
@@ -19,7 +18,10 @@
 //!   preferences domain `com.openai.codex`.
 //!
 //! **What a report holds.** Fixed paths, counts and key names from the tables
-//! below, with fixed text for each. Every string in a report is a constant of
+//! below, each with its category. It makes no claim about what a key does on
+//! this system: [`CLAUDE_GUIDANCE`] and [`CODEX_GUIDANCE`] say once, for all of
+//! a provider's keys, that they can change how the provider treats what delega
+//! passes, and point at the provider's own reference. Every string in a report is a constant of
 //! this module or a fixed path: nothing is copied from a file or a directory.
 //! It never holds a value. It never holds a name read from a directory: a
 //! drop-in file or a user's preferences directory can be named anything,
@@ -28,14 +30,10 @@
 //! path and a count. It never holds a key name read from a file either, for the
 //! same reason: a key that is in a table is reported under the table's name,
 //! and a top-level key of a Codex file that is in no table is only counted. A
-//! file's text is parsed, the names of the keys in the tables are looked up
-//! and the text is dropped. No value is read, not even to tell whether a key
-//! is switched on: a key is reported because it is present, with what it
-//! controls.
-//! A file that cannot be read or parsed is reported as present and unreadable,
-//! without the error, which could quote the file. Managed preferences are
-//! reported as present and are not opened. Settings a provider fetches from its
-//! server are not on disk and cannot be seen here.
+//! file's text is gone through for the names of its keys and dropped. No value
+//! is read or even converted: values are skipped, so a number no type here
+//! could hold does not hide the keys beside it, and a key is reported because
+//! it is present, not because of what it is set to.
 //!
 //! **Reading.** A file is opened without blocking, the opened handle must be a
 //! regular file, and at most [`MAX_MANAGED_FILE_BYTES`] are read, so a pipe or
@@ -43,7 +41,9 @@
 //! read up to [`MAX_DROP_IN_FILES`] files, [`MAX_DIRECTORY_ENTRIES`] entries
 //! and [`MAX_MANAGED_FILE_BYTES`] in all, counted as the bytes read from disk
 //! whether or not they turn out to be text, and the report says when a limit
-//! stopped it.
+//! stopped it. The size of the open file is taken before and after the read: a
+//! file that changed size meanwhile, or holds more than was read, is not
+//! reported as read but as partly read with the limit marker.
 //!
 //! **Symbolic links.** Under the real root `/` links are followed, because the
 //! providers follow them: a managed file may be a link an administrator's
@@ -61,9 +61,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
+use std::collections::BTreeSet;
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::Value;
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 
 use crate::contract::request::Provider;
 
@@ -244,15 +247,66 @@ pub enum ManagedSourceState {
     NotInspected,
 }
 
+/// What a managed key is about. It places the key; it says nothing about what
+/// the key does on this system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedKeyCategory {
+    /// Permission rules, working directories and what tools may touch.
+    Permissions,
+    /// Hooks.
+    Hooks,
+    /// MCP servers and the flags that configure them.
+    Mcp,
+    /// Plugins and other customization sources.
+    Plugins,
+    /// Sandboxing of commands.
+    Sandbox,
+    /// Login, credentials and which service is used.
+    Authentication,
+    /// Environment variables.
+    Environment,
+    /// Which models may be used.
+    Model,
+    /// Which provider versions may start.
+    Version,
+    /// How managed settings themselves are computed.
+    Policy,
+    /// A key of Codex's `requirements.toml`.
+    CodexRequirements,
+    /// A key of Codex's legacy `managed_config.toml`.
+    CodexConfig,
+}
+
+impl ManagedKeyCategory {
+    /// The name the JSON report and the text report use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permissions => "permissions",
+            Self::Hooks => "hooks",
+            Self::Mcp => "mcp",
+            Self::Plugins => "plugins",
+            Self::Sandbox => "sandbox",
+            Self::Authentication => "authentication",
+            Self::Environment => "environment",
+            Self::Model => "model",
+            Self::Version => "version",
+            Self::Policy => "policy",
+            Self::CodexRequirements => "codex_requirements",
+            Self::CodexConfig => "codex_config",
+        }
+    }
+}
+
 /// A key in a managed source that can change how a delega launch is honoured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ManagedKey {
     /// The key's name, dotted when it is nested, such as `permissions.deny`.
     /// Never its value.
     pub name: String,
-    /// What the key controls that bears on a delega launch. Fixed text for the
-    /// key: it does not say whether the key is on, since no value is read.
-    pub effect: String,
+    /// What the key is about. Not what it does: no value is read, and what a
+    /// key does is for the provider's reference to say.
+    pub category: ManagedKeyCategory,
 }
 
 /// The files of a source that is a directory, as counts. No file is named.
@@ -281,10 +335,12 @@ pub struct ManagedSource {
     /// Whether it was read.
     pub state: ManagedSourceState,
     /// For a source that is a directory, how many files it holds. Null for a
-    /// single file.
+    /// single file, unless the file changed size while it was read: then it is
+    /// one file found, not read, with `limit_reached`, and the state is
+    /// `partly_read`.
     pub files: Option<ManagedFileCounts>,
-    /// What the presence of the source means for a delega launch, when that
-    /// does not depend on a key in it. Fixed text for the kind.
+    /// What is known of the source that does not depend on a key in it. Fixed
+    /// text for the kind.
     pub note: Option<String>,
     /// The keys in it that can affect a delega launch, by name, in the order of
     /// the provider's table (Claude Code) or of the names (Codex). Every name
@@ -299,205 +355,94 @@ pub struct ManagedSource {
     pub other_keys: usize,
 }
 
-/// A Claude Code settings key, as the path to it, and what it controls.
-type ClaudeKey = (&'static [&'static str], &'static str);
+/// What doctor says once about every Claude Code key it lists.
+pub const CLAUDE_GUIDANCE: &str = "These managed keys can change how Claude Code treats what \
+                                   delega passes at launch; see \
+                                   https://code.claude.com/docs/en/settings-reference.";
 
-/// The managed Claude Code keys that bear on how what delega passes is
-/// honoured, each with what it controls. A key is reported when it is present,
-/// whatever its value: doctor does not reproduce how Claude Code reads a value
-/// (a string where a Boolean belongs, `null`, an empty list, a key that fails
-/// closed), so no reason says that a restriction is in force, only what the
-/// key decides. What each key controls is from the Claude Code settings
-/// reference and its sandboxing page. `permissions.defaultMode` is not here:
-/// delega passes `--permission-mode`, which takes precedence over it. Neither
-/// is `permissions.disableBypassPermissionsMode`: delega never asks for that
+/// What doctor says once about every Codex key it lists.
+pub const CODEX_GUIDANCE: &str = "These managed keys can change how Codex treats what delega \
+                                  passes at launch; see codex-rs/config/src/config_requirements.rs \
+                                  and codex-rs/config/src/loader/README.md in \
+                                  https://github.com/openai/codex.";
+
+/// The sentence for a provider's keys.
+pub fn guidance(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => CLAUDE_GUIDANCE,
+        Provider::Codex => CODEX_GUIDANCE,
+    }
+}
+
+/// A Claude Code settings key, as the path to it, and its category.
+type ClaudeKey = (&'static [&'static str], ManagedKeyCategory);
+
+/// The managed Claude Code keys that bear on what delega passes at launch
+/// (grants, the hook in `--settings`, the MCP configuration, added
+/// directories, the model, the credential), each with a category. A key is
+/// reported when it is present, whatever its value. Nothing here says what a
+/// key does: that is in Claude Code's settings reference, which
+/// [`CLAUDE_GUIDANCE`] points at. `permissions.defaultMode` is not here: delega
+/// passes `--permission-mode`, which takes precedence over it. Neither is
+/// `permissions.disableBypassPermissionsMode`: delega never asks for that
 /// mode.
-const CLAUDE_KEYS: &[ClaudeKey] = &[
-    (
-        &["allowManagedPermissionRulesOnly"],
-        "controls whether only managed permission rules count; when enabled, the tools granted \
-         with --allowedTools and the deny rules passed in --settings are ignored",
-    ),
-    (
-        &["allowManagedHooksOnly"],
-        concat!(
-            "controls whether only managed hooks run, and so whether ",
-            "delega's command hook, passed with --settings, runs; when it does not, exact command ",
-            "grants are not checked by it"
+const CLAUDE_KEYS: &[ClaudeKey] = {
+    use ManagedKeyCategory::{
+        Authentication, Environment, Hooks, Mcp, Model, Permissions, Plugins, Policy, Sandbox,
+        Version,
+    };
+    &[
+        (&["allowManagedPermissionRulesOnly"], Permissions),
+        (&["allowManagedHooksOnly"], Hooks),
+        (&["disableAllHooks"], Hooks),
+        (&["strictPluginOnlyCustomization"], Plugins),
+        (&["disableSideloadFlags"], Mcp),
+        (&["allowManagedMcpServersOnly"], Mcp),
+        (&["allowedMcpServers"], Mcp),
+        (&["deniedMcpServers"], Mcp),
+        (&["permissions", "allow"], Permissions),
+        (&["permissions", "deny"], Permissions),
+        (&["permissions", "ask"], Permissions),
+        (&["permissions", "additionalDirectories"], Permissions),
+        (
+            &["permissions", "blockReadsOutsideWorkingDirectories"],
+            Permissions,
         ),
-    ),
-    (
-        &["disableAllHooks"],
-        concat!(
-            "controls whether hooks are turned off, and so whether ",
-            "delega's command hook, passed with --settings, runs; when it does not, exact command ",
-            "grants are not checked by it"
+        (
+            &["permissions", "blockWritesOutsideWorkingDirectories"],
+            Permissions,
         ),
-    ),
-    (
-        &["strictPluginOnlyCustomization"],
-        "controls whether hooks and MCP servers that do not come from a plugin are blocked, \
-         which would cover the hook in --settings and the servers in --mcp-config",
-    ),
-    (
-        &["disableSideloadFlags"],
-        "controls whether Claude Code rejects --mcp-config at startup, which delega passes on \
-         every run",
-    ),
-    (
-        &["allowManagedMcpServersOnly"],
-        "controls whether only the managed allowlist of MCP servers counts; when enabled, \
-         servers passed with --mcp-config can be refused",
-    ),
-    (
-        &["allowedMcpServers"],
-        "holds the managed allowlist of MCP servers, which servers passed with --mcp-config are \
-         checked against",
-    ),
-    (
-        &["deniedMcpServers"],
-        "holds the managed list of blocked MCP servers, which servers passed with --mcp-config \
-         are checked against",
-    ),
-    (
-        &["permissions", "allow"],
-        "holds managed allow rules, which apply beside the tools granted with --allowedTools, so \
-         a worker can be allowed more than the request grants",
-    ),
-    (
-        &["permissions", "deny"],
-        "holds managed deny rules, which apply over the tools granted with --allowedTools",
-    ),
-    (
-        &["permissions", "ask"],
-        "holds managed ask rules, which apply over the tools granted with --allowedTools; a call \
-         that would ask is denied under --permission-mode dontAsk",
-    ),
-    (
-        &["permissions", "additionalDirectories"],
-        "holds managed working directories, which are added beside the ones passed with \
-         --add-dir, so a worker can reach directories the request did not name",
-    ),
-    (
-        &["permissions", "blockReadsOutsideWorkingDirectories"],
-        "controls whether file tools refuse reads outside the working directories (the ones \
-         passed with --add-dir and any managed permissions.additionalDirectories), whatever the \
-         request grants",
-    ),
-    (
-        &["permissions", "blockWritesOutsideWorkingDirectories"],
-        "controls whether file tools refuse writes outside the working directories (the ones \
-         passed with --add-dir and any managed permissions.additionalDirectories), whatever the \
-         request grants",
-    ),
-    (
-        &["sandbox", "enabled"],
-        "controls whether Bash commands run in Claude Code's sandbox, whatever the request grants",
-    ),
-    (
-        &["sandbox", "filesystem", "allowManagedReadPathsOnly"],
-        "controls whether only managed sandbox read paths count; when enabled, a sandboxed \
-         command may not read a directory passed with --add-dir",
-    ),
-    (
-        &["sandbox", "network", "allowManagedDomainsOnly"],
-        "controls whether sandboxed commands reach only the network domains managed settings \
-         allow; when enabled, any other domain is blocked without asking",
-    ),
-    (
-        &["forceLoginMethod"],
-        "controls which kind of account the worker may be logged in with",
-    ),
-    (
-        &["forceLoginOrgUUID"],
-        "controls which organization the worker's login may belong to",
-    ),
-    (
-        &["enforceAnthropicSignIn"],
-        "controls whether a claude.ai login is required; when enabled, a worker authenticated \
-         another way is refused",
-    ),
-    (
-        &["allowedProviders"],
-        "lists the services a worker may reach Claude through; one that uses another is refused \
-         at startup",
-    ),
-    (
-        &["apiKeyHelper"],
-        "names a command that can supply the worker's credential; environment credentials and \
-         cloud provider settings come first, as Claude Code's authentication precedence \
-         describes",
-    ),
-    (
-        &["env"],
-        "holds environment variables Claude Code sets in the worker, after delega's environment \
-         policy has run",
-    ),
-    (
-        &["availableModels"],
-        "lists the models a --model passed by delega may name",
-    ),
-    (
-        &["deniedModels"],
-        "lists models a --model passed by delega may not name",
-    ),
-    (
-        &["modelOverrides"],
-        "maps model IDs to provider model IDs, so a model named with --model can be sent to a \
-         different one",
-    ),
-    (
-        &["requiredMinimumVersion"],
-        "sets the oldest Claude Code version that may start",
-    ),
-    (
-        &["requiredMaximumVersion"],
-        "sets the newest Claude Code version that may start",
-    ),
-    (
-        &["policyHelper"],
-        "names a command that computes managed settings at startup; doctor cannot see what it \
-         returns",
-    ),
-];
+        (&["sandbox", "enabled"], Sandbox),
+        (
+            &["sandbox", "filesystem", "allowManagedReadPathsOnly"],
+            Sandbox,
+        ),
+        (&["sandbox", "network", "allowManagedDomainsOnly"], Sandbox),
+        (&["forceLoginMethod"], Authentication),
+        (&["forceLoginOrgUUID"], Authentication),
+        (&["enforceAnthropicSignIn"], Authentication),
+        (&["allowedProviders"], Authentication),
+        (&["apiKeyHelper"], Authentication),
+        (&["env"], Environment),
+        (&["availableModels"], Model),
+        (&["deniedModels"], Model),
+        (&["modelOverrides"], Model),
+        (&["requiredMinimumVersion"], Version),
+        (&["requiredMaximumVersion"], Version),
+        (&["policyHelper"], Policy),
+    ]
+};
 
-/// What the keys of `requirements.toml` that bear on something delega passes
-/// do to a launch.
-const CODEX_REQUIREMENT_KEYS: &[(&str, &str)] = &[
-    (
-        "allowed_approval_policies",
-        "limits the approval policies Codex accepts, where delega passes -c \
-         approval_policy=\"never\"",
-    ),
-    (
-        "allowed_sandbox_modes",
-        "limits the sandbox modes Codex accepts, where delega passes -c sandbox_mode for the \
-         request's permissions",
-    ),
-    (
-        "allowed_permission_profiles",
-        "limits the permission profiles Codex accepts, which constrains the sandbox delega asks \
-         for with -c sandbox_mode",
-    ),
-    (
-        "default_permissions",
-        "sets the permission profile Codex starts from, beside the -c sandbox_mode delega passes",
-    ),
-    (
-        "mcp_servers",
-        "limits the MCP servers Codex starts, beside the -c mcp_servers setting delega passes \
-         to disable the configured ones",
-    ),
-    (
-        "allow_login_shell",
-        "constrains login shells, where delega passes -c allow_login_shell=false",
-    ),
-];
-
-/// The other top-level keys of `requirements.toml` Codex reads, from
+/// The top-level keys of `requirements.toml` Codex reads: the fields of
 /// `ConfigRequirementsToml` in `codex-rs/config/src/config_requirements.rs`,
 /// with the aliases it accepts.
 const CODEX_REQUIREMENT_NAMES: &[&str] = &[
+    "allowed_approval_policies",
+    "allowed_sandbox_modes",
+    "allowed_permission_profiles",
+    "default_permissions",
+    "mcp_servers",
+    "allow_login_shell",
     "config_server",
     "allowed_login_methods",
     "allowed_chatgpt_workspaces",
@@ -542,48 +487,26 @@ const CODEX_REQUIREMENT_NAMES: &[&str] = &[
     "guardian_extra_policy",
 ];
 
-const CODEX_REQUIREMENT_KNOWN: &str =
-    "a requirement Codex enforces whatever settings delega passes";
-
-/// What the keys of Codex's legacy managed configuration that delega also
-/// passes, or that Codex turns into requirements, do to a launch.
-const CODEX_MANAGED_CONFIG_KEYS: &[(&str, &str)] = &[
-    (
-        "approval_policy",
-        "replaces the -c approval_policy=\"never\" delega passes and is enforced as a requirement",
-    ),
-    (
-        "sandbox_mode",
-        "replaces the -c sandbox_mode delega passes and is enforced as a requirement",
-    ),
-    (
-        "approvals_reviewer",
-        "is enforced as a requirement on who reviews approvals",
-    ),
-    (
-        "allow_login_shell",
-        "replaces the -c allow_login_shell=false delega passes",
-    ),
-    (
-        "sandbox_workspace_write",
-        "replaces keys of the -c sandbox_workspace_write settings delega passes for a write run",
-    ),
-    (
-        "developer_instructions",
-        "replaces the -c developer_instructions delega passes",
-    ),
-    (
-        "model_reasoning_effort",
-        "replaces the -c model_reasoning_effort delega passes for a request's effort",
-    ),
-    (
-        "mcp_servers",
-        "is merged over the -c mcp_servers setting delega passes to disable the configured servers",
-    ),
+/// The top-level keys of Codex's legacy managed configuration that are named:
+/// the settings delega also passes with `-c`, and `approvals_reviewer`, which
+/// Codex's loader reads from this file beside `approval_policy` and
+/// `sandbox_mode`. Every other key of the file is counted.
+const CODEX_MANAGED_CONFIG_NAMES: &[&str] = &[
+    "approval_policy",
+    "sandbox_mode",
+    "approvals_reviewer",
+    "allow_login_shell",
+    "sandbox_workspace_write",
+    "developer_instructions",
+    "model_reasoning_effort",
+    "mcp_servers",
 ];
 
-const MCP_FILE_NOTE: &str = "with this file in place Claude Code exits at startup when it is \
-                             given --strict-mcp-config, which delega passes on every run";
+const MCP_FILE_NOTE: &str = "Claude Code's managed MCP reference describes what this file does \
+                             to --strict-mcp-config and --mcp-config, which delega passes on \
+                             every run; see https://code.claude.com/docs/en/managed-mcp";
+const CHANGED_NOTE: &str = "the file changed size while doctor read it, so nothing is reported \
+                            from it";
 const CLAUDE_PREFERENCES_NOTE: &str = "can set any managed Claude Code key; doctor does not read \
                                        it";
 const CODEX_PREFERENCES_NOTE: &str = "can carry a managed configuration (config_toml_base64) or \
@@ -659,10 +582,10 @@ pub fn scan_with(provider: Provider, system: &SystemPaths, limits: &Limits) -> V
     found
 }
 
-/// The bytes of the regular file at `path`, when it holds at most `limit`.
-/// `charged` gets the number of bytes read from the file, whatever comes of
-/// them, so a caller with a total to keep to can count them. It is never more
-/// than `limit`: no byte past the limit is read to find out that there is one.
+/// The bytes of the regular file at `path`, when it holds at most `limit` and
+/// kept its size while it was read. `charged` gets the number of bytes read
+/// from the file, whatever comes of them, so a caller with a total to keep to
+/// can count them. It is never more than `limit`.
 ///
 /// The file is opened without blocking and the opened handle is judged, not
 /// the path: a pipe, a device or a directory swapped in after any earlier look
@@ -675,35 +598,44 @@ fn read_bytes(path: &Path, limit: u64, charged: &mut u64) -> Result<Vec<u8>, Unr
         Mode::empty(),
     )
     .map_err(|_| Unread::Unusable)?;
-    let file = std::fs::File::from(handle);
-    let meta = file.metadata().map_err(|_| Unread::Unusable)?;
-    if !meta.is_file() {
+    let mut file = std::fs::File::from(handle);
+    if !file.metadata().map_err(|_| Unread::Unusable)?.is_file() {
         return Err(Unread::Unusable);
     }
-    if meta.len() > limit {
-        return Err(Unread::OverLimit);
-    }
-    let bytes = read_at_most(&file, limit, charged).map_err(|_| Unread::Unusable)?;
-    // The file may have grown since the look above. When the read stopped at
-    // the limit, the size of the open file says whether there is more.
-    let size_now = file.metadata().map_or(u64::MAX, |meta| meta.len());
-    if bytes.len() as u64 == limit && size_now > limit {
-        return Err(Unread::OverLimit);
-    }
-    Ok(bytes)
+    read_stable(
+        &mut file,
+        |file| file.metadata().map(|meta| meta.len()),
+        limit,
+        charged,
+    )
 }
 
-/// Up to `limit` bytes from `source`, and never one more, whatever `source`
-/// goes on to hold. `charged` gets the number read, also when reading fails.
-pub(crate) fn read_at_most(
-    source: impl Read,
+/// The whole of `source`, when it holds at most `limit` bytes and its size, as
+/// `size` gives it, is the same before and after the read and is the number of
+/// bytes read. Anything else is not a consistent copy: a source that grew or
+/// shrank meanwhile, in whatever order that and the read happened, is
+/// [`Unread::Changed`]. No byte past `limit` is read to find out that there is
+/// one, and `charged` gets the number read, also on failure.
+pub(crate) fn read_stable<R: Read>(
+    source: &mut R,
+    size: impl Fn(&R) -> std::io::Result<u64>,
     limit: u64,
     charged: &mut u64,
-) -> std::io::Result<Vec<u8>> {
+) -> Result<Vec<u8>, Unread> {
+    *charged = 0;
+    let before = size(source).map_err(|_| Unread::Unusable)?;
+    if before > limit {
+        return Err(Unread::OverLimit);
+    }
     let mut bytes = Vec::new();
-    let read = source.take(limit).read_to_end(&mut bytes);
+    let read = source.by_ref().take(limit).read_to_end(&mut bytes);
     *charged = bytes.len() as u64;
-    read.map(|_| bytes)
+    read.map_err(|_| Unread::Unusable)?;
+    let after = size(source).map_err(|_| Unread::Unusable)?;
+    if after != before || after != bytes.len() as u64 {
+        return Err(Unread::Changed);
+    }
+    Ok(bytes)
 }
 
 /// The text in `bytes`, without a byte order mark, when they are UTF-8.
@@ -714,9 +646,11 @@ fn decode(bytes: Vec<u8>) -> Option<String> {
 
 /// Why a file gave no bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Unread {
+pub(crate) enum Unread {
     /// It is a regular file with more bytes than the limit given.
     OverLimit,
+    /// Its size changed while it was read, or it holds more than was read.
+    Changed,
     /// It could not be opened or read, or is not a regular file.
     Unusable,
 }
@@ -735,13 +669,17 @@ fn file_source(
     path: &Path,
     kind: ManagedSourceKind,
 ) {
+    let mut changed = false;
     let keys = match system.presence(path) {
         Presence::Absent => return,
         Presence::Unusable => None,
-        Presence::Usable => read_bytes(path, limits.file_bytes, &mut 0)
-            .ok()
-            .and_then(decode)
-            .and_then(|text| keys_of(kind, &text)),
+        Presence::Usable => match read_bytes(path, limits.file_bytes, &mut 0) {
+            Ok(bytes) => decode(bytes).and_then(|text| keys_of(kind, &text)),
+            Err(reason) => {
+                changed = reason == Unread::Changed;
+                None
+            }
+        },
     };
     let read = keys.is_some();
     let keys = keys.unwrap_or_default();
@@ -750,11 +688,22 @@ fn file_source(
         kind,
         state: if read {
             ManagedSourceState::Read
+        } else if changed {
+            ManagedSourceState::PartlyRead
         } else {
             ManagedSourceState::Unreadable
         },
-        files: None,
-        note: (kind == ManagedSourceKind::McpFile && read).then(|| MCP_FILE_NOTE.to_string()),
+        // A file that changed under the read is reported as cut short.
+        files: changed.then_some(ManagedFileCounts {
+            found: 1,
+            unreadable: 1,
+            limit_reached: true,
+        }),
+        note: if changed {
+            Some(CHANGED_NOTE.to_string())
+        } else {
+            (kind == ManagedSourceKind::McpFile && read).then(|| MCP_FILE_NOTE.to_string())
+        },
         keys: keys.keys,
         other_keys: keys.other,
     });
@@ -769,45 +718,123 @@ fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
             if text.is_empty() {
                 return Some(Found::default());
             }
-            let value: Value = serde_json::from_str(text).ok()?;
-            value.as_object()?;
             Some(Found {
-                keys: claude_keys(&value),
+                keys: claude_keys(text)?,
                 other: 0,
             })
         }
         ManagedSourceKind::McpFile => {
-            let value: Value = serde_json::from_str(text).ok()?;
-            value.as_object()?;
+            json_keys(text, &[])?;
             Some(Found::default())
         }
-        ManagedSourceKind::RequirementsFile => {
-            let general = CODEX_REQUIREMENT_NAMES
-                .iter()
-                .map(|name| (*name, CODEX_REQUIREMENT_KNOWN));
-            codex_keys(text, CODEX_REQUIREMENT_KEYS.iter().copied().chain(general))
-        }
-        ManagedSourceKind::ManagedConfigFile => {
-            codex_keys(text, CODEX_MANAGED_CONFIG_KEYS.iter().copied())
-        }
+        ManagedSourceKind::RequirementsFile => codex_keys(
+            text,
+            CODEX_REQUIREMENT_NAMES,
+            ManagedKeyCategory::CodexRequirements,
+        ),
+        ManagedSourceKind::ManagedConfigFile => codex_keys(
+            text,
+            CODEX_MANAGED_CONFIG_NAMES,
+            ManagedKeyCategory::CodexConfig,
+        ),
         ManagedSourceKind::ManagedPreferences | ManagedSourceKind::UserManagedPreferences => None,
     }
 }
 
-fn claude_keys(settings: &Value) -> Vec<ManagedKey> {
-    CLAUDE_KEYS
-        .iter()
-        .filter(|(path, _)| {
-            // Present is enough: the value at the end of the path is not read.
-            path.iter()
-                .try_fold(settings, |value, part| value.as_object()?.get(*part))
-                .is_some()
+/// The names of the keys of the JSON object at `path` in `text`: the top level
+/// for an empty path. `None` when `text` is not JSON with an object at the top,
+/// when a key of the path is absent, or when what is at the path is not an
+/// object.
+///
+/// Every value is skipped, not converted: a number too large for any Rust type
+/// is still valid JSON, and it must not hide the keys around it. Only the
+/// objects on the way to `path` are entered.
+fn json_keys(text: &str, path: &[&str]) -> Option<BTreeSet<String>> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let keys = KeysAt(path).deserialize(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
+    keys
+}
+
+/// Collects the key names of the object at a path, skipping every value.
+struct KeysAt<'a>(&'a [&'a str]);
+
+impl<'de> DeserializeSeed<'de> for KeysAt<'_> {
+    type Value = Option<BTreeSet<String>>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for KeysAt<'_> {
+    type Value = Option<BTreeSet<String>>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut names = BTreeSet::new();
+        let mut below = None;
+        while let Some(name) = map.next_key::<String>()? {
+            match self.0.split_first() {
+                Some((first, rest)) if *first == name => {
+                    below = map.next_value_seed(KeysAt(rest))?;
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            names.insert(name);
+        }
+        Ok(if self.0.is_empty() {
+            Some(names)
+        } else {
+            below
         })
-        .map(|(path, effect)| ManagedKey {
-            name: path.join("."),
-            effect: (*effect).to_string(),
-        })
-        .collect()
+    }
+}
+
+/// The keys of [`CLAUDE_KEYS`] that are present in the settings `text`, or
+/// `None` when it is not JSON with an object at the top. Present is all that
+/// is asked: no value is read.
+///
+/// The objects that hold nested keys are looked into one at a time, each in a
+/// pass of its own, so that one of them not being an object (`"permissions":
+/// "x"`) loses its own keys only.
+fn claude_keys(text: &str) -> Option<Vec<ManagedKey>> {
+    let top = json_keys(text, &[])?;
+    // The key names of each nested object, looked up once.
+    let mut nested: Vec<(&[&str], Option<BTreeSet<String>>)> = Vec::new();
+    let mut found = Vec::new();
+    for (path, category) in CLAUDE_KEYS {
+        let (name, parent) = path.split_last()?;
+        let present = if parent.is_empty() {
+            top.contains(*name)
+        } else {
+            if !nested.iter().any(|(known, _)| *known == parent) {
+                // Only when the top-level key is there is the pass worth making.
+                let names = top
+                    .contains(parent[0])
+                    .then(|| json_keys(text, parent))
+                    .flatten();
+                nested.push((parent, names));
+            }
+            nested
+                .iter()
+                .find(|(known, _)| *known == parent)
+                .and_then(|(_, names)| names.as_ref())
+                .is_some_and(|names| names.contains(*name))
+        };
+        if present {
+            found.push(ManagedKey {
+                name: path.join("."),
+                category: *category,
+            });
+        }
+    }
+    Some(found)
 }
 
 /// The top-level keys of a Codex file that are in `table`, under the table's
@@ -815,20 +842,25 @@ fn claude_keys(settings: &Value) -> Vec<ManagedKey> {
 /// key that is in no table is never named: its name is whatever the file says,
 /// which can be a credential or text with a line break, and it may be a typing
 /// mistake Codex ignores.
-fn codex_keys(
-    text: &str,
-    table: impl Iterator<Item = (&'static str, &'static str)>,
-) -> Option<Found> {
-    let parsed: toml::Table = text.parse().ok()?;
+fn codex_keys(text: &str, table: &[&'static str], category: ManagedKeyCategory) -> Option<Found> {
+    // The table as the parser leaves it, before numbers are converted: a
+    // number out of range does not fail here, so it hides no key.
+    let parsed = toml::de::DeTable::parse(text).ok()?;
+    let present: BTreeSet<&str> = parsed
+        .get_ref()
+        .keys()
+        .map(|name| name.get_ref().as_ref())
+        .collect();
     let mut keys: Vec<ManagedKey> = table
-        .filter(|(name, _)| parsed.contains_key(*name))
-        .map(|(name, effect)| ManagedKey {
-            name: name.to_string(),
-            effect: effect.to_string(),
+        .iter()
+        .filter(|name| present.contains(**name))
+        .map(|name| ManagedKey {
+            name: (*name).to_string(),
+            category,
         })
         .collect();
     keys.sort_by(|a, b| a.name.cmp(&b.name));
-    let other = parsed.len() - keys.len();
+    let other = present.len() - keys.len();
     Some(Found { keys, other })
 }
 
@@ -900,8 +932,10 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, limits: &Limit
         let found_keys = match bytes {
             Ok(bytes) => decode(bytes).and_then(|text| keys_of(kind, &text)),
             Err(reason) => {
-                counts.limit_reached |=
-                    reason == Unread::OverLimit && within_total < limits.file_bytes;
+                // Left out by the total, or changed under the read: either
+                // way the directory was not gone through as it stands.
+                counts.limit_reached |= reason == Unread::Changed
+                    || (reason == Unread::OverLimit && within_total < limits.file_bytes);
                 None
             }
         };
@@ -916,12 +950,9 @@ fn drop_ins(found: &mut Vec<ManagedSource>, system: &SystemPaths, limits: &Limit
     }
     source.keys = CLAUDE_KEYS
         .iter()
-        .map(|(path, effect)| (path.join("."), *effect))
+        .map(|(path, category)| (path.join("."), *category))
         .filter(|(name, _)| names.contains(name))
-        .map(|(name, effect)| ManagedKey {
-            name,
-            effect: effect.to_string(),
-        })
+        .map(|(name, category)| ManagedKey { name, category })
         .collect();
     // A limit means there may be files that were never looked at, so the
     // directory is partly read whatever became of the ones that were.

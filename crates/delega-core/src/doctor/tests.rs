@@ -313,25 +313,27 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         .display()
         .to_string();
     for expected in [
-        "  managed settings: 5 found; the provider applies them over what delega passes"
+        "  managed settings: 5 found\n".to_string(),
+        "    These managed keys can change how Claude Code treats what delega passes at launch; \
+         see https://code.claude.com/docs/en/settings-reference.\n"
             .to_string(),
+        "doctor does not say whether a key is on".to_string(),
         "docs/providers.md".to_string(),
         format!("    {dir}/managed-settings.json (read)"),
-        "      allowManagedPermissionRulesOnly: controls whether only managed permission rules count"
-            .to_string(),
-        "      permissions.deny: ".to_string(),
-        "      apiKeyHelper: ".to_string(),
-        "      env: ".to_string(),
+        "      permissions: allowManagedPermissionRulesOnly, permissions.deny\n".to_string(),
+        "      authentication: apiKeyHelper\n".to_string(),
+        "      environment: env\n".to_string(),
         format!("    {dir}/managed-settings.d (partly read; 2 files, 1 not read)\n"),
-        "      disableAllHooks: ".to_string(),
+        "      hooks: disableAllHooks\n".to_string(),
         "Library/Managed Preferences (present, not inspected; 1 file)\n".to_string(),
         format!("    {dir}/managed-mcp.json (read)"),
         "--strict-mcp-config".to_string(),
         "com.anthropic.claudecode.plist (present, not inspected)".to_string(),
-        "  managed settings: 1 found".to_string(),
+        "  managed settings: 1 found\n".to_string(),
+        "    These managed keys can change how Codex treats what delega passes at launch; see "
+            .to_string(),
         "etc/codex/requirements.toml (read)".to_string(),
-        "      allowed_sandbox_modes: ".to_string(),
-        "      default_permissions: ".to_string(),
+        "      codex_requirements: allowed_sandbox_modes, default_permissions\n".to_string(),
         "      1 other top-level key is not named: doctor names only keys it knows".to_string(),
     ] {
         assert!(shown.contains(&expected), "{expected}\n{shown}");
@@ -395,10 +397,11 @@ fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
             "env"
         ]
     );
-    // A key is a name and an effect, nothing else.
+    // A key is a name and a category, nothing else: no sentence about it.
     for key in claude[0]["keys"].as_array().expect("keys") {
         let fields: Vec<&String> = key.as_object().expect("object").keys().collect();
-        assert_eq!(fields, ["effect", "name"]);
+        assert_eq!(fields, ["category", "name"]);
+        assert!(key["category"].as_str().is_some_and(|c| !c.contains(' ')));
     }
     assert_eq!(claude[0]["files"], Value::Null);
     assert_eq!(claude[1]["keys"][0]["name"], "disableAllHooks");
@@ -478,4 +481,24 @@ fn a_codex_file_with_only_unrecognized_keys_is_said_to_hold_none_doctor_recogniz
         assert!(shown.contains(expected), "{expected}\n{shown}");
     }
     assert!(!shown.contains("sets nothing"), "{shown}");
+}
+
+#[test]
+fn the_text_says_once_per_provider_what_managed_keys_can_do_and_nothing_per_key() {
+    let (_root, report) = report_with_managed_settings();
+    let shown = report.to_text();
+    // One sentence for each provider that has sources, whatever their number.
+    assert_eq!(
+        shown.matches("These managed keys can change how").count(),
+        2
+    );
+    assert_eq!(shown.matches("settings-reference").count(), 1);
+    // A key line is a category and names: no verb says what a key does.
+    for line in shown.lines().filter(|l| l.starts_with("      ")) {
+        for claim in [
+            "ignored", "refuse", "reject", "enforce", "limits", "replaces",
+        ] {
+            assert!(!line.contains(claim), "{line}");
+        }
+    }
 }
