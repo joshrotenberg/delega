@@ -46,13 +46,7 @@ problem with what it blocks. The only provider process it starts is each
 provider's `--version` probe. It never prints an environment value, a deny rule
 or the content of a file.
 
-Exit status, for a report that was written:
-
-| Status | Meaning |
-| --- | --- |
-| 0 | A run can go ahead: at least one provider is ready, process inspection works and the configuration file, if there is one, can be used. |
-| 1 | No provider is ready, the configuration file is refused, or process inspection is unavailable. |
-| 2 | doctor itself cannot run, such as with an unusable current directory. |
+doctor exits 0 when a run can go ahead.
 
 A provider that is not installed is a problem for that provider and does not by
 itself make the status 1 when the other provider is ready. The problem kinds and

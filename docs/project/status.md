@@ -21,10 +21,10 @@ stands. This page lists the limits a user meets.
   live checks and the
   [remaining assumptions](../providers.md#unverified-against-the-real-cli).
 - **Permission modes.** `read` (default), `write` and `full`, plus exact
-  commands (`--allow-command`) and extra readable directories. A worker that
-  runs varying build and test commands needs `full` today, because `write` on
-  Claude Code runs only exactly granted commands and Codex's `write` sandbox
-  excludes temporary directories
+  commands (`--allow-command`) and extra readable directories. In delega's own
+  development, workers that build and run the test suite needed `full`, because
+  `write` on Claude Code runs only exactly granted commands and Codex's `write`
+  sandbox excludes temporary directories
   ([#98](https://github.com/joshrotenberg/delega/issues/98)). A fixed command
   can be granted with `--allow-command`.
   Codex confines neither reads nor commands, so a `read` or `write` Codex run is

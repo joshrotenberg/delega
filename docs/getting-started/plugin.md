@@ -36,9 +36,9 @@ Run it again after rebuilding delega to refresh the plugin. The plugin's version
 includes a digest of the copied executable, so a changed executable gets a new
 version and the hosts refresh their cached copy.
 
-`--output json` prints the command's report as one document, including for a
-failure that exits 1. An argument the parser rejects exits 2 with no JSON. The
-exit statuses are under [Install and uninstall](../api.md#install-and-uninstall).
+`--output json` prints the command's report as JSON. The exit statuses, and the
+cases with no report, are under
+[Install and uninstall](../api.md#install-and-uninstall).
 
 ## Reconnect the host session
 
@@ -60,9 +60,8 @@ its `running_revision` with `installed_revision` when both are present
 
 ## Use it
 
-From a host session with the plugin installed, a caller starts a worker with
-`start`, waits with `wait` (passing back the `cursor` it returns), reads the
-result with `read` and frees the worker with `close`. The
+The plugin gives a host session seven tools: `start`, `follow_up`, `wait`,
+`read`, `list`, `interrupt` and `close`. The
 [`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/skills/delegate/SKILL.md)
 and the [tool table](../api.md#mcp) describe the arguments and responses.
 
