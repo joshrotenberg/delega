@@ -7,9 +7,12 @@
 //! cloud and forge tokens, JSON web tokens, bearer tokens, private key blocks).
 //! The shapes are a heuristic, so a credential in an unusual form is not caught.
 
+use std::borrow::Cow;
+
 use super::limits::MIN_REDACTED_VALUE_CHARS;
 
-const MASK: &str = "[redacted]";
+/// What a removed secret is replaced with.
+pub(super) const MASK: &str = "[redacted]";
 
 /// What to remove.
 #[derive(Clone, Default)]
@@ -170,6 +173,40 @@ impl Redactor {
         values.sort_by_key(|v| std::cmp::Reverse(v.len()));
         values.dedup();
         Self { values }
+    }
+
+    /// `text` is the start of a capture whose beginning was cut off. When it
+    /// begins with the end of a known value (a proper suffix at least
+    /// [`MIN_REDACTED_VALUE_CHARS`] long), that end is replaced; the longest
+    /// one wins. Replacement characters at the very start, left by a
+    /// character the cut split, count as part of the value. [`Self::apply`]
+    /// cannot find such a value, because its beginning is gone.
+    pub fn mask_cut_start<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        let body = text.trim_start_matches(char::REPLACEMENT_CHARACTER);
+        let mut longest = 0;
+        for value in &self.values {
+            // The last suffix start that still leaves enough characters.
+            let Some((last, _)) = value.char_indices().rev().nth(MIN_REDACTED_VALUE_CHARS - 1)
+            else {
+                continue;
+            };
+            // Suffixes from the longest down, so the first match is this
+            // value's longest.
+            for (start, _) in value.char_indices().skip(1) {
+                let suffix = &value[start..];
+                if start > last || suffix.len() <= longest {
+                    break;
+                }
+                if body.starts_with(suffix) {
+                    longest = suffix.len();
+                    break;
+                }
+            }
+        }
+        if longest == 0 {
+            return Cow::Borrowed(text);
+        }
+        Cow::Owned(format!("{MASK}{}", &body[longest..]))
     }
 
     /// The text with every known value and credential-shaped string removed.

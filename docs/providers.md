@@ -227,11 +227,29 @@ marker never joins a word). After both cuts and the marker, the finished excerpt
 is redacted once more, so neither cut can leave a newly key-shaped string (such
 as the end of `xsk-ant-...` without its `x`) unredacted.
 
-The remaining limit: when standard error was longer than its 64 KiB capture,
-the start of the capture is a cut made before redaction. A secret cut there
-(part of a key, or a token whose `Bearer` was not captured) is not recognised.
-It could show only if redaction removes nearly all of the capture, so that the
-capture's start reaches the excerpt.
+When standard error was longer than its 64 KiB capture, the start of the
+capture is a cut made before redaction, and it can fall inside a secret: part of
+a key, a token whose `Bearer` was not captured, a private key whose `BEGIN` line
+was not captured, or half of a multi-byte character. The redactor cannot
+recognise what is left of it. Two things keep that text out of the excerpt, and
+neither applies to a capture that was not cut:
+
+- When the capture begins with the end of a value of a redacted variable (see
+  below), at least 6 characters of it, that end is replaced with `[redacted]`
+  first, however long it is.
+- The excerpt is taken only from redacted text after a guard at its start. The
+  guard is 13664 bytes: redaction keeps the order of the text and lengthens it
+  by at most 10 bytes for every 6 (a 6-character value becomes `[redacted]`),
+  so the first 8 KiB of the decoded capture end up within the first
+  8192 * 10 / 6, rounded up, plus 10 bytes of the redacted text. The guard is
+  cut from text that is already redacted, so it cannot split a secret that the
+  capture holds whole. When nothing but whitespace is left after the guard, the
+  message has no excerpt. This happens when redaction removes most of a cut
+  capture.
+
+The remaining limit: a credential-shaped secret that the capture's start cuts
+and of which more than 8 KiB was captured (a very long token or private key
+body, not a redacted variable's value) can still show its tail.
 
 A provider error message is kept whole and cut to its first 500 characters
 after redaction. Two kinds of text are replaced with `[redacted]`:

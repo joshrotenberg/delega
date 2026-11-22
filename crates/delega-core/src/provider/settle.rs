@@ -6,13 +6,14 @@ use serde_json::Value;
 use crate::contract::outcome::Outcome;
 use crate::contract::request::Provider;
 use crate::contract::result::{Cleanup, ErrorDetail, RunResult, Timing};
-use crate::process::{Ending, ProcessReport};
+use crate::process::{Captured, Ending, ProcessReport};
 
 use super::facts::Facts;
 use super::limits::{
-    PROVIDER_MESSAGE_CHARS, STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS,
+    MAX_STDERR_BYTES, MIN_REDACTED_VALUE_CHARS, PROVIDER_MESSAGE_CHARS, STDERR_CUT_START_BYTES,
+    STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS,
 };
-use super::redact::Redactor;
+use super::redact::{MASK, Redactor};
 use super::refusal::clip;
 use super::stream::{Parsed, Terminal};
 use super::structured;
@@ -116,17 +117,65 @@ fn error(kind: &str, message: impl Into<String>, code: Option<i32>) -> ErrorDeta
     }
 }
 
+/// How much of the start of the redacted text of a cut standard error capture
+/// is never shown, in bytes. Redaction keeps the order of the text and makes it
+/// longer by at most `MASK.len() / MIN_REDACTED_VALUE_CHARS` (a known value of
+/// [`MIN_REDACTED_VALUE_CHARS`] one-byte characters becomes [`MASK`]), and one
+/// replacement can lie across the end of any stretch of text. So the redacted
+/// image of the capture's first [`STDERR_CUT_START_BYTES`] lies within this
+/// many bytes of the redacted text.
+pub(super) const STDERR_CUT_GUARD_BYTES: usize =
+    (STDERR_CUT_START_BYTES * MASK.len()).div_ceil(MIN_REDACTED_VALUE_CHARS) + MASK.len();
+
+// What the guard's derivation relies on. A change to a constant that breaks
+// one of these must revisit the guard.
+const _: () = {
+    // A replacement is never shorter than the shortest value it replaces, so
+    // the factor is at least one and unredacted text is covered too.
+    assert!(MIN_REDACTED_VALUE_CHARS > 0 && MASK.len() >= MIN_REDACTED_VALUE_CHARS);
+    assert!(STDERR_CUT_GUARD_BYTES >= STDERR_CUT_START_BYTES + MASK.len());
+    assert!(
+        STDERR_CUT_GUARD_BYTES * MIN_REDACTED_VALUE_CHARS
+            >= (STDERR_CUT_START_BYTES + MIN_REDACTED_VALUE_CHARS) * MASK.len()
+    );
+    // A cut capture is full. Even if redaction leaves its length unchanged,
+    // text remains after the guard for a whole excerpt window.
+    assert!(STDERR_CUT_GUARD_BYTES + STDERR_SCAN_BYTES <= MAX_STDERR_BYTES);
+};
+
 /// The last part of the provider's standard error as one line, with secrets
-/// removed. All of the captured standard error is decoded and redacted first;
-/// only then is the excerpt cut from it: its last [`STDERR_SCAN_BYTES`],
-/// joined to one line, and its last [`STDERR_EXCERPT_CHARS`] characters, so
-/// these cuts cannot split a secret. A 300-character cut is marked by a
-/// leading `... ` (with a space, so it never joins a word), and the finished
-/// excerpt is redacted once more, in case a cut left a newly
-/// credential-shaped string.
+/// removed. See [`excerpt`].
 fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
-    let decoded = String::from_utf8_lossy(&report.stderr.bytes);
-    let redacted = redactor.apply(&decoded);
+    excerpt(&report.stderr, redactor)
+}
+
+/// The last part of a standard error capture as one line, with secrets
+/// removed. All of the capture is decoded and redacted first; only then is the
+/// excerpt cut from it: its last [`STDERR_SCAN_BYTES`], joined to one line,
+/// and its last [`STDERR_EXCERPT_CHARS`] characters, so these cuts cannot
+/// split a secret. A 300-character cut is marked by a leading `... ` (with a
+/// space, so it never joins a word), and the finished excerpt is redacted once
+/// more, in case a cut left a newly credential-shaped string.
+///
+/// A capture that was cut (standard error was longer than the capture) starts
+/// at a cut made before redaction, which can leave part of a secret that the
+/// redactor does not recognise. The end of a known value there is replaced
+/// first ([`Redactor::mask_cut_start`]), and the excerpt is taken only from
+/// redacted text after the first [`STDERR_CUT_GUARD_BYTES`]. That cut is made
+/// in text that is already redacted, so it cannot split a secret either.
+pub(super) fn excerpt(stderr: &Captured, redactor: &Redactor) -> Option<String> {
+    let decoded = String::from_utf8_lossy(&stderr.bytes);
+    let redacted = if stderr.truncated {
+        let mut redacted = redactor.apply(&redactor.mask_cut_start(&decoded));
+        let mut guard = STDERR_CUT_GUARD_BYTES.min(redacted.len());
+        while !redacted.is_char_boundary(guard) {
+            guard += 1;
+        }
+        redacted.drain(..guard);
+        redacted
+    } else {
+        redactor.apply(&decoded)
+    };
     let mut start = redacted.len().saturating_sub(STDERR_SCAN_BYTES);
     while !redacted.is_char_boundary(start) {
         start += 1;

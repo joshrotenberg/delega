@@ -123,6 +123,23 @@
 #                    key block (see key_block) that redaction shrinks to one
 #                    marker so TOKEN would reach the excerpt, and "end"
 #   stderr-first-line-kept  the lines "first line" and "second line"
+#   Standard error past the 64 KiB capture limit whose capture starts inside
+#   a secret (exit 3). "|" marks where the capture starts; after the fragment
+#   come newlines and 20 long sk-ant- keys (see secret_fill) up to exactly
+#   64 KiB, which redact to 20 markers:
+#   stderr-cut-key   "sk-ant-api03-abcdefghijkl|mnopqrstuvwxyz0123456789"
+#   stderr-cut-bearer  "Authorization: Bearer", a newline, "|abcdefghijklmnop123"
+#   stderr-cut-private-key  a private key BEGIN line, "MIIEbody|cutbodyline0123456789"
+#                    and the END line
+#   stderr-cut-char  "caf" and the two bytes of an e with acute accent, with
+#                    the capture starting at the second byte
+#   stderr-cut-value  the value of MY_SERVICE_API_TOKEN and a newline, then 20
+#                    keys of 2400 bytes: the capture starts inside the value
+#                    when it is longer than 17536 bytes
+#   stderr-cut-then-plain  the stderr-cut-key fragment, then 4679 lines
+#                    "ordinary line" and "end", so text is left after the guard
+#   stderr-full-not-cut  "first words", newlines and the 20 keys, exactly
+#                    64 KiB in all, so nothing is cut
 #   denied-result-text-error  a failed result with a Bash denial, no errors
 #                    and the result text "Connection reset"
 #   denied-refused-secret  the denied-refused result, its error naming Bash and
@@ -356,6 +373,20 @@ key_block() {
   printf '%s' '-----END RSA PRIVATE KEY-----'
 }
 
+# secret_fill COUNT BYTES: COUNT lines of BYTES bytes each (newline included),
+# every one an sk-ant- key, which the redactor replaces with one marker. A few
+# long ones fill a capture and redact to less than one excerpt, so the
+# capture's start reaches the excerpt unless it is guarded.
+secret_fill() {
+  fill_i=0
+  while [ "$fill_i" -lt "$1" ]; do
+    printf 'sk-ant-'
+    head -c $(($2 - 8)) /dev/zero | tr '\0' a
+    printf '\n'
+    fill_i=$((fill_i + 1))
+  done
+}
+
 # api_error_message FIELDS TEXT: a root assistant message marked
 # is_api_error_message, with the extra JSON members FIELDS and the text TEXT.
 api_error_message() {
@@ -571,6 +602,73 @@ case "$mode" in
   stderr-nbsp-at-window)
     init
     { printf 'Authorization: Bearer\302\240 abcdefghijklmnop123'; head -c 8167 /dev/zero | tr '\0' ' '; printf 'end'; } >&2
+    exit 3
+    ;;
+  stderr-cut-key)
+    init
+    {
+      printf 'sk-ant-api03-abcdefghijkl'
+      printf 'mnopqrstuvwxyz0123456789\n'
+      head -c 1511 /dev/zero | tr '\0' '\n'
+      secret_fill 20 3200
+    } >&2
+    exit 3
+    ;;
+  stderr-cut-bearer)
+    init
+    {
+      printf 'Authorization: Bearer\n'
+      printf 'abcdefghijklmnop123\n'
+      head -c 1516 /dev/zero | tr '\0' '\n'
+      secret_fill 20 3200
+    } >&2
+    exit 3
+    ;;
+  stderr-cut-private-key)
+    init
+    {
+      printf '%s\nMIIEbody' '-----BEGIN RSA PRIVATE KEY-----'
+      printf 'cutbodyline0123456789\n%s\n' '-----END RSA PRIVATE KEY-----'
+      head -c 1484 /dev/zero | tr '\0' '\n'
+      secret_fill 20 3200
+    } >&2
+    exit 3
+    ;;
+  stderr-cut-char)
+    init
+    {
+      printf 'caf\303'
+      printf '\251\n'
+      head -c 1534 /dev/zero | tr '\0' '\n'
+      secret_fill 20 3200
+    } >&2
+    exit 3
+    ;;
+  stderr-cut-value)
+    init
+    {
+      printf '%s\n' "$MY_SERVICE_API_TOKEN"
+      secret_fill 20 2400
+    } >&2
+    exit 3
+    ;;
+  stderr-cut-then-plain)
+    init
+    {
+      printf 'sk-ant-api03-abcdefghijkl'
+      printf 'mnopqrstuvwxyz0123456789\n\n'
+      yes 'ordinary line' | head -n 4679
+      printf 'end\n'
+    } >&2
+    exit 3
+    ;;
+  stderr-full-not-cut)
+    init
+    {
+      printf 'first words\n'
+      head -c 1524 /dev/zero | tr '\0' '\n'
+      secret_fill 20 3200
+    } >&2
     exit 3
     ;;
   stderr-first-line-kept)

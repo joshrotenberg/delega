@@ -1237,13 +1237,135 @@ async fn stderr_excerpt_redacts_a_token_whose_bearer_is_just_before_the_excerpt_
 
 #[tokio::test]
 async fn stderr_excerpt_redacts_a_token_on_the_line_after_a_bearer_8_kib_into_a_cut_capture() {
+    // Redaction leaves less of this cut capture than the guard at its start,
+    // so there is no excerpt at all.
     stderr_excerpt_hides(
         "stderr-bearer-at-8k-of-capture",
         "abcdefghijklmnop123",
-        "end",
+        "without a final result",
     )
     .await;
 }
+
+/// A fake mode that exits 3 after more standard error than the capture
+/// holds, with the capture starting inside a secret and the rest redacting to
+/// less than one excerpt: nothing of `hidden` may be in the error. The guard
+/// at the start of a cut capture leaves no text here, so there is no excerpt.
+async fn cut_capture_hides(provider: Provider, mode: &str, hidden: &[&str]) {
+    let error = failure_of(provider, mode).await;
+    assert_eq!(error.kind, "provider_exit", "{mode}");
+    for text in hidden {
+        assert!(!error.message.contains(text), "{mode}: {}", error.message);
+    }
+    assert_eq!(
+        error.message, "the provider exited with code 3 without a final result",
+        "{mode}"
+    );
+}
+
+async fn cut_key(provider: Provider) {
+    cut_capture_hides(provider, "stderr-cut-key", &["mnopqrstuvwxyz0123456789"]).await;
+}
+both!(
+    stderr_excerpt_hides_the_end_of_a_key_cut_by_the_start_of_the_capture,
+    cut_key
+);
+
+async fn cut_bearer(provider: Provider) {
+    cut_capture_hides(provider, "stderr-cut-bearer", &["abcdefghijklmnop123"]).await;
+}
+both!(
+    stderr_excerpt_hides_a_token_whose_bearer_line_is_before_the_capture,
+    cut_bearer
+);
+
+async fn cut_private_key(provider: Provider) {
+    cut_capture_hides(
+        provider,
+        "stderr-cut-private-key",
+        &["cutbodyline0123456789", "PRIVATE KEY"],
+    )
+    .await;
+}
+both!(
+    stderr_excerpt_hides_a_private_key_body_whose_begin_line_is_before_the_capture,
+    cut_private_key
+);
+
+async fn cut_char(provider: Provider) {
+    cut_capture_hides(provider, "stderr-cut-char", &["\u{FFFD}"]).await;
+}
+both!(
+    stderr_excerpt_hides_a_character_cut_by_the_start_of_the_capture,
+    cut_char
+);
+
+async fn cut_value(provider: Provider) {
+    // 21000 bytes, longer than the guard, in distinct 7-byte pieces. The
+    // capture keeps its last 17536 bytes, so more than the guard removes.
+    let value: String = (0..3000).map(|i| format!("v{i:05}q")).collect();
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    options
+        .env_set
+        .push(("MY_SERVICE_API_TOKEN".into(), value.clone()));
+    let result = run_checked(rig.request(provider, "stderr-cut-value"), options).await;
+    assert_eq!(result.outcome, Outcome::Failed, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "provider_exit");
+    for piece in ["v02999q", "v02990q", "q"] {
+        assert!(!error.message.contains(piece), "{}", error.message);
+    }
+    assert_eq!(
+        error.message,
+        "the provider exited with code 3 without a final result"
+    );
+    rig.assert_nothing_left().await;
+}
+both!(
+    stderr_excerpt_hides_the_end_of_a_long_known_value_cut_by_the_start_of_the_capture,
+    cut_value
+);
+
+async fn cut_then_plain(provider: Provider) {
+    let error = failure_of(provider, "stderr-cut-then-plain").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert!(
+        error
+            .message
+            .contains("its standard error ended with: ... "),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.ends_with("ordinary line ordinary line end"),
+        "{}",
+        error.message
+    );
+}
+both!(
+    stderr_excerpt_of_a_cut_capture_still_shows_text_after_the_guard,
+    cut_then_plain
+);
+
+async fn full_not_cut(provider: Provider) {
+    // Exactly as much standard error as the capture holds: nothing was cut,
+    // so its first words are shown as before.
+    let error = failure_of(provider, "stderr-full-not-cut").await;
+    assert_eq!(error.kind, "provider_exit");
+    let masks = vec!["[redacted]"; 20].join(" ");
+    assert_eq!(
+        error.message,
+        format!(
+            "the provider exited with code 3 without a final result; its standard error ended \
+             with: first words {masks}"
+        )
+    );
+}
+both!(
+    stderr_excerpt_of_a_full_capture_that_was_not_cut_keeps_its_first_words,
+    full_not_cut
+);
 
 #[tokio::test]
 async fn stderr_excerpt_redacts_a_token_whose_bearer_is_on_the_line_before_the_excerpt() {

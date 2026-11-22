@@ -22,6 +22,7 @@ mod deny;
 mod dry;
 mod enforce;
 mod env;
+mod excerpt;
 mod hook;
 mod injection;
 mod mapping;
