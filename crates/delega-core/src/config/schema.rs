@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::{
     Config, MAX_LIVE_WORKERS_BOUND, MAX_QUEUED_PER_WORKER_BOUND, MAX_RUNNING_RUNS_BOUND,
-    SCHEMA_VERSION, WAIT_BOUND_SECS,
+    MAX_WAITS_IN_FLIGHT_BOUND, SCHEMA_VERSION, WAIT_BOUND_SECS,
 };
 use crate::contract::limits::{MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
 
@@ -62,6 +62,12 @@ pub(super) fn refine_mcp(schema: &mut Schema) {
     );
     range(schema, "wait_default_secs", 0, WAIT_BOUND_SECS);
     range(schema, "wait_ceiling_secs", 1, WAIT_BOUND_SECS);
+    range(
+        schema,
+        "max_waits_in_flight",
+        1,
+        MAX_WAITS_IN_FLIGHT_BOUND as u64,
+    );
 }
 
 /// The schema as the generator makes it, refined.

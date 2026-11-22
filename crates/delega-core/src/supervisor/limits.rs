@@ -24,6 +24,16 @@ pub const RETENTION: Duration = Duration::from_secs(60 * 60);
 pub const WAIT_CEILING: Duration = Duration::from_secs(300);
 /// The timeout `wait` uses when the caller gives none.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
+/// Most waits that may block at once. A wait counts while its caller is
+/// blocked: from when it found nothing to report until it is woken, its time
+/// passes, shutdown releases it or its caller goes away. A wait that is
+/// answered at once takes no slot, and neither does one given no time
+/// (`timeout_secs: 0`), which never blocks and is never turned away. A wait that would block beyond the limit is not
+/// registered: it returns at once with the current states and
+/// `limit_reached: "max_waits_in_flight"`. The MCP server handles 128 requests
+/// at once and a wait can hold one for [`WAIT_CEILING`], so this keeps at least
+/// half of them free for `interrupt`, `close`, `start` and the reads.
+pub const MAX_WAITS_IN_FLIGHT: usize = 64;
 
 /// The longest `shutdown` waits for runs to settle after asking them to stop.
 /// The process layer bounds each stop on its own, by its cleanup deadline.

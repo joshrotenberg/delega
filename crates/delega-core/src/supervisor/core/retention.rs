@@ -61,7 +61,9 @@ pub(super) fn weigh(result: &RunResult, activity: &Activity) -> usize {
 impl Core {
     /// Drop finished runs beyond the count or the byte bound, or older than
     /// the retention time. The newest result is never dropped for size.
-    pub(super) fn prune(&mut self, now: Instant) {
+    /// Returns whether a run or a worker was removed.
+    pub(super) fn prune(&mut self, now: Instant) -> bool {
+        let mut removed = false;
         let limits = &self.config.limits;
         let (max, max_bytes, age) = (
             limits.retained_results,
@@ -81,12 +83,15 @@ impl Core {
             }
             if let Some(id) = self.finished.pop_front() {
                 self.evict(&id);
+                removed = true;
             }
         }
         // A closed worker with nothing kept is gone, however it got there.
+        let workers = self.workers.len();
         self.workers.retain(|_, w| {
             !(w.closed && w.runs.is_empty() && w.current.is_none() && w.queue.is_empty())
         });
+        removed || self.workers.len() != workers
     }
 
     fn evict(&mut self, id: &str) {

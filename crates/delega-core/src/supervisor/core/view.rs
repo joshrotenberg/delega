@@ -180,6 +180,8 @@ impl Core {
                 retention_secs: limits.retention.as_secs(),
                 wait_ceiling_secs: limits.wait_ceiling.as_secs(),
                 default_wait_secs: limits.wait_default.as_secs(),
+                max_waits_in_flight: limits.max_waits_in_flight,
+                waits_in_flight: self.waits_in_flight(),
             },
             workers: workers
                 .into_iter()

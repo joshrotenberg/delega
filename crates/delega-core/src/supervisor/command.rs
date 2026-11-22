@@ -4,6 +4,10 @@
 //! wait for a run, such as `wait` or `interrupt`, replies at once with
 //! something to wait on, so the supervisor's task never waits for a provider.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
 use tokio::sync::oneshot;
 
 use crate::contract::applied::Applied;
@@ -25,11 +29,19 @@ pub(super) enum WaitStart {
     /// Shutdown has begun and the wait has a cursor, so it answers at once
     /// without anything named having finished after the cursor.
     Released,
+    /// Nothing named has finished and the wait is not registered: either it
+    /// was given no time, or it would block and as many waits as the limit
+    /// allows are blocked already. This is its answer, built in the same
+    /// command.
+    Answered(Box<WaitResponse>),
     /// Registered. `rx` fires when something named finishes, or when shutdown
-    /// releases the wait.
+    /// releases the wait. The caller clears `blocked` as soon as it stops
+    /// waiting for `rx`, so the registration no longer counts as a wait in
+    /// flight, and keeps `rx` until it has its view.
     Pending {
         id: u64,
         rx: oneshot::Receiver<Wake>,
+        blocked: Arc<AtomicBool>,
     },
 }
 
@@ -95,6 +107,8 @@ pub(super) enum Command {
     Wait {
         targets: WaitTargets,
         after: Option<u64>,
+        /// The time the wait may block, after the default and the ceiling.
+        applied: Duration,
         reply: Reply<WaitStart>,
     },
     WaitView {
@@ -154,6 +168,10 @@ pub(super) enum Command {
     },
     /// Stop everything and end the task.
     Quit,
+    /// Move the time retention reads forward by this much, and do nothing
+    /// else: what has aged out is pruned by the command that follows.
+    #[cfg(test)]
+    AdvanceRetentionClock(Duration),
     /// Make the task panic.
     #[cfg(test)]
     PanicForTest,

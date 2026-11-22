@@ -65,8 +65,19 @@
         "description": "True when shutdown released the wait. Nothing named need have finished:\na run can still be `running` while it is stopped, so `timed_out: false`\ndoes not mean something finished. Absent otherwise.",
         "type": "boolean"
       },
+      "limit_reached": {
+        "description": "Set when the wait would have blocked and as many waits as\n`max_waits_in_flight` allows were blocked already. The wait did not\nblock: `timeout_secs` is 0 and the states are current, as for a wait\nasked with `timeout_secs: 0`. Absent otherwise.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WaitLimit"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "timeout_secs": {
-        "description": "The wait that applied, in seconds, after the ceiling.",
+        "description": "The wait that applied, in seconds, after the ceiling. 0 when\n`limit_reached` is set.",
         "type": "integer",
         "format": "uint64",
         "minimum": 0
@@ -102,6 +113,16 @@
       "unknown"
     ],
     "$defs": {
+      "WaitLimit": {
+        "description": "The limit that kept a `wait` from blocking.",
+        "oneOf": [
+          {
+            "description": "As many waits as `max_waits_in_flight` allows were blocked already.",
+            "type": "string",
+            "const": "max_waits_in_flight"
+          }
+        ]
+      },
       "RunBrief": {
         "description": "One run in a `wait` response.",
         "type": "object",

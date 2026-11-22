@@ -44,7 +44,7 @@
 
 #![cfg(unix)]
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -82,7 +82,8 @@ pub use state::{IllegalTransition, RunState, WorkerState};
 pub use views::{
     CloseResponse, CompactResult, Detail, FollowUpResponse, InterruptResponse, LimitsView,
     ListResponse, ProgressView, ReadResponse, ResultView, RunBrief, RunDiagnostics, ShutdownReport,
-    StartResponse, Target, TextWindow, WaitResponse, WaitTargets, WorkerBrief, WorkerView,
+    StartResponse, Target, TextWindow, WaitLimit, WaitResponse, WaitTargets, WorkerBrief,
+    WorkerView,
 };
 
 use command::{Closing, Command, Stopping, WaitStart, Wake};
@@ -360,6 +361,15 @@ impl Supervisor {
     /// ceiling. With `after_cursor`, returns at once if anything named
     /// finished after it. Pass the response's `cursor` back as `after_cursor`.
     /// Unknown ids are listed in `unknown`; the rest are still waited for.
+    ///
+    /// At most `Limits::max_waits_in_flight` waits block at once
+    /// ([`limits::MAX_WAITS_IN_FLIGHT`] unless changed). A wait that would
+    /// block beyond that returns at once with the current states,
+    /// `timeout_secs: 0` and `limit_reached`; a wait that has something to
+    /// report is answered whatever the count. A wait whose applied timeout is
+    /// zero never blocks, so it takes no slot and is never turned away. A wait
+    /// stops counting when its time has passed or it is woken, and when its
+    /// future is dropped.
     pub async fn wait(
         &self,
         targets: WaitTargets,
@@ -374,6 +384,7 @@ impl Supervisor {
             .call(|reply| Command::Wait {
                 targets: targets.clone(),
                 after: after_cursor,
+                applied,
                 reply,
             })
             .await??;
@@ -385,8 +396,17 @@ impl Supervisor {
         let (waiter, timed_out, released) = match start {
             WaitStart::Ready => (None, false, false),
             WaitStart::Released => (None, false, true),
-            WaitStart::Pending { id, mut rx } => {
+            WaitStart::Answered(view) => return Ok(*view),
+            WaitStart::Pending {
+                id,
+                mut rx,
+                blocked,
+            } => {
                 let woke = bound::within(applied, &self.shared.wall_clock, &mut rx).await;
+                // The wait blocks no longer, so it stops counting against
+                // `max_waits_in_flight` here, not when the view removes the
+                // registration: the view is another round trip.
+                blocked.store(false, Ordering::SeqCst);
                 match woke {
                     Some(woke) => (None, false, matches!(woke, Ok(Wake::Shutdown))),
                     None => {
@@ -415,6 +435,22 @@ impl Supervisor {
             response.released_by_shutdown |= matches!(rx.try_recv(), Ok(Wake::Shutdown));
         }
         Ok(response)
+    }
+
+    /// The limits this supervisor enforces, with every lower bound applied.
+    pub fn limits(&self) -> Limits {
+        self.shared.config.limits.clone().normalized()
+    }
+
+    /// Test only: make retention read time as `by` later than it does now, so
+    /// a result ages out without real time passing. Nothing is pruned until
+    /// the next command.
+    #[cfg(test)]
+    pub(crate) fn advance_retention_clock(&self, by: Duration) {
+        self.shared
+            .tx
+            .send(Command::AdvanceRetentionClock(by))
+            .expect("the supervisor's task is running");
     }
 
     /// Test only: hold the next `wait` after its timeout has elapsed and before

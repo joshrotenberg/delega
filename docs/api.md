@@ -618,8 +618,10 @@ for the supervisor, with the `[mcp]` limits of the configuration file applied: f
 run, the default and the range of the time limit, the output bounds and the
 version probe limit; for the supervisor (see
 [supervisor.md](supervisor.md#limits-and-defaults)), the worker, run and queue
-limits, retention by count, size and time, the default wait and its ceiling, and
-the cap on outstanding request checks; the skills built into this
+limits, retention by count, size and time, the default wait, its ceiling and
+how many waits may block at once (the configured limit: `doctor` is a process
+of its own and cannot see a server's open waits, which that server's `list`
+reports as `waits_in_flight`), and the cap on outstanding request checks; the skills built into this
 executable with their digests, as `delega version --output json` lists them; and
 whether process inspection works, by running one `ps` listing as cleanup does.
 
@@ -850,6 +852,7 @@ max_running_runs = 2
 max_queued_per_worker = 4
 wait_default_secs = 20
 wait_ceiling_secs = 120
+max_waits_in_flight = 32
 ```
 
 **Location.** `DELEGA_CONFIG`, when set and not empty, names the file and must be
@@ -874,7 +877,7 @@ otherwise, and an unknown key is refused at any level, naming it (such as
 | `[env]` `pass` | A list of names, as `--env NAME`. |
 | `[env.set]` | Names set to string values, as `--env NAME=VALUE`. A value is never printed, in a result, a report, a message or a debug text. |
 | `[providers.claude]`, `[providers.codex]` `executable` | An absolute path. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` overrides it; it comes before `PATH` ([providers.md](providers.md#finding-the-executable)). |
-| `[mcp]` | The supervisor's limits, each bounded by the constant that is its default today, so the file can lower a limit and cannot raise one: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300 and `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300). A file that lowers only the ceiling lowers the default with it, so `list` and `doctor` report what a wait applies. Only `delega mcp` uses them; `delega doctor` shows them. |
+| `[mcp]` | The supervisor's limits, each bounded by the constant that is its default today, so the file can lower a limit and cannot raise one: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300, `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300), and `max_waits_in_flight` 1 to 64 (the server handles 128 requests at once, so waits never take more than half of them). A file that lowers only the ceiling lowers the default with it, so `list` and `doctor` report what a wait applies. Only `delega mcp` uses them; `delega doctor` shows them. |
 
 The names in `[env]` follow the rules and have the refusals of `--env` ([Command
 line](#command-line)): an invalid name is `invalid_env_name`, a calling-session,
@@ -955,9 +958,9 @@ eighth, `respond`, when live asking is added.
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
-| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. |
+| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` is present, and otherwise absent, when the wait would have blocked and as many waits as the server allows were blocked already: it returned at once with `timeout_secs: 0`, `timed_out: true` and the current states. A wait asked with `timeout_secs: 0` never gets it. |
 | `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
-| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`) and in use; a `cursor`. |
+| `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`, and `max_waits_in_flight`) and in use (including `waits_in_flight`); a `cursor`. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
 | `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
 | `close` | `worker` | Stops the worker's running run (at most 30 s), discards queued runs and frees its slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. Results already produced stay readable for the retention time. Closing again answers the same way. |
@@ -1118,6 +1121,17 @@ Rules that hold for every tool:
 - **Wait.** `timeout_secs` defaults to 30 (`mcp.wait_default_secs`) and is
   capped by the wait ceiling (300, `mcp.wait_ceiling_secs`). It is counted in
   awake time and checked against wall time, as the rule on starting says.
+  At most 64 waits block at once (`mcp.max_waits_in_flight`, which can lower it;
+  `list` reports `max_waits_in_flight` and `waits_in_flight`). The server
+  handles 128 requests at once and a wait can hold one for the whole ceiling,
+  so this leaves at least half of them to `interrupt`, `close`, `start` and the
+  reads. A wait that would block beyond the limit is not queued: it returns at
+  once with the current states, `timeout_secs: 0`, `timed_out: true` and
+  `limit_reached: "max_waits_in_flight"`. Let an open wait return, or call
+  again later with the cursor. A wait that has something to report is answered
+  whatever the count, and so is a wait whose applied timeout is 0, which never
+  blocks and never carries `limit_reached`. A wait stops counting when its time
+  has passed, when it is woken or when its request is cancelled.
   `read` takes `text_offset`, a number of characters, to page a long answer;
   page by run id, because a worker's latest run can change between pages.
 

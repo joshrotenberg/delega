@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use super::{Rig, finished, result_of};
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::request::Provider;
-use delega_core::supervisor::{Error, Limits, RunState, Supervisor, WaitTargets, WorkerState};
+use delega_core::supervisor::{
+    Error, Limits, RunState, Supervisor, Target, WaitLimit, WaitTargets, WorkerState,
+};
 
 fn runs(ids: &[&str]) -> WaitTargets {
     WaitTargets {
@@ -460,4 +462,324 @@ async fn shutdown_releases_a_wait_whose_cursor_no_run_will_pass() {
         .expect("wait answers");
     assert!(!late.timed_out, "{late:#?}");
     rig.assert_nothing_left().await;
+}
+
+/// How long a call that must not block may take. It does no waiting, so this
+/// is generous for a loaded machine and far below any wait a test parks.
+const AT_ONCE: Duration = Duration::from_secs(10);
+/// The timeout of a wait a test parks: longer than the test, so it only
+/// returns because something woke it.
+const PARKED_SECS: u64 = 120;
+
+fn limited(rig: &Rig, max_waits_in_flight: usize) -> Supervisor {
+    let limits = Limits {
+        max_waits_in_flight,
+        ..Limits::default()
+    };
+    Supervisor::new(rig.config_with(Provider::Claude, limits))
+}
+
+fn park(
+    supervisor: &Supervisor,
+    targets: WaitTargets,
+) -> tokio::task::JoinHandle<Result<delega_core::supervisor::WaitResponse, Error>> {
+    let supervisor = supervisor.clone();
+    tokio::spawn(async move { supervisor.wait(targets, Some(PARKED_SECS), None).await })
+}
+
+/// Poll `list` until it reports `count` waits in flight.
+async fn waits_in_flight(supervisor: &Supervisor, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut seen = usize::MAX;
+    while Instant::now() < deadline {
+        seen = supervisor
+            .list()
+            .await
+            .expect("list")
+            .limits
+            .waits_in_flight;
+        if seen == count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("waits in flight stayed at {seen}, expected {count}");
+}
+
+#[tokio::test]
+async fn a_wait_past_the_limit_returns_at_once_and_list_and_interrupt_still_answer() {
+    let rig = Rig::new();
+    let supervisor = limited(&rig, 2);
+    let (held, quick) = (rig.gate("held"), rig.gate("quick"));
+    let a = supervisor
+        .start(rig.request(Provider::Claude, &held.prompt()))
+        .await
+        .expect("start");
+    let b = supervisor
+        .start(rig.request(Provider::Claude, &quick.prompt()))
+        .await
+        .expect("start");
+    held.started().await;
+    quick.open();
+    result_of(&supervisor, &b.run).await;
+
+    let parked = [
+        park(&supervisor, runs(&[&a.run])),
+        park(&supervisor, runs(&[&a.run])),
+    ];
+    waits_in_flight(&supervisor, 2).await;
+
+    // The next wait that would block is answered instead of queued.
+    let begun = Instant::now();
+    let refused = supervisor
+        .wait(runs(&[&a.run]), Some(PARKED_SECS), None)
+        .await
+        .expect("a wait past the limit is a response, not an error");
+    assert!(begun.elapsed() < AT_ONCE, "{:?}", begun.elapsed());
+    assert_eq!(refused.limit_reached, Some(WaitLimit::MaxWaitsInFlight));
+    assert_eq!(refused.timeout_secs, 0);
+    assert!(refused.timed_out);
+    assert!(!refused.released_by_shutdown);
+    assert_eq!(refused.runs[0].state, RunState::Running);
+    assert!(refused.cursor > 0);
+    // The same with a cursor: the cursor it gets back is good for the next call.
+    let polled = supervisor
+        .wait(runs(&[&a.run]), Some(PARKED_SECS), Some(refused.cursor))
+        .await
+        .expect("wait");
+    assert_eq!(polled.limit_reached, Some(WaitLimit::MaxWaitsInFlight));
+    assert_eq!(polled.runs[0].changed, Some(false));
+
+    // A wait given no time never blocks, so the limit does not apply to it.
+    let poll = supervisor
+        .wait(runs(&[&a.run]), Some(0), None)
+        .await
+        .expect("wait");
+    assert_eq!(poll.limit_reached, None, "{poll:#?}");
+    assert!(poll.timed_out);
+    assert_eq!(poll.timeout_secs, 0);
+    assert_eq!(poll.runs[0].state, RunState::Running);
+
+    // A wait with something to report takes no slot and is served at the limit.
+    let begun = Instant::now();
+    let ready = supervisor
+        .wait(runs(&[&a.run, &b.run]), Some(PARKED_SECS), None)
+        .await
+        .expect("wait");
+    assert!(begun.elapsed() < AT_ONCE, "{:?}", begun.elapsed());
+    assert_eq!(ready.limit_reached, None);
+    assert!(!ready.timed_out);
+    let unknown = supervisor
+        .wait(runs(&["no-such-run"]), Some(PARKED_SECS), None)
+        .await
+        .expect("wait");
+    assert_eq!(unknown.limit_reached, None);
+    assert_eq!(unknown.unknown, ["no-such-run"]);
+
+    // The parked waits hold nothing else back.
+    let begun = Instant::now();
+    let listed = supervisor.list().await.expect("list");
+    assert!(begun.elapsed() < AT_ONCE, "{:?}", begun.elapsed());
+    assert_eq!(listed.limits.max_waits_in_flight, 2);
+    assert_eq!(listed.limits.waits_in_flight, 2);
+    let stopped = supervisor
+        .interrupt(Target::Run(a.run.clone()))
+        .await
+        .expect("interrupt answers while the waits are parked");
+    assert!(stopped.settled, "{stopped:#?}");
+
+    // The interrupt finished the run, which wakes the parked waits.
+    for wait in parked {
+        let response = wait.await.expect("task").expect("wait");
+        assert!(!response.timed_out, "{response:#?}");
+        assert_eq!(response.limit_reached, None);
+        assert_eq!(response.timeout_secs, PARKED_SECS);
+    }
+    waits_in_flight(&supervisor, 0).await;
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_that_times_out_frees_its_slot() {
+    let rig = Rig::new();
+    let supervisor = limited(&rig, 1);
+    let gate = rig.gate("timeout");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+
+    let timed_out = supervisor
+        .wait(runs(&[&started.run]), Some(1), None)
+        .await
+        .expect("wait");
+    assert!(timed_out.timed_out);
+    assert_eq!(timed_out.limit_reached, None);
+    assert_eq!(timed_out.timeout_secs, 1);
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
+
+    // The slot is free: the next wait parks instead of being turned away.
+    let parked = park(&supervisor, runs(&[&started.run]));
+    waits_in_flight(&supervisor, 1).await;
+    gate.open();
+    let response = parked.await.expect("task").expect("wait");
+    assert_eq!(response.limit_reached, None);
+    assert!(!response.timed_out);
+    waits_in_flight(&supervisor, 0).await;
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_whose_default_timeout_is_zero_is_a_poll_and_is_never_turned_away_for_the_limit() {
+    let rig = Rig::new();
+    let limits = Limits {
+        max_waits_in_flight: 1,
+        wait_default: Duration::ZERO,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
+    let gate = rig.gate("poll");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    let parked = park(&supervisor, runs(&[&started.run]));
+    waits_in_flight(&supervisor, 1).await;
+
+    for timeout in [None, Some(0)] {
+        let poll = supervisor
+            .wait(runs(&[&started.run]), timeout, None)
+            .await
+            .expect("wait");
+        assert_eq!(poll.limit_reached, None, "{timeout:?}: {poll:#?}");
+        assert!(poll.timed_out, "{timeout:?}");
+        assert_eq!(poll.timeout_secs, 0, "{timeout:?}");
+    }
+    // The polls took no slot and left the parked wait alone.
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 1, "{listed:#?}");
+    // A poll still reports a finish.
+    gate.open();
+    let woken = parked.await.expect("task").expect("wait");
+    assert!(!woken.timed_out, "{woken:#?}");
+    let poll = supervisor
+        .wait(runs(&[&started.run]), None, None)
+        .await
+        .expect("wait");
+    assert!(!poll.timed_out, "{poll:#?}");
+    assert_eq!(poll.runs[0].state, RunState::Finished);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_wait_whose_caller_went_away_frees_its_slot() {
+    let rig = Rig::new();
+    let supervisor = limited(&rig, 1);
+    let gate = rig.gate("dropped");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+
+    let abandoned = park(&supervisor, runs(&[&started.run]));
+    waits_in_flight(&supervisor, 1).await;
+    let refused = supervisor
+        .wait(runs(&[&started.run]), Some(PARKED_SECS), None)
+        .await
+        .expect("wait");
+    assert_eq!(refused.limit_reached, Some(WaitLimit::MaxWaitsInFlight));
+
+    // Dropping the future mid-wait is what a cancelled MCP request does.
+    abandoned.abort();
+    assert!(abandoned.await.expect_err("aborted").is_cancelled());
+    waits_in_flight(&supervisor, 0).await;
+
+    let parked = park(&supervisor, runs(&[&started.run]));
+    waits_in_flight(&supervisor, 1).await;
+    gate.open();
+    let response = parked.await.expect("task").expect("wait");
+    assert_eq!(response.limit_reached, None);
+    assert!(!response.timed_out);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn shutdown_frees_the_slots_of_the_waits_it_releases() {
+    let rig = Rig::new();
+    let supervisor = limited(&rig, 1);
+    let gate = rig.gate("released");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    let parked = {
+        let supervisor = supervisor.clone();
+        let targets = runs(&[&started.run]);
+        tokio::spawn(async move {
+            supervisor
+                .wait(targets, Some(PARKED_SECS), Some(u64::MAX / 2))
+                .await
+        })
+    };
+    waits_in_flight(&supervisor, 1).await;
+    supervisor.shutdown().await;
+    let response = parked.await.expect("task").expect("wait");
+    assert!(response.released_by_shutdown, "{response:#?}");
+    assert_eq!(response.limit_reached, None);
+    assert_eq!(
+        supervisor
+            .list()
+            .await
+            .expect("list")
+            .limits
+            .waits_in_flight,
+        0
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_limit_of_no_waits_is_raised_to_one_so_a_wait_can_still_block() {
+    let rig = Rig::new();
+    let supervisor = limited(&rig, 0);
+    let gate = rig.gate("one");
+    let started = supervisor
+        .start(rig.request(Provider::Claude, &gate.prompt()))
+        .await
+        .expect("start");
+    gate.started().await;
+    assert_eq!(
+        supervisor
+            .list()
+            .await
+            .expect("list")
+            .limits
+            .max_waits_in_flight,
+        1
+    );
+    let parked = park(&supervisor, runs(&[&started.run]));
+    waits_in_flight(&supervisor, 1).await;
+    gate.open();
+    let response = parked.await.expect("task").expect("wait");
+    assert_eq!(response.limit_reached, None);
+    assert!(!response.timed_out);
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[test]
+fn the_default_limit_on_waits_is_the_named_constant() {
+    assert_eq!(
+        Limits::default().max_waits_in_flight,
+        delega_core::supervisor::limits::MAX_WAITS_IN_FLIGHT
+    );
 }

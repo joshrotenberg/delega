@@ -18,7 +18,7 @@ worker, which continues the worker's provider session.
 | --- | --- | --- | --- |
 | `start(Request)` | `start` | no | `StartResponse`: worker id, run id, state `queued` or `running`. |
 | `follow_up(worker, prompt, timeout_secs?)` | `follow_up` | no | `StartResponse` for the new run. |
-| `wait(WaitTargets, timeout_secs?, after_cursor?)` | `wait` | yes, bounded | `WaitResponse`: current states, a cursor, `timed_out`, `unknown`. |
+| `wait(WaitTargets, timeout_secs?, after_cursor?)` | `wait` | yes, bounded | `WaitResponse`: current states, a cursor, `timed_out`, `unknown`, and `limit_reached` when the wait was not allowed to block. |
 | `read(Target, Detail, after_cursor?)` | `read` | no | `ReadResponse`: the result, or progress. |
 | `list()` | `list` | no | `ListResponse`: workers, limits and use. |
 | `interrupt(Target)` | `interrupt` | yes, bounded | `InterruptResponse`: the result. |
@@ -98,6 +98,7 @@ All defaults are named constants in `supervisor/limits.rs`.
 | `retention` | 1 hour | How long a finished result stays readable. |
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. The time a `wait` applies is counted in awake time and checked against wall time; see [How the bounds count time](#how-the-bounds-count-time). |
 | `wait_default` | 30 s | Used when `wait` gets no `timeout_secs` (`Limits::wait_default`, reported by `list` as `default_wait_secs`; `delega mcp` sets it from `mcp.wait_default_secs` of the [configuration file](api.md#configuration-file)). The ceiling is kept high for library callers; the MCP layer should keep each wait short, well inside what a tool-calling client allows for one call, and rely on the cursor to continue. |
+| `max_waits_in_flight` | 64 | Waits blocked at once. A wait counts while its caller is blocked: from when it found nothing to report until it is woken, its time passes, shutdown releases it or its caller drops it. A wait that is answered at once takes no slot, and neither does a wait whose applied timeout is 0, which never blocks and is never turned away. A wait that would block beyond the limit is not registered and returns at once with `limit_reached: "max_waits_in_flight"`; see [Waiting and cursors](#waiting-and-cursors). At least 1. `list` reports it with `waits_in_flight`. The MCP server handles 128 requests at once, so at least half stay free for `interrupt`, `close`, `start` and the reads; `delega-mcp` asserts this at compile time, and `mcp.max_waits_in_flight` of the [configuration file](api.md#configuration-file) can lower the limit and cannot raise it. |
 | preflight bound | 10 s | The longest `start` spends checking paths, the executable and the schema before it is admitted. |
 | outstanding request checks | 16 | Request checks that have started and not ended, each on an OS thread of its own. A check that timed out still counts until its thread ends. A start that finds all 16 busy waits for a slot without holding a thread, and the wait counts against the preflight bound measured from when the start began. If no slot frees in time it is refused, kind `preflight_timeout`. A burst of concurrent starts is served in turn, not refused. The value is `MAX_LIVE_WORKERS`; a hung filesystem costs at most 16 threads. `list` does not report it. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer; `text_offset` pages through the rest. |
@@ -205,6 +206,20 @@ carries its value as `cursor`.
 - An id that names nothing is listed in `unknown`; the known ones are still
   waited for, and a call whose ids are all unknown returns at once.
 - A call with no ids is an `InvalidArguments` error.
+- At most `max_waits_in_flight` waits block at once (64 by default). A wait
+  that would block when that many already do returns at once, as a wait with
+  `timeout_secs: 0` does: the current states, `timed_out` true, `timeout_secs`
+  0 (the wait that applied) and `limit_reached: "max_waits_in_flight"`, which
+  is absent from every other answer. Its cursor is good for the next call. A
+  wait that has something to report, or whose ids are all unknown, is answered
+  whatever the count. A wait whose applied timeout is 0 (`timeout_secs: 0`, or
+  none given with a `wait_default` of 0) is a poll: it is never registered,
+  takes no slot and never carries `limit_reached`. The count is taken from the registrations whose caller is
+  still blocked, so a slot frees when a wait is woken, as soon as its time has
+  passed (before it asks for its answer), when shutdown releases it and when
+  the caller drops the future mid-wait. When retention removes the run or
+  worker a parked wait named, the wait is woken before the command that
+  follows is applied, so it does not hold a slot against that command.
 
 The wait itself happens in the caller's task. The supervisor's task registers
 the wait and later builds the answer from current states, so it never blocks.
@@ -393,7 +408,10 @@ counter. A run is held open by
 a gate (`gate:FILE`), so the order of events depends on files, not on timing. The
 tests cover every operation, the state tables, queue order, resuming a session,
 limits reached and freed, retention, wait with and without a cursor, on timeout,
-with several runs and with unknown ids, reads during a run, interrupt of a
+with several runs and with unknown ids, waits parked up to their limit (the next
+is answered at once while `list` and `interrupt` still answer, a poll is never
+turned away, and a slot frees on wake, timeout, shutdown, a dropped caller and
+when the result a wait named ages out), reads during a run, interrupt of a
 running, queued and finished run, close with a running run and a queue, shutdown
 with ten workers running, drop of the last clone in eight places (inside a
 spawned task with four runtime threads and with one, on the `block_on` thread,

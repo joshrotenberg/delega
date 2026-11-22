@@ -201,6 +201,17 @@
           "maximum": 4,
           "minimum": 1
         },
+        "max_waits_in_flight": {
+          "description": "Most waits blocked at once, from 1 to 64. A wait that would block\nbeyond it returns at once and says so.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "maximum": 64,
+          "minimum": 1
+        },
         "wait_ceiling_secs": {
           "description": "The longest one `wait` blocks, in seconds, from 1 to 300.",
           "type": [

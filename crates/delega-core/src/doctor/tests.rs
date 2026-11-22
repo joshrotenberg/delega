@@ -217,12 +217,14 @@ fn the_limits_follow_the_supervisor_limits_given() {
         max_live_workers: 3,
         wait_default: std::time::Duration::from_secs(7),
         wait_ceiling: std::time::Duration::from_secs(9),
+        max_waits_in_flight: 5,
         ..crate::supervisor::Limits::default()
     };
     let limits = Limits::with_supervisor(&lowered);
     assert_eq!(limits.supervisor.max_live_workers, 3);
     assert_eq!(limits.supervisor.default_wait_secs, 7);
     assert_eq!(limits.supervisor.wait_ceiling_secs, 9);
+    assert_eq!(limits.supervisor.max_waits_in_flight, 5);
     assert_eq!(
         limits.supervisor.max_running_runs,
         supervisor::MAX_RUNNING_RUNS

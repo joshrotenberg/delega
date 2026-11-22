@@ -552,6 +552,12 @@
           "format": "uint",
           "minimum": 0
         },
+        "max_waits_in_flight": {
+          "description": "Waits blocked at once.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
         "retained_bytes": {
           "description": "Estimated bytes of finished results kept readable.",
           "type": "integer",
@@ -586,6 +592,7 @@
         "retention_secs",
         "default_wait_secs",
         "wait_ceiling_secs",
+        "max_waits_in_flight",
         "max_outstanding_request_checks"
       ]
     }

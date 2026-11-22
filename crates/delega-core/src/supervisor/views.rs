@@ -139,6 +139,14 @@ pub struct WorkerBrief {
     pub changed: Option<bool>,
 }
 
+/// The limit that kept a `wait` from blocking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitLimit {
+    /// As many waits as `max_waits_in_flight` allows were blocked already.
+    MaxWaitsInFlight,
+}
+
 /// The answer to `wait`. A timeout is not an error: `timed_out` is true and
 /// the states are current. A wait that shutdown released says
 /// `released_by_shutdown`.
@@ -154,7 +162,14 @@ pub struct WaitResponse {
     /// does not mean something finished. Absent otherwise.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub released_by_shutdown: bool,
-    /// The wait that applied, in seconds, after the ceiling.
+    /// Set when the wait would have blocked and as many waits as
+    /// `max_waits_in_flight` allows were blocked already. The wait did not
+    /// block: `timeout_secs` is 0 and the states are current, as for a wait
+    /// asked with `timeout_secs: 0`. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_reached: Option<WaitLimit>,
+    /// The wait that applied, in seconds, after the ceiling. 0 when
+    /// `limit_reached` is set.
     pub timeout_secs: u64,
     /// The runs named, in the order given, minus the unknown ones.
     pub runs: Vec<RunBrief>,
@@ -461,6 +476,11 @@ pub struct LimitsView {
     pub wait_ceiling_secs: u64,
     /// The timeout a wait uses when it is given none, in seconds.
     pub default_wait_secs: u64,
+    /// Most waits blocked at once. A wait that would block beyond it returns
+    /// at once with `limit_reached`.
+    pub max_waits_in_flight: usize,
+    /// Waits blocked now.
+    pub waits_in_flight: usize,
 }
 
 /// One worker in `list`.

@@ -45,7 +45,10 @@ pub const INSTRUCTIONS: &str = "delega supervises Claude Code and Codex workers.
 
 /// The server for `supervisor`: the seven tools, the skills and the identity
 /// resource. The error is the text of a skill that the Skills extension cannot
-/// serve, which the build's own checks rule out.
+/// serve, which the build's own checks rule out, or says that the supervisor
+/// allows more waits in flight than half of the requests [`serve`] handles at
+/// once (64): such a supervisor could let open waits hold `interrupt`, `close`
+/// and `start` behind them, so no router is built for it.
 pub fn router(supervisor: Supervisor, build: &BuildInfo) -> Result<McpRouter, String> {
     router_with_defaults(supervisor, build, PartialRequest::default())
 }
@@ -72,6 +75,16 @@ pub fn router_with_config(
     defaults: PartialRequest,
     config: Option<AppliedConfig>,
 ) -> Result<McpRouter, String> {
+    let waits = supervisor.limits().max_waits_in_flight;
+    let most = serve::MAX_CONCURRENT_REQUESTS / 2;
+    if waits > most {
+        return Err(format!(
+            "the supervisor allows {waits} waits in flight and the server handles {} requests \
+             at once; set Limits::max_waits_in_flight to at most {most} so that open waits \
+             cannot hold the other calls behind them",
+            serve::MAX_CONCURRENT_REQUESTS
+        ));
+    }
     let skills = resources::skill_set().map_err(|error| error.to_string())?;
     let mut router = McpRouter::new()
         .server_info("delega", delega_core::VERSION)
