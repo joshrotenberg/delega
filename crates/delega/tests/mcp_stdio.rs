@@ -97,8 +97,13 @@ impl Rig {
 
     /// Like [`Rig::start`], with more variables in the server's environment.
     fn start_with(&self, args: &[&str], more_env: &[(&str, &str)]) -> Session {
+        self.start_program(Path::new(env!("CARGO_BIN_EXE_delega")), args, more_env)
+    }
+
+    /// Like [`Rig::start_with`], for the `delega` executable at `program`.
+    fn start_program(&self, program: &Path, args: &[&str], more_env: &[(&str, &str)]) -> Session {
         let config = self.root.join("home");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_delega"))
+        let mut child = Command::new(program)
             .arg("mcp")
             .args(args)
             .env_clear()
@@ -869,6 +874,73 @@ fn the_skills_and_the_identity_over_stdio_are_what_the_cli_prints() {
         Some(skills.len())
     );
 
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
+    session.assert_only_json_rpc();
+}
+
+#[test]
+fn a_server_whose_executable_was_replaced_after_it_started_says_so_over_stdio() {
+    let rig = Rig::new();
+    // A copy laid out as the installed plugin is, so the build's own
+    // executable is never touched.
+    let plugin = rig.root.join("plugin");
+    std::fs::create_dir_all(plugin.join("bin")).expect("create bin");
+    let executable = plugin.join("bin/delega");
+    std::fs::copy(env!("CARGO_BIN_EXE_delega"), &executable).expect("copy delega");
+    let mut session = rig.start_program(&executable, &[], &[]);
+    session.initialize();
+    let read_identity = |session: &mut Session| -> Value {
+        let read = session.request("resources/read", json!({"uri": "delega://identity"}));
+        serde_json::from_str(read["contents"][0]["text"].as_str().expect("text"))
+            .expect("identity JSON")
+    };
+
+    let listed = session.call("list", json!({}));
+    assert!(listed.get("stale_server").is_none(), "{listed}");
+    let current = read_identity(&mut session);
+    assert!(current.get("stale_server").is_none(), "{current}");
+
+    // What `delega plugin install` does, here with identical bytes: a staged
+    // file renamed over the path, and the identity of the build it installed
+    // beside `bin`. The size is the same, and the modification time is set to
+    // be, so the report rests on the file being another one.
+    let staged = plugin.join("bin/delega.staged");
+    std::fs::copy(env!("CARGO_BIN_EXE_delega"), &staged).expect("stage a copy");
+    let before = std::fs::metadata(&executable)
+        .and_then(|status| status.modified())
+        .expect("modification time");
+    std::fs::File::options()
+        .write(true)
+        .open(&staged)
+        .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(before)))
+        .expect("set the modification time");
+    assert_eq!(
+        std::fs::metadata(&staged).expect("status").len(),
+        std::fs::metadata(&executable).expect("status").len()
+    );
+    std::fs::rename(&staged, &executable).expect("rename over the executable");
+    std::fs::write(
+        plugin.join("IDENTITY.json"),
+        r#"{"revision":"a-later-revision"}"#,
+    )
+    .expect("write IDENTITY.json");
+
+    let listed = session.call("list", json!({}));
+    let stale = &listed["stale_server"];
+    assert_eq!(stale["change"], "replaced", "{listed}");
+    assert_eq!(stale["running_revision"], current["revision"]);
+    assert_eq!(stale["installed_revision"], "a-later-revision");
+    let what = stale["what_to_do"].as_str().expect("what_to_do");
+    assert!(
+        what.contains("/mcp") && what.contains("new session"),
+        "{what}"
+    );
+    assert_eq!(read_identity(&mut session)["stale_server"], *stale);
+
+    // The stale server still serves and stops in order.
     session.close_stdin();
     let status = session.exit();
     assert_stop_status(&session, status, 0);

@@ -8,6 +8,8 @@ use tower_mcp::protocol::ReadResourceResult;
 use tower_mcp::skills::{SkillBuilder, SkillError, SkillSet};
 use tower_mcp::{Resource, ResourceBuilder};
 
+use crate::stale::Staleness;
+
 /// The URI of the identity resource.
 pub const IDENTITY_URI: &str = "delega://identity";
 
@@ -69,16 +71,31 @@ pub(crate) fn skill_set() -> Result<SkillSet, SkillError> {
     Ok(set)
 }
 
-/// The identity resource.
-pub(crate) fn identity_resource(build: &BuildInfo) -> Resource {
+/// The identity resource. The document is [`identity`], computed on each read,
+/// with a `stale_server` object added while the server's executable is not the
+/// one it was started from. `delega version --output json` never has that field.
+pub(crate) fn identity_resource(build: &BuildInfo, staleness: Staleness) -> Resource {
     let document = identity(build);
     ResourceBuilder::new(IDENTITY_URI)
         .name("identity")
-        .description("The version, contract schema version and skill digests of this build")
+        .description(
+            "The version, contract schema version and skill digests of this build, and \
+             stale_server when the executable the server started from was replaced or removed",
+        )
         .mime_type("application/json")
         .handler(move || {
-            let document = document.clone();
-            async move { Ok(ReadResourceResult::json(IDENTITY_URI, &document)) }
+            let mut document = document.clone();
+            let staleness = staleness.clone();
+            async move {
+                if let Some(stale) = staleness.check().await
+                    && let Ok(stale) = serde_json::to_value(&stale)
+                    && let Value::Object(fields) = &mut document
+                {
+                    fields.insert("stale_server".to_string(), stale);
+                    document = delega_core::canonical::sorted(document);
+                }
+                Ok(ReadResourceResult::json(IDENTITY_URI, &document))
+            }
         })
         .build()
 }

@@ -14,7 +14,11 @@ MCP server over it exist so far. `delega run`, `delega mcp`,
 fake host CLIs only.
 `delega mcp` serves seven tools (`start`, `follow_up`, `wait`, `read`, `list`,
 `interrupt`, `close`) over standard input and output, and has been tested
-against fake providers only. `delega run` runs one assignment on a
+against fake providers only. A host session keeps running the server it started
+with after `delega plugin install` refreshes the plugin. When the executable a
+server started from has been replaced or removed since, `list` and
+`delega://identity` report `stale_server` until the server is reconnected or a
+new session starts. `delega run` runs one assignment on a
 Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
 `--progress`, `--allow-command` and the exit statuses in
 [docs/api.md](docs/api.md); it has been tested against fake providers only, not
@@ -67,7 +71,7 @@ Out of scope:
 | --- | --- |
 | `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and the supervisor (`supervisor`: several workers at once, with follow-ups, a queue, limits, wait, read, interrupt and close). |
 | `schemas` | JSON Schemas for the request and result, generated from the core types, the doctor report, the optional user-level configuration file (`config.schema.json`, described in `docs/api.md`), and under `schemas/mcp` the input and output schemas of each MCP tool. |
-| `crates/delega-mcp` | The MCP server over the supervisor: the seven tools, the skills and the identity as resources, and serving on standard input and output with an orderly stop. Its tests run the router in process against the fake providers. |
+| `crates/delega-mcp` | The MCP server over the supervisor: the seven tools, the skills and the identity as resources, the report of a server whose executable was replaced or removed after it started (`stale_server`), and serving on standard input and output with an orderly stop. Its tests run the router in process against the fake providers. |
 | `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
 | `acceptance` | `delega-acceptance`, the acceptance test for criteria 1 and 2: it drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. Results are in `acceptance/RESULTS.md`. |
 | `docs/api.md` | The agreed design for the CLI and MCP surface, including the optional user-level configuration file (`~/.config/delega/config.toml`). |

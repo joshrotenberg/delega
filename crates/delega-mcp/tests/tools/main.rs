@@ -31,6 +31,7 @@ use tower_mcp::{CallToolResult, TestClient};
 
 mod applied;
 mod resources;
+mod stale;
 mod tools;
 
 /// Start `command` while holding delega's spawn lock, for the spawn call only

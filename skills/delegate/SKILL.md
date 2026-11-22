@@ -27,7 +27,7 @@ An argument a tool does not have is rejected.
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new `run`. It queues behind a running run. |
 | `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When any named run finishes, or on timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` means too many waits were already open and this one returned at once without waiting. |
 | `read` | `run` or `worker`, `detail`, `after` (a cursor), `text_offset` | The `result` if finished; otherwise `state`, partial text and recent activity. |
-| `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. |
+| `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. `stale_server` is present only when the executable this server started from was replaced or removed since. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: the `result`, with the outcome `interrupted`. |
 | `close` | `worker` | After its running run has stopped: the worker is `closed`, its queued runs are discarded and its slot is free. |
 
@@ -155,6 +155,17 @@ A call that cannot go ahead is not always an error.
 with them, which the user's configuration file may have lowered. Check it before
 starting many workers. A run beyond the running limit is not refused: it stays
 `queued` until a slot frees.
+
+If `list` reports `stale_server`, the file at the path this server started from
+is no longer the file it recorded at start: `change` is `replaced` when another
+file is there or the file was rewritten with another size or modification time,
+and `removed` when nothing is there. An install, a reinstall of the same build
+and an uninstall do this, and so does anything else that replaces the file,
+removes it, or rewrites it so that its size or modification time changes. A
+rewrite that keeps both is not seen. The report does not say that a newer build
+is installed. The server still runs what it started from.
+Tell the user to reconnect the server (in Claude Code, from `/mcp`) or to start
+a new session; `stale_server.what_to_do` says the same.
 
 ## Read an outcome
 

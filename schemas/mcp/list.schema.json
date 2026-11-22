@@ -10,7 +10,7 @@
   "outputSchema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "ListResponse",
-    "description": "The answer to `list`.",
+    "description": "The answer to `list`: the supervisor's, and `stale_server` while the\nexecutable this server was started from is no longer the one on disk.",
     "type": "object",
     "properties": {
       "cursor": {
@@ -29,6 +29,17 @@
         "items": {
           "$ref": "#/$defs/WorkerView"
         }
+      },
+      "stale_server": {
+        "description": "Present only when the executable this server was started from has been\nreplaced or removed since, for example by `delega plugin install`: the\nhost is still running the old build.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/StaleServer"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
@@ -298,6 +309,51 @@
             "description": "Codex CLI.",
             "type": "string",
             "const": "codex"
+          }
+        ]
+      },
+      "StaleServer": {
+        "description": "Reported by `list` and by `delega://identity` when the executable this\nserver was started from has been replaced or removed since: the host is\nstill running the old build.",
+        "type": "object",
+        "properties": {
+          "change": {
+            "description": "`replaced` when another file is at the executable's path, `removed`\nwhen nothing is.",
+            "$ref": "#/$defs/Change"
+          },
+          "running_revision": {
+            "description": "The source revision of the build that is running.",
+            "type": "string"
+          },
+          "installed_revision": {
+            "description": "The revision in the `IDENTITY.json` beside the installed executable.\nAbsent when that file cannot be read or names no revision.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "what_to_do": {
+            "description": "What to do: reconnect the server or start a new session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "change",
+          "running_revision",
+          "what_to_do"
+        ]
+      },
+      "Change": {
+        "description": "What happened to the executable the server was started from.",
+        "oneOf": [
+          {
+            "description": "Another file is at the path now, or the file was rewritten.",
+            "type": "string",
+            "const": "replaced"
+          },
+          {
+            "description": "Nothing is at the path now.",
+            "type": "string",
+            "const": "removed"
           }
         ]
       }
