@@ -1239,13 +1239,16 @@ async fn stderr_excerpt_redacts_a_token_whose_bearer_is_just_before_the_excerpt_
 async fn stderr_excerpt_redacts_a_token_on_the_line_after_a_bearer_8_kib_into_a_cut_capture() {
     // Redaction leaves less of this cut capture than the guard at its start,
     // so there is no excerpt at all.
-    stderr_excerpt_hides(
-        "stderr-bearer-at-8k-of-capture",
-        "abcdefghijklmnop123",
-        "without a final result",
-    )
-    .await;
+    let error = failure_of(Provider::Claude, "stderr-bearer-at-8k-of-capture").await;
+    assert_eq!(error.kind, "provider_exit");
+    assert_eq!(error.message, NOTHING_SHOWN);
 }
+
+/// The message of a fake that exits 3 after standard error whose cut capture
+/// has no text to show: it says so, and does not read as no standard error.
+const NOTHING_SHOWN: &str = "the provider exited with code 3 without a final result (standard \
+                             error not shown: the capture was cut and no text was left after \
+                             redaction and the guard at its start)";
 
 /// A fake mode that exits 3 after more standard error than the capture
 /// holds, with the capture starting inside a secret and the rest redacting to
@@ -1257,10 +1260,7 @@ async fn cut_capture_hides(provider: Provider, mode: &str, hidden: &[&str]) {
     for text in hidden {
         assert!(!error.message.contains(text), "{mode}: {}", error.message);
     }
-    assert_eq!(
-        error.message, "the provider exited with code 3 without a final result",
-        "{mode}"
-    );
+    assert_eq!(error.message, NOTHING_SHOWN, "{mode}");
 }
 
 async fn cut_key(provider: Provider) {
@@ -1316,10 +1316,7 @@ async fn cut_value(provider: Provider) {
     for piece in ["v02999q", "v02990q", "q"] {
         assert!(!error.message.contains(piece), "{}", error.message);
     }
-    assert_eq!(
-        error.message,
-        "the provider exited with code 3 without a final result"
-    );
+    assert_eq!(error.message, NOTHING_SHOWN);
     rig.assert_nothing_left().await;
 }
 both!(

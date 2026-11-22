@@ -7,8 +7,6 @@
 //! cloud and forge tokens, JSON web tokens, bearer tokens, private key blocks).
 //! The shapes are a heuristic, so a credential in an unusual form is not caught.
 
-use std::borrow::Cow;
-
 use super::limits::MIN_REDACTED_VALUE_CHARS;
 
 /// What a removed secret is replaced with.
@@ -17,7 +15,76 @@ pub(super) const MASK: &str = "[redacted]";
 /// What to remove.
 #[derive(Clone, Default)]
 pub(super) struct Redactor {
-    values: Vec<String>,
+    values: Vec<Known>,
+}
+
+/// One known value and its prefix table (see [`prefix_table`]).
+#[derive(Clone)]
+struct Known {
+    text: String,
+    table: Vec<usize>,
+}
+
+/// For each prefix of `pattern`, the length of its longest proper prefix that
+/// is also its suffix (the Knuth-Morris-Pratt table), so a scan for the
+/// pattern never goes back in the text.
+fn prefix_table(pattern: &[u8]) -> Vec<usize> {
+    let mut table = vec![0; pattern.len()];
+    let mut k = 0;
+    for i in 1..pattern.len() {
+        while k > 0 && pattern[k] != pattern[i] {
+            k = table[k - 1];
+        }
+        if pattern[k] == pattern[i] {
+            k += 1;
+        }
+        table[i] = k;
+    }
+    table
+}
+
+/// Add the byte span of every place `pattern` occurs in `text` to `spans`,
+/// overlapping occurrences included, in one pass over `text`.
+fn occurrences(text: &[u8], pattern: &[u8], table: &[usize], spans: &mut Vec<(usize, usize)>) {
+    if pattern.is_empty() {
+        return;
+    }
+    let mut k = 0;
+    for (i, &byte) in text.iter().enumerate() {
+        while k > 0 && pattern[k] != byte {
+            k = table[k - 1];
+        }
+        if pattern[k] == byte {
+            k += 1;
+        }
+        if k == pattern.len() {
+            spans.push((i + 1 - k, i + 1));
+            k = table[k - 1];
+        }
+    }
+}
+
+/// The length of the longest end of `value` that `start` begins with, in one
+/// pass over `value`. `start` is no longer than `value` minus one byte, so the
+/// end is a proper one.
+fn longest_end_at_start(value: &[u8], start: &[u8]) -> usize {
+    if start.is_empty() {
+        return 0;
+    }
+    let table = prefix_table(start);
+    let mut k = 0;
+    for &byte in value {
+        if k == start.len() {
+            k = table[k - 1];
+        }
+        while k > 0 && start[k] != byte {
+            k = table[k - 1];
+        }
+        if start[k] == byte {
+            k += 1;
+        }
+    }
+    k
 }
 
 impl std::fmt::Debug for Redactor {
@@ -172,49 +239,106 @@ impl Redactor {
             .collect();
         values.sort_by_key(|v| std::cmp::Reverse(v.len()));
         values.dedup();
+        let values = values
+            .into_iter()
+            .map(|text| Known {
+                table: prefix_table(text.as_bytes()),
+                text,
+            })
+            .collect();
         Self { values }
-    }
-
-    /// `text` is the start of a capture whose beginning was cut off. When it
-    /// begins with the end of a known value (a proper suffix at least
-    /// [`MIN_REDACTED_VALUE_CHARS`] long), that end is replaced; the longest
-    /// one wins. Replacement characters at the very start, left by a
-    /// character the cut split, count as part of the value. [`Self::apply`]
-    /// cannot find such a value, because its beginning is gone.
-    pub fn mask_cut_start<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        let body = text.trim_start_matches(char::REPLACEMENT_CHARACTER);
-        let mut longest = 0;
-        for value in &self.values {
-            // The last suffix start that still leaves enough characters.
-            let Some((last, _)) = value.char_indices().rev().nth(MIN_REDACTED_VALUE_CHARS - 1)
-            else {
-                continue;
-            };
-            // Suffixes from the longest down, so the first match is this
-            // value's longest.
-            for (start, _) in value.char_indices().skip(1) {
-                let suffix = &value[start..];
-                if start > last || suffix.len() <= longest {
-                    break;
-                }
-                if body.starts_with(suffix) {
-                    longest = suffix.len();
-                    break;
-                }
-            }
-        }
-        if longest == 0 {
-            return Cow::Borrowed(text);
-        }
-        Cow::Owned(format!("{MASK}{}", &body[longest..]))
     }
 
     /// The text with every known value and credential-shaped string removed.
     pub fn apply(&self, text: &str) -> String {
-        let mut text = text.to_string();
+        self.redact(text, None)
+    }
+
+    /// [`Self::apply`] for the decoded text of a capture whose beginning was
+    /// cut off. The capture can begin with the end of a known value, which
+    /// has no beginning left to be found by. Such an end (a proper suffix at
+    /// least [`MIN_REDACTED_VALUE_CHARS`] long) is removed with the whole
+    /// values, in the same pass.
+    ///
+    /// The cut can also split a character. Its remaining bytes, at most
+    /// three, are UTF-8 continuation bytes that decode to one replacement
+    /// character each. Those, and no other replacement characters, are
+    /// stepped over before the end of a value is looked for, and go with it.
+    pub fn apply_cut(&self, capture: &[u8]) -> String {
+        let stray = capture
+            .iter()
+            .take(3)
+            .take_while(|byte| (0x80..=0xBF).contains(*byte))
+            .count();
+        let cut_chars: usize = String::from_utf8_lossy(&capture[..stray])
+            .chars()
+            .take_while(|c| *c == char::REPLACEMENT_CHARACTER)
+            .map(char::len_utf8)
+            .sum();
+        self.redact(&String::from_utf8_lossy(capture), Some(cut_chars))
+    }
+
+    /// The byte spans of `text` that hold known values, merged and in order.
+    /// Every occurrence of every value counts, overlapping ones included, and
+    /// for a cut capture (`cut_chars` is the length of the replacement
+    /// characters its cut left) the end of a value at the start. Spans that
+    /// overlap or touch are one span, so a value that overlaps another is
+    /// removed whole, whichever is found first.
+    fn value_spans(&self, text: &str, cut_chars: Option<usize>) -> Vec<(usize, usize)> {
+        let mut spans = Vec::new();
         for value in &self.values {
-            text = text.replace(value.as_str(), MASK);
+            // The table scan is linear but slower than `contains`, and most
+            // text holds no value.
+            if text.contains(value.text.as_str()) {
+                occurrences(
+                    text.as_bytes(),
+                    value.text.as_bytes(),
+                    &value.table,
+                    &mut spans,
+                );
+            }
+            let Some(body) = cut_chars.and_then(|skip| text.get(skip..)) else {
+                continue;
+            };
+            let longest = body.len().min(value.text.len() - 1);
+            let len = longest_end_at_start(value.text.as_bytes(), &body.as_bytes()[..longest]);
+            // Both texts are whole characters, so equal bytes that end where
+            // the value ends are whole characters too.
+            let enough = body
+                .get(..len)
+                .is_some_and(|end| end.chars().count() >= MIN_REDACTED_VALUE_CHARS);
+            if enough {
+                spans.push((0, cut_chars.unwrap_or(0) + len));
+            }
         }
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+        for (start, end) in spans {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
+    }
+
+    /// Known values are replaced in one pass over the text as it was given:
+    /// each merged span of [`Self::value_spans`] becomes one [`MASK`], and a
+    /// mask is never searched again. Every span is at least
+    /// [`MIN_REDACTED_VALUE_CHARS`] characters, so this pass makes text longer
+    /// by at most `MASK.len() / MIN_REDACTED_VALUE_CHARS`. The passes after it
+    /// (private keys, credential shapes, `Bearer`) only make text shorter.
+    fn redact(&self, text: &str, cut_chars: Option<usize>) -> String {
+        let spans = self.value_spans(text, cut_chars);
+        let mut without_values = String::with_capacity(text.len());
+        let mut copied = 0;
+        for (start, end) in spans {
+            without_values.push_str(&text[copied..start]);
+            without_values.push_str(MASK);
+            copied = end;
+        }
+        without_values.push_str(&text[copied..]);
+        let text = without_values;
         let text = without_private_keys(&text);
         let mut out = String::with_capacity(text.len());
         let mut previous_word = String::new();

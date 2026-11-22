@@ -235,17 +235,23 @@ recognise what is left of it. Two things keep that text out of the excerpt, and
 neither applies to a capture that was not cut:
 
 - When the capture begins with the end of a value of a redacted variable (see
-  below), at least 6 characters of it, that end is replaced with `[redacted]`
-  first, however long it is.
+  below), at least 6 characters of it, that end is replaced with `[redacted]`,
+  however long it is, in the same pass as the whole values, so a whole value
+  that overlaps it is replaced with it. If the cut split a character, the
+  bytes left of it (at most 3, each decoded as U+FFFD) are stepped over first
+  and go with the value. Other U+FFFD characters are text like any other.
 - The excerpt is taken only from redacted text after a guard at its start. The
   guard is 13664 bytes: redaction keeps the order of the text and lengthens it
-  by at most 10 bytes for every 6 (a 6-character value becomes `[redacted]`),
+  by at most 10 bytes for every 6 (a 6-character value becomes `[redacted]`,
+  and a replacement is never searched again, see below),
   so the first 8 KiB of the decoded capture end up within the first
   8192 * 10 / 6, rounded up, plus 10 bytes of the redacted text. The guard is
   cut from text that is already redacted, so it cannot split a secret that the
   capture holds whole. When nothing but whitespace is left after the guard, the
-  message has no excerpt. This happens when redaction removes most of a cut
-  capture.
+  message has no excerpt and says so instead: `(standard error not shown: the
+  capture was cut and no text was left after redaction and the guard at its
+  start)`. This happens when redaction removes most of a cut capture. A
+  provider that wrote no standard error gets neither an excerpt nor this note.
 
 The remaining limit: a credential-shaped secret that the capture's start cuts
 and of which more than 8 KiB was captured (a very long token or private key
@@ -259,6 +265,14 @@ after redaction. Two kinds of text are replaced with `[redacted]`:
 - strings shaped like API keys (`sk-`, `sk-ant-`), forge tokens (`ghp_`, `gho_`,
   `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack tokens, AWS access key ids, JSON
   web tokens, `Bearer` tokens and private key blocks.
+
+The values are replaced in one pass over the text as the provider wrote it.
+Every occurrence of every value is found, occurrences that overlap included;
+stretches that overlap or touch are replaced together by one `[redacted]`, so
+a value that overlaps another is removed whole. The replacements are not
+searched for values again, so a value that happens to match inside
+`[redacted]` cannot lengthen the text. The key shapes, `Bearer` tokens and
+private key blocks are replaced after that, and only shorten the text.
 
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,

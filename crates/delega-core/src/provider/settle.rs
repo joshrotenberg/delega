@@ -143,10 +143,21 @@ const _: () = {
     assert!(STDERR_CUT_GUARD_BYTES + STDERR_SCAN_BYTES <= MAX_STDERR_BYTES);
 };
 
-/// The last part of the provider's standard error as one line, with secrets
-/// removed. See [`excerpt`].
-fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String> {
-    excerpt(&report.stderr, redactor)
+/// What an error message says in place of an excerpt of a cut standard error
+/// capture that has no text to show, so it does not read as a provider that
+/// wrote nothing.
+pub(super) const STDERR_NOT_SHOWN: &str = "(standard error not shown: the capture was cut and no \
+                                           text was left after redaction and the guard at its start)";
+
+/// What an error message says about the provider's standard error, to follow
+/// the message: its excerpt (see [`excerpt`]), [`STDERR_NOT_SHOWN`], or
+/// nothing when it wrote none.
+fn stderr_report(report: &ProcessReport, redactor: &Redactor) -> String {
+    match excerpt(&report.stderr, redactor) {
+        Some(excerpt) => format!("; its standard error ended with: {excerpt}"),
+        None if report.stderr.truncated => format!(" {STDERR_NOT_SHOWN}"),
+        None => String::new(),
+    }
 }
 
 /// The last part of a standard error capture as one line, with secrets
@@ -160,13 +171,14 @@ fn stderr_excerpt(report: &ProcessReport, redactor: &Redactor) -> Option<String>
 /// A capture that was cut (standard error was longer than the capture) starts
 /// at a cut made before redaction, which can leave part of a secret that the
 /// redactor does not recognise. The end of a known value there is replaced
-/// first ([`Redactor::mask_cut_start`]), and the excerpt is taken only from
-/// redacted text after the first [`STDERR_CUT_GUARD_BYTES`]. That cut is made
-/// in text that is already redacted, so it cannot split a secret either.
+/// with the whole values ([`Redactor::apply_cut`]), and the excerpt is taken
+/// only from redacted text after the first [`STDERR_CUT_GUARD_BYTES`]. That
+/// cut is made in text that is already redacted, so it cannot split a secret
+/// either. When it leaves no text, there is no excerpt and the message says
+/// [`STDERR_NOT_SHOWN`].
 pub(super) fn excerpt(stderr: &Captured, redactor: &Redactor) -> Option<String> {
-    let decoded = String::from_utf8_lossy(&stderr.bytes);
     let redacted = if stderr.truncated {
-        let mut redacted = redactor.apply(&redactor.mask_cut_start(&decoded));
+        let mut redacted = redactor.apply_cut(&stderr.bytes);
         let mut guard = STDERR_CUT_GUARD_BYTES.min(redacted.len());
         while !redacted.is_char_boundary(guard) {
             guard += 1;
@@ -174,7 +186,7 @@ pub(super) fn excerpt(stderr: &Captured, redactor: &Redactor) -> Option<String> 
         redacted.drain(..guard);
         redacted
     } else {
-        redactor.apply(&decoded)
+        redactor.apply(&String::from_utf8_lossy(&stderr.bytes))
     };
     let mut start = redacted.len().saturating_sub(STDERR_SCAN_BYTES);
     while !redacted.is_char_boundary(start) {
@@ -425,9 +437,7 @@ fn no_terminal(
     }
     if code != 0 {
         let mut message = format!("the provider exited with code {code} without a final result");
-        if let Some(excerpt) = stderr_excerpt(report, redactor) {
-            message.push_str(&format!("; its standard error ended with: {excerpt}"));
-        }
+        message.push_str(&stderr_report(report, redactor));
         return error("provider_exit", message, Some(code));
     }
     if parsed.stats.unparseable > 0 || parsed.stats.oversize > 0 {

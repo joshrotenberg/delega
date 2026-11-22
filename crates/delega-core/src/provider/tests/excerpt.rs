@@ -2,7 +2,7 @@
 
 use crate::process::Captured;
 use crate::provider::limits::{
-    MAX_STDERR_BYTES, MIN_REDACTED_VALUE_CHARS, STDERR_CUT_START_BYTES, STDERR_EXCERPT_CHARS,
+    MIN_REDACTED_VALUE_CHARS, STDERR_CUT_START_BYTES, STDERR_EXCERPT_CHARS,
 };
 use crate::provider::redact::{MASK, Redactor};
 use crate::provider::settle::{STDERR_CUT_GUARD_BYTES, excerpt};
@@ -28,24 +28,97 @@ fn none() -> Redactor {
     Redactor::default()
 }
 
+/// A cut capture whose first [`STDERR_CUT_START_BYTES`] are `unit` over and
+/// over and, as their last two bytes, the sentinel `ZQ`; then the keys, which
+/// redact to less than one excerpt. Without the guard the sentinel is in the
+/// excerpt.
+fn sentinel_at_the_end_of_the_guarded_start(unit: &str) -> Captured {
+    let count = (STDERR_CUT_START_BYTES - 2) / unit.len();
+    let pad = ".".repeat(STDERR_CUT_START_BYTES - 2 - count * unit.len());
+    let text = format!("{pad}{}ZQ\n{}", unit.repeat(count), keys());
+    assert_eq!(text.find("ZQ"), Some(STDERR_CUT_START_BYTES - 2));
+    capture(text.as_bytes(), true)
+}
+
 #[test]
 fn the_guard_covers_the_redacted_image_of_the_start_of_a_cut_capture() {
     assert_eq!(STDERR_CUT_START_BYTES, 8 * 1024);
     assert_eq!(STDERR_CUT_GUARD_BYTES, 13_664);
     // The text that redaction lengthens most: the shortest known value over
-    // and over, the last one lying across the end of the guarded start.
+    // and over. Occurrences that touch are one span, so a space keeps them
+    // apart and each becomes its own marker.
     let value = "v".repeat(MIN_REDACTED_VALUE_CHARS);
-    let count = STDERR_CUT_START_BYTES.div_ceil(value.len());
     let redactor = Redactor::new([value.clone()]);
-    let image = redactor.apply(&value.repeat(count));
-    assert_eq!(image.len(), count * MASK.len());
-    assert!(image.len() <= STDERR_CUT_GUARD_BYTES, "{}", image.len());
-    // And end to end: that start, then text to show.
-    let text = format!("{}\n{}", value.repeat(count), "shown ".repeat(3000));
-    assert!(text.len() <= MAX_STDERR_BYTES);
-    let out = excerpt(&capture(text.as_bytes(), true), &redactor).expect("excerpt");
-    assert!(!out.contains(MASK), "{out}");
-    assert!(out.ends_with("shown shown"), "{out}");
+    let unit = format!("{value} ");
+    assert_eq!(
+        redactor.apply(&unit.repeat(100)).len(),
+        100 * (MASK.len() + 1)
+    );
+    let cut = sentinel_at_the_end_of_the_guarded_start(&unit);
+    // The start grew, and the sentinel after it is still before the guard.
+    let image = redactor.apply_cut(&cut.bytes);
+    let at = image.find("ZQ").expect("the sentinel is not a secret");
+    assert!(at > STDERR_CUT_START_BYTES * 3 / 2, "{at}");
+    assert!(at + 2 <= STDERR_CUT_GUARD_BYTES, "{at}");
+    assert_eq!(excerpt(&cut, &redactor), None);
+    // Not cut, the same text shows it: the tail redacts short enough.
+    let shown = excerpt(&capture(&cut.bytes, false), &redactor).expect("not cut");
+    assert!(shown.contains(" ZQ [redacted]"), "{shown}");
+}
+
+#[test]
+fn a_value_that_matches_inside_a_marker_does_not_lengthen_the_text_past_the_guard() {
+    // "redact" is in "[redacted]". Replaced one value after another, each
+    // seven bytes became fourteen and the sentinel moved past the guard.
+    let redactor = Redactor::new(["abcdefg".to_string(), "redact".to_string()]);
+    assert_eq!(redactor.apply("abcdefg"), MASK);
+    assert_eq!(
+        redactor.apply("x abcdefg y redact z"),
+        "x [redacted] y [redacted] z"
+    );
+    for unit in ["abcdefg", "abcdefg "] {
+        let cut = sentinel_at_the_end_of_the_guarded_start(unit);
+        let out = excerpt(&cut, &redactor);
+        assert!(!out.clone().unwrap_or_default().contains("ZQ"), "{out:?}");
+    }
+}
+
+#[test]
+fn a_cut_start_that_ends_one_value_and_begins_another_hides_the_whole_other_value() {
+    // The capture starts with all of `long`, whose first six characters also
+    // end `other`. Masking those six first left the rest of `long` unmatched.
+    let long: String = format!(
+        "shared{}",
+        (0..2500).map(|i| format!("w{i:05}k")).collect::<String>()
+    );
+    assert!(long.len() > STDERR_CUT_GUARD_BYTES);
+    let redactor = Redactor::new(["another-value-shared".to_string(), long.clone()]);
+    let text = format!("{long}\n{}", keys());
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor);
+    assert!(!out.clone().unwrap_or_default().contains('k'), "{out:?}");
+    assert_eq!(out, None);
+    assert_eq!(
+        redactor.apply_cut(format!("{long} rest").as_bytes()),
+        "[redacted] rest"
+    );
+}
+
+#[test]
+fn replacement_characters_that_are_part_of_a_value_are_not_stepped_over_at_a_cut_start() {
+    // The value ends in 6000 literal U+FFFD, and the capture keeps 5500 of
+    // them, more than the guard removes. Only replacement characters the cut
+    // itself made may be stepped over; these are the value.
+    let value = format!("known-{}", "\u{FFFD}".repeat(6000));
+    let redactor = Redactor::new([value]);
+    let kept = "\u{FFFD}".repeat(5500);
+    assert!(kept.len() > STDERR_CUT_GUARD_BYTES);
+    let text = format!("{kept}\n{}", keys());
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor);
+    assert!(
+        !out.clone().unwrap_or_default().contains('\u{FFFD}'),
+        "{out:?}"
+    );
+    assert_eq!(out, None);
 }
 
 #[test]
@@ -152,43 +225,95 @@ fn the_end_of_a_known_value_longer_than_the_guard_is_masked_at_a_cut_start() {
 }
 
 #[test]
-fn mask_cut_start_replaces_the_longest_known_value_end_and_nothing_else() {
+fn known_values_are_replaced_in_one_pass_with_overlaps_merged() {
+    let redactor = Redactor::new([
+        "abab-abab".to_string(),
+        "secret-one".to_string(),
+        "one-and-two".to_string(),
+        "redact".to_string(),
+    ]);
+    // An occurrence that overlaps the one before it is found too.
+    assert_eq!(redactor.apply("x abab-abab-abab y"), "x [redacted] y");
+    // Two values that overlap, and two that touch, are one marker.
+    assert_eq!(redactor.apply("a secret-one-and-two b"), "a [redacted] b");
+    assert_eq!(
+        redactor.apply("a secret-oneone-and-two b"),
+        "a [redacted] b"
+    );
+    // A marker is not searched for values.
+    assert_eq!(
+        redactor.apply("secret-one, redact"),
+        "[redacted], [redacted]"
+    );
+    let plain = "nothing of the kind: abab-aba, secret-on";
+    assert_eq!(redactor.apply(plain), plain);
+}
+
+#[test]
+fn apply_cut_replaces_the_longest_known_value_end_and_nothing_else() {
     let redactor = Redactor::new([
         "alpha-secret-tail".to_string(),
         "other-long-secret-tail".to_string(),
         "caf\u{e9}-secret-\u{e9}t\u{e9}-value".to_string(),
     ]);
+    let cut = |text: &str| redactor.apply_cut(text.as_bytes());
     // "secret-tail" ends both values; the longer end wins.
-    assert_eq!(
-        redactor.mask_cut_start("long-secret-tail then text"),
-        "[redacted] then text"
-    );
-    assert_eq!(
-        redactor.mask_cut_start("secret-tail then text"),
-        "[redacted] then text"
-    );
+    assert_eq!(cut("long-secret-tail then text"), "[redacted] then text");
+    assert_eq!(cut("secret-tail then text"), "[redacted] then text");
     // An end shorter than the shortest redacted value is left.
     assert_eq!(MIN_REDACTED_VALUE_CHARS, 6);
-    assert_eq!(redactor.mask_cut_start("t-tail then"), "[redacted] then");
-    assert_eq!(redactor.mask_cut_start("-tail then"), "-tail then");
-    // A whole value is not an end of itself; `apply` replaces it.
-    let whole = "alpha-secret-tail then";
-    assert_eq!(redactor.mask_cut_start(whole), whole);
-    assert_eq!(redactor.apply(whole), "[redacted] then");
-    // Only at the very start.
-    let later = "x secret-tail";
-    assert_eq!(redactor.mask_cut_start(later), later);
-    // A value cut inside a character: the replacement characters left by the
-    // cut go with it. Characters are counted, not bytes.
+    assert_eq!(cut("t-tail then"), "[redacted] then");
+    assert_eq!(cut("-tail then"), "-tail then");
+    // A whole value, at the start and later, as `apply` does it.
+    assert_eq!(cut("alpha-secret-tail then"), "[redacted] then");
     assert_eq!(
-        redactor.mask_cut_start("\u{FFFD}-secret-\u{e9}t\u{e9}-value rest"),
+        cut("t-tail, alpha-secret-tail then"),
+        "[redacted], [redacted] then"
+    );
+    // The end of a value only counts at the very start.
+    assert_eq!(cut("x secret-tail"), "x secret-tail");
+    assert_eq!(redactor.apply("secret-tail then"), "secret-tail then");
+    // Characters are counted, not bytes.
+    assert_eq!(cut("\u{e9}-value rest"), "[redacted] rest");
+    assert_eq!(cut("-value rest"), "[redacted] rest");
+    assert_eq!(cut("value rest"), "value rest");
+    assert_eq!(none().apply_cut(b"anything"), "anything");
+    assert_eq!(none().apply_cut(b""), "");
+}
+
+#[test]
+fn apply_cut_steps_over_only_the_bytes_of_a_character_the_cut_split() {
+    let redactor = Redactor::new([
+        "caf\u{e9}-secret-value".to_string(),
+        "\u{1F600}-emoji-value".to_string(),
+        "x\u{FFFD}\u{FFFD}-literal-value".to_string(),
+    ]);
+    // The second byte of the two-byte character, then the rest of the value.
+    assert_eq!(
+        redactor.apply_cut(b"\xA9-secret-value rest"),
+        "[redacted] rest"
+    );
+    // The last three bytes of a four-byte character.
+    assert_eq!(
+        redactor.apply_cut(b"\x9F\x98\x80-emoji-value rest"),
+        "[redacted] rest"
+    );
+    // Four stray bytes are not one cut character: three are stepped over and
+    // the fourth is in the way.
+    assert_eq!(
+        redactor.apply_cut(b"\x80\x80\x80\x80-emoji-value rest"),
+        "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}-emoji-value rest"
+    );
+    // Replacement characters that were written as such are text: they match
+    // a value that holds them, and are not stepped over for one that does not.
+    assert_eq!(
+        redactor.apply_cut("\u{FFFD}\u{FFFD}-literal-value rest".as_bytes()),
         "[redacted] rest"
     );
     assert_eq!(
-        redactor.mask_cut_start("\u{e9}-value rest"),
-        "[redacted] rest"
+        redactor.apply_cut("\u{FFFD}-secret-value rest".as_bytes()),
+        "\u{FFFD}-secret-value rest"
     );
-    assert_eq!(redactor.mask_cut_start("-value rest"), "[redacted] rest");
-    assert_eq!(redactor.mask_cut_start("value rest"), "value rest");
-    assert_eq!(none().mask_cut_start("anything"), "anything");
+    // A cut character with no value after it stays as it decoded.
+    assert_eq!(redactor.apply_cut(b"\xA9 plain"), "\u{FFFD} plain");
 }
