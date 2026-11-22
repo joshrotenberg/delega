@@ -34,8 +34,11 @@ covers the MCP tools and skills in Claude Code and Codex.
 delega run --provider codex -p "Summarize this repository"
 ```
 
-A completed run prints the answer and exits 0; a failed run exits 1, a refused
-one 2 and one that timed out 124. `--output json` prints the whole result.
+When the result is delivered normally, a completed run prints the answer and
+exits 0, a failed run exits 1, a refused one 2, one that timed out 124 and an
+interrupted one 130. The other cases are under
+[Command line](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#command-line).
+`--output json` prints the whole result instead of the answer.
 [First run](https://github.com/joshrotenberg/delega/blob/main/docs/getting-started/first-run.md)
 explains the result and the other cases.
 

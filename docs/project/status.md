@@ -21,9 +21,12 @@ stands. This page lists the limits a user meets.
   live checks and the
   [remaining assumptions](../providers.md#unverified-against-the-real-cli).
 - **Permission modes.** `read` (default), `write` and `full`, plus exact
-  commands (`--allow-command`) and extra readable directories. Work that builds
-  and runs tests needs `full` today, because `read` and `write` allow only
-  commands listed exactly ([#98](https://github.com/joshrotenberg/delega/issues/98)).
+  commands (`--allow-command`) and extra readable directories. A worker that
+  runs varying build and test commands needs `full` today, because `write` on
+  Claude Code runs only exactly granted commands and Codex's `write` sandbox
+  excludes temporary directories
+  ([#98](https://github.com/joshrotenberg/delega/issues/98)). A fixed command
+  can be granted with `--allow-command`.
   Codex confines neither reads nor commands, so a `read` or `write` Codex run is
   wider than requested and says so in `provider_notes`; with `--strict` it is
   refused ([Wider than requested](../providers.md#wider-than-requested)).
@@ -72,6 +75,6 @@ Out of scope:
 
 - Session history. That is
   [trovador](https://github.com/joshrotenberg/trovador).
-- A JavaScript harness and a JSON-RPC surface.
-  [due](https://github.com/joshrotenberg/due) has both; they are left out until
-  the core is solid and then reconsidered.
+- [due](https://github.com/joshrotenberg/due)'s JavaScript scripting harness
+  and its standalone JSON-RPC interface. They are left out until the core is
+  solid and then reconsidered.

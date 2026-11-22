@@ -51,7 +51,7 @@ surfaces ([The request](api.md#the-request), [The result](api.md#the-result)).
 - **Enforced independent review** of a worker's change, and work loops, are
   planned as later layers and are not built.
 - **Session history.** That is [trovador](https://github.com/joshrotenberg/trovador).
-- **A JavaScript harness or a JSON-RPC surface.**
+- **A JavaScript scripting harness or a standalone JSON-RPC interface.**
   [due](https://github.com/joshrotenberg/due) has both; delega leaves them out.
 - **Listing or stopping runs from another process with the CLI.** `delega run`
   is foreground only; supervising several workers is done over MCP.

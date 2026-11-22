@@ -36,9 +36,9 @@ Run it again after rebuilding delega to refresh the plugin. The plugin's version
 includes a digest of the copied executable, so a changed executable gets a new
 version and the hosts refresh their cached copy.
 
-Exit status: 0 on success, including a dry run; 1 when a host command failed or
-something was refused; 2 for a usage error. `--output json` prints one document,
-including for failures.
+`--output json` prints the command's report as one document, including for a
+failure that exits 1. An argument the parser rejects exits 2 with no JSON. The
+exit statuses are under [Install and uninstall](../api.md#install-and-uninstall).
 
 ## Reconnect the host session
 
@@ -62,19 +62,19 @@ its `running_revision` with `installed_revision` when both are present
 
 From a host session with the plugin installed, a caller starts a worker with
 `start`, waits with `wait` (passing back the `cursor` it returns), reads the
-result with `read` and frees the worker with `close`. `start` needs an absolute
-`cwd`, because the server's own working directory is chosen by the host.
+result with `read` and frees the worker with `close`. The
+[`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/skills/delegate/SKILL.md)
+and the [tool table](../api.md#mcp) describe the arguments and responses.
 
 The plugin also installs the `run` and `delegate` skills, which tell a calling
 agent how to use `delega run` and the MCP tools. `delega skill list` prints them
-and `delega skill show NAME` prints one. The tools and their arguments are in
-the [MCP](../api.md#mcp) tool table, and the
-[`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/skills/delegate/SKILL.md)
-describes the workflow.
+and `delega skill show NAME` prints one.
 
-The installed plugin starts `delega mcp` with no `--env`, so its workers get
-only the fixed environment allowlist
-([Environment policy](../providers.md#environment-policy)).
+The installed plugin starts `delega mcp` with no `--env`. Its workers get the
+fixed environment allowlist plus what the configuration file's `[env]` section
+adds, because `delega mcp` reads that file
+([Environment policy](../providers.md#environment-policy),
+[Configuration file](../api.md#configuration-file)).
 
 Claude.ai and Cowork refuse plugins with a top-level `bin/`, so the plugin
 installs only into Claude Code and Codex.

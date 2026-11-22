@@ -15,9 +15,9 @@ delega run --provider codex -p "Summarize this repository" --dry-run
 ```
 
 It lists environment variable names, never values, and replaces the assignment
-by its size. A request that would be refused prints the refusal and exits 2; a
-dry run exits 0 otherwise. `--dry-run --output json` prints the same as one JSON
-document ([Command line](../api.md#command-line), "Dry run").
+by its size. A dry run that prints the plan exits 0; the other cases are under
+[Command line](../api.md#command-line) ("Dry run"). `--dry-run --output json`
+prints the plan as one JSON document.
 
 ## Run one assignment
 
@@ -26,36 +26,27 @@ delega run --provider codex -p "Summarize this repository"
 ```
 
 The worker runs with read-only permissions (the default) and a time limit of 600
-seconds unless `--timeout` sets another. When the run completes, the answer is
-printed on standard output and nothing else is.
+seconds unless `--timeout` sets another. With text output, the answer goes to
+standard output and diagnostics go to standard error
+([Command line](../api.md#command-line), "Output").
 
-## Reading the result
+## Exit status
 
-The exit status follows the outcome:
+When the result is delivered normally, the exit status follows the outcome:
 
 | Status | Outcome |
 | --- | --- |
 | 0 | `completed` |
 | 1 | `failed` |
-| 2 | `refused`, and usage errors |
+| 2 | `refused` |
 | 124 | `timed_out` |
 | 130 | `interrupted` |
 
-These hold when the result is delivered normally. A result that cannot be
-written, and a write cut short by a signal, are covered under
-[Command line](../api.md#command-line).
-
-With text output, standard output holds the answer only for a `completed` run.
-For any other outcome it stays empty, and standard error gets one line:
-
-```text
-delega run: <outcome>: <error.kind>: <error.message>
-```
-
-Each denied request is written to standard error as `delega run: denied:
-<request>`, whatever the outcome, and cleanup that could not be confirmed as
-`delega run: cleanup not confirmed: ...`. A run that did not complete gives its
-reason in `error.kind` ([Error kinds](../providers.md#error-kinds)).
+Every other case, such as a result that cannot be written, a signal during
+delivery, or an argument the parser rejects, is under
+[Command line](../api.md#command-line) ("Exit status"). A run that did not
+complete gives its reason in `error.kind`
+([Error kinds](../providers.md#error-kinds)).
 
 ## The whole result as JSON
 
@@ -63,12 +54,12 @@ reason in `error.kind` ([Error kinds](../providers.md#error-kinds)).
 delega run --provider codex -p "Summarize this repository" --output json
 ```
 
-`--output json` prints the whole result as one JSON document, whatever the exit
-status. A caller that only needs to know what happened reads `outcome`, `text`,
-`error` and `cleanup`. `provider_notes` says where the provider did not do what
-the request asked, or did it differently, and `session_id` is what `--resume`
-takes. Every field is described under [The result](../api.md#the-result), and
-`delega schema result` prints the result's JSON Schema.
+`--output json` prints the whole result instead of the answer. A caller that
+only needs to know what happened reads `outcome`, `text`, `error` and `cleanup`.
+`provider_notes` says where the provider did not do what the request asked, or
+did it differently, and `session_id` is what `--resume` takes. Every field is
+described under [The result](../api.md#the-result), and `delega schema result`
+prints the result's JSON Schema.
 
 ## More forms
 

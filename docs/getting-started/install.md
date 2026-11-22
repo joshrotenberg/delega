@@ -46,7 +46,7 @@ problem with what it blocks. The only provider process it starts is each
 provider's `--version` probe. It never prints an environment value, a deny rule
 or the content of a file.
 
-Exit status:
+Exit status, for a report that was written:
 
 | Status | Meaning |
 | --- | --- |
@@ -56,7 +56,8 @@ Exit status:
 
 A provider that is not installed is a problem for that provider and does not by
 itself make the status 1 when the other provider is ready. The problem kinds and
-the JSON report are described under [Doctor](../api.md#doctor).
+the JSON report are described under [Doctor](../api.md#doctor), with the exit
+statuses.
 
 ## Finding the providers
 
