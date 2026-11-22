@@ -351,9 +351,9 @@ impl Supervisor {
 
     /// Wait until any named run finishes, or any named worker's current run
     /// finishes, or the time passes. A timeout is a response with `timed_out`,
-    /// not an error. The time is counted in wall time and in the time the
-    /// machine was awake, and the wait ends when either reaches the limit, so a
-    /// machine that slept does not hold the caller past it.
+    /// not an error. The time is counted in the time the machine was awake and
+    /// checked against wall time about once a second, so after the machine
+    /// slept past the limit the wait ends shortly after it wakes.
     ///
     /// `timeout_secs` defaults to the configured wait default
     /// ([`limits::DEFAULT_WAIT`] unless changed) and is capped at the wait
@@ -488,8 +488,8 @@ impl Supervisor {
 
     /// Stop a run and return its `interrupted` result once it has stopped and
     /// cleanup was attempted, bounded by the process layer and by the
-    /// supervisor's interrupt bound. That bound ends in wall time or in the
-    /// time the machine was awake, whichever passes first.
+    /// supervisor's interrupt bound. That bound is counted in the time the
+    /// machine was awake and checked against wall time, as a `wait` is.
     ///
     /// A queued run is removed and finishes `interrupted` without ever starting.
     /// A finished run is returned unchanged. For a worker, acts on its current
@@ -540,7 +540,7 @@ impl Supervisor {
     }
 
     /// Whether the run a stop is waiting on reported within the interrupt
-    /// bound, counted in wall time and in awake time, whichever passes first.
+    /// bound, counted in awake time and checked against wall time.
     async fn stopped_in_time(&self, rx: oneshot::Receiver<()>) -> bool {
         let bound = self.shared.config.interrupt_bound;
         bound::within(bound, &self.shared.wall_clock, rx)

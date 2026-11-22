@@ -5,7 +5,8 @@
 //! advances while the machine sleeps. A caller of `wait`, `interrupt` or
 //! `close` measures the call in wall time, so a bound on awake time alone can
 //! outlast what the caller allows by however long the machine slept.
-//! [`within`] ends when the limit has passed on either clock.
+//! [`within`] also reads the wall clock at an interval and ends when either
+//! clock is seen to have reached the limit.
 //!
 //! Run time limits are not bounded this way on purpose: a run paused by sleep
 //! has not used its time.
@@ -27,13 +28,17 @@ pub(super) fn system_clock() -> WallClock {
 }
 
 /// Await `future` for at most `limit`, counted in awake time and in wall time,
-/// whichever passes first. `None` means the limit passed.
+/// whichever is seen to pass first. `None` means the limit passed.
 ///
-/// The awake-time bound is a timer, exact as before. The wall-time bound is
-/// checked every [`WALL_CHECK_INTERVAL`] of awake time, so after a sleep it ends
-/// within that interval of the machine waking. A wall clock that reads earlier
-/// than it did at the start counts as no time passed, which leaves the
-/// awake-time bound in force; one set forward ends the bound early.
+/// The awake-time bound is `tokio::time::timeout`, exact as before, and keeps a
+/// limit of any length. Wall time is read at the start and again every
+/// [`WALL_CHECK_INTERVAL`] of awake time, and the bound ends at a check that
+/// reads at least `limit` more than the start did. So after the machine slept
+/// past the limit, the bound ends within about one interval of awake time
+/// after it wakes, plus scheduling. A wall clock that reads earlier than it
+/// did at the start counts as no time passed, which leaves the awake-time
+/// bound in force. A wall clock set forward ends the bound early only if a
+/// check made while the call is still waiting reads the limit as passed.
 ///
 /// `future` is polled first, so one that is ready is returned even when `limit`
 /// is zero. It is taken by value: pass `&mut` to keep it after the limit.
@@ -43,25 +48,33 @@ pub(super) async fn within<F: Future>(
     future: F,
 ) -> Option<F::Output> {
     let began = clock();
-    let awake = tokio::time::sleep(limit);
-    let mut check =
-        tokio::time::interval_at(Instant::now() + WALL_CHECK_INTERVAL, WALL_CHECK_INTERVAL);
-    // After a sleep the checks do not need to catch up: one is enough.
-    check.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    tokio::pin!(future, awake);
-    loop {
-        tokio::select! {
-            biased;
-            output = &mut future => return Some(output),
-            () = &mut awake => return None,
-            _ = check.tick() => {
-                let passed = clock().duration_since(began).unwrap_or(Duration::ZERO);
-                if passed >= limit {
-                    return None;
+    // The future, or `None` at the first check that finds the limit passed in
+    // wall time.
+    let until_wall_limit = async {
+        let mut check =
+            tokio::time::interval_at(Instant::now() + WALL_CHECK_INTERVAL, WALL_CHECK_INTERVAL);
+        // After a sleep the checks do not need to catch up: one is enough.
+        check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut future => return Some(output),
+                _ = check.tick() => {
+                    let passed = clock().duration_since(began).unwrap_or(Duration::ZERO);
+                    if passed >= limit {
+                        return None;
+                    }
                 }
             }
         }
-    }
+    };
+    // `timeout`, not `sleep`: `sleep` clamps a duration to about 30 years,
+    // and a caller may configure a longer bound.
+    tokio::time::timeout(limit, until_wall_limit)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]
@@ -147,6 +160,31 @@ mod tests {
             took >= LIMIT && took <= LIMIT + TIMER_RESOLUTION,
             "ended after {took:?} awake, not at the awake-time limit of {LIMIT:?}"
         );
+    }
+
+    /// A library caller may configure a bound longer than the 30 years or so
+    /// that Tokio's `sleep` clamps a duration to. The bound keeps its limit.
+    #[tokio::test(start_paused = true)]
+    async fn a_bound_longer_than_thirty_years_has_not_ended_after_thirty_one() {
+        const YEAR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+        let (clock, _now) = hand_clock();
+        let bounded =
+            tokio::spawn(
+                async move { within(YEAR * 40, &clock, std::future::pending::<()>()).await },
+            );
+        // `advance` moves the clock in one step, so the wall checks do not run
+        // once for each second of it. Yielding keeps this task runnable, so
+        // paused time does not move on its own.
+        tokio::task::yield_now().await;
+        tokio::time::advance(YEAR * 31).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !bounded.is_finished(),
+            "a bound of 40 years ended within 31 years of awake time"
+        );
+        bounded.abort();
     }
 
     #[tokio::test(start_paused = true)]

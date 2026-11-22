@@ -32,8 +32,8 @@ pub const SHUTDOWN_BOUND: Duration = Duration::from_secs(30);
 pub const INTERRUPT_BOUND: Duration = Duration::from_secs(30);
 /// How often the bounds of `wait`, `interrupt` and `close` compare wall time
 /// with their limit. Their timers count only the time the machine was awake;
-/// this check ends them once the limit has passed in wall time, within this
-/// long of the machine waking.
+/// this check ends them once the limit has passed in wall time, within about
+/// this long of awake time after the machine wakes.
 pub(super) const WALL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// The longest `start` spends checking the request's paths, executable and
 /// schema before it is admitted.

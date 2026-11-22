@@ -1537,33 +1537,45 @@ async fn a_wait_still_ends_at_its_awake_time_limit_when_the_wall_clock_does_not_
     dir.assert_nothing_left().await;
 }
 
-/// How long the run of [`unstoppable`] outlasts a stop: longer than the
-/// interval at which a bound checks wall time, so the check comes first.
-const STOP_GRACE: Duration = Duration::from_secs(3);
+/// Far above the time the tests below need, so neither the stop's escalation
+/// nor the awake-time bound can end them: only the wall clock does.
+const FAR_OFF: Duration = Duration::from_secs(60 * 60);
 
 /// A supervisor that reads `clock`, with a running run that ignores the polite
-/// stop and so ends only when the stop escalates, [`STOP_GRACE`] later.
+/// stop and ends only when the test creates the gate file. The stop's
+/// escalation and the interrupt bound are both [`FAR_OFF`].
 async fn unstoppable(dir: &Dir, clock: &Arc<HandClock>) -> (Supervisor, super::StartResponse) {
-    let record = dir.root().join("record");
-    std::fs::create_dir(&record).expect("create directory");
     let mut config = dir.config();
-    config.provider.stop_grace = Some(STOP_GRACE);
-    config.provider.env_set.push((
-        "FAKE_RECORD_DIR".to_string(),
-        record.to_string_lossy().into_owned(),
-    ));
+    config.provider.stop_grace = Some(FAR_OFF);
+    config.interrupt_bound = FAR_OFF;
     let supervisor = Supervisor::with_wall_clock(config, clock.clock());
-    let started = supervisor.start(dir.request("hang")).await.expect("start");
-    // The fake writes this after it has begun ignoring the polite stop.
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    while !record.join("started").exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the hanging run never started"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let started = supervisor
+        .start(dir.request(&format!("hang-until:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    // The fake writes its marker after it has begun ignoring the polite stop.
+    dir.gate_started().await;
     (supervisor, started)
+}
+
+/// Await a stop that the moved wall clock should end at its next check, about a
+/// second away. The limit only ends a test that would otherwise wait for
+/// [`FAR_OFF`]; it is far above the time a loaded machine needs.
+async fn ended_by_wall_time<T>(stopping: tokio::task::JoinHandle<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(120), stopping)
+        .await
+        .expect("the stop was still waiting 120 s after wall time passed its bound")
+        .expect("task")
+}
+
+/// Let the run of [`unstoppable`] end, and check it ended as stopped and left
+/// nothing behind.
+async fn release_and_settle(dir: &Dir, supervisor: &Supervisor, run: &str) {
+    std::fs::write(dir.gate(), b"").expect("release the run");
+    let result = finished_result(supervisor, run).await;
+    assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
 }
 
 #[tokio::test]
@@ -1571,27 +1583,19 @@ async fn an_interrupt_says_not_settled_once_wall_time_passed_its_bound_though_aw
     let dir = Dir::new();
     let clock = HandClock::new();
     let (supervisor, started) = unstoppable(&dir, &clock).await;
-    let bound = supervisor.shared.config.interrupt_bound;
-    let begun = tokio::time::Instant::now();
     let interrupting = {
         let (supervisor, run) = (supervisor.clone(), started.run.clone());
         tokio::spawn(async move { supervisor.interrupt(Target::Run(run)).await })
     };
     clock.bound_began().await;
-    clock.forward(bound);
-    let response = interrupting.await.expect("task").expect("interrupt");
-    let took = begun.elapsed();
+    // The run cannot stop until the gate is released, so nothing but wall time
+    // can end the interrupt before then.
+    clock.forward(FAR_OFF);
+    let response = ended_by_wall_time(interrupting).await.expect("interrupt");
+    assert!(!dir.gate().exists(), "the run was released too early");
     assert!(!response.settled, "{response:#?}");
     assert!(response.result.is_none(), "{response:#?}");
-    assert!(
-        took < STOP_GRACE,
-        "the interrupt took {took:?}: it waited for the run, not for wall time"
-    );
-    // The stop was asked for and goes on; the run still ends interrupted.
-    let result = finished_result(&supervisor, &started.run).await;
-    assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
-    supervisor.shutdown().await;
-    dir.assert_nothing_left().await;
+    release_and_settle(&dir, &supervisor, &started.run).await;
 }
 
 #[tokio::test]
@@ -1599,17 +1603,15 @@ async fn a_close_says_not_settled_once_wall_time_passed_its_bound_though_awake_t
     let dir = Dir::new();
     let clock = HandClock::new();
     let (supervisor, started) = unstoppable(&dir, &clock).await;
-    let bound = supervisor.shared.config.interrupt_bound;
     let worker = started.worker.clone().expect("worker");
-    let begun = tokio::time::Instant::now();
     let closing = {
-        let (supervisor, worker) = (supervisor.clone(), worker.clone());
+        let supervisor = supervisor.clone();
         tokio::spawn(async move { supervisor.close(&worker).await })
     };
     clock.bound_began().await;
-    clock.forward(bound);
-    let response = closing.await.expect("task").expect("close");
-    let took = begun.elapsed();
+    clock.forward(FAR_OFF);
+    let response = ended_by_wall_time(closing).await.expect("close");
+    assert!(!dir.gate().exists(), "the run was released too early");
     assert!(!response.settled, "{response:#?}");
     assert!(response.result.is_none(), "{response:#?}");
     assert_eq!(
@@ -1617,12 +1619,5 @@ async fn a_close_says_not_settled_once_wall_time_passed_its_bound_though_awake_t
         Some(started.run.as_str()),
         "{response:#?}"
     );
-    assert!(
-        took < STOP_GRACE,
-        "the close took {took:?}: it waited for the run, not for wall time"
-    );
-    let result = finished_result(&supervisor, &started.run).await;
-    assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
-    supervisor.shutdown().await;
-    dir.assert_nothing_left().await;
+    release_and_settle(&dir, &supervisor, &started.run).await;
 }
