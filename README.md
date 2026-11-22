@@ -193,6 +193,10 @@ unexpectedly.
   no `--env`.
 - **Hosts.** Claude.ai and Cowork refuse plugins with a top-level `bin/`, so the
   plugin installs only into Claude Code and Codex.
+- Claude Code workers cannot run on a machine where a `managed-mcp.json` that
+  Claude Code can read and parse is deployed: delega refuses such runs up front
+  with `managed_mcp_exclusive`, and `delega doctor` reports it. See
+  [Managed settings](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#managed-settings).
 
 ## Scope
 
