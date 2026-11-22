@@ -502,3 +502,58 @@ fn the_text_says_once_per_provider_what_managed_keys_can_do_and_nothing_per_key(
         }
     }
 }
+
+#[test]
+fn a_single_file_that_changed_under_the_read_is_not_said_to_have_more_files() {
+    use crate::provider::managed::{
+        ManagedFileCounts, ManagedSource, ManagedSourceKind, ManagedSourceState,
+    };
+    let counts = ManagedFileCounts {
+        found: 1,
+        unreadable: 1,
+        limit_reached: true,
+    };
+    let mut report = full_report();
+    report.providers[1].managed_settings = vec![
+        ManagedSource {
+            path: "/etc/codex/requirements.toml".to_string(),
+            kind: ManagedSourceKind::RequirementsFile,
+            state: ManagedSourceState::PartlyRead,
+            files: Some(counts),
+            note: Some("the file changed size while doctor read it".to_string()),
+            keys: Vec::new(),
+            other_keys: 0,
+        },
+        ManagedSource {
+            path: "/Library/Managed Preferences".to_string(),
+            kind: ManagedSourceKind::UserManagedPreferences,
+            state: ManagedSourceState::PartlyRead,
+            files: Some(ManagedFileCounts {
+                found: 0,
+                unreadable: 0,
+                limit_reached: true,
+            }),
+            note: None,
+            keys: Vec::new(),
+            other_keys: 0,
+        },
+    ];
+    let shown = report.to_text();
+    // One file: its state and its note, no count and no talk of more files.
+    assert!(
+        shown.contains(
+            "    /etc/codex/requirements.toml (partly read)\n      the file changed size while \
+             doctor read it\n"
+        ),
+        "{shown}"
+    );
+    // A directory still says so.
+    assert!(
+        shown.contains(
+            "    /Library/Managed Preferences (partly read; 0 files, a limit was reached so \
+             there may be more)\n"
+        ),
+        "{shown}"
+    );
+    assert_eq!(shown.matches("there may be more").count(), 1, "{shown}");
+}

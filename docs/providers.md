@@ -1130,9 +1130,10 @@ file was seen before the limit, because there may be files that were never
 looked at. The same holds for the users' preferences: a listing cut off at 4096
 entries is reported as `partly_read` with `limit_reached`. The size of a file is
 taken before and after it is read. A file whose size changed meanwhile, or that
-holds more than was read, is not reported as read: a single file is
-`partly_read` with `limit_reached` and no keys, and a drop-in file is counted as
-not read and marks its directory the same way.
+holds more than was read, is not reported as read. A single file is then
+`partly_read` with no keys, and that is the only case in which a single file has
+`files` (one found, one not read, `limit_reached`). A drop-in file is counted as
+not read and marks its directory `partly_read` with `limit_reached`.
 
 **Claude Code keys.** Doctor lists these keys when they are present, whatever
 their value, with the category shown. A key that is not in this table is not
@@ -1159,11 +1160,8 @@ tools granted with `--allowedTools` and the deny rules and command hook in
 `--mcp-config`, the `--add-dir` directories, `--model`, and the environment a
 worker gets, which carries its credential.
 
-Two keys are left out on purpose. `permissions.disableBypassPermissionsMode`
-is about `--dangerously-skip-permissions`, which delega never passes: `full` is
-`--permission-mode dontAsk` with every built-in tool granted.
-`permissions.defaultMode` sets a default that the `--permission-mode` delega
-passes takes precedence over.
+Two keys are not listed: `permissions.disableBypassPermissionsMode` and
+`permissions.defaultMode`.
 
 **Codex keys.** A top-level key is named only when doctor knows it. Any other
 key is counted in `other_keys` and not named, and the text report says how many

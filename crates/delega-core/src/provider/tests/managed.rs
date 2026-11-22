@@ -1255,3 +1255,64 @@ fn a_file_whose_size_changes_under_the_read_is_not_reported_as_read() {
     // The largest bound does not overflow.
     assert_eq!(scripted(b"abc", 3, 3, u64::MAX), (Ok(b"abc".to_vec()), 3));
 }
+
+#[test]
+fn every_occurrence_of_a_repeated_key_is_looked_into() {
+    // The first value of a repeated name not being an object does not end the
+    // search under the name: each occurrence is judged by itself.
+    assert_eq!(
+        claude_names(r#"{"permissions":false,"permissions":{"deny":[]},"env":{}}"#),
+        ["permissions.deny", "env"]
+    );
+    assert_eq!(
+        claude_names(r#"{"permissions":{"deny":[]},"permissions":1e400,"env":{}}"#),
+        ["permissions.deny", "env"]
+    );
+    // The keys of every occurrence that is an object count, at each depth.
+    assert_eq!(
+        claude_names(
+            r#"{"permissions":{"allow":[]},"permissions":[{"deny":[]}],"permissions":{"ask":[]},
+                "sandbox":"x","sandbox":{"network":null,"network":{"allowManagedDomainsOnly":1},
+                  "filesystem":{"allowManagedReadPathsOnly":1},"filesystem":7},
+                "sandbox":{"enabled":0}}"#
+        ),
+        [
+            "permissions.allow",
+            "permissions.ask",
+            "sandbox.enabled",
+            "sandbox.filesystem.allowManagedReadPathsOnly",
+            "sandbox.network.allowManagedDomainsOnly"
+        ]
+    );
+    // A key is looked for where the table has it and nowhere else: not inside
+    // an array, not under another parent, not as a dotted top-level name.
+    assert_eq!(
+        claude_names(
+            r#"{"permissions.deny":1,"other":{"permissions":{"deny":[]}},
+                "list":[{"disableAllHooks":true}],"permissions":{"sandbox":{"enabled":1}},
+                "text":"{\"disableAllHooks\":true}","nested":{"a":[1,{"b":"}"}],"c":"]\\\""},
+                "apiKeyHelper":"x"}"#
+        ),
+        ["apiKeyHelper"]
+    );
+}
+
+#[test]
+fn a_member_name_that_is_not_text_hides_only_that_member() {
+    // An escaped lone surrogate is valid JSON and decodes to no text. It is
+    // treated the same everywhere: the member is passed over, its neighbours
+    // are found.
+    assert_eq!(
+        claude_names(
+            r#"{"\uDEAD":{"deny":[]},"x":"\uDEAD",
+                "permissions":{"\uDEAD":1,"deny":[],"\uD800x":{"allow":[]}},
+                "sandbox":{"\uDEAD":{"enabled":1},"enabled":"\uDBFF"},"disableAllHooks":"\uDEAD"}"#
+        ),
+        ["disableAllHooks", "permissions.deny", "sandbox.enabled"]
+    );
+    // Escapes that do decode are compared as the text they stand for.
+    assert_eq!(
+        claude_names(r#"{"env":{},"permissions":{"deny":[]}}"#),
+        ["permissions.deny", "env"]
+    );
+}

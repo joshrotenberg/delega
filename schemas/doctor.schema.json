@@ -297,7 +297,7 @@
           "minimum": 0
         },
         "limit_reached": {
-          "description": "Whether a limit on files, directory entries or bytes stopped the scan\nbefore the directory was exhausted, so there may be more than `found`\nand keys may be missing.",
+          "description": "For a directory, whether a limit on files, directory entries or bytes\nstopped the scan before the directory was exhausted, or a file in it\nchanged size while it was read, so there may be more than `found` and\nkeys may be missing. For a single file, set when the file changed size\nwhile it was read; there is no other file to find.",
           "type": "boolean"
         },
         "unreadable": {
@@ -401,7 +401,7 @@
       "type": "object",
       "properties": {
         "files": {
-          "description": "For a source that is a directory, how many files it holds. Null for a\nsingle file, unless the file changed size while it was read: then it is\none file found, not read, with `limit_reached`, and the state is\n`partly_read`.",
+          "description": "For a source that is a directory, how many files it holds. For a\nsingle file it is null, with one exception: when the file changed size\nwhile it was read it is one file found, one not read and\n`limit_reached`, and the state is `partly_read`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ManagedFileCounts"
@@ -501,7 +501,7 @@
           "const": "read"
         },
         {
-          "description": "A directory that was not gone through completely: some of its files\ncould not be read, or a limit stopped the scan (`files.limit_reached`),\nin which case there may be files that were never looked at. `keys`\nlists what was found in the files read.",
+          "description": "Not gone through completely. For a directory: some of its files could\nnot be read, or a limit stopped the scan (`files.limit_reached`), in\nwhich case there may be files that were never looked at; `keys` lists\nwhat was found in the files read. For a single file: its size changed\nwhile it was read, so no key is reported from it.",
           "type": "string",
           "const": "partly_read"
         },

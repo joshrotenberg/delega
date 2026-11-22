@@ -609,11 +609,15 @@ It reports, for `claude` and `codex` each:
   (`managed_settings`): each source's `path`, its `kind` (`settings_file`,
   `settings_drop_ins`, `mcp_file`, `requirements_file`, `managed_config_file`,
   `managed_preferences` or `user_managed_preferences`), its `state` (`read`,
-  `partly_read` for a directory of which some files were not read, `unreadable`
-  when it is there and could not be read or parsed, `not_inspected` for managed
-  preferences, which doctor does not open), `files` for a source that is a
-  directory (`found`, `unreadable` and `limit_reached`; null for a single
-  file), a `note` when the presence of the source matters by itself, and
+  `partly_read` for a directory of which some files were not read or whose
+  scan a limit cut short, and for a single file that changed size while it was
+  read, `unreadable` when it is there and could not be read or parsed,
+  `not_inspected` for managed preferences, which doctor does not open), `files`
+  for a source that is a directory (`found`, `unreadable` and `limit_reached`).
+  For a single file `files` is null, except when the file changed size while it
+  was read: then it is one found, one not read and `limit_reached`, and no key
+  is reported from the file. Each source also has a `note` when something is
+  known of it that does not depend on a key, and
   `keys`: the keys present in it that bear on what delega passes at launch,
   each a `name` and a `category` (`permissions`, `hooks`, `mcp`, `plugins`,
   `sandbox`, `authentication`, `environment`, `model`, `version`, `policy`,
@@ -624,10 +628,8 @@ It reports, for `claude` and `codex` each:
   provider that these keys can change how the provider treats what delega
   passes, with a link to the provider's reference. Never a value, and never
   text copied from a file or a directory: every `path` is one of the fixed
-  locations and every key name is one doctor knows. A source whose scan a limit
-  cut short, or a file that changed size while it was read, is `partly_read`
-  with `files.limit_reached`. The list is empty, and the text report prints
-  nothing, when no source is found.
+  locations and every key name is one doctor knows. The list is empty, and the
+  text report prints nothing, when no source is found.
   [providers.md](providers.md#managed-settings) lists the locations, the keys
   and what doctor cannot see, such as settings a provider fetches from its
   server.

@@ -62,11 +62,10 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
 use std::collections::BTreeSet;
-use std::fmt;
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::de::IgnoredAny;
 
 use crate::contract::request::Provider;
 
@@ -235,10 +234,11 @@ pub enum ManagedSourceKind {
 pub enum ManagedSourceState {
     /// It was read and parsed, and `keys` lists what was found in it.
     Read,
-    /// A directory that was not gone through completely: some of its files
-    /// could not be read, or a limit stopped the scan (`files.limit_reached`),
-    /// in which case there may be files that were never looked at. `keys`
-    /// lists what was found in the files read.
+    /// Not gone through completely. For a directory: some of its files could
+    /// not be read, or a limit stopped the scan (`files.limit_reached`), in
+    /// which case there may be files that were never looked at; `keys` lists
+    /// what was found in the files read. For a single file: its size changed
+    /// while it was read, so no key is reported from it.
     PartlyRead,
     /// It is there and could not be read or parsed, so nothing is known about
     /// what it sets.
@@ -318,9 +318,11 @@ pub struct ManagedFileCounts {
     /// Of those, how many could not be read or parsed. Always 0 for
     /// preferences, which are not opened.
     pub unreadable: usize,
-    /// Whether a limit on files, directory entries or bytes stopped the scan
-    /// before the directory was exhausted, so there may be more than `found`
-    /// and keys may be missing.
+    /// For a directory, whether a limit on files, directory entries or bytes
+    /// stopped the scan before the directory was exhausted, or a file in it
+    /// changed size while it was read, so there may be more than `found` and
+    /// keys may be missing. For a single file, set when the file changed size
+    /// while it was read; there is no other file to find.
     pub limit_reached: bool,
 }
 
@@ -334,10 +336,10 @@ pub struct ManagedSource {
     pub kind: ManagedSourceKind,
     /// Whether it was read.
     pub state: ManagedSourceState,
-    /// For a source that is a directory, how many files it holds. Null for a
-    /// single file, unless the file changed size while it was read: then it is
-    /// one file found, not read, with `limit_reached`, and the state is
-    /// `partly_read`.
+    /// For a source that is a directory, how many files it holds. For a
+    /// single file it is null, with one exception: when the file changed size
+    /// while it was read it is one file found, one not read and
+    /// `limit_reached`, and the state is `partly_read`.
     pub files: Option<ManagedFileCounts>,
     /// What is known of the source that does not depend on a key in it. Fixed
     /// text for the kind.
@@ -723,10 +725,7 @@ fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
                 other: 0,
             })
         }
-        ManagedSourceKind::McpFile => {
-            json_keys(text, &[])?;
-            Some(Found::default())
-        }
+        ManagedSourceKind::McpFile => is_json_object(text).then(Found::default),
         ManagedSourceKind::RequirementsFile => codex_keys(
             text,
             CODEX_REQUIREMENT_NAMES,
@@ -741,100 +740,167 @@ fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
     }
 }
 
-/// The names of the keys of the JSON object at `path` in `text`: the top level
-/// for an empty path. `None` when `text` is not JSON with an object at the top,
-/// when a key of the path is absent, or when what is at the path is not an
-/// object.
-///
-/// Every value is skipped, not converted: a number too large for any Rust type
-/// is still valid JSON, and it must not hide the keys around it. Only the
-/// objects on the way to `path` are entered.
-fn json_keys(text: &str, path: &[&str]) -> Option<BTreeSet<String>> {
-    let mut deserializer = serde_json::Deserializer::from_str(text);
-    let keys = KeysAt(path).deserialize(&mut deserializer).ok()?;
-    deserializer.end().ok()?;
-    keys
-}
-
-/// Collects the key names of the object at a path, skipping every value.
-struct KeysAt<'a>(&'a [&'a str]);
-
-impl<'de> DeserializeSeed<'de> for KeysAt<'_> {
-    type Value = Option<BTreeSet<String>>;
-
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
-        deserializer.deserialize_map(self)
-    }
-}
-
-impl<'de> Visitor<'de> for KeysAt<'_> {
-    type Value = Option<BTreeSet<String>>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an object")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut names = BTreeSet::new();
-        let mut below = None;
-        while let Some(name) = map.next_key::<String>()? {
-            match self.0.split_first() {
-                Some((first, rest)) if *first == name => {
-                    below = map.next_value_seed(KeysAt(rest))?;
-                }
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-            names.insert(name);
-        }
-        Ok(if self.0.is_empty() {
-            Some(names)
-        } else {
-            below
-        })
-    }
+/// Whether `text` is JSON with an object at the top. Values are skipped, not
+/// converted: a number too large for any Rust type is still valid JSON, and it
+/// must not make a file unreadable.
+fn is_json_object(text: &str) -> bool {
+    text.trim_start().starts_with('{') && serde_json::from_str::<IgnoredAny>(text).is_ok()
 }
 
 /// The keys of [`CLAUDE_KEYS`] that are present in the settings `text`, or
 /// `None` when it is not JSON with an object at the top. Present is all that
 /// is asked: no value is read.
-///
-/// The objects that hold nested keys are looked into one at a time, each in a
-/// pass of its own, so that one of them not being an object (`"permissions":
-/// "x"`) loses its own keys only.
 fn claude_keys(text: &str) -> Option<Vec<ManagedKey>> {
-    let top = json_keys(text, &[])?;
-    // The key names of each nested object, looked up once.
-    let mut nested: Vec<(&[&str], Option<BTreeSet<String>>)> = Vec::new();
-    let mut found = Vec::new();
-    for (path, category) in CLAUDE_KEYS {
-        let (name, parent) = path.split_last()?;
-        let present = if parent.is_empty() {
-            top.contains(*name)
-        } else {
-            if !nested.iter().any(|(known, _)| *known == parent) {
-                // Only when the top-level key is there is the pass worth making.
-                let names = top
-                    .contains(parent[0])
-                    .then(|| json_keys(text, parent))
-                    .flatten();
-                nested.push((parent, names));
-            }
-            nested
-                .iter()
-                .find(|(known, _)| *known == parent)
-                .and_then(|(_, names)| names.as_ref())
-                .is_some_and(|names| names.contains(*name))
-        };
-        if present {
-            found.push(ManagedKey {
+    if !is_json_object(text) {
+        return None;
+    }
+    let mut present = vec![false; CLAUDE_KEYS.len()];
+    let mut walk = Walk {
+        bytes: text.as_bytes(),
+        at: 0,
+    };
+    walk.object(&mut Vec::new(), &mut present)?;
+    Some(
+        CLAUDE_KEYS
+            .iter()
+            .zip(present)
+            .filter(|(_, present)| *present)
+            .map(|((path, category), _)| ManagedKey {
                 name: path.join("."),
                 category: *category,
-            });
+            })
+            .collect(),
+    )
+}
+
+/// One pass over text that [`is_json_object`] has accepted, marking which
+/// paths of [`CLAUDE_KEYS`] are present.
+///
+/// It goes by the shape of the text and converts nothing. Every member of an
+/// object is visited, so a name written twice counts both times: an occurrence
+/// whose value is an object is entered when keys are looked for under it, and
+/// an occurrence with any other value is skipped, without that ending the
+/// walk. A member name that does not decode to text (an escaped lone
+/// surrogate) matches no key, and only that member is skipped.
+struct Walk<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Walk<'a> {
+    /// The next byte that is not white space, without passing it.
+    fn peek(&mut self) -> Option<u8> {
+        while matches!(self.bytes.get(self.at)?, b' ' | b'\t' | b'\n' | b'\r') {
+            self.at += 1;
+        }
+        self.bytes.get(self.at).copied()
+    }
+
+    /// Pass `byte`, which must come next.
+    fn expect(&mut self, byte: u8) -> Option<()> {
+        (self.peek()? == byte).then(|| self.at += 1)
+    }
+
+    /// Pass the string that starts here and return it with its quotes.
+    fn string(&mut self) -> Option<&'a [u8]> {
+        let start = self.at;
+        self.expect(b'"')?;
+        loop {
+            match self.bytes.get(self.at)? {
+                b'\\' => self.at += 2,
+                b'"' => {
+                    self.at += 1;
+                    return self.bytes.get(start..self.at);
+                }
+                _ => self.at += 1,
+            }
         }
     }
-    Some(found)
+
+    /// Pass the value that starts here, whatever it is, without recursion.
+    fn skip(&mut self) -> Option<()> {
+        let mut depth = 0_usize;
+        loop {
+            match self.peek()? {
+                b'"' => {
+                    self.string()?;
+                }
+                b'{' | b'[' => {
+                    depth += 1;
+                    self.at += 1;
+                }
+                b'}' | b']' => {
+                    depth = depth.checked_sub(1)?;
+                    self.at += 1;
+                }
+                // Between values inside a container.
+                b',' | b':' if depth > 0 => self.at += 1,
+                // A number or a literal: up to what ends it.
+                _ => {
+                    while !matches!(
+                        self.bytes.get(self.at),
+                        None | Some(b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r')
+                    ) {
+                        self.at += 1;
+                    }
+                }
+            }
+            if depth == 0 {
+                return Some(());
+            }
+        }
+    }
+
+    /// Go through the object that starts here. `path` is the names that lead
+    /// to it. Each member whose path is a key of the table is marked in
+    /// `present`, and a member that is an object is entered when the table has
+    /// keys under its path.
+    fn object(&mut self, path: &mut Vec<String>, present: &mut [bool]) -> Option<()> {
+        self.expect(b'{')?;
+        if self.peek()? == b'}' {
+            self.at += 1;
+            return Some(());
+        }
+        loop {
+            self.peek()?;
+            let raw = self.string()?;
+            self.expect(b':')?;
+            // A name that is not text matches nothing; its value is passed.
+            match serde_json::from_slice::<String>(raw).ok() {
+                Some(name) => {
+                    path.push(name);
+                    let mut parent = false;
+                    for (index, (key, _)) in CLAUDE_KEYS.iter().enumerate() {
+                        if key.len() >= path.len()
+                            && key.iter().zip(path.iter()).all(|(a, b)| a == b)
+                        {
+                            if key.len() == path.len() {
+                                present[index] = true;
+                            } else {
+                                parent = true;
+                            }
+                        }
+                    }
+                    let entered = if parent && self.peek()? == b'{' {
+                        self.object(path, present)
+                    } else {
+                        self.skip()
+                    };
+                    path.pop();
+                    entered?;
+                }
+                None => self.skip()?,
+            }
+            match self.peek()? {
+                b',' => self.at += 1,
+                b'}' => {
+                    self.at += 1;
+                    return Some(());
+                }
+                _ => return None,
+            }
+        }
+    }
 }
 
 /// The top-level keys of a Codex file that are in `table`, under the table's

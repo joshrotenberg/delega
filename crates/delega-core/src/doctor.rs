@@ -31,7 +31,9 @@ use crate::provider::doctor::{self, Blocks, Problem, ProviderCheck};
 use crate::provider::limits::{
     MAX_OUTPUT_BYTES, MAX_STDERR_BYTES, MIN_CLAUDE_HOOK_VERSION, VERSION_PROBE_TIMEOUT,
 };
-use crate::provider::managed::{self, ManagedSource, ManagedSourceState, SystemPaths};
+use crate::provider::managed::{
+    self, ManagedSource, ManagedSourceKind, ManagedSourceState, SystemPaths,
+};
 use crate::provider::{ProviderOptions, Refusal};
 use crate::supervisor::limits as supervisor;
 
@@ -544,7 +546,14 @@ fn managed_text(out: &mut String, provider: Provider, sources: &[ManagedSource])
             ManagedSourceState::Unreadable => "present, could not be read or parsed",
             ManagedSourceState::NotInspected => "present, not inspected",
         };
-        let files = source.files.map_or_else(String::new, |files| {
+        // Only a directory has files to count. A single file carries counts
+        // when it changed under the read, which its note says in words.
+        let directory = matches!(
+            source.kind,
+            ManagedSourceKind::SettingsDropIns | ManagedSourceKind::UserManagedPreferences
+        );
+        let counted = source.files.filter(|_| directory);
+        let files = counted.map_or_else(String::new, |files| {
             let noun = if files.found == 1 { "file" } else { "files" };
             let mut text = format!("; {} {noun}", files.found);
             if files.unreadable > 0 {
