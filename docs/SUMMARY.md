@@ -2,13 +2,13 @@
 
 # Introduction
 
-- [Overview](introduction.md)
+- [Introduction](introduction.md)
 
 # Getting started
 
-- [Install]()
-- [First run]()
-- [Plugin setup]()
+- [Install](getting-started/install.md)
+- [First run](getting-started/first-run.md)
+- [Plugin setup](getting-started/plugin.md)
 
 # Guides
 
@@ -39,5 +39,5 @@
 # Project
 
 - [Guarantees and how they are tested](acceptance.md)
-- [Status and limits]()
+- [Status and limits](project/status.md)
 - [Contributing]()
