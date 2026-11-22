@@ -94,8 +94,8 @@ From a host session with the plugin installed, a caller starts a worker with
 `start`, waits with `wait` (passing back the `cursor` it returns), reads the
 result with `read` and frees the worker with `close`. The
 [`delegate` skill](skills/delegate/SKILL.md) and the
-[tool table](docs/api.md#mcp) in `docs/api.md` give the arguments and every
-answer.
+[tool table](docs/api.md#mcp) in `docs/api.md` describe the tool arguments
+and responses.
 
 ### Library
 
@@ -150,7 +150,7 @@ Where each stands:
 | 1 | Met against fake providers. | `contract`, `process`, `provider/settle.rs`; tested by the provider, CLI and supervisor tests and the acceptance matrix. |
 | 2 | Partly met. The result reports the cleanup problems delega detects; the documented gaps (below) can leave a process running while cleanup is reported as confirmed. | `process`; tested by `process/tests` and the acceptance matrix. |
 | 3 | Partly met. Permissions are stated up front, and a request not granted is answered no. Asking the caller live is not built. | `contract/permissions.rs`, `provider`; tested by `provider/tests` against fakes that honour the permission arguments. |
-| 4 | Met for the differences delega can identify, which it reports in `provider_notes`. With `permissions.strict`, a run whose permissions the provider cannot enforce as stated is refused with `permissions_not_enforceable`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
+| 4 | Met for the differences delega can identify, which it reports in `provider_notes`. With `permissions.strict`, a run with a permission that delega identifies as one the provider cannot enforce is refused with `permissions_not_enforceable`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
 | 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
 | 6 | Partly met. The fake-provider tests run in CI; the live suite is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)). | `crates/delega-core/src/provider/tests/fakes`. |
 
