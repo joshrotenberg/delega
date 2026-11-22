@@ -85,6 +85,8 @@ pub struct SupervisorLimits {
     pub default_wait_secs: u64,
     /// The longest one `wait` blocks, in seconds.
     pub wait_ceiling_secs: u64,
+    /// Waits blocked at once.
+    pub max_waits_in_flight: usize,
     /// Request checks that may be outstanding at once.
     pub max_outstanding_request_checks: usize,
 }
@@ -125,6 +127,7 @@ impl Limits {
                 retention_secs: limits.retention.as_secs(),
                 default_wait_secs: limits.wait_default.as_secs(),
                 wait_ceiling_secs: limits.wait_ceiling.as_secs(),
+                max_waits_in_flight: limits.max_waits_in_flight,
                 max_outstanding_request_checks: supervisor::MAX_PENDING_PREFLIGHTS,
             },
         }
@@ -546,7 +549,7 @@ fn limits_text(out: &mut String, limits: &Limits) {
     let _ = writeln!(
         out,
         "  supervisor: {} live workers, {} running runs, {} queued per worker; {} results or \
-         {} bytes kept for {} s; wait {} s by default, {} s at most; {} outstanding request checks",
+         {} bytes kept for {} s; wait {} s by default, {} s at most, {} blocked at once; {} outstanding request checks",
         sup.max_live_workers,
         sup.max_running_runs,
         sup.max_queued_per_worker,
@@ -555,6 +558,7 @@ fn limits_text(out: &mut String, limits: &Limits) {
         sup.retention_secs,
         sup.default_wait_secs,
         sup.wait_ceiling_secs,
+        sup.max_waits_in_flight,
         sup.max_outstanding_request_checks
     );
     let (a, b, c) = MIN_CLAUDE_HOOK_VERSION;

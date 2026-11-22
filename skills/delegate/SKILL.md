@@ -25,7 +25,7 @@ An argument a tool does not have is rejected.
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides | At once: `worker`, `run` and `state`, `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new `run`. It queues behind a running run. |
-| `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When any named run finishes, or on timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. |
+| `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When any named run finishes, or on timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` means too many waits were already open and this one returned at once without waiting. |
 | `read` | `run` or `worker`, `detail`, `after` (a cursor), `text_offset` | The `result` if finished; otherwise `state`, partial text and recent activity. |
 | `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: the `result`, with the outcome `interrupted`. |
@@ -33,7 +33,8 @@ An argument a tool does not have is rejected.
 
 `start` and `follow_up` return at once. Only `wait`, `interrupt` and `close`
 wait, and each is bounded: `wait` by its `timeout_secs` (30 seconds by default,
-and at most 300), `interrupt` and `close` by 30 seconds. If those 30 seconds
+and at most 300), `interrupt` and `close` by 30 seconds. At most 64 waits can
+be open at once (`list` reports `max_waits_in_flight` and `waits_in_flight`). If those 30 seconds
 pass first, `settled` is false: `read` the run later.
 
 ## Start a worker
@@ -84,6 +85,13 @@ Give each its own working directory.
 
 Prefer short waits and the cursor to one long wait. A timeout costs nothing: the
 workers keep running, and you can do other work or call `wait` again.
+
+Do not leave many waits open at once: one `wait` can name every run and worker
+you care about. A `wait` that would block when the limit on open waits is
+reached returns at once with `limit_reached: "max_waits_in_flight"`,
+`timeout_secs: 0` and the current states. Nothing is wrong with the workers:
+let an open wait return, then call `wait` again with the `cursor`. `interrupt`,
+`close`, `start`, `read` and `list` are not held behind open waits.
 
 Responses are compact by default. Pass `detail: "full"` to `read` only when you
 need process diagnostics, activity history or every field of the result.

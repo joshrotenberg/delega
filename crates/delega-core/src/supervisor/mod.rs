@@ -82,7 +82,8 @@ pub use state::{IllegalTransition, RunState, WorkerState};
 pub use views::{
     CloseResponse, CompactResult, Detail, FollowUpResponse, InterruptResponse, LimitsView,
     ListResponse, ProgressView, ReadResponse, ResultView, RunBrief, RunDiagnostics, ShutdownReport,
-    StartResponse, Target, TextWindow, WaitResponse, WaitTargets, WorkerBrief, WorkerView,
+    StartResponse, Target, TextWindow, WaitLimit, WaitResponse, WaitTargets, WorkerBrief,
+    WorkerView,
 };
 
 use command::{Closing, Command, Stopping, WaitStart, Wake};
@@ -360,6 +361,13 @@ impl Supervisor {
     /// ceiling. With `after_cursor`, returns at once if anything named
     /// finished after it. Pass the response's `cursor` back as `after_cursor`.
     /// Unknown ids are listed in `unknown`; the rest are still waited for.
+    ///
+    /// At most `Limits::max_waits_in_flight` waits block at once
+    /// ([`limits::MAX_WAITS_IN_FLIGHT`] unless changed). A wait that would
+    /// block beyond that returns at once with the current states,
+    /// `timeout_secs: 0` and `limit_reached`; a wait that has something to
+    /// report is answered whatever the count. A wait stops counting when it
+    /// returns and when its future is dropped.
     pub async fn wait(
         &self,
         targets: WaitTargets,
@@ -385,6 +393,7 @@ impl Supervisor {
         let (waiter, timed_out, released) = match start {
             WaitStart::Ready => (None, false, false),
             WaitStart::Released => (None, false, true),
+            WaitStart::LimitReached(view) => return Ok(*view),
             WaitStart::Pending { id, mut rx } => {
                 let woke = bound::within(applied, &self.shared.wall_clock, &mut rx).await;
                 match woke {

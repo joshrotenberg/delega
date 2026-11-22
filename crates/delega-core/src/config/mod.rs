@@ -95,6 +95,10 @@ pub const MAX_QUEUED_PER_WORKER_BOUND: usize = supervisor::MAX_QUEUED_PER_WORKER
 /// Upper bound of `mcp.wait_ceiling_secs` and of `mcp.wait_default_secs`.
 pub const WAIT_BOUND_SECS: u64 = supervisor::WAIT_CEILING.as_secs();
 
+/// Upper bound of `mcp.max_waits_in_flight`: the supervisor's default, which
+/// leaves at least half of the server's request slots to other calls.
+pub const MAX_WAITS_IN_FLIGHT_BOUND: usize = supervisor::MAX_WAITS_IN_FLIGHT;
+
 /// Where a configuration path came from, for reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -231,6 +235,10 @@ pub struct Mcp {
     /// The longest one `wait` blocks, in seconds, from 1 to 300.
     #[serde(default)]
     pub wait_ceiling_secs: Option<u64>,
+    /// Most waits blocked at once, from 1 to 64. A wait that would block
+    /// beyond it returns at once and says so.
+    #[serde(default)]
+    pub max_waits_in_flight: Option<u64>,
 }
 
 /// The user-level delega configuration file, a TOML document with the keys below.
@@ -334,6 +342,9 @@ impl Config {
         if let Some(v) = m.wait_default_secs {
             limits.wait_default = Duration::from_secs(v);
         }
+        if let Some(v) = m.max_waits_in_flight {
+            limits.max_waits_in_flight = count(v);
+        }
         // A wait is capped at the ceiling, so what is reported as the default is
         // what applies: a file that lowers only the ceiling lowers the default
         // with it.
@@ -378,6 +389,7 @@ impl Config {
         );
         add(m.wait_default_secs.is_some(), "mcp.wait_default_secs");
         add(m.wait_ceiling_secs.is_some(), "mcp.wait_ceiling_secs");
+        add(m.max_waits_in_flight.is_some(), "mcp.max_waits_in_flight");
         keys.sort();
         keys
     }

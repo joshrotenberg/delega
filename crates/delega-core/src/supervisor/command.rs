@@ -25,6 +25,9 @@ pub(super) enum WaitStart {
     /// Shutdown has begun and the wait has a cursor, so it answers at once
     /// without anything named having finished after the cursor.
     Released,
+    /// The wait would block and as many waits as the limit allows are blocked
+    /// already. It is not registered; this is its answer.
+    LimitReached(Box<WaitResponse>),
     /// Registered. `rx` fires when something named finishes, or when shutdown
     /// releases the wait.
     Pending {

@@ -9,6 +9,20 @@ use tower_mcp::{McpRouter, StdioTransport};
 
 /// Most requests handled at once.
 const MAX_CONCURRENT_REQUESTS: usize = 128;
+// A `wait` can hold a request for the whole wait ceiling. The supervisor lets
+// at most `max_waits_in_flight` of them block, and the configuration file can
+// lower that and cannot raise it, so at least half of the requests stay free
+// for `interrupt`, `close`, `start` and the reads. A build that changes either
+// number so that this no longer holds does not compile.
+const _: () = assert!(
+    delega_core::supervisor::limits::MAX_WAITS_IN_FLIGHT <= MAX_CONCURRENT_REQUESTS / 2,
+    "the default limit on waits in flight must leave half of the request slots to other calls"
+);
+const _: () = assert!(
+    delega_core::config::MAX_WAITS_IN_FLIGHT_BOUND
+        <= delega_core::supervisor::limits::MAX_WAITS_IN_FLIGHT,
+    "the configuration file must not raise the limit on waits in flight"
+);
 /// Largest input frame. A prompt may be 4 MiB before JSON escaping, so the
 /// frame limit leaves room for it and for the other fields.
 const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;

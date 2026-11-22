@@ -96,6 +96,7 @@ max_running_runs = 2
 max_queued_per_worker = 4
 wait_default_secs = 20
 wait_ceiling_secs = 120
+max_waits_in_flight = 32
 "#;
 
 #[test]
@@ -237,9 +238,10 @@ fn the_full_file_is_read_and_applied() {
     assert_eq!(limits.max_queued_per_worker, 4);
     assert_eq!(limits.wait_default, std::time::Duration::from_secs(20));
     assert_eq!(limits.wait_ceiling, std::time::Duration::from_secs(120));
+    assert_eq!(limits.max_waits_in_flight, 32);
     // What the file does not set stays as it is.
     assert_eq!(limits.retained_results, Limits::default().retained_results);
-    assert_eq!(config.settings().len(), 15);
+    assert_eq!(config.settings().len(), 16);
 }
 
 #[test]
@@ -446,6 +448,16 @@ fn a_value_of_the_wrong_type_or_outside_its_bound_is_refused_without_the_value()
         (
             "schema_version = 1\n[mcp]\nwait_ceiling_secs = 0\n".to_string(),
             "mcp.wait_ceiling_secs must be at least 1",
+        ),
+        // More would leave less than half of the server's requests to the
+        // calls that are not waits.
+        (
+            "schema_version = 1\n[mcp]\nmax_waits_in_flight = 65\n".to_string(),
+            "mcp.max_waits_in_flight must be at most 64",
+        ),
+        (
+            "schema_version = 1\n[mcp]\nmax_waits_in_flight = 0\n".to_string(),
+            "mcp.max_waits_in_flight must be at least 1",
         ),
         (
             "schema_version = 1\n[mcp]\nmax_running_runs = -1\n".to_string(),
@@ -850,6 +862,8 @@ fn the_schema_states_the_bounds_the_file_enforces() {
     assert_eq!(mcp["max_running_runs"]["maximum"], 4);
     assert_eq!(mcp["max_queued_per_worker"]["minimum"], 0);
     assert_eq!(mcp["wait_ceiling_secs"]["maximum"], 300);
+    assert_eq!(mcp["max_waits_in_flight"]["minimum"], 1);
+    assert_eq!(mcp["max_waits_in_flight"]["maximum"], 64);
     // The documented example validates against the schema it is checked by.
     assert!(config_of(FULL).is_ok());
 }

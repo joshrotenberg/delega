@@ -18,7 +18,7 @@ use super::super::command::{WaitStart, Wake};
 use super::super::error::Error;
 use super::super::limits::MAX_WAIT_TARGETS;
 use super::super::state::RunState;
-use super::super::views::{RunBrief, WaitResponse, WaitTargets};
+use super::super::views::{RunBrief, WaitLimit, WaitResponse, WaitTargets};
 use super::Core;
 
 /// A registered wait.
@@ -89,11 +89,30 @@ impl Core {
         if released_now {
             return Ok(WaitStart::Released);
         }
+        // A registration whose caller has gone holds no slot.
         self.waiters.retain(|_, w| !w.wake.is_closed());
+        if self.waiters.len() >= self.config.limits.max_waits_in_flight {
+            // Nothing named is ready, so this is what a wait of no time answers.
+            let mut view = self.wait_view(targets, after, None, true, false, 0);
+            view.limit_reached = Some(WaitLimit::MaxWaitsInFlight);
+            return Ok(WaitStart::LimitReached(Box::new(view)));
+        }
         self.next_waiter += 1;
         let id = self.next_waiter;
         self.waiters.insert(id, waiter);
         Ok(WaitStart::Pending { id, rx })
+    }
+
+    /// How many waits are blocked now. The registrations are the count, so it
+    /// cannot drift from them: one leaves when it fires, when its caller asks
+    /// for the view after its time passed, and when its caller has gone. A
+    /// caller that has gone is not counted even before its registration is
+    /// removed.
+    pub(super) fn waits_in_flight(&self) -> usize {
+        self.waiters
+            .values()
+            .filter(|w| !w.wake.is_closed())
+            .count()
     }
 
     fn waiter_ready(&self, waiter: &Waiter) -> bool {
@@ -198,6 +217,7 @@ impl Core {
             cursor: self.current_cursor(),
             timed_out: timed_out && !ready_now,
             released_by_shutdown: released,
+            limit_reached: None,
             timeout_secs,
             runs,
             workers,

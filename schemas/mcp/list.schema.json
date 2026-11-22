@@ -112,6 +112,18 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0
+          },
+          "max_waits_in_flight": {
+            "description": "Most waits blocked at once. A wait that would block beyond it returns\nat once with `limit_reached`.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "waits_in_flight": {
+            "description": "Waits blocked now.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
           }
         },
         "required": [
@@ -126,7 +138,9 @@
           "retained_bytes_now",
           "retention_secs",
           "wait_ceiling_secs",
-          "default_wait_secs"
+          "default_wait_secs",
+          "max_waits_in_flight",
+          "waits_in_flight"
         ]
       },
       "WorkerView": {

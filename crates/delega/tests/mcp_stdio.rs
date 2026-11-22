@@ -902,7 +902,7 @@ fn the_files_limits_defaults_and_environment_apply_to_the_server_and_its_starts(
          [defaults]\nprovider = \"codex\"\nmodel = \"file-model\"\ntimeout_secs = 777\n\
          [env]\npass = [\"FAKE_RECORD_DIR\"]\n[env.set]\nFROM_FILE = \"{SECRET_VALUE}\"\n\
          [mcp]\nmax_live_workers = 2\nmax_queued_per_worker = 3\n\
-         wait_default_secs = 1\nwait_ceiling_secs = 2\n"
+         wait_default_secs = 1\nwait_ceiling_secs = 2\nmax_waits_in_flight = 3\n"
     ));
     let mut session = rig.start(&[]);
     session.initialize();
@@ -915,6 +915,8 @@ fn the_files_limits_defaults_and_environment_apply_to_the_server_and_its_starts(
     assert_eq!(limits["max_running_runs"], 4, "{limits}");
     assert_eq!(limits["default_wait_secs"], 1, "{limits}");
     assert_eq!(limits["wait_ceiling_secs"], 2, "{limits}");
+    assert_eq!(limits["max_waits_in_flight"], 3, "{limits}");
+    assert_eq!(limits["waits_in_flight"], 0, "{limits}");
 
     // A start with no provider and no timeout takes the file's.
     let first = session.call(
@@ -993,6 +995,7 @@ fn a_file_the_server_cannot_use_refuses_to_start_it_and_a_missing_one_does_not()
     let listed = session.call("list", json!({}));
     assert_eq!(listed["limits"]["max_live_workers"], 16);
     assert_eq!(listed["limits"]["default_wait_secs"], 30);
+    assert_eq!(listed["limits"]["max_waits_in_flight"], 64);
     session.close_stdin();
     assert_eq!(session.exit().code(), Some(0), "{}", session.stderr());
     // A rig holds the lock that lets one of these tests run at a time.

@@ -31,6 +31,10 @@ pub struct Limits {
     /// The timeout `wait` uses when the caller gives none, capped at
     /// `wait_ceiling` like any other.
     pub wait_default: Duration,
+    /// Most waits blocked at once. A wait that would block beyond it returns
+    /// at once and says so; one that is answered at once does not count. At
+    /// least 1.
+    pub max_waits_in_flight: usize,
 }
 
 impl Default for Limits {
@@ -44,6 +48,7 @@ impl Default for Limits {
             retention: limits::RETENTION,
             wait_ceiling: limits::WAIT_CEILING,
             wait_default: limits::DEFAULT_WAIT,
+            max_waits_in_flight: limits::MAX_WAITS_IN_FLIGHT,
         }
     }
 }
@@ -54,6 +59,7 @@ impl Limits {
         self.max_live_workers = self.max_live_workers.max(1);
         self.max_running_runs = self.max_running_runs.max(1);
         self.retained_results = self.retained_results.max(1);
+        self.max_waits_in_flight = self.max_waits_in_flight.max(1);
         self
     }
 }

@@ -793,3 +793,94 @@ async fn a_wait_released_by_a_run_finishing_does_not_claim_shutdown() {
     assert!(waited.get("released_by_shutdown").is_none(), "{waited}");
     rig.finish().await;
 }
+
+#[tokio::test]
+async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_not_held_behind_waits()
+ {
+    let limits = Limits {
+        max_waits_in_flight: 2,
+        ..Limits::default()
+    };
+    let mut rig = Rig::with_limits(Provider::Codex, limits).await;
+    let gate = rig.gate("waits");
+    let started = rig
+        .call("start", rig.start_args(CODEX, &gate.prompt()))
+        .await;
+    gate.started().await;
+    let run = started["run"].clone();
+
+    // Each parked wait is a call on a connection of its own to the same
+    // server, so the calls below go on while they wait.
+    let mut parked = Vec::new();
+    for _ in 0..2 {
+        let router = delega_mcp::router(rig.supervisor.clone(), &delega_mcp::BuildInfo::default())
+            .expect("router");
+        let mut other = tower_mcp::TestClient::from_router(router);
+        other.initialize().await;
+        let run = run.clone();
+        parked.push(tokio::spawn(async move {
+            let result = other
+                .call_tool("wait", json!({"runs": [run], "timeout_secs": 120}))
+                .await;
+            (other, result)
+        }));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let listed = rig.call("list", json!({})).await;
+        assert_eq!(listed["limits"]["max_waits_in_flight"], 2, "{listed}");
+        if listed["limits"]["waits_in_flight"] == 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waits never parked: {listed}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Far below the 120 s the parked waits asked for.
+    let at_once = Duration::from_secs(10);
+    let begun = std::time::Instant::now();
+    let refused = rig
+        .call("wait", json!({"runs": [run], "timeout_secs": 120}))
+        .await;
+    assert!(begun.elapsed() < at_once, "{:?}", begun.elapsed());
+    assert_eq!(refused["limit_reached"], "max_waits_in_flight", "{refused}");
+    assert_eq!(refused["timeout_secs"], 0, "{refused}");
+    assert_eq!(refused["timed_out"], true, "{refused}");
+    assert_eq!(refused["runs"][0]["state"], "running", "{refused}");
+    assert!(refused.get("released_by_shutdown").is_none(), "{refused}");
+
+    // A wait with nothing to block on is answered without a slot.
+    let unknown = rig
+        .call(
+            "wait",
+            json!({"runs": ["no-such-run"], "timeout_secs": 120}),
+        )
+        .await;
+    assert!(unknown.get("limit_reached").is_none(), "{unknown}");
+
+    let begun = std::time::Instant::now();
+    let listed = rig.call("list", json!({})).await;
+    assert!(begun.elapsed() < at_once, "{:?}", begun.elapsed());
+    assert_eq!(listed["limits"]["waits_in_flight"], 2, "{listed}");
+    let stopped = rig.call("interrupt", json!({"run": run})).await;
+    assert_eq!(stopped["settled"], true, "{stopped}");
+
+    // The interrupt finished the run, which wakes the parked waits.
+    for wait in parked {
+        let (_, result) = tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .expect("the finished run woke the parked wait")
+            .expect("the task");
+        assert!(!result.is_error, "{}", result.all_text());
+        let woken = super::agree(&result);
+        assert_eq!(woken["timed_out"], false, "{woken}");
+        assert!(woken.get("limit_reached").is_none(), "{woken}");
+        assert_eq!(woken["timeout_secs"], 120, "{woken}");
+    }
+    let listed = rig.call("list", json!({})).await;
+    assert_eq!(listed["limits"]["waits_in_flight"], 0, "{listed}");
+    rig.finish().await;
+}
