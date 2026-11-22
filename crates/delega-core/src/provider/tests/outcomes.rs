@@ -256,8 +256,9 @@ both!(times_out_a_hung_provider_and_stops_it, timeout);
 
 /// A run that reported its usage and then hung past the time limit, started
 /// fresh or resumed (the fakes' second turn). The limit is far above the time
-/// the fake takes to start on a loaded machine, and the fake's
-/// `result-written` record shows its result came out before the limit.
+/// the fake takes to start on a loaded machine. The fake's `result-written`
+/// record shows its result was written before the fake was stopped, so the
+/// run had it to read.
 async fn timed_out_after_usage(
     provider: Provider,
     resume: bool,
@@ -272,7 +273,7 @@ async fn timed_out_after_usage(
     assert_eq!(result.outcome, Outcome::TimedOut, "{result:#?}");
     assert!(
         rig.record.join("result-written").exists(),
-        "the fake did not write its result before the time limit: {result:#?}"
+        "the fake did not write its result before it was stopped: {result:#?}"
     );
     assert!(
         result
