@@ -1085,7 +1085,8 @@ they can change what a worker gets with nothing in the result saying why: a
 grant ignored, an MCP configuration refused, delega's command hook not run.
 `delega doctor` ([api.md](api.md#doctor)) looks for the local sources of each
 provider and names the keys in them that change how a delega launch is
-honoured. It reports the fixed paths below, counts and key names, never a value.
+honoured, with what each controls. It reports the fixed paths below, counts and
+key names, never a value, and it does not say whether a key is on.
 Nothing it prints is copied from a file or a directory. A drop-in file or a
 user's preferences directory can be named anything, so each of those is one
 source with a count. A key is named only when it is one doctor knows, under
@@ -1117,40 +1118,41 @@ A file is opened without blocking and must be a regular file once open, so a
 pipe or a device in its place is `unreadable` and cannot hang doctor. Symbolic
 links are followed, as the providers follow them. The drop-in directory is read
 up to 64 files, 4096 directory entries and 4 MiB in all, counted as bytes read
-from disk whether or not they are text. When some of its files cannot be read
+from disk whether or not they are text, and never a byte more: a file that
+grows while it is read is cut off at what is left of the total. When some of its files cannot be read
 the directory is `partly_read` and the report says how many. When a limit stops
 the scan the directory is `partly_read` with `limit_reached`, even if no drop-in
 file was seen before the limit, because there may be files that were never
 looked at. The same holds for the users' preferences: a listing cut off at 4096
 entries is reported as `partly_read` with `limit_reached`.
 
-**Claude Code keys.** A key that is not in this table is not listed. Nested keys
-are given as dotted names. A key that is a switch is listed only when it is on:
-`false` is not listed, and any other value is, because Claude Code reads a
-managed switch it cannot parse as on. `disableAllHooks` is the exception: it is
-listed only when it is `true`, since Claude Code drops an invalid value. A key
-that holds a list or a value is listed when it is present, and its line says
-what the key holds, not that anything is restricted: an empty list is still
-listed.
+**Claude Code keys.** Doctor lists the managed keys present that can affect a
+launch and what each controls. It does not say whether a key is on: a key is
+listed because it is present, whatever its value, and no value is read. How
+Claude Code reads a value (a string where a Boolean belongs, `null`, an empty
+list, a key that fails closed when it cannot be parsed) is not reproduced, so a
+key set to `false` is listed like one set to `true`; read the file to see which
+it is. A key that is not in this table is not listed. Nested keys are given as
+dotted names.
 
-| Key | What it does to a delega launch |
+| Key | What it controls |
 | --- | --- |
-| `allowManagedPermissionRulesOnly` | Only managed permission rules count. The tools granted with `--allowedTools` and the deny rules passed in `--settings` are ignored, so under `--permission-mode dontAsk` a worker is denied what the request granted. |
-| `allowManagedHooksOnly`, `disableAllHooks` | The command hook passed with `--settings` does not run, so exact command grants are not checked by it. |
-| `strictPluginOnlyCustomization` | Can block hooks and MCP servers that do not come from a plugin, which covers the hook in `--settings` and the servers in `--mcp-config`. |
-| `disableSideloadFlags` | Claude Code rejects `--mcp-config` at startup, which every run passes. |
-| `allowManagedMcpServersOnly` | Only the managed allowlist of MCP servers counts, so servers passed with `--mcp-config` can be refused. |
+| `allowManagedPermissionRulesOnly` | Whether only managed permission rules count. When enabled, the tools granted with `--allowedTools` and the deny rules passed in `--settings` are ignored, so under `--permission-mode dontAsk` a worker is denied what the request granted. |
+| `allowManagedHooksOnly`, `disableAllHooks` | Whether only managed hooks run, or hooks are turned off, and so whether the command hook passed with `--settings` runs. When it does not, exact command grants are not checked by it. |
+| `strictPluginOnlyCustomization` | Whether hooks and MCP servers that do not come from a plugin are blocked, which would cover the hook in `--settings` and the servers in `--mcp-config`. |
+| `disableSideloadFlags` | Whether Claude Code rejects `--mcp-config` at startup, which every run passes. |
+| `allowManagedMcpServersOnly` | Whether only the managed allowlist of MCP servers counts. When enabled, servers passed with `--mcp-config` can be refused. |
 | `allowedMcpServers`, `deniedMcpServers` | Hold the managed allowlist and the list of blocked MCP servers, which servers passed with `--mcp-config` are checked against. |
 | `managed-mcp.json` (the file) | With the file in place Claude Code exits at startup when it is given `--strict-mcp-config`, which every run passes. |
 | `permissions.allow`, `permissions.deny`, `permissions.ask` | Hold managed rules, which apply beside the tools granted with `--allowedTools`: an allow rule can grant more than the request, a deny rule less, and a call that would ask is denied. |
 | `permissions.additionalDirectories` | Holds managed working directories, which are added beside the ones passed with `--add-dir`, so a worker can reach directories the request did not name. |
-| `permissions.blockReadsOutsideWorkingDirectories`, `permissions.blockWritesOutsideWorkingDirectories` | File tools refuse paths outside the working directories, which are the ones passed with `--add-dir` and any managed `permissions.additionalDirectories`, whatever the request grants. |
-| `sandbox.enabled` | Bash commands run in Claude Code's sandbox whatever the request grants. |
-| `sandbox.filesystem.allowManagedReadPathsOnly` | Only managed sandbox read paths count, so a sandboxed command may not read a directory passed with `--add-dir`. |
-| `sandbox.network.allowManagedDomainsOnly` | Sandboxed commands reach only the network domains managed settings allow, and any other domain is blocked without asking. The sandbox allowlist does not limit the `WebFetch` tool itself, which follows permission rules. |
-| `forceLoginMethod`, `forceLoginOrgUUID`, `allowedProviders` | Control which kind of account, which organization and which service the worker may use; a worker that uses another is refused. |
-| `enforceAnthropicSignIn` | Requires a claude.ai login, so a worker authenticated another way is refused. |
-| `apiKeyHelper` | Names a command that supplies the worker's credential when the environment delega passes holds no `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. Those come first in Claude Code's order, so a worker launched with one of them uses it and not the helper. |
+| `permissions.blockReadsOutsideWorkingDirectories`, `permissions.blockWritesOutsideWorkingDirectories` | Whether file tools refuse paths outside the working directories, which are the ones passed with `--add-dir` and any managed `permissions.additionalDirectories`, whatever the request grants. |
+| `sandbox.enabled` | Whether Bash commands run in Claude Code's sandbox, whatever the request grants. |
+| `sandbox.filesystem.allowManagedReadPathsOnly` | Whether only managed sandbox read paths count. When enabled, a sandboxed command may not read a directory passed with `--add-dir`. |
+| `sandbox.network.allowManagedDomainsOnly` | Whether sandboxed commands reach only the network domains managed settings allow. When enabled, any other domain is blocked without asking. The sandbox allowlist does not limit the `WebFetch` tool itself, which follows permission rules. |
+| `forceLoginMethod`, `forceLoginOrgUUID`, `allowedProviders` | Which kind of account, which organization and which service the worker may use; a worker that uses another is refused. |
+| `enforceAnthropicSignIn` | Whether a claude.ai login is required. When enabled, a worker authenticated another way is refused. |
+| `apiKeyHelper` | Names a command that can supply the worker's credential. Environment credentials and cloud provider settings come first, as Claude Code's [authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence) describes, so a worker launched with one of those does not use the helper. |
 | `env` | Holds variables Claude Code sets in the worker after the [environment policy](#environment-policy) has run. The variable names are not listed. |
 | `availableModels`, `deniedModels` | List the models a `--model` may and may not name. |
 | `modelOverrides` | Maps model IDs to provider model IDs, so a model named with `--model` can be sent to a different one. |

@@ -317,7 +317,8 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
             .to_string(),
         "docs/providers.md".to_string(),
         format!("    {dir}/managed-settings.json (read)"),
-        "      allowManagedPermissionRulesOnly: only managed permission rules count".to_string(),
+        "      allowManagedPermissionRulesOnly: controls whether only managed permission rules count"
+            .to_string(),
         "      permissions.deny: ".to_string(),
         "      apiKeyHelper: ".to_string(),
         "      env: ".to_string(),
@@ -447,4 +448,34 @@ fn no_managed_settings_block_is_shown_when_none_was_found() {
     let document: Value = serde_json::from_str(&report.to_json()).expect("JSON");
     assert_eq!(document["providers"][0]["managed_settings"], json!([]));
     assert_eq!(document["providers"][1]["managed_settings"], json!([]));
+}
+
+#[test]
+fn a_codex_file_with_only_unrecognized_keys_is_said_to_hold_none_doctor_recognizes() {
+    use crate::provider::managed::{Platform, SystemPaths, scan};
+    let root = tempfile::tempdir().expect("temporary root");
+    std::fs::create_dir_all(root.path().join("etc/codex")).expect("create directory");
+    std::fs::write(
+        root.path().join("etc/codex/managed_config.toml"),
+        "model = \"x\"\nmodel_provider = \"y\"\n",
+    )
+    .expect("write file");
+    std::fs::write(root.path().join("etc/codex/requirements.toml"), "").expect("write file");
+    let system = SystemPaths {
+        root: root.path().to_path_buf(),
+        platform: Platform::Linux,
+    };
+    let mut report = full_report();
+    report.providers[1].managed_settings = scan(Provider::Codex, &system);
+    let shown = report.to_text();
+    // The file may well change a launch: doctor only says it knows none of
+    // its keys, and how many there are.
+    for expected in [
+        "managed_config.toml (read, holds no keys doctor recognizes)\n",
+        "      2 other top-level keys are not named: ",
+        "requirements.toml (read, holds none of the keys doctor lists)\n",
+    ] {
+        assert!(shown.contains(expected), "{expected}\n{shown}");
+    }
+    assert!(!shown.contains("sets nothing"), "{shown}");
 }

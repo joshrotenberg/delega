@@ -910,78 +910,6 @@ fn a_key_name_written_in_a_codex_file_never_reaches_the_report() {
 }
 
 #[test]
-fn a_switch_that_is_set_to_false_is_not_reported_as_a_restriction() {
-    // Every switch off: nothing is in force.
-    assert_eq!(
-        claude_names(
-            r#"{"allowManagedPermissionRulesOnly":false,"allowManagedHooksOnly":false,
-                "disableAllHooks":false,"strictPluginOnlyCustomization":false,
-                "disableSideloadFlags":false,"allowManagedMcpServersOnly":false,
-                "permissions":{"blockReadsOutsideWorkingDirectories":false,
-                  "blockWritesOutsideWorkingDirectories":false},
-                "sandbox":{"enabled":false,"filesystem":{"allowManagedReadPathsOnly":false},
-                  "network":{"allowManagedDomainsOnly":false}},
-                "enforceAnthropicSignIn":false}"#
-        ),
-        Vec::<String>::new()
-    );
-    // The same switches on are reported.
-    assert_eq!(
-        claude_names(r#"{"disableSideloadFlags":true,"sandbox":{"enabled":true}}"#),
-        ["disableSideloadFlags", "sandbox.enabled"]
-    );
-    // A value Claude Code cannot read counts as on for a key that fails
-    // closed, and as absent for disableAllHooks, which it drops.
-    assert_eq!(
-        claude_names(r#"{"allowManagedPermissionRulesOnly":"yes","disableAllHooks":"true"}"#),
-        ["allowManagedPermissionRulesOnly"]
-    );
-    assert_eq!(
-        claude_names(r#"{"strictPluginOnlyCustomization":["hooks"]}"#),
-        ["strictPluginOnlyCustomization"]
-    );
-}
-
-#[test]
-fn a_key_that_is_not_a_switch_is_described_by_what_it_holds() {
-    // An empty list restricts nothing, so the reason must not say it does.
-    let root = Root::new();
-    root.write(
-        &format!("{MAC_CLAUDE}/managed-settings.json"),
-        r#"{"allowedMcpServers":[],"deniedMcpServers":[],"permissions":{"deny":[],"allow":[]},
-            "availableModels":[],"env":{},"apiKeyHelper":"x"}"#,
-    );
-    let found = root.mac(Provider::Claude);
-    let effect = |name: &str| {
-        found[0]
-            .keys
-            .iter()
-            .find(|k| k.name == name)
-            .expect("key")
-            .effect
-            .clone()
-    };
-    for name in [
-        "allowedMcpServers",
-        "deniedMcpServers",
-        "permissions.deny",
-        "permissions.allow",
-        "env",
-    ] {
-        assert!(
-            effect(name).starts_with("holds "),
-            "{name}: {}",
-            effect(name)
-        );
-    }
-    assert!(effect("availableModels").starts_with("lists "));
-    // The helper comes after a key in the environment, and the reason says so.
-    let helper = effect("apiKeyHelper");
-    assert!(helper.contains("ANTHROPIC_API_KEY"), "{helper}");
-    assert!(!helper.contains("not from the environment"), "{helper}");
-}
-
-#[test]
 fn the_drop_in_byte_limit_counts_bytes_read_before_decoding() {
     let dir = format!("{MAC_CLAUDE}/managed-settings.d");
     let half = SMALL.file_bytes as usize / 2;
@@ -1057,4 +985,176 @@ fn the_bounds_doctor_uses_are_the_documented_ones() {
     );
     assert_eq!(MAX_MANAGED_FILE_BYTES, 4 * 1024 * 1024);
     assert_eq!(MAX_DROP_IN_FILES, 64);
+}
+
+/// One settings object with every key of the table present, each set to
+/// `value`.
+fn every_claude_key(value: &str) -> String {
+    format!(
+        r#"{{"allowManagedPermissionRulesOnly":{v},"allowManagedHooksOnly":{v},
+            "disableAllHooks":{v},"strictPluginOnlyCustomization":{v},"disableSideloadFlags":{v},
+            "allowManagedMcpServersOnly":{v},"allowedMcpServers":{v},"deniedMcpServers":{v},
+            "permissions":{{"allow":{v},"deny":{v},"ask":{v},"additionalDirectories":{v},
+              "blockReadsOutsideWorkingDirectories":{v},
+              "blockWritesOutsideWorkingDirectories":{v}}},
+            "sandbox":{{"enabled":{v},"filesystem":{{"allowManagedReadPathsOnly":{v}}},
+              "network":{{"allowManagedDomainsOnly":{v}}}}},
+            "forceLoginMethod":{v},"forceLoginOrgUUID":{v},"enforceAnthropicSignIn":{v},
+            "allowedProviders":{v},"apiKeyHelper":{v},"env":{v},"availableModels":{v},
+            "deniedModels":{v},"modelOverrides":{v},"requiredMinimumVersion":{v},
+            "requiredMaximumVersion":{v},"policyHelper":{v}}}"#,
+        v = value
+    )
+}
+
+#[test]
+fn a_key_that_is_present_is_listed_whatever_its_value() {
+    // doctor does not decide whether a key is on: how Claude Code reads a
+    // value is not reproduced, so the same keys are listed for every value.
+    let with_true = claude_names(&every_claude_key("true"));
+    assert_eq!(with_true.len(), 29, "{with_true:?}");
+    for value in ["false", r#""false""#, "null", "[]", "{}", "0", r#""x""#] {
+        assert_eq!(claude_names(&every_claude_key(value)), with_true, "{value}");
+    }
+    assert_eq!(
+        claude_names(r#"{"disableSideloadFlags":false,"sandbox":{"enabled":false}}"#),
+        ["disableSideloadFlags", "sandbox.enabled"]
+    );
+}
+
+#[test]
+fn no_reason_says_that_a_restriction_is_in_force() {
+    let root = Root::new();
+    root.write(
+        &format!("{MAC_CLAUDE}/managed-settings.json"),
+        &every_claude_key("false"),
+    );
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found[0].keys.len(), 29);
+    for key in &found[0].keys {
+        // Every reason opens with what the key controls or holds.
+        assert!(
+            ["controls ", "holds ", "lists ", "names ", "maps ", "sets "]
+                .iter()
+                .any(|opening| key.effect.starts_with(opening)),
+            "{}: {}",
+            key.name,
+            key.effect
+        );
+        // And none states an outcome as a fact about this system: an
+        // outcome is always under a "whether" or a "when".
+        for claim in [
+            " are ignored, ",
+            "does not run,",
+            "Claude Code rejects",
+            "is refused,",
+        ] {
+            assert!(
+                !key.effect.contains(claim)
+                    || key.effect.contains("when ")
+                    || key.effect.contains("whether "),
+                "{}: {}",
+                key.name,
+                key.effect
+            );
+        }
+    }
+    let effect = |name: &str| {
+        found[0]
+            .keys
+            .iter()
+            .find(|k| k.name == name)
+            .expect("key")
+            .effect
+            .clone()
+    };
+    assert!(effect("disableSideloadFlags").starts_with("controls whether Claude Code rejects"));
+    assert!(effect("sandbox.enabled").starts_with("controls whether Bash commands run"));
+    assert!(effect("allowManagedPermissionRulesOnly").contains("when enabled"));
+    // The helper is one source of a credential among several that come first.
+    let helper = effect("apiKeyHelper");
+    assert!(
+        helper.starts_with("names a command that can supply"),
+        "{helper}"
+    );
+    assert!(
+        helper.contains("cloud provider settings come first"),
+        "{helper}"
+    );
+}
+
+#[test]
+fn a_read_never_takes_a_byte_past_its_limit_however_much_there_is() {
+    use crate::provider::managed::read_at_most;
+    // A source with no end stands for a file that keeps growing.
+    for limit in [0_u64, 1, 10, 4096] {
+        let mut charged = u64::MAX;
+        let bytes = read_at_most(std::io::repeat(b' '), limit, &mut charged).expect("read");
+        assert_eq!(bytes.len() as u64, limit);
+        assert_eq!(charged, limit);
+    }
+    // A short source is read whole and charged for what it held.
+    let mut charged = 0;
+    let bytes = read_at_most(&b"abc"[..], u64::MAX, &mut charged).expect("read");
+    assert_eq!((bytes.as_slice(), charged), (&b"abc"[..], 3));
+}
+
+#[test]
+fn the_bytes_read_from_a_drop_in_directory_never_exceed_its_total() {
+    // Files of every size around the total: whatever the order the directory
+    // gives them in, the report is consistent with at most the total being
+    // read, and a file at exactly the total alone is read whole.
+    let dir = format!("{MAC_CLAUDE}/managed-settings.d");
+    let total = SMALL.file_bytes as usize;
+    let root = Root::new();
+    root.write(
+        &format!("{dir}/a.json"),
+        &format!("{{}}{}", " ".repeat(total - 2)),
+    );
+    let found = root.mac_small(Provider::Claude);
+    assert_eq!(found[0].files, counts(1, 0, false), "{found:?}");
+    // One byte more is over the limit for a single file and is not read.
+    root.write(
+        &format!("{dir}/a.json"),
+        &format!("{{}}{}", " ".repeat(total - 1)),
+    );
+    let found = root.mac_small(Provider::Claude);
+    assert_eq!(found[0].files, counts(1, 1, false), "{found:?}");
+    // With one byte of the total spent, a file of exactly the total is left
+    // out by the limit, or the one-byte file is, never neither.
+    root.write(
+        &format!("{dir}/a.json"),
+        &format!("{{}}{}", " ".repeat(total - 2)),
+    );
+    root.write(&format!("{dir}/b.json"), " ");
+    let found = root.mac_small(Provider::Claude);
+    let files = found[0].files.expect("counts");
+    assert_eq!(files.found, 2);
+    assert!(files.limit_reached, "{found:?}");
+}
+
+#[test]
+fn a_bound_of_the_largest_number_does_not_overflow() {
+    let root = Root::new();
+    root.write(
+        &format!("{MAC_CLAUDE}/managed-settings.json"),
+        r#"{"disableAllHooks":true}"#,
+    );
+    root.write(&format!("{MAC_CLAUDE}/managed-settings.d/a.json"), "{}");
+    root.write("etc/codex/requirements.toml", "rules = {}\n");
+    let system = SystemPaths {
+        root: root.dir.path().to_path_buf(),
+        platform: Platform::Macos,
+    };
+    let unbounded = Limits {
+        file_bytes: u64::MAX,
+        drop_in_files: usize::MAX,
+        directory_entries: usize::MAX,
+    };
+    let claude = scan_with(Provider::Claude, &system, &unbounded);
+    assert_eq!(claude.len(), 2, "{claude:?}");
+    assert_eq!(names(&claude[0]), ["disableAllHooks"]);
+    assert_eq!(claude[1].files, counts(1, 0, false));
+    let codex = scan_with(Provider::Codex, &system, &unbounded);
+    assert_eq!(names(&codex[0]), ["rules"]);
 }

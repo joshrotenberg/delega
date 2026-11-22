@@ -532,7 +532,11 @@ fn managed_text(out: &mut String, sources: &[ManagedSource]) {
     for source in sources {
         let state = match source.state {
             ManagedSourceState::Read if source.keys.is_empty() && source.note.is_none() => {
-                "read, sets nothing that affects a delega launch"
+                if source.other_keys > 0 {
+                    "read, holds no keys doctor recognizes"
+                } else {
+                    "read, holds none of the keys doctor lists"
+                }
             }
             ManagedSourceState::Read => "read",
             ManagedSourceState::PartlyRead => "partly read",

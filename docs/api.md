@@ -614,8 +614,9 @@ It reports, for `claude` and `codex` each:
   preferences, which doctor does not open), `files` for a source that is a
   directory (`found`, `unreadable` and `limit_reached`; null for a single
   file), a `note` when the presence of the source matters by itself, and
-  `keys`: the names of the keys in it that can change how a delega launch is
-  honoured, each with its `effect`, and `other_keys`: for a Codex file, how many
+  `keys`: the names of the keys present in it that can change how a delega
+  launch is honoured, each with its `effect`, which is what the key controls
+  and not whether it is on (no value is read), and `other_keys`: for a Codex file, how many
   top-level keys doctor does not know, which are counted and not named. Never a
   value, and never text copied from a file or a directory: every `path` is one
   of the fixed locations and every key name is one doctor knows. A source whose

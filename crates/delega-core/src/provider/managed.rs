@@ -28,9 +28,10 @@
 //! path and a count. It never holds a key name read from a file either, for the
 //! same reason: a key that is in a table is reported under the table's name,
 //! and a top-level key of a Codex file that is in no table is only counted. A
-//! file's text is parsed, the names of the keys in the tables are looked up,
-//! values are read only to tell whether a switch is on, and the text is
-//! dropped.
+//! file's text is parsed, the names of the keys in the tables are looked up
+//! and the text is dropped. No value is read, not even to tell whether a key
+//! is switched on: a key is reported because it is present, with what it
+//! controls.
 //! A file that cannot be read or parsed is reported as present and unreadable,
 //! without the error, which could quote the file. Managed preferences are
 //! reported as present and are not opened. Settings a provider fetches from its
@@ -249,7 +250,8 @@ pub struct ManagedKey {
     /// The key's name, dotted when it is nested, such as `permissions.deny`.
     /// Never its value.
     pub name: String,
-    /// What the key can do to a delega launch. Fixed text for the key.
+    /// What the key controls that bears on a delega launch. Fixed text for the
+    /// key: it does not say whether the key is on, since no value is read.
     pub effect: String,
 }
 
@@ -297,38 +299,55 @@ pub struct ManagedSource {
     pub other_keys: usize,
 }
 
-/// A Claude Code settings key, as the path to it, and what it does to a launch.
+/// A Claude Code settings key, as the path to it, and what it controls.
 type ClaudeKey = (&'static [&'static str], &'static str);
 
-const HOOK_OFF: &str = "delega's command hook, passed with --settings, does not run, so exact \
-                        command grants are not checked by it";
-
-/// The managed Claude Code keys that change how what delega passes is
-/// honoured. Effects are from the Claude Code settings reference and its
-/// sandboxing page. `permissions.defaultMode` is not here: delega passes
-/// `--permission-mode`, which takes precedence over it. Neither is
-/// `permissions.disableBypassPermissionsMode`: delega never asks for that mode.
+/// The managed Claude Code keys that bear on how what delega passes is
+/// honoured, each with what it controls. A key is reported when it is present,
+/// whatever its value: doctor does not reproduce how Claude Code reads a value
+/// (a string where a Boolean belongs, `null`, an empty list, a key that fails
+/// closed), so no reason says that a restriction is in force, only what the
+/// key decides. What each key controls is from the Claude Code settings
+/// reference and its sandboxing page. `permissions.defaultMode` is not here:
+/// delega passes `--permission-mode`, which takes precedence over it. Neither
+/// is `permissions.disableBypassPermissionsMode`: delega never asks for that
+/// mode.
 const CLAUDE_KEYS: &[ClaudeKey] = &[
     (
         &["allowManagedPermissionRulesOnly"],
-        "only managed permission rules count: the tools granted with --allowedTools and the deny \
-         rules passed in --settings are ignored",
+        "controls whether only managed permission rules count; when enabled, the tools granted \
+         with --allowedTools and the deny rules passed in --settings are ignored",
     ),
-    (&["allowManagedHooksOnly"], HOOK_OFF),
-    (&["disableAllHooks"], HOOK_OFF),
+    (
+        &["allowManagedHooksOnly"],
+        concat!(
+            "controls whether only managed hooks run, and so whether ",
+            "delega's command hook, passed with --settings, runs; when it does not, exact command ",
+            "grants are not checked by it"
+        ),
+    ),
+    (
+        &["disableAllHooks"],
+        concat!(
+            "controls whether hooks are turned off, and so whether ",
+            "delega's command hook, passed with --settings, runs; when it does not, exact command ",
+            "grants are not checked by it"
+        ),
+    ),
     (
         &["strictPluginOnlyCustomization"],
-        "can block hooks and MCP servers that do not come from a plugin, which covers the hook in \
-         --settings and the servers in --mcp-config",
+        "controls whether hooks and MCP servers that do not come from a plugin are blocked, \
+         which would cover the hook in --settings and the servers in --mcp-config",
     ),
     (
         &["disableSideloadFlags"],
-        "Claude Code rejects --mcp-config at startup, which delega passes on every run",
+        "controls whether Claude Code rejects --mcp-config at startup, which delega passes on \
+         every run",
     ),
     (
         &["allowManagedMcpServersOnly"],
-        "only the managed allowlist of MCP servers counts, so servers passed with --mcp-config \
-         can be refused",
+        "controls whether only the managed allowlist of MCP servers counts; when enabled, \
+         servers passed with --mcp-config can be refused",
     ),
     (
         &["allowedMcpServers"],
@@ -361,27 +380,29 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
     ),
     (
         &["permissions", "blockReadsOutsideWorkingDirectories"],
-        "file tools refuse reads outside the working directories (the ones passed with --add-dir \
-         and any managed permissions.additionalDirectories) whatever the request grants",
+        "controls whether file tools refuse reads outside the working directories (the ones \
+         passed with --add-dir and any managed permissions.additionalDirectories), whatever the \
+         request grants",
     ),
     (
         &["permissions", "blockWritesOutsideWorkingDirectories"],
-        "file tools refuse writes outside the working directories (the ones passed with --add-dir \
-         and any managed permissions.additionalDirectories) whatever the request grants",
+        "controls whether file tools refuse writes outside the working directories (the ones \
+         passed with --add-dir and any managed permissions.additionalDirectories), whatever the \
+         request grants",
     ),
     (
         &["sandbox", "enabled"],
-        "Bash commands run in Claude Code's sandbox whatever the request grants",
+        "controls whether Bash commands run in Claude Code's sandbox, whatever the request grants",
     ),
     (
         &["sandbox", "filesystem", "allowManagedReadPathsOnly"],
-        "only managed sandbox read paths count, so a sandboxed command may not read a directory \
-         passed with --add-dir",
+        "controls whether only managed sandbox read paths count; when enabled, a sandboxed \
+         command may not read a directory passed with --add-dir",
     ),
     (
         &["sandbox", "network", "allowManagedDomainsOnly"],
-        "sandboxed commands reach only the network domains managed settings allow, and any other \
-         domain is blocked without asking, whatever the request grants",
+        "controls whether sandboxed commands reach only the network domains managed settings \
+         allow; when enabled, any other domain is blocked without asking",
     ),
     (
         &["forceLoginMethod"],
@@ -393,7 +414,8 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
     ),
     (
         &["enforceAnthropicSignIn"],
-        "requires a claude.ai login, so a worker authenticated another way is refused",
+        "controls whether a claude.ai login is required; when enabled, a worker authenticated \
+         another way is refused",
     ),
     (
         &["allowedProviders"],
@@ -402,8 +424,9 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
     ),
     (
         &["apiKeyHelper"],
-        "names a command that supplies the worker's credential when the environment delega \
-         passes holds no ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY, which come first",
+        "names a command that can supply the worker's credential; environment credentials and \
+         cloud provider settings come first, as Claude Code's authentication precedence \
+         describes",
     ),
     (
         &["env"],
@@ -437,29 +460,6 @@ const CLAUDE_KEYS: &[ClaudeKey] = &[
          returns",
     ),
 ];
-
-/// The keys of [`CLAUDE_KEYS`] that are switches: each is reported unless its
-/// value is `false`. Anything but `false` counts as on, because Claude Code
-/// reads a managed key that has one restrictive value as that value when it
-/// cannot read what was written (its managed settings page, "Keys that fail
-/// closed"), and treats an invalid Boolean in `sandbox` as the strictest one.
-const CLAUDE_SWITCHES: &[&str] = &[
-    "allowManagedPermissionRulesOnly",
-    "allowManagedHooksOnly",
-    "strictPluginOnlyCustomization",
-    "disableSideloadFlags",
-    "allowManagedMcpServersOnly",
-    "permissions.blockReadsOutsideWorkingDirectories",
-    "permissions.blockWritesOutsideWorkingDirectories",
-    "sandbox.enabled",
-    "sandbox.filesystem.allowManagedReadPathsOnly",
-    "sandbox.network.allowManagedDomainsOnly",
-    "enforceAnthropicSignIn",
-];
-
-/// The one switch that is reported only when its value is `true`: Claude Code
-/// drops an invalid `disableAllHooks` and does not treat it as on.
-const CLAUDE_ONLY_TRUE: &[&str] = &["disableAllHooks"];
 
 /// What the keys of `requirements.toml` that bear on something delega passes
 /// do to a launch.
@@ -661,7 +661,8 @@ pub fn scan_with(provider: Provider, system: &SystemPaths, limits: &Limits) -> V
 
 /// The bytes of the regular file at `path`, when it holds at most `limit`.
 /// `charged` gets the number of bytes read from the file, whatever comes of
-/// them, so a caller with a total to keep to can count them.
+/// them, so a caller with a total to keep to can count them. It is never more
+/// than `limit`: no byte past the limit is read to find out that there is one.
 ///
 /// The file is opened without blocking and the opened handle is judged, not
 /// the path: a pipe, a device or a directory swapped in after any earlier look
@@ -682,14 +683,27 @@ fn read_bytes(path: &Path, limit: u64, charged: &mut u64) -> Result<Vec<u8>, Unr
     if meta.len() > limit {
         return Err(Unread::OverLimit);
     }
-    let mut bytes = Vec::new();
-    let read = file.take(limit + 1).read_to_end(&mut bytes);
-    *charged = bytes.len() as u64;
-    read.map_err(|_| Unread::Unusable)?;
-    if bytes.len() as u64 > limit {
+    let bytes = read_at_most(&file, limit, charged).map_err(|_| Unread::Unusable)?;
+    // The file may have grown since the look above. When the read stopped at
+    // the limit, the size of the open file says whether there is more.
+    let size_now = file.metadata().map_or(u64::MAX, |meta| meta.len());
+    if bytes.len() as u64 == limit && size_now > limit {
         return Err(Unread::OverLimit);
     }
     Ok(bytes)
+}
+
+/// Up to `limit` bytes from `source`, and never one more, whatever `source`
+/// goes on to hold. `charged` gets the number read, also when reading fails.
+pub(crate) fn read_at_most(
+    source: impl Read,
+    limit: u64,
+    charged: &mut u64,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let read = source.take(limit).read_to_end(&mut bytes);
+    *charged = bytes.len() as u64;
+    read.map(|_| bytes)
 }
 
 /// The text in `bytes`, without a byte order mark, when they are UTF-8.
@@ -780,30 +794,17 @@ fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
     }
 }
 
-/// Whether the value of a Claude Code key means the key is in force. A key
-/// that is not a switch is in force by being there. The value is looked at and
-/// goes no further.
-fn in_force(name: &str, value: &Value) -> bool {
-    if CLAUDE_ONLY_TRUE.contains(&name) {
-        value == &Value::Bool(true)
-    } else if CLAUDE_SWITCHES.contains(&name) {
-        value != &Value::Bool(false)
-    } else {
-        true
-    }
-}
-
 fn claude_keys(settings: &Value) -> Vec<ManagedKey> {
     CLAUDE_KEYS
         .iter()
-        .map(|(path, effect)| (path, path.join("."), effect))
-        .filter(|(path, name, _)| {
+        .filter(|(path, _)| {
+            // Present is enough: the value at the end of the path is not read.
             path.iter()
                 .try_fold(settings, |value, part| value.as_object()?.get(*part))
-                .is_some_and(|value| in_force(name, value))
+                .is_some()
         })
-        .map(|(_, name, effect)| ManagedKey {
-            name,
+        .map(|(path, effect)| ManagedKey {
+            name: path.join("."),
             effect: (*effect).to_string(),
         })
         .collect()

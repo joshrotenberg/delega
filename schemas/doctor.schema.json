@@ -318,7 +318,7 @@
       "type": "object",
       "properties": {
         "effect": {
-          "description": "What the key can do to a delega launch. Fixed text for the key.",
+          "description": "What the key controls that bears on a delega launch. Fixed text for the\nkey: it does not say whether the key is on, since no value is read.",
           "type": "string"
         },
         "name": {
