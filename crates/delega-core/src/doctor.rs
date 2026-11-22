@@ -535,10 +535,22 @@ fn managed_text(out: &mut String, sources: &[ManagedSource]) {
                 "read, sets nothing that affects a delega launch"
             }
             ManagedSourceState::Read => "read",
+            ManagedSourceState::PartlyRead => "partly read",
             ManagedSourceState::Unreadable => "present, could not be read or parsed",
             ManagedSourceState::NotInspected => "present, not inspected",
         };
-        let _ = writeln!(out, "    {} ({state})", source.path);
+        let files = source.files.map_or_else(String::new, |files| {
+            let noun = if files.found == 1 { "file" } else { "files" };
+            let mut text = format!("; {} {noun}", files.found);
+            if files.unreadable > 0 {
+                let _ = write!(text, ", {} not read", files.unreadable);
+            }
+            if files.limit_reached {
+                text.push_str(", a limit was reached so there may be more");
+            }
+            text
+        });
+        let _ = writeln!(out, "    {} ({state}{files})", source.path);
         if let Some(note) = &source.note {
             let _ = writeln!(out, "      {note}");
         }

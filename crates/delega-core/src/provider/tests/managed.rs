@@ -11,8 +11,10 @@ use tempfile::TempDir;
 
 use crate::contract::request::Provider;
 use crate::provider::managed::{
-    ManagedSource, ManagedSourceKind, ManagedSourceState, Platform, SystemPaths, scan,
+    MAX_DROP_IN_FILES, MAX_MANAGED_FILE_BYTES, ManagedFileCounts, ManagedSource, ManagedSourceKind,
+    ManagedSourceState, Platform, SystemPaths, scan,
 };
+use crate::test_spawn::Guarded;
 
 /// A value no report may contain.
 const SECRET: &str = "sk-distinctive-managed-value-4417";
@@ -186,7 +188,6 @@ fn the_children_of_permissions_are_named_with_their_parent() {
             "permissions.allow",
             "permissions.deny",
             "permissions.ask",
-            "permissions.defaultMode",
             "permissions.additionalDirectories",
             "permissions.blockReadsOutsideWorkingDirectories",
             "permissions.blockWritesOutsideWorkingDirectories"
@@ -251,13 +252,14 @@ fn a_managed_env_block_is_named_without_its_variables() {
 fn the_model_version_and_helper_keys_are_named() {
     assert_eq!(
         claude_names(
-            r#"{"availableModels":["opus"],"deniedModels":["haiku"],
+            r#"{"availableModels":["opus"],"deniedModels":["haiku"],"modelOverrides":{"a":"b"},
                 "requiredMinimumVersion":"2.1.150","requiredMaximumVersion":"2.2.0",
                 "policyHelper":{"path":"/x"}}"#
         ),
         [
             "availableModels",
             "deniedModels",
+            "modelOverrides",
             "requiredMinimumVersion",
             "requiredMaximumVersion",
             "policyHelper"
@@ -267,7 +269,12 @@ fn the_model_version_and_helper_keys_are_named() {
 
 #[test]
 fn a_key_that_does_not_change_what_delega_passes_is_not_listed() {
-    // delega never asks for bypass mode, so the lock on it changes nothing.
+    // delega never asks for bypass mode, so the lock on it changes nothing,
+    // and it passes --permission-mode, which takes precedence over a default.
+    assert_eq!(
+        claude_names(r#"{"permissions":{"defaultMode":"plan"}}"#),
+        Vec::<String>::new()
+    );
     assert_eq!(
         claude_names(&format!(
             r#"{{"model":"{SECRET}","cleanupPeriodDays":7,"companyAnnouncements":["{SECRET}"],
@@ -281,40 +288,6 @@ fn a_key_that_does_not_change_what_delega_passes_is_not_listed() {
         claude_names(r#"{"permissions":{"env":{},"disableAllHooks":true},"hooks":{"allow":[]}}"#),
         Vec::<String>::new()
     );
-}
-
-#[test]
-fn each_drop_in_file_is_a_source_and_hidden_or_other_files_are_not() {
-    let root = Root::new();
-    let dir = format!("{MAC_CLAUDE}/managed-settings.d");
-    let second = root.write(
-        &format!("{dir}/20-security.json"),
-        r#"{"allowManagedPermissionRulesOnly":true}"#,
-    );
-    let first = root.write(
-        &format!("{dir}/10-hooks.json"),
-        r#"{"disableAllHooks":true}"#,
-    );
-    root.write(
-        &format!("{dir}/.hidden.json"),
-        r#"{"disableAllHooks":true}"#,
-    );
-    root.write(&format!("{dir}/notes.txt"), r#"{"disableAllHooks":true}"#);
-    let found = root.mac(Provider::Claude);
-    assert_eq!(found.len(), 2, "{found:?}");
-    assert!(found.iter().all(
-        |s| s.kind == ManagedSourceKind::SettingsDropIn && s.state == ManagedSourceState::Read
-    ));
-    assert_eq!(found[0].path, text(&first));
-    assert_eq!(names(&found[0]), ["disableAllHooks"]);
-    assert_eq!(found[1].path, text(&second));
-    assert_eq!(names(&found[1]), ["allowManagedPermissionRulesOnly"]);
-    // With the main file, the main file comes first.
-    let main = root.write(&format!("{MAC_CLAUDE}/managed-settings.json"), "{}");
-    let found = root.mac(Provider::Claude);
-    assert_eq!(found.len(), 3, "{found:?}");
-    assert_eq!(found[0].path, text(&main));
-    assert_eq!(found[0].keys, Vec::new());
 }
 
 #[test]
@@ -410,45 +383,6 @@ fn a_file_that_cannot_be_opened_or_is_not_a_file_is_present_and_unreadable() {
 }
 
 #[test]
-fn managed_preferences_are_reported_present_and_never_opened() {
-    let root = Root::new();
-    // Not a property list at all: nothing may depend on what is inside.
-    let system = root.write(
-        &format!("{PREFERENCES}/com.anthropic.claudecode.plist"),
-        &format!("{{\"disableAllHooks\":true}} {SECRET}"),
-    );
-    let user = root.write(
-        &format!("{PREFERENCES}/someone/com.anthropic.claudecode.plist"),
-        SECRET,
-    );
-    let codex = root.write(
-        &format!("{PREFERENCES}/someone/com.openai.codex.plist"),
-        SECRET,
-    );
-    root.write(&format!("{PREFERENCES}/com.example.other.plist"), SECRET);
-    let found = root.mac(Provider::Claude);
-    assert_eq!(found.len(), 2, "{found:?}");
-    assert_eq!(found[0].path, text(&system));
-    assert_eq!(found[1].path, text(&user));
-    for source in &found {
-        assert_eq!(source.kind, ManagedSourceKind::ManagedPreferences);
-        assert_eq!(source.state, ManagedSourceState::NotInspected);
-        assert_eq!(source.keys, Vec::new());
-        assert!(source.note.is_some());
-    }
-    let found = root.mac(Provider::Codex);
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].path, text(&codex));
-    assert_eq!(found[0].state, ManagedSourceState::NotInspected);
-    let note = found[0].note.as_deref().expect("note");
-    assert!(note.contains("requirements_toml_base64"), "{note}");
-    assert!(!format!("{found:?}").contains(SECRET));
-    // Managed preferences are a macOS mechanism.
-    assert_eq!(root.scan(Provider::Claude, Platform::Linux), Vec::new());
-    assert_eq!(root.scan(Provider::Codex, Platform::Linux), Vec::new());
-}
-
-#[test]
 fn every_top_level_key_of_a_codex_requirements_file_is_named() {
     let root = Root::new();
     let path = root.write(
@@ -492,8 +426,8 @@ fn every_top_level_key_of_a_codex_requirements_file_is_named() {
         };
         assert!(effect("allowed_approval_policies").contains("approval_policy"));
         assert!(effect("allowed_sandbox_modes").contains("sandbox_mode"));
-        // A key this build does not know still gets a reason.
-        assert!(effect("some_future_requirement").contains("requirement"));
+        // A key this build does not know is named without a claim about it.
+        assert!(effect("some_future_requirement").contains("Codex may ignore it"));
         assert!(!format!("{found:?}").contains(SECRET), "{found:?}");
     }
     assert_eq!(root.scan(Provider::Claude, Platform::Linux), Vec::new());
@@ -557,7 +491,7 @@ fn a_codex_file_that_is_not_toml_is_present_and_unreadable_with_no_content() {
 #[test]
 fn a_file_over_the_size_bound_is_unreadable_and_is_not_parsed() {
     let root = Root::new();
-    let padding = " ".repeat(crate::provider::managed::MAX_MANAGED_FILE_BYTES as usize);
+    let padding = " ".repeat(MAX_MANAGED_FILE_BYTES as usize);
     root.write(
         &format!("{MAC_CLAUDE}/managed-settings.json"),
         &format!(r#"{{"disableAllHooks":true}}{padding}"#),
@@ -576,12 +510,12 @@ fn no_effect_or_note_holds_an_em_dash_or_is_left_empty() {
         r#"{"allowManagedPermissionRulesOnly":1,"allowManagedHooksOnly":1,"disableAllHooks":1,
             "strictPluginOnlyCustomization":1,"disableSideloadFlags":1,
             "allowManagedMcpServersOnly":1,"allowedMcpServers":1,"deniedMcpServers":1,
-            "permissions":{"allow":1,"deny":1,"ask":1,"defaultMode":1,"additionalDirectories":1,
+            "permissions":{"allow":1,"deny":1,"ask":1,"additionalDirectories":1,
               "blockReadsOutsideWorkingDirectories":1,"blockWritesOutsideWorkingDirectories":1},
             "sandbox":{"enabled":1,"filesystem":{"allowManagedReadPathsOnly":1},
               "network":{"allowManagedDomainsOnly":1}},
             "forceLoginMethod":1,"forceLoginOrgUUID":1,"enforceAnthropicSignIn":1,
-            "allowedProviders":1,"apiKeyHelper":1,"env":1,"availableModels":1,"deniedModels":1,
+            "allowedProviders":1,"apiKeyHelper":1,"env":1,"availableModels":1,"deniedModels":1,"modelOverrides":1,
             "requiredMinimumVersion":1,"requiredMaximumVersion":1,"policyHelper":1}"#,
     );
     root.write(&format!("{MAC_CLAUDE}/managed-mcp.json"), "{}");
@@ -611,4 +545,341 @@ fn no_effect_or_note_holds_an_em_dash_or_is_left_empty() {
             assert!(!words.contains("  "), "{words}");
         }
     }
+}
+
+fn counts(found: usize, unreadable: usize, limit_reached: bool) -> Option<ManagedFileCounts> {
+    Some(ManagedFileCounts {
+        found,
+        unreadable,
+        limit_reached,
+    })
+}
+
+#[test]
+fn the_drop_in_directory_is_one_source_with_a_count_and_the_keys_of_its_files() {
+    let root = Root::new();
+    let dir = format!("{MAC_CLAUDE}/managed-settings.d");
+    root.write(
+        &format!("{dir}/20-security.json"),
+        r#"{"allowManagedPermissionRulesOnly":true,"disableAllHooks":true}"#,
+    );
+    root.write(
+        &format!("{dir}/10-hooks.json"),
+        r#"{"disableAllHooks":true}"#,
+    );
+    // Hidden files and files that are not `*.json` are not read, as in Claude Code.
+    root.write(&format!("{dir}/.hidden.json"), r#"{"env":{}}"#);
+    root.write(&format!("{dir}/notes.txt"), r#"{"env":{}}"#);
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].kind, ManagedSourceKind::SettingsDropIns);
+    assert_eq!(found[0].state, ManagedSourceState::Read);
+    assert_eq!(found[0].path, text(&root.dir.path().join(&dir)));
+    assert_eq!(found[0].files, counts(2, 0, false));
+    // The keys of both files together, each once, in the table's order.
+    assert_eq!(
+        names(&found[0]),
+        ["allowManagedPermissionRulesOnly", "disableAllHooks"]
+    );
+    // With the main file, the main file comes first and has no count.
+    let main = root.write(&format!("{MAC_CLAUDE}/managed-settings.json"), "{}");
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].path, text(&main));
+    assert_eq!(found[0].files, None);
+    // One file that does not parse makes the directory partly read.
+    root.write(&format!("{dir}/30-broken.json"), &format!("no {SECRET}"));
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found[1].state, ManagedSourceState::PartlyRead);
+    assert_eq!(found[1].files, counts(3, 1, false));
+    assert_eq!(names(&found[1]).len(), 2);
+    assert!(!format!("{found:?}").contains(SECRET));
+}
+
+#[test]
+fn a_drop_in_file_name_never_reaches_the_report() {
+    let root = Root::new();
+    let dir = format!("{MAC_CLAUDE}/managed-settings.d");
+    // A name that looks like a credential, and one that carries a line that
+    // would read as a report line of its own.
+    root.write(
+        &format!("{dir}/10-{SECRET}.json"),
+        r#"{"disableAllHooks":true}"#,
+    );
+    root.write(
+        &format!("{dir}/20-x\nproblems: none\n  forged-{SECRET}.json"),
+        "not json",
+    );
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].path, text(&root.dir.path().join(&dir)));
+    assert_eq!(found[0].files, counts(2, 1, false));
+    assert_eq!(names(&found[0]), ["disableAllHooks"]);
+    let shown = format!("{found:?}");
+    assert!(!shown.contains(SECRET), "{shown}");
+    assert!(!shown.contains("forged"), "{shown}");
+    assert!(!shown.contains("problems"), "{shown}");
+    let json = serde_json::to_string(&found).expect("JSON");
+    assert!(!json.contains(SECRET) && !json.contains("forged"), "{json}");
+    // Every path is exactly a fixed location under the root.
+    let fixed = text(&root.dir.path().join(&dir));
+    assert!(found.iter().all(|s| s.path == fixed));
+}
+
+#[test]
+fn a_drop_in_directory_is_read_up_to_its_file_limit_and_says_so() {
+    let root = Root::new();
+    let dir = format!("{MAC_CLAUDE}/managed-settings.d");
+    for index in 0..MAX_DROP_IN_FILES + 5 {
+        root.write(&format!("{dir}/{index:03}.json"), "{}");
+    }
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].files, counts(MAX_DROP_IN_FILES, 0, true));
+    // Files were left out, so the directory is not reported as wholly read.
+    assert_eq!(found[0].state, ManagedSourceState::PartlyRead);
+}
+
+#[test]
+fn a_drop_in_directory_is_read_up_to_its_byte_limit_and_says_so() {
+    let root = Root::new();
+    let dir = format!("{MAC_CLAUDE}/managed-settings.d");
+    // Each fits alone; the two together are over the total.
+    let padding = " ".repeat(MAX_MANAGED_FILE_BYTES as usize * 3 / 4);
+    for name in ["a.json", "b.json"] {
+        root.write(
+            &format!("{dir}/{name}"),
+            &format!(r#"{{"disableAllHooks":true}}{padding}"#),
+        );
+    }
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].files, counts(2, 1, true));
+    assert_eq!(found[0].state, ManagedSourceState::PartlyRead);
+    assert_eq!(names(&found[0]), ["disableAllHooks"]);
+}
+
+#[test]
+fn an_empty_settings_file_is_read_as_an_empty_object_as_claude_code_does() {
+    let root = Root::new();
+    root.write(&format!("{MAC_CLAUDE}/managed-settings.json"), "");
+    root.write(&format!("{MAC_CLAUDE}/managed-settings.d/a.json"), "");
+    // An empty MCP file is not an MCP configuration.
+    root.write(&format!("{MAC_CLAUDE}/managed-mcp.json"), "");
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert_eq!(found[0].state, ManagedSourceState::Read);
+    assert_eq!(found[0].keys, Vec::new());
+    assert_eq!(found[1].state, ManagedSourceState::Read);
+    assert_eq!(found[1].files, counts(1, 0, false));
+    assert_eq!(found[2].state, ManagedSourceState::Unreadable);
+    // Whitespace alone is not empty and is not JSON.
+    root.write(&format!("{MAC_CLAUDE}/managed-settings.json"), " \n");
+    assert_eq!(
+        root.mac(Provider::Claude)[0].state,
+        ManagedSourceState::Unreadable
+    );
+}
+
+#[test]
+fn a_pipe_where_a_file_belongs_is_unreadable_and_does_not_block() {
+    let root = Root::new();
+    let dir = root.dir.path().join(MAC_CLAUDE);
+    std::fs::create_dir_all(dir.join("managed-settings.d")).expect("create directories");
+    for name in ["managed-settings.json", "managed-settings.d/a.json"] {
+        let status = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(dir.join(name))
+            .guarded_status()
+            .expect("run mkfifo");
+        assert!(status.success());
+    }
+    // With no writer, a blocking open would never return. The scan runs on
+    // another thread so a regression fails the test and does not hang it.
+    let system = SystemPaths {
+        root: root.dir.path().to_path_buf(),
+        platform: Platform::Macos,
+    };
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(scan(Provider::Claude, &system));
+    });
+    let found = receive
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the scan returned");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].state, ManagedSourceState::Unreadable);
+    assert_eq!(found[1].state, ManagedSourceState::Unreadable);
+    assert_eq!(found[1].files, counts(1, 1, false));
+}
+
+#[test]
+fn a_link_out_of_an_injected_root_is_never_opened_or_listed() {
+    use std::os::unix::fs::symlink;
+    // What a fixture must not reach: files outside the root with keys in them.
+    let outside = Root::new();
+    let settings = outside.write("settings.json", r#"{"disableAllHooks":true}"#);
+    outside.write("codex/requirements.toml", "allowed_sandbox_modes = []\n");
+    outside.write("drop/a.json", r#"{"env":{}}"#);
+    outside.write("prefs/someone/com.anthropic.claudecode.plist", "");
+
+    // A file that is a link out: present, unreadable, nothing from the target.
+    let root = Root::new();
+    let dir = root.dir.path().join(MAC_CLAUDE);
+    std::fs::create_dir_all(dir.join("managed-settings.d")).expect("create directories");
+    symlink(&settings, dir.join("managed-settings.json")).expect("symlink");
+    // A drop-in file that is a link out: counted, not read.
+    symlink(&settings, dir.join("managed-settings.d/a.json")).expect("symlink");
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].state, ManagedSourceState::Unreadable);
+    assert_eq!(found[0].keys, Vec::new());
+    assert_eq!(found[1].state, ManagedSourceState::Unreadable);
+    assert_eq!(found[1].files, counts(1, 1, false));
+    assert_eq!(found[1].keys, Vec::new());
+
+    // Directories that are links out: nothing below them is looked at.
+    let root = Root::new();
+    std::fs::create_dir_all(root.dir.path().join("etc")).expect("create directory");
+    std::fs::create_dir_all(root.dir.path().join(MAC_CLAUDE)).expect("create directory");
+    std::fs::create_dir_all(root.dir.path().join("Library")).expect("create directory");
+    symlink(
+        outside.dir.path().join("codex"),
+        root.dir.path().join("etc/codex"),
+    )
+    .expect("symlink");
+    symlink(
+        outside.dir.path().join("prefs"),
+        root.dir.path().join(PREFERENCES),
+    )
+    .expect("symlink");
+    assert_eq!(root.mac(Provider::Codex), Vec::new());
+    // The drop-in directory itself is a fixed location: a link out is
+    // reported as present and unreadable, and is not listed.
+    symlink(
+        outside.dir.path().join("drop"),
+        root.dir.path().join(MAC_CLAUDE).join("managed-settings.d"),
+    )
+    .expect("symlink");
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].kind, ManagedSourceKind::SettingsDropIns);
+    assert_eq!(found[0].state, ManagedSourceState::Unreadable);
+    assert_eq!(found[0].files, None);
+
+    // A user's preferences directory that is a link out is not counted.
+    let root = Root::new();
+    std::fs::create_dir_all(root.dir.path().join(PREFERENCES)).expect("create directory");
+    symlink(
+        outside.dir.path().join("prefs/someone"),
+        root.dir.path().join(PREFERENCES).join("linked"),
+    )
+    .expect("symlink");
+    assert_eq!(root.mac(Provider::Claude), Vec::new());
+}
+
+#[test]
+fn a_link_that_stays_inside_the_root_is_followed_as_the_providers_follow_it() {
+    let root = Root::new();
+    let target = root.write("opt/policy/claude.json", r#"{"disableAllHooks":true}"#);
+    let dir = root.dir.path().join(MAC_CLAUDE);
+    std::fs::create_dir_all(&dir).expect("create directory");
+    std::os::unix::fs::symlink(&target, dir.join("managed-settings.json")).expect("symlink");
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].state, ManagedSourceState::Read);
+    assert_eq!(names(&found[0]), ["disableAllHooks"]);
+    // The path reported is the fixed location, not the target.
+    assert_eq!(found[0].path, text(&dir.join("managed-settings.json")));
+}
+
+#[test]
+fn managed_preferences_are_reported_present_and_never_opened() {
+    let root = Root::new();
+    // Not a property list at all: nothing may depend on what is inside.
+    let system = root.write(
+        &format!("{PREFERENCES}/com.anthropic.claudecode.plist"),
+        &format!("{{\"disableAllHooks\":true}} {SECRET}"),
+    );
+    // Users' directories can be named anything; none is named in the report.
+    root.write(
+        &format!("{PREFERENCES}/user-{SECRET}/com.anthropic.claudecode.plist"),
+        SECRET,
+    );
+    root.write(
+        &format!("{PREFERENCES}/line\nbreak/com.anthropic.claudecode.plist"),
+        SECRET,
+    );
+    root.write(
+        &format!("{PREFERENCES}/user-{SECRET}/com.openai.codex.plist"),
+        SECRET,
+    );
+    root.write(&format!("{PREFERENCES}/com.example.other.plist"), SECRET);
+    let directory = text(&root.dir.path().join(PREFERENCES));
+    let found = root.mac(Provider::Claude);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].path, text(&system));
+    assert_eq!(found[0].kind, ManagedSourceKind::ManagedPreferences);
+    assert_eq!(found[0].files, None);
+    assert_eq!(found[1].path, directory);
+    assert_eq!(found[1].kind, ManagedSourceKind::UserManagedPreferences);
+    assert_eq!(found[1].files, counts(2, 0, false));
+    for source in &found {
+        assert_eq!(source.state, ManagedSourceState::NotInspected);
+        assert_eq!(source.keys, Vec::new());
+        assert!(source.note.is_some());
+    }
+    assert!(!format!("{found:?}").contains(SECRET), "{found:?}");
+    assert!(!format!("{found:?}").contains("break"), "{found:?}");
+    let found = root.mac(Provider::Codex);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].path, directory);
+    assert_eq!(found[0].kind, ManagedSourceKind::UserManagedPreferences);
+    assert_eq!(found[0].files, counts(1, 0, false));
+    assert!(!format!("{found:?}").contains(SECRET));
+    // The file for the whole system says which keys it can carry.
+    root.write(&format!("{PREFERENCES}/com.openai.codex.plist"), SECRET);
+    let found = root.mac(Provider::Codex);
+    let note = found[0].note.as_deref().expect("note");
+    assert!(note.contains("requirements_toml_base64"), "{note}");
+    // Managed preferences are a macOS mechanism.
+    assert_eq!(root.scan(Provider::Claude, Platform::Linux), Vec::new());
+    assert_eq!(root.scan(Provider::Codex, Platform::Linux), Vec::new());
+}
+
+#[test]
+fn a_codex_key_that_is_not_known_is_named_without_a_claim_that_it_is_enforced() {
+    let root = Root::new();
+    root.write(
+        "etc/codex/requirements.toml",
+        "allowed_sandox_modes = [\"read-only\"]\nrules = {}\nfeatures = {}\n",
+    );
+    root.write(
+        "etc/codex/managed_config.toml",
+        "sandbox_mdoe = \"read-only\"\nallow_login_shell = true\n",
+    );
+    let found = root.scan(Provider::Codex, Platform::Linux);
+    let effect = |source: usize, name: &str| {
+        found[source]
+            .keys
+            .iter()
+            .find(|k| k.name == name)
+            .expect("key")
+            .effect
+            .clone()
+    };
+    // A typing mistake is listed, since an administrator meant something by
+    // it, and nothing says Codex enforces it.
+    let typo = effect(0, "allowed_sandox_modes");
+    assert!(typo.contains("Codex may ignore it"), "{typo}");
+    assert!(!typo.contains("enforce"), "{typo}");
+    // A key Codex reads that has no bearing on a delega flag is a requirement.
+    assert!(effect(0, "rules").contains("enforces"));
+    assert!(effect(0, "features").contains("enforces"));
+    let typo = effect(1, "sandbox_mdoe");
+    assert!(typo.contains("one it does not know is ignored"), "{typo}");
+    assert!(
+        !typo.contains("replaces") && !typo.contains("enforce"),
+        "{typo}"
+    );
+    assert!(effect(1, "allow_login_shell").contains("allow_login_shell=false"));
 }

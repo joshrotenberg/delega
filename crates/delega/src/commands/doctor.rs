@@ -27,8 +27,8 @@ pub struct Args {
     output: OutputFormat,
 }
 
-/// Test-only: the directory the system locations of managed settings are
-/// looked for under, in place of `/`.
+/// Test-only, honoured in builds with debug assertions only: the directory the
+/// system locations of managed settings are looked for under, in place of `/`.
 const SYSTEM_ROOT_ENV: &str = "DELEGA_TEST_SYSTEM_ROOT";
 
 /// Exit status when doctor itself cannot run.
@@ -73,15 +73,19 @@ pub fn run(args: Args) -> ExitCode {
     ExitCode::from(report.exit_status())
 }
 
-/// Where managed settings are looked for: the real system locations, or, with
-/// the test-only variable `DELEGA_TEST_SYSTEM_ROOT` naming an absolute path,
-/// the same locations under that directory. The variable moves only where this
-/// notice looks; it changes no run.
+/// Where managed settings are looked for: the real system locations. In a
+/// build with debug assertions, which is what the tests run, the test-only
+/// variable `DELEGA_TEST_SYSTEM_ROOT` naming an absolute path moves them under
+/// that directory. A release build ignores the variable, so one inherited from
+/// the environment cannot hide what is on the system.
 fn system_paths() -> SystemPaths {
-    match std::env::var_os(SYSTEM_ROOT_ENV).map(PathBuf::from) {
-        Some(root) if root.is_absolute() => SystemPaths::under(root),
-        _ => SystemPaths::default(),
+    if cfg!(debug_assertions) {
+        match std::env::var_os(SYSTEM_ROOT_ENV).map(PathBuf::from) {
+            Some(root) if root.is_absolute() => return SystemPaths::under(root),
+            _ => {}
+        }
     }
+    SystemPaths::default()
 }
 
 fn unable(message: &str) -> ExitCode {

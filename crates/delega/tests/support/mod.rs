@@ -181,8 +181,17 @@ impl Rig {
     /// starts from this, so doctor looks for managed settings under
     /// [`Rig::system_root`] and never reads the real system locations. The
     /// variable is not set for other commands, whose environment counts it
-    /// would change.
+    /// would change. `delega` honours it only in a build with debug
+    /// assertions, which is what `cargo test` builds.
     pub fn doctor_command(&self) -> Command {
+        // A build without debug assertions ignores the variable and would look
+        // at the real system locations, so such a build must not get this far.
+        if !cfg!(debug_assertions) {
+            panic!(
+                "the doctor tests need a build with debug assertions: a release build ignores \
+                 DELEGA_TEST_SYSTEM_ROOT and would read the real managed settings locations"
+            );
+        }
         let mut command = self.command();
         command.env(SYSTEM_ROOT_ENV, self.system_root());
         command

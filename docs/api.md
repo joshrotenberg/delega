@@ -575,7 +575,7 @@ Behavior:
   override. There is no flag for it. `--allow-command` for Claude Code is enforced by this executable's own
   hidden `command-guard` subcommand, which Claude Code starts before a `Bash`
   call; it is not part of the public surface.
-- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface. `DELEGA_TEST_SYSTEM_ROOT`, when set to an absolute path, makes `delega doctor` look for managed settings under that directory in place of `/`, so the tests never read the real system locations; it changes no run and is not part of the public surface either.
+- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface. `DELEGA_TEST_SYSTEM_ROOT`, when set to an absolute path, makes `delega doctor` look for managed settings under that directory in place of `/`, so the tests never read the real system locations. It is honoured only in a build with debug assertions, which is what `cargo test` builds: a release build ignores it, so a variable inherited from the environment cannot hide what is on the system. Under such a directory doctor opens nothing that resolves outside it. It changes no run and is not part of the public surface either.
 - **Scope.** The CLI runs in the foreground only. It does not list or stop runs
   started by another process; supervising several workers is done over MCP.
 
@@ -607,13 +607,17 @@ It reports, for `claude` and `codex` each:
   their rule counts, the local files ignored and why, and the number applied;
 - the managed (administrator) settings found on this system for the provider
   (`managed_settings`): each source's `path`, its `kind` (`settings_file`,
-  `settings_drop_in`, `mcp_file`, `requirements_file`, `managed_config_file` or
-  `managed_preferences`), its `state` (`read`, `unreadable` when it is there and
-  could not be read or parsed, `not_inspected` for managed preferences, which
-  doctor does not open), a `note` when the presence of the source matters by
-  itself, and `keys`: the names of the keys in it that can change how a delega
-  launch is honoured, each with its `effect`. Never a value. The list is empty,
-  and the text report prints nothing, when no source is found.
+  `settings_drop_ins`, `mcp_file`, `requirements_file`, `managed_config_file`,
+  `managed_preferences` or `user_managed_preferences`), its `state` (`read`,
+  `partly_read` for a directory of which some files were not read, `unreadable`
+  when it is there and could not be read or parsed, `not_inspected` for managed
+  preferences, which doctor does not open), `files` for a source that is a
+  directory (`found`, `unreadable` and `limit_reached`; null for a single
+  file), a `note` when the presence of the source matters by itself, and
+  `keys`: the names of the keys in it that can change how a delega launch is
+  honoured, each with its `effect`. Never a value, and never a name read from a
+  directory: every `path` is one of the fixed locations. The list is empty, and
+  the text report prints nothing, when no source is found.
   [providers.md](providers.md#managed-settings) lists the locations, the keys
   and what doctor cannot see, such as settings a provider fetches from its
   server.

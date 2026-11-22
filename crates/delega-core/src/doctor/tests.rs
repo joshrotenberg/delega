@@ -241,9 +241,11 @@ fn the_limits_follow_the_supervisor_limits_given() {
 const MANAGED_SECRET: &str = "sk-distinctive-managed-value-9093";
 
 /// A report whose providers carry what a scan of a temporary root found: for
-/// Claude Code a settings file, an unparseable drop-in file, an MCP file and a
-/// managed preferences file, and for Codex a requirements file. Every file
-/// holds [`MANAGED_SECRET`].
+/// Claude Code a settings file, a drop-in directory with one file that parses
+/// and one that does not, an MCP file and managed preferences for the system
+/// and for a user, and for Codex a requirements file. Every file holds
+/// [`MANAGED_SECRET`], and so do the names of the drop-in files and of the
+/// user's directory; one drop-in name also carries a forged report line.
 fn report_with_managed_settings() -> (tempfile::TempDir, Report) {
     use crate::provider::managed::{Platform, SystemPaths, scan};
     let root = tempfile::tempdir().expect("temporary root");
@@ -262,8 +264,18 @@ fn report_with_managed_settings() -> (tempfile::TempDir, Report) {
         ),
     );
     write(
-        &format!("{claude}/managed-settings.d/10-broken.json"),
+        &format!("{claude}/managed-settings.d/10-{MANAGED_SECRET}.json"),
         format!("not json {MANAGED_SECRET}"),
+    );
+    write(
+        &format!("{claude}/managed-settings.d/20-x\nproblems: forged-{MANAGED_SECRET}.json"),
+        r#"{"disableAllHooks":true}"#.to_string(),
+    );
+    write(
+        &format!(
+            "Library/Managed Preferences/u-{MANAGED_SECRET}\nforged/com.anthropic.claudecode.plist"
+        ),
+        MANAGED_SECRET.to_string(),
     );
     write(
         &format!("{claude}/managed-mcp.json"),
@@ -300,7 +312,7 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         .display()
         .to_string();
     for expected in [
-        "  managed settings: 4 found; the provider applies them over what delega passes"
+        "  managed settings: 5 found; the provider applies them over what delega passes"
             .to_string(),
         "docs/providers.md".to_string(),
         format!("    {dir}/managed-settings.json (read)"),
@@ -308,9 +320,9 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         "      permissions.deny: ".to_string(),
         "      apiKeyHelper: ".to_string(),
         "      env: ".to_string(),
-        format!(
-            "    {dir}/managed-settings.d/10-broken.json (present, could not be read or parsed)"
-        ),
+        format!("    {dir}/managed-settings.d (partly read; 2 files, 1 not read)\n"),
+        "      disableAllHooks: ".to_string(),
+        "Library/Managed Preferences (present, not inspected; 1 file)\n".to_string(),
         format!("    {dir}/managed-mcp.json (read)"),
         "--strict-mcp-config".to_string(),
         "com.anthropic.claudecode.plist (present, not inspected)".to_string(),
@@ -322,6 +334,13 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         assert!(shown.contains(&expected), "{expected}\n{shown}");
     }
     assert!(!shown.contains(MANAGED_SECRET), "{shown}");
+    // No name read from a directory is shown, so none can forge a line.
+    assert!(!shown.contains("forged"), "{shown}");
+    assert_eq!(
+        shown.lines().filter(|l| l.starts_with("problems")).count(),
+        1,
+        "{shown}"
+    );
     // A key that does not affect a launch is not shown.
     assert!(!shown.contains("model:"), "{shown}");
 }
@@ -331,6 +350,7 @@ fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
     let (_root, report) = report_with_managed_settings();
     let json = report.to_json();
     assert!(!json.contains(MANAGED_SECRET), "{json}");
+    assert!(!json.contains("forged"), "{json}");
     let document: Value = serde_json::from_str(&json).expect("report is JSON");
     let schema: Value = serde_json::from_str(DOCTOR_SCHEMA).expect("schema is JSON");
     let validator = jsonschema::validator_for(&schema).expect("compile schema");
@@ -351,9 +371,10 @@ fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
         shape,
         [
             ("settings_file", "read"),
-            ("settings_drop_in", "unreadable"),
+            ("settings_drop_ins", "partly_read"),
             ("mcp_file", "read"),
             ("managed_preferences", "not_inspected"),
+            ("user_managed_preferences", "not_inspected"),
         ]
     );
     let names: Vec<&str> = claude[0]["keys"]
@@ -376,8 +397,25 @@ fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
         let fields: Vec<&String> = key.as_object().expect("object").keys().collect();
         assert_eq!(fields, ["effect", "name"]);
     }
-    assert_eq!(claude[1]["keys"], json!([]));
+    assert_eq!(claude[0]["files"], Value::Null);
+    assert_eq!(claude[1]["keys"][0]["name"], "disableAllHooks");
+    assert_eq!(
+        claude[1]["files"],
+        json!({"found": 2, "limit_reached": false, "unreadable": 1})
+    );
     assert_eq!(claude[1]["note"], Value::Null);
+    assert_eq!(claude[4]["files"]["found"], 1);
+    // Every path ends in a fixed name, never one read from a directory.
+    for (source, end) in claude.iter().zip([
+        "/ClaudeCode/managed-settings.json",
+        "/ClaudeCode/managed-settings.d",
+        "/ClaudeCode/managed-mcp.json",
+        "/Managed Preferences/com.anthropic.claudecode.plist",
+        "/Library/Managed Preferences",
+    ]) {
+        let path = source["path"].as_str().expect("path");
+        assert!(path.ends_with(end), "{path}");
+    }
     let codex = &document["providers"][1]["managed_settings"];
     assert_eq!(codex[0]["kind"], "requirements_file");
     assert_eq!(codex[0]["keys"][0]["name"], "allowed_sandbox_modes");

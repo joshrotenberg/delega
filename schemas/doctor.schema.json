@@ -286,6 +286,33 @@
         "supervisor"
       ]
     },
+    "ManagedFileCounts": {
+      "description": "The files of a source that is a directory, as counts. No file is named.",
+      "type": "object",
+      "properties": {
+        "found": {
+          "description": "Files found: `*.json` files that are not hidden in a drop-in directory,\nor users' preferences files. Counting stops at a limit.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "limit_reached": {
+          "description": "Whether a limit on files, directory entries or bytes stopped the scan\nbefore the directory was exhausted, so there may be more than `found`\nand keys may be missing.",
+          "type": "boolean"
+        },
+        "unreadable": {
+          "description": "Of those, how many could not be read or parsed. Always 0 for\npreferences, which are not opened.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "found",
+        "unreadable",
+        "limit_reached"
+      ]
+    },
     "ManagedKey": {
       "description": "A key in a managed source that can change how a delega launch is honoured.",
       "type": "object",
@@ -308,8 +335,19 @@
       "description": "A managed source that exists on this system.",
       "type": "object",
       "properties": {
+        "files": {
+          "description": "For a source that is a directory, how many files it holds. Null for a\nsingle file.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedFileCounts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "keys": {
-          "description": "The keys in it that can affect a delega launch, by name, in the order of\nthe provider's table (Claude Code) or of the names (Codex). Empty when\nthe source was not read or sets none of them.",
+          "description": "The keys in it that can affect a delega launch, by name, in the order of\nthe provider's table (Claude Code) or of the names (Codex). For a\ndirectory, the keys of all its files together. Empty when the source was\nnot read or sets none of them.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/ManagedKey"
@@ -327,7 +365,7 @@
           ]
         },
         "path": {
-          "description": "The path of the file or directory.",
+          "description": "The path of the file or directory. Always one of the fixed locations,\nnever a name read from a directory.",
           "type": "string"
         },
         "state": {
@@ -351,9 +389,9 @@
           "const": "settings_file"
         },
         {
-          "description": "A `*.json` file in Claude Code's `managed-settings.d/`, or that\ndirectory itself when it cannot be listed.",
+          "description": "Claude Code's `managed-settings.d/` directory, as a whole: `path` is the\ndirectory and `files` counts the `*.json` files in it.",
           "type": "string",
-          "const": "settings_drop_in"
+          "const": "settings_drop_ins"
         },
         {
           "description": "Claude Code's `managed-mcp.json`.",
@@ -371,9 +409,14 @@
           "const": "managed_config_file"
         },
         {
-          "description": "A macOS managed preferences file of the provider's domain.",
+          "description": "The macOS managed preferences file of the provider's domain for the\nwhole system.",
           "type": "string",
           "const": "managed_preferences"
+        },
+        {
+          "description": "The macOS managed preferences files of the provider's domain in users'\ndirectories, as a whole: `path` is the directory that holds the users'\ndirectories and `files` counts the files.",
+          "type": "string",
+          "const": "user_managed_preferences"
         }
       ]
     },
@@ -384,6 +427,11 @@
           "description": "It was read and parsed, and `keys` lists what was found in it.",
           "type": "string",
           "const": "read"
+        },
+        {
+          "description": "A directory of which some files were read and some could not be, or\nwere left out by a limit. `keys` lists what was found in those read, and\n`files` says how many were not.",
+          "type": "string",
+          "const": "partly_read"
         },
         {
           "description": "It is there and could not be read or parsed, so nothing is known about\nwhat it sets.",
