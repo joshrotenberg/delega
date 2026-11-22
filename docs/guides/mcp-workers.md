@@ -7,8 +7,9 @@ are described in [MCP](../api.md#mcp) and [the supervisor](../supervisor.md).
 
 ## Start
 
-`start` checks the request and returns a run (and a worker, if it was
-admitted); the [tool table](../api.md#mcp) in `docs/api.md` lists every answer.
+A `start` request that reaches the supervisor returns a run id, and a worker id
+if the worker was admitted. A request that cannot be read is a tool error; the
+[MCP section](../api.md#mcp) of `docs/api.md` describes both.
 
 ```json
 {
