@@ -97,7 +97,8 @@ It takes about 75 seconds and writes `acceptance/results.jsonl`. See
 [acceptance/README.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md) for the options, the matrix and how
 to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
 
-Build with `mdbook build`, preview with `mdbook serve`, and lint with `mdbook-lint lint docs`.
+Build the documentation book with `mdbook build`, preview it with
+`mdbook serve`, and lint it with `mdbook-lint lint docs`.
 
 ## The API
 
