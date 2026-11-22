@@ -986,10 +986,10 @@ Rules that hold for every tool:
   wait short and pass the cursor back instead of waiting long. These three
   limits are counted in awake time and also checked against wall time about
   once a second of awake time. After the machine slept past a limit, the
-  waiting ends at the first wall check after the machine wakes, about one
-  check interval of awake time later plus scheduling, unless the wall clock was
-  set back meanwhile so that the check reads less than the limit; it does not
-  end while the machine sleeps. A wall clock set forward ends the waiting early
+  first wall check after it wakes, due within about one check interval of
+  awake time plus scheduling, ends a waiting that is still pending if it reads
+  elapsed wall time at or above the limit; the waiting does not end while the
+  machine sleeps. A wall clock set forward ends the waiting early
   only if the elapsed wall time read reaches the limit while the call is still
   waiting, and one that reads earlier than at the start counts as no time
   passed. Whichever clock ends the waiting, the call then takes the same path

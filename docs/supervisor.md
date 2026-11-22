@@ -352,11 +352,11 @@ that reads at least the limit more than the start did.
 
 When the waiting ends:
 
-- After the machine slept past the limit, the waiting ends at the first wall
-  check after the machine wakes, about one check interval of awake time later
-  plus scheduling, unless the wall clock was set back meanwhile so that the
-  check reads less than the limit. It does not end while the machine sleeps, so
-  in wall time it can outlast its limit by the rest of the sleep.
+- After the machine slept past the limit, the first wall check after it wakes,
+  due within about one check interval of awake time plus scheduling, ends a
+  waiting that is still pending if it reads elapsed wall time at or above the
+  limit. The waiting does not end while the machine sleeps, so in wall time it
+  can outlast its limit by the rest of the sleep.
 - A wall clock that reads earlier than it did at the start counts as no time
   passed, which leaves the awake-time bound in force.
 - A wall clock set forward ends the waiting early only if the elapsed wall time
