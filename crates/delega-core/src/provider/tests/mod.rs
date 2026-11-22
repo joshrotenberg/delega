@@ -78,6 +78,7 @@ impl Rig {
     pub fn options(&self, provider: Provider) -> ProviderOptions {
         let text = |p: &PathBuf| p.to_string_lossy().into_owned();
         ProviderOptions {
+            system_paths: super::managed::SystemPaths::under(self.work.join("system")),
             executable: Some(Self::fake(provider)),
             parent_env: Some(vec![
                 (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),

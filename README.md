@@ -22,7 +22,9 @@ new session starts. `delega run` runs one assignment on a
 Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
 `--progress`, `--allow-command` and the exit statuses in
 [docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md); it has been tested against fake providers only, not
-against the real CLIs. It merges two earlier
+against the real CLIs. A readable, parsing Claude Code `managed-mcp.json`
+refuses Claude runs before launch, and `delega doctor` reports the problem.
+See [Managed settings](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#managed-settings). It merges two earlier
 projects, [due](https://github.com/joshrotenberg/due) and
 [counterpart](https://github.com/joshrotenberg/counterpart), and the first work
 is deciding what to carry over and proving the core. The design record that led

@@ -54,14 +54,17 @@ there is one), plus the process inspection check. A failed or timed-out Claude p
 command refuses the same condition as `unsupported_provider_version`. It never
 prints a value or a rule.
 
-It also names the managed (administrator) settings it finds for each provider,
-as a notice that changes no verdict ([Managed settings](#managed-settings)).
+It also names the managed (administrator) settings it finds for each provider.
+A readable, parsing Claude Code `managed-mcp.json` is a problem that blocks
+Claude runs ([Managed settings](#managed-settings)).
 
 ## Run sequence
 
 1. Validate the request (`Request::validate`), the `native_args`, and the
    `answer_schema` (it must compile). Resolve `cwd` and `permissions.directories`
-   (each must exist). Look up the executable. Any failure is `refused` before start.
+   (each must exist). Look up the executable. For Claude Code, read the user's
+   deny rules and check for exclusive managed MCP. Any refusal at this stage
+   leaves the provider unstarted.
 2. Run `<executable> --version` (5 s). The first line is
    `provenance.provider_version`. For Claude Code with `permissions.commands`
    granted, a version below 2.1.325 or an unreadable one is `refused` with kind
@@ -185,8 +188,8 @@ anywhere. Neither is matched when
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
 `permissions_not_enforceable`, `provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
-`forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit` (all
-refused before start);
+`forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit`,
+`managed_mcp_exclusive` (all refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_auth`, `provider_billing`, `provider_capacity`,
 `provider_model_unavailable`, `provider_context_exhausted`, `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
@@ -629,9 +632,9 @@ ignores them.
 - `full` is the nine built-in tools. Sub-agents, MCP tools and background tasks
   stay off, and a note says so.
 - `NotebookEdit` is not granted in `write`.
-- The provider's own managed policy is applied by the provider over what delega
-  passes, and no run reads it. `delega doctor` reports the local sources
-  ([Managed settings](#managed-settings)).
+- Claude Code applies its managed policy over what delega passes. Planning
+  checks `managed-mcp.json` for exclusive control, and `delega doctor` reports
+  the local sources ([Managed settings](#managed-settings)).
 
 ### Resume, ephemeral, effort
 
@@ -1094,8 +1097,16 @@ value. Nothing it prints is copied from a file or a directory. A drop-in file or
 a user's preferences directory can be named anything, so each of those is one
 source with a count. A key is named only when it is one doctor knows, under
 doctor's own spelling; a key of a Codex file that doctor does not know is
-counted (`other_keys`) and not named. It is a notice: it adds no problem and
-does not change `ready` or the exit status.
+counted (`other_keys`) and not named.
+
+Planning refuses Claude Code with `managed_mcp_exclusive` when it can read
+and parse `managed-mcp.json`. Claude Code exits at startup if it receives
+`--strict-mcp-config` while this file is deployed. An empty server map
+(`{"mcpServers":{}}`) still exercises exclusive control. A zero-byte file
+contains no JSON, so it leaves the run eligible to start. Doctor lists the
+file as a managed source and reports the same refusal as a Claude problem
+with `blocks: run`. Other managed sources are informational.
+See the [Claude Code managed MCP reference](https://code.claude.com/docs/en/managed-mcp#servers-passed-with---mcp-config-or---strict-mcp-config).
 
 **Sources looked for.** Windows is out of scope.
 
@@ -1103,7 +1114,7 @@ does not change `ready` or the exit status.
 | --- | --- | --- | --- |
 | Claude Code | `managed-settings.json` | `/Library/Application Support/ClaudeCode` on macOS, `/etc/claude-code` on Linux | The keys below that are present. |
 | Claude Code | `managed-settings.d/*.json`, hidden files left out | The same directory | The directory once, with the number of files, how many could not be read, and the keys below from all of them together. No file is named. |
-| Claude Code | `managed-mcp.json` | The same directory | Its presence, with a pointer to Claude Code's [managed MCP reference](https://code.claude.com/docs/en/managed-mcp), which describes what the file does to `--strict-mcp-config` and `--mcp-config`. delega passes both on every run. Server names are not read. |
+| Claude Code | `managed-mcp.json` | The same directory | Its presence and read state. A readable, parsing file also appears as a problem. Server names are not reported. |
 | Claude Code | Managed preferences domain `com.anthropic.claudecode` | macOS: `/Library/Managed Preferences/com.anthropic.claudecode.plist` and the same file in each user's directory there | The system file as present, not inspected; the users' files as one source with a count. No user is named. |
 | Codex | `requirements.toml` | `/etc/codex` on macOS and Linux | The top-level keys Codex reads, by name, and a count of the others. |
 | Codex | `managed_config.toml` (legacy) | `/etc/codex` on macOS and Linux | The top-level keys listed below, by name, and a count of the others. |
@@ -1111,7 +1122,8 @@ does not change `ready` or the exit status.
 
 A file that parses is `read`. An empty `managed-settings.json` or drop-in file is
 read as `{}`. A file that is there and cannot be read or parsed (no permission,
-not a regular file, over 4 MiB, not JSON or TOML, no object at the top) is
+not a regular file, over 4 MiB, invalid JSON or TOML, or a Claude settings file
+with a non-object root) is
 `unreadable`, with no content and no error text. Values are skipped, not
 converted, so a number too large for doctor to hold does not make a file
 unreadable or hide its keys. Managed preferences are `not_inspected`: doctor

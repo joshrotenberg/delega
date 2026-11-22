@@ -641,7 +641,7 @@
           "$ref": "#/$defs/Blocks"
         },
         "kind": {
-          "description": "A stable label. See [`Problem::kind`] and\n[`PROCESS_INSPECTION_UNAVAILABLE`].",
+          "description": "A stable label, including `managed_mcp_exclusive` when managed MCP blocks\nClaude runs. See [`Problem::kind`] and\n[`PROCESS_INSPECTION_UNAVAILABLE`].",
           "type": "string"
         },
         "message": {

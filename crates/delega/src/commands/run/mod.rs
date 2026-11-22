@@ -148,6 +148,7 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     };
     let facts = request::Facts::of(&request, origin.clone());
     let mut options = ProviderOptions {
+        system_paths: super::system_paths(),
         hook: super::guard_command(),
         origin,
         ..ProviderOptions::default()

@@ -91,3 +91,21 @@ pub(crate) fn apply_env(options: &mut delega_core::provider::ProviderOptions, gi
         }
     }
 }
+
+/// Where managed settings are looked for: the real system locations. In a
+/// build with debug assertions, which is what the tests run, the test-only
+/// variable `DELEGA_TEST_SYSTEM_ROOT` naming an absolute path moves them under
+/// that directory. A release build ignores the variable, so one inherited from
+/// the environment cannot hide what is on the system.
+fn system_paths() -> delega_core::provider::managed::SystemPaths {
+    use delega_core::provider::managed::SystemPaths;
+    use std::path::PathBuf;
+
+    if cfg!(debug_assertions) {
+        match std::env::var_os("DELEGA_TEST_SYSTEM_ROOT").map(PathBuf::from) {
+            Some(root) if root.is_absolute() => return SystemPaths::under(root),
+            _ => {}
+        }
+    }
+    SystemPaths::default()
+}

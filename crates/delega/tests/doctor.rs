@@ -3,7 +3,7 @@
 //! Every test points `DELEGA_CLAUDE_BIN` and `DELEGA_CODEX_BIN` at fakes, so no
 //! real provider CLI is started, and runs in the rig's directories, so nothing
 //! reads the real home directory. Every doctor command starts from
-//! `Rig::doctor_command`, so managed settings are looked for under the rig's
+//! `Rig::command`, so managed settings are looked for under the rig's
 //! own directory and never under the real system locations.
 
 mod support;
@@ -19,7 +19,7 @@ use support::{Guarded, Rig, text};
 const SECRET: &str = "distinctive-value-7731";
 
 fn doctor_command(rig: &Rig, args: &[&str]) -> Command {
-    let mut command = rig.doctor_command();
+    let mut command = rig.command();
     command
         .current_dir(&rig.work)
         .env("HTTPS_PROXY", format!("http://user:{SECRET}@proxy.example"))
@@ -414,7 +414,7 @@ fn deny_rules_are_counted_with_their_files_and_never_printed() {
 fn unavailable_process_inspection_is_named_and_exits_one() {
     let rig = Rig::new();
     let out = rig
-        .doctor_command()
+        .command()
         .current_dir(&rig.work)
         .env("DELEGA_TEST_NO_PROCESS_LISTING", "1")
         .args(["doctor", "--output", "json"])
@@ -439,7 +439,7 @@ fn unavailable_process_inspection_is_named_and_exits_one() {
     assert_eq!(provider(&report, "claude")["ready"], true);
     assert_eq!(provider(&report, "codex")["ready"], true);
     let shown = rig
-        .doctor_command()
+        .command()
         .current_dir(&rig.work)
         .env("DELEGA_TEST_NO_PROCESS_LISTING", "1")
         .arg("doctor")
@@ -467,7 +467,6 @@ fn doctor_cannot_run_without_a_usable_current_directory_and_exits_two() {
     let mut command = Command::new("/bin/sh");
     rig.configure(&mut command);
     let out = command
-        .env(support::SYSTEM_ROOT_ENV, rig.system_root())
         .arg("-c")
         .arg(format!(
             "cd '{0}' && rmdir '{0}' && exec '{1}' doctor",
@@ -536,7 +535,7 @@ fn an_executable_that_cannot_be_started_stops_every_run_with_it() {
 }
 
 /// Write a file under the directory doctor looks for system locations in
-/// (`Rig::doctor_command` points `DELEGA_TEST_SYSTEM_ROOT` at it), never under
+/// (`Rig::command` points `DELEGA_TEST_SYSTEM_ROOT` at it), never under
 /// the real `/`.
 fn system_file(rig: &Rig, relative: &str, content: &str) -> PathBuf {
     let path = rig.system_root().join(relative);
@@ -575,7 +574,7 @@ fn no_managed_settings_are_reported_when_the_system_has_none() {
 }
 
 #[test]
-fn managed_settings_are_named_for_both_providers_without_values_and_stop_nothing() {
+fn parsing_managed_mcp_blocks_only_claude_and_doctor_reports_no_file_values() {
     let rig = Rig::new();
     let settings = system_file(
         &rig,
@@ -601,13 +600,21 @@ fn managed_settings_are_named_for_both_providers_without_values_and_stop_nothing
         &format!("allowed_sandbox_modes = [\"read-only\"]\ndefault_permissions = \"{SECRET}\"\n"),
     );
     let out = doctor_with(&rig, &["--output", "json"], |_| {});
-    // A notice: the exit status, readiness and the problems are as without them.
+    // Codex is ready, so the command still succeeds.
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     let report = json_of(&out);
     assert_eq!(report["ready"], true);
-    assert_eq!(report["problems"], serde_json::json!([]));
+    assert_eq!(
+        problem_kinds(&report),
+        [("claude".to_string(), "managed_mcp_exclusive".to_string())]
+    );
+    let problem = &report["problems"][0];
+    assert_eq!(problem["blocks"], "run");
+    let message = problem["message"].as_str().expect("message");
+    assert!(message.contains(&mcp.display().to_string()));
+    assert!(message.contains("--strict-mcp-config"));
     let claude = provider(&report, "claude");
-    assert_eq!(claude["ready"], true);
+    assert_eq!(claude["ready"], false);
     let sources = claude["managed_settings"].as_array().expect("sources");
     assert_eq!(sources.len(), 2, "{sources:?}");
     assert_eq!(sources[0]["path"], settings.display().to_string());
@@ -625,6 +632,8 @@ fn managed_settings_are_named_for_both_providers_without_values_and_stop_nothing
     );
     assert_eq!(sources[1]["path"], mcp.display().to_string());
     assert_eq!(sources[1]["kind"], "mcp_file");
+    assert_eq!(sources[1]["state"], "read");
+    assert_eq!(sources[1]["note"], Value::Null);
     let codex = provider(&report, "codex");
     assert_eq!(codex["ready"], true);
     let sources = codex["managed_settings"].as_array().expect("sources");
@@ -642,7 +651,7 @@ fn managed_settings_are_named_for_both_providers_without_values_and_stop_nothing
     let report = text(&shown.stdout);
     for expected in [
         "a run can go ahead",
-        "claude: ready",
+        "claude: not ready",
         "codex: ready",
         "managed settings: 2 found",
         "managed-settings.json (read)",
@@ -654,9 +663,13 @@ fn managed_settings_are_named_for_both_providers_without_values_and_stop_nothing
         "These managed keys can change how Codex treats what delega passes at launch",
         "codex_requirements: allowed_sandbox_modes, default_permissions",
         "managed_config.toml (present, could not be read or parsed)",
-        "problems: none",
+        "claude: managed_mcp_exclusive (stops every run)",
     ] {
         assert!(report.contains(expected), "{expected}\n{report}");
     }
+    let (before_problems, _) = report
+        .split_once("\nproblems:\n")
+        .expect("problems section");
+    assert!(!before_problems.contains("--strict-mcp-config"), "{report}");
     assert_no_value(&shown);
 }

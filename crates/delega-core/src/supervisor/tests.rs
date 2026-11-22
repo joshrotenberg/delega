@@ -55,6 +55,7 @@ impl Dir {
         let root = self.root();
         SupervisorConfig {
             provider: ProviderOptions {
+                system_paths: crate::provider::managed::SystemPaths::under(root.join("system")),
                 executable: Some(root.join("fakes/fake-claude.sh")),
                 parent_env: Some(vec![
                     (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),

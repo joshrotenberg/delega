@@ -1,4 +1,4 @@
-//! Managed (administrator) settings of the providers, for `delega doctor`.
+//! Managed (administrator) settings for run planning and `delega doctor`.
 //!
 //! delega does not apply managed settings and cannot switch them off: each
 //! provider reads them itself, above everything delega passes on the command
@@ -68,6 +68,8 @@ use serde::Serialize;
 use serde::de::IgnoredAny;
 
 use crate::contract::request::Provider;
+
+use super::refusal::Refusal;
 
 /// Most bytes of one managed file that are read, and most bytes read from one
 /// drop-in directory in all. A larger file is reported as unreadable.
@@ -150,6 +152,13 @@ impl SystemPaths {
             root: root.into(),
             platform: Platform::current(),
         }
+    }
+
+    fn claude_dir(&self) -> PathBuf {
+        self.join(match self.platform {
+            Platform::Macos => "/Library/Application Support/ClaudeCode",
+            Platform::Linux => "/etc/claude-code",
+        })
     }
 
     fn join(&self, absolute: &str) -> PathBuf {
@@ -504,9 +513,6 @@ const CODEX_MANAGED_CONFIG_NAMES: &[&str] = &[
     "mcp_servers",
 ];
 
-const MCP_FILE_NOTE: &str = "Claude Code's managed MCP reference describes what this file does \
-                             to --strict-mcp-config and --mcp-config, which delega passes on \
-                             every run; see https://code.claude.com/docs/en/managed-mcp";
 const CHANGED_NOTE: &str = "the file changed size while doctor read it, so nothing is reported \
                             from it";
 const CLAUDE_PREFERENCES_NOTE: &str = "can set any managed Claude Code key; doctor does not read \
@@ -516,6 +522,29 @@ const CODEX_PREFERENCES_NOTE: &str = "can carry a managed configuration (config_
                                       read it";
 const USER_PREFERENCES_NOTE: &str = "managed preferences of the provider in users' directories; \
                                      only the current user's apply, and doctor does not read them";
+
+/// Refuse the strict MCP launch when Claude Code's managed file parses.
+pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
+    let path = system.claude_dir().join("managed-mcp.json");
+    if file_source(
+        system,
+        &Limits::default(),
+        &path,
+        ManagedSourceKind::McpFile,
+    )
+    .is_some_and(|source| source.state == ManagedSourceState::Read)
+    {
+        return Err(Refusal::new(
+            "managed_mcp_exclusive",
+            format!(
+                "Claude Code exits at startup when given --strict-mcp-config while {} is deployed. \
+                 See https://code.claude.com/docs/en/managed-mcp#servers-passed-with---mcp-config-or---strict-mcp-config",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// The managed sources of `provider` that exist under `system`, in a fixed
 /// order: files, the drop-in directory, then managed preferences. Nothing is
@@ -529,25 +558,20 @@ pub fn scan_with(provider: Provider, system: &SystemPaths, limits: &Limits) -> V
     let mut found = Vec::new();
     match provider {
         Provider::Claude => {
-            let dir = system.join(match system.platform {
-                Platform::Macos => "/Library/Application Support/ClaudeCode",
-                Platform::Linux => "/etc/claude-code",
-            });
-            file_source(
-                &mut found,
+            let dir = system.claude_dir();
+            found.extend(file_source(
                 system,
                 limits,
                 &dir.join("managed-settings.json"),
                 ManagedSourceKind::SettingsFile,
-            );
+            ));
             drop_ins(&mut found, system, limits, &dir.join("managed-settings.d"));
-            file_source(
-                &mut found,
+            found.extend(file_source(
                 system,
                 limits,
                 &dir.join("managed-mcp.json"),
                 ManagedSourceKind::McpFile,
-            );
+            ));
             preferences(
                 &mut found,
                 system,
@@ -558,20 +582,18 @@ pub fn scan_with(provider: Provider, system: &SystemPaths, limits: &Limits) -> V
         }
         Provider::Codex => {
             let dir = system.join("/etc/codex");
-            file_source(
-                &mut found,
+            found.extend(file_source(
                 system,
                 limits,
                 &dir.join("requirements.toml"),
                 ManagedSourceKind::RequirementsFile,
-            );
-            file_source(
-                &mut found,
+            ));
+            found.extend(file_source(
                 system,
                 limits,
                 &dir.join("managed_config.toml"),
                 ManagedSourceKind::ManagedConfigFile,
-            );
+            ));
             preferences(
                 &mut found,
                 system,
@@ -665,15 +687,14 @@ struct Found {
 }
 
 fn file_source(
-    found: &mut Vec<ManagedSource>,
     system: &SystemPaths,
     limits: &Limits,
     path: &Path,
     kind: ManagedSourceKind,
-) {
+) -> Option<ManagedSource> {
     let mut changed = false;
     let keys = match system.presence(path) {
-        Presence::Absent => return,
+        Presence::Absent => return None,
         Presence::Unusable => None,
         Presence::Usable => match read_bytes(path, limits.file_bytes, &mut 0) {
             Ok(bytes) => decode(bytes).and_then(|text| keys_of(kind, &text)),
@@ -685,7 +706,7 @@ fn file_source(
     };
     let read = keys.is_some();
     let keys = keys.unwrap_or_default();
-    found.push(ManagedSource {
+    Some(ManagedSource {
         path: path.display().to_string(),
         kind,
         state: if read {
@@ -701,18 +722,14 @@ fn file_source(
             unreadable: 1,
             limit_reached: true,
         }),
-        note: if changed {
-            Some(CHANGED_NOTE.to_string())
-        } else {
-            (kind == ManagedSourceKind::McpFile && read).then(|| MCP_FILE_NOTE.to_string())
-        },
+        note: changed.then(|| CHANGED_NOTE.to_string()),
         keys: keys.keys,
         other_keys: keys.other,
-    });
+    })
 }
 
 /// What `text` holds of the kind's tables, or `None` when it does not parse
-/// as the kind's format with a table at the top.
+/// as the kind's format.
 fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
     match kind {
         ManagedSourceKind::SettingsFile | ManagedSourceKind::SettingsDropIns => {
@@ -725,7 +742,7 @@ fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
                 other: 0,
             })
         }
-        ManagedSourceKind::McpFile => is_json_object(text).then(Found::default),
+        ManagedSourceKind::McpFile => is_json(text).then(Found::default),
         ManagedSourceKind::RequirementsFile => codex_keys(
             text,
             CODEX_REQUIREMENT_NAMES,
@@ -740,11 +757,13 @@ fn keys_of(kind: ManagedSourceKind, text: &str) -> Option<Found> {
     }
 }
 
-/// Whether `text` is JSON with an object at the top. Values are skipped, not
-/// converted: a number too large for any Rust type is still valid JSON, and it
-/// must not make a file unreadable.
+/// Check JSON syntax without converting values, including very large numbers.
+fn is_json(text: &str) -> bool {
+    serde_json::from_str::<IgnoredAny>(text).is_ok()
+}
+
 fn is_json_object(text: &str) -> bool {
-    text.trim_start().starts_with('{') && serde_json::from_str::<IgnoredAny>(text).is_ok()
+    text.trim_start().starts_with('{') && is_json(text)
 }
 
 /// The keys of [`CLAUDE_KEYS`] that are present in the settings `text`, or

@@ -247,6 +247,9 @@ impl Fixture {
             // Its own process group: a signal the harness's terminal sends
             // never reaches it, and the harness never signals its own group.
             .process_group(0);
+        if cfg!(debug_assertions) {
+            command.env("DELEGA_TEST_SYSTEM_ROOT", self.dir.join("system"));
+        }
         if case.case.ps_unavailable {
             // Test-only seam: no place to look for `ps`.
             command.env("DELEGA_TEST_NO_PROCESS_LISTING", "");

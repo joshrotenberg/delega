@@ -326,8 +326,7 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         format!("    {dir}/managed-settings.d (partly read; 2 files, 1 not read)\n"),
         "      hooks: disableAllHooks\n".to_string(),
         "Library/Managed Preferences (present, not inspected; 1 file)\n".to_string(),
-        format!("    {dir}/managed-mcp.json (read)"),
-        "--strict-mcp-config".to_string(),
+        format!("    {dir}/managed-mcp.json (read, holds none of the keys doctor lists)"),
         "com.anthropic.claudecode.plist (present, not inspected)".to_string(),
         "  managed settings: 1 found\n".to_string(),
         "    These managed keys can change how Codex treats what delega passes at launch; see "
