@@ -48,14 +48,16 @@ A review that only reads can use `read`. What `read` means differs by provider:
   runs no command except those in `permissions.commands`, matched exactly. Keep
   the diff inside `cwd`, or add its directory to `permissions.directories`.
 - **Codex** cannot confine reads or commands: in `read` it can read any file
-  the user can and run any command that needs no write and no network. Every
-  Codex `read` result carries a `provider_notes` entry starting
-  `wider than requested`. With `permissions.strict` (`--strict`) a Codex `read`
-  run is refused `permissions_not_enforceable` instead.
+  the user can and run any command that needs no write and no network. A Codex
+  `read` run that goes ahead carries a `provider_notes` entry starting
+  `wider than requested`. With `permissions.strict` (`--strict`) the run is
+  refused before it starts instead, with `error.kind`
+  `permissions_not_enforceable`.
 
 A reviewer that builds and runs the tests needs `full`, for the reasons on the
-[implementation page](implement-and-review.md#2-start-the-implementer). The
-exported copy keeps it away from the implementer's tree. See
+[implementation page](implement-and-review.md#2-start-the-implementer). With
+`full` the exported copy is only its working directory, not a limit on what it
+can reach. See
 [Wider than requested](../providers.md#wider-than-requested) and
 [Permissions](../api.md#permissions).
 

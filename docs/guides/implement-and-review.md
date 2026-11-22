@@ -19,8 +19,8 @@ the worker writes:
 git worktree add /path/to/repo-issue-123 -b fix/issue-123 main
 ```
 
-One implementer per worktree. Do not point two workers that write at the same
-`cwd`.
+One implementer per worktree, so concurrent edits do not collide. A worktree is a
+separate working directory, not an isolation boundary.
 
 ## 2. Start the implementer
 
@@ -43,7 +43,8 @@ not see the supervising conversation, so the prompt must stand alone.
 `permissions.commands`, which cannot cover the varying commands a build runs on
 Claude Code, and Codex's `write` sandbox excludes the temporary directories
 ([#98](https://github.com/joshrotenberg/delega/issues/98)). `full` means no
-restriction from delega, so the worktree is the boundary you rely on. See
+restriction from delega: the worker can reach any directory the user running
+delega can, not only its worktree. See
 [Permissions](../api.md#permissions) and the per-provider mappings in
 [providers.md](../providers.md).
 
@@ -51,9 +52,10 @@ restriction from delega, so the worktree is the boundary you rely on. See
 
 Call `wait` with the worker and a timeout, and pass the returned `cursor` as
 `after` on the next call. See
-[Run independent workers over MCP](mcp-workers.md) for the loop. In Claude Code,
-a `wait` that runs past 120 s moves to the background and the session is
-notified when it returns.
+[Run independent workers over MCP](mcp-workers.md) for the loop. In practice,
+Claude Code as the host moves a tool call that runs past 120 s to the background
+and notifies the session when it returns; that is host behaviour, not part of
+delega.
 
 When the run is finished, `read` it by run id and check:
 
@@ -66,8 +68,10 @@ When the run is finished, `read` it by run id and check:
 
 ## 4. Review on an exported copy
 
-The reviewer works on a copy of the exact head, so it cannot change the
-implementer's tree. Export the commit and write the diff as a file:
+The reviewer works on a copy of the exact head, so what it reads is that commit
+and not a tree the implementer is still changing, and its own edits, if any, do
+not land in the implementer's worktree. The copy is a separate directory, not
+an isolation boundary. Export the commit and write the diff as a file:
 
 ```sh
 HEAD_SHA=$(git -C /path/to/repo-issue-123 rev-parse HEAD)
@@ -114,8 +118,9 @@ worktree and the exported copy when you are done.
 ## Defaults from the configuration file
 
 A user configuration file (`~/.config/delega/config.toml`) can set what every
-`start` begins from. For example, delega passes `ANTHROPIC_*` variables to
-Claude workers, so this makes Claude workers that name no model use Opus:
+`start` begins from. delega passes `ANTHROPIC_*` variables to Claude workers. In
+the maintainer's live run on 2026-11-22, a Claude worker that named no model ran
+Opus with this file:
 
 ```toml
 schema_version = 1
