@@ -762,10 +762,10 @@ does not allow fails.
 
 ### Wider than requested
 
-In `read` and `write`, Codex does more than the request asks. A note starting
-`wider than requested` is on a dry run, or on a result whose `read` or `write`
-plan was built, whether or not the request set `commands` or `directories`.
-Later checks can still refuse such a run:
+In `read` and `write`, Codex does more than the request asks. Successful Codex
+`read` and `write` dry runs include a note starting `wider than requested`. The
+note also appears in run results that carry the plan's notes, including
+preparation failures. The differences:
 
 - Codex can read any file the user can read, including outside the working
   directory and `permissions.directories`. The request says "read the working
@@ -1076,7 +1076,7 @@ each.
 | Neither provider's schema option (`--json-schema`, `--output-schema`) is needed | Not used. The schema is in the prompt and the answer is validated here. |
 | `--effort low\|medium\|high` and `model_reasoning_effort` accept the same words | The earlier project passed them. Its extra levels `xhigh` and `max` are not in the request. |
 | `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` stop Claude Code loading `CLAUDE.md` files and the auto-memory index into the worker's context automatically, as Claude Code documents | With Claude Code 2.1.329, a worker started this way listed no `CLAUDE.md`, `AGENTS.md` or auto-memory file in its context (#86, #106). A note on every run says what is not loaded automatically. |
-| A Claude failed result with `permission_denials`, no other error and no further work after the last denied call is a stop caused by the denial; the exact conditions are in `provider/claude.rs` and `provider/settle.rs` | Anything else with a denial is `failed`. |
+| A denial can account for a Claude failure | delega reports `refused` with `permission_denied` when its denial checks match. See `provider/claude.rs` and `provider/settle.rs` for the exact conditions. |
 | Claude Code's failed `errors` name the denied tool or speak of permission when a denial stopped it | Matching is by those words. Anything else with a denial is `failed`, never `refused`. |
 | Claude Code 2.1.314 at a usage limit, as an earlier runner recorded it, writes a root assistant message with `error: "rate_limit"`, `is_api_error_message: true`, `api_error_status: 429`, `api_error: "usage_limit_reached"` and `api_error_params.rate_limit_info` (`status: "rejected"`, `overageStatus`, `isUsingOverage`), with text such as "You've hit your session limit · resets 1pm (America/Los_Angeles)", then a failed `result` with `api_error: "usage_limit_reached"` and that text, and exits 1; a root `rate_limit_event` with `rate_limit_info.status: "rejected"` can also appear | `usage_limit_reached` or a rejected `rate_limit_event` that overage does not cover is `provider_usage_limit`, ahead of the `rate_limit` and 429 it also carries. With `isUsingOverage` true or `overageStatus` `allowed` or `allowed_warning`, overage covers it. |
 | Claude Code capacity failures carry `api_error_status` 429, 503 or 529 with text like "API Error: 529 overloaded", or assistant `error` `rate_limit` or `overloaded`; `billing_error` and the account `error` values other than `authentication_failed` reach the stream like the live shapes; a context overflow is a failed result whose text starts "Prompt is too long" | Matched as described in the Claude Code [Stream](#stream) section. Not run live. |
@@ -1214,9 +1214,10 @@ Code, `/status` names the managed sources in force.
 - **User instructions for Claude Code.** The earlier project also copied the
   user's `CLAUDE.md` into the launch. This layer does not read it. The
   `permissions.deny` rules are carried over (see [Deny rules](#deny-rules)).
-- **Managed settings.** No run applies them, and a result does not say that
-  one changed it. delega's Claude planner reads only Claude Code's
-  `managed-mcp.json`, to refuse `managed_mcp_exclusive`. `delega doctor` names the local sources and the keys in
+- **Managed settings.** delega does not load managed policy into the launch.
+  Providers can apply their own managed policy. The Claude planner checks
+  `managed-mcp.json` and names it in a `managed_mcp_exclusive` refusal.
+  `delega doctor` names the local sources and the keys in
   them that matter ([Managed settings](#managed-settings)); settings a provider
   fetches from its server cannot be seen.
 - **Command shape in the result.** The contract's `provenance` has no field for

@@ -128,13 +128,14 @@ servers; this can end in `unsupported_provider_version` or
 `provider_preparation_failed` unless the run is interrupted or times out first.
 A dry run starts neither.
 
-`delega run` also checks the configuration file (see
-[Configuration file](#configuration-file)) and its own runtime
-(`runtime_unavailable`, `signals_unavailable`) before the provider checks.
+`delega run` loads the configuration file before provider planning (see
+[Configuration file](#configuration-file)). When executing a run, it also sets
+up the runtime and signal handlers before provider planning
+(`runtime_unavailable`, `signals_unavailable`).
 
 Under the supervisor, `start` reports `invalid_request`, `name_in_use` and
 `limit_reached` ahead of the result of its preflight, which can be a provider
-refusal, `cwd_required` (MCP only, see [MCP](#mcp)), `preflight_timeout` or
+refusal, `cwd_required` (from the supervisor's absolute-`cwd` entry points, which MCP uses, see [MCP](#mcp)), `preflight_timeout` or
 `internal_error`. The exact order is in
 `crates/delega-core/src/supervisor/core/admit.rs`. `delega mcp` can also reject
 malformed tool input before the supervisor sees it.
@@ -158,11 +159,11 @@ One JSON object, versioned, the same from every surface.
 | `worker` | Worker id and `name`. Present only under the supervisor (MCP, library), and absent for a refused `start`; `delega run` results have none. |
 | `provider` | Absent only on a refused result for a request that named no provider. |
 | `outcome` | One of the five above. |
-| `text` | The provider's answer text: the final answer of a completed run, and whatever text the provider wrote for other outcomes. Can be empty. |
+| `text` | The answer text selected from the provider stream. For other outcomes, this can contain partial text or be empty. |
 | `structured` | The structured answer when `answer_schema` was given. |
 | `structured_valid` | Whether `structured` satisfied the schema; present with `structured`. |
 | `error` | `kind`, `message`, and `provider_exit_code` when the provider process exited with one. Present unless `completed`. |
-| `cleanup` | The combined verdict for the run's processes, the provider and any preparation probes. `confirmed: true` when the final sweeps found nothing left in their process groups, sessions or tracked descendants; otherwise `confirmed: false` with `pids`, `process_groups` and `reason`, which can also happen when no process is known to have started (for example when the task following the run ended abnormally). Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
+| `cleanup` | The combined verdict for the run's processes, the provider and any preparation probes. `confirmed: true` when the final sweeps found nothing left in their process groups, sessions or tracked descendants; otherwise unconfirmed, which can also happen when no process is known to have started (for example when the task following the run ended abnormally). Unconfirmed cleanup has `confirmed: false` and a `reason`. It includes `pids` and `process_groups` when the corresponding lists are nonempty. Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
 | `permissions` | `mode` applied, and `denied`: the denials delega recognised (see [Outcomes](#outcomes)). **Later:** `asked`, requests the caller answered. |
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied: the configuration file, which layer set each request field, the environment, the deny rules and the context mode, as names, counts, paths and digests. Optional; see [`applied`](#applied). |
