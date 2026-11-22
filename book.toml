@@ -7,6 +7,8 @@ src = "docs"
 build-dir = "target/book"
 
 [output.html]
+# The book is served from https://joshrotenberg.com/delega/; the 404 page needs the prefix.
+site-url = "/delega/"
 git-repository-url = "https://github.com/joshrotenberg/delega"
 # mdBook 0.5 prefixes the chapter path with the source directory.
 edit-url-template = "https://github.com/joshrotenberg/delega/edit/main/{path}"
