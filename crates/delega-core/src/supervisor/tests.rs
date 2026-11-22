@@ -1202,11 +1202,17 @@ async fn a_follow_up_that_continued_another_session_does_not_replace_the_workers
 async fn a_timed_out_follow_up_that_reported_another_session_does_not_replace_the_workers_session()
 {
     let dir = Dir::new();
+    let record = dir.root().join("record");
+    std::fs::create_dir(&record).expect("create directory");
     let mut config = dir.config();
     config
         .provider
         .env_set
         .push(("FAKE_RESUMED_SESSION_ID".into(), "stray-session".into()));
+    config.provider.env_set.push((
+        "FAKE_RECORD_DIR".into(),
+        record.to_string_lossy().into_owned(),
+    ));
     let supervisor = Supervisor::new(config);
     let started = supervisor
         .start(dir.request("echo:one"))
@@ -1216,13 +1222,20 @@ async fn a_timed_out_follow_up_that_reported_another_session_does_not_replace_th
     assert_eq!(first.outcome, Outcome::Completed, "{first:#?}");
     let worker = started.worker.expect("worker");
 
-    // This follow-up reports the stray session, then runs out of time.
+    // This follow-up reports the stray session, then runs out of time. The
+    // limit is far above the time the fake takes to start on a loaded machine,
+    // and its `started` record, written after the event that names the
+    // session, shows the event was written before the fake was stopped.
     let hung = supervisor
-        .follow_up(&worker, "hang", Some(1))
+        .follow_up(&worker, "hang", Some(5))
         .await
         .expect("follow up");
     let hung = finished_result(&supervisor, &hung.run).await;
     assert_eq!(hung.outcome, Outcome::TimedOut, "{hung:#?}");
+    assert!(
+        record.join("started").exists(),
+        "the fake did not report its session before it was stopped: {hung:#?}"
+    );
     assert_eq!(hung.session_id.as_deref(), Some("stray-session"));
 
     let followed = supervisor

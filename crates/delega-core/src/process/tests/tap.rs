@@ -40,11 +40,12 @@ async fn a_slow_tap_does_not_stretch_the_time_limit_or_lose_capture() {
     let s = Scratch::new();
     let release = Arc::new(AtomicBool::new(false));
     // Output arrives at once, then the child runs past its time limit. The
-    // limit is long against the two writes it follows and short for a test.
+    // limit is far above the time the shell takes to start and make its two
+    // writes on a loaded machine.
     let mut spec = sh(
         &s,
         "printf first; printf second; sleep 30",
-        Duration::from_secs(2),
+        Duration::from_secs(5),
     );
     spec.stdout_tap = Some(stuck_tap(release.clone()));
     let report = tokio::time::timeout(Duration::from_secs(60), run(spec))
