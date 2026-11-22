@@ -25,6 +25,7 @@ mod env;
 mod excerpt;
 mod hook;
 mod injection;
+mod managed;
 mod mapping;
 mod native;
 mod outcomes;

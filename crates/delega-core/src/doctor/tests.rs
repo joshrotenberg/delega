@@ -68,6 +68,7 @@ fn full_report() -> Report {
                     }],
                     applied: 2,
                 }),
+                managed_settings: Vec::new(),
                 ready: true,
             },
             ProviderCheck {
@@ -78,6 +79,7 @@ fn full_report() -> Report {
                 command_hook: None,
                 env: None,
                 deny_rules: None,
+                managed_settings: Vec::new(),
                 ready: false,
             },
         ],
@@ -233,4 +235,172 @@ fn the_limits_follow_the_supervisor_limits_given() {
         Limits::with_supervisor(&crate::supervisor::Limits::default()),
         Limits::current()
     );
+}
+
+/// A value no output may contain.
+const MANAGED_SECRET: &str = "sk-distinctive-managed-value-9093";
+
+/// A report whose providers carry what a scan of a temporary root found: for
+/// Claude Code a settings file, an unparseable drop-in file, an MCP file and a
+/// managed preferences file, and for Codex a requirements file. Every file
+/// holds [`MANAGED_SECRET`].
+fn report_with_managed_settings() -> (tempfile::TempDir, Report) {
+    use crate::provider::managed::{Platform, SystemPaths, scan};
+    let root = tempfile::tempdir().expect("temporary root");
+    let write = |relative: &str, content: String| {
+        let path = root.path().join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create directories");
+        std::fs::write(path, content).expect("write file");
+    };
+    let claude = "Library/Application Support/ClaudeCode";
+    write(
+        &format!("{claude}/managed-settings.json"),
+        format!(
+            r#"{{"allowManagedPermissionRulesOnly":true,"apiKeyHelper":"/bin/{MANAGED_SECRET}",
+                "env":{{"TOKEN":"{MANAGED_SECRET}"}},"model":"{MANAGED_SECRET}",
+                "permissions":{{"deny":["Read(./{MANAGED_SECRET})"]}}}}"#
+        ),
+    );
+    write(
+        &format!("{claude}/managed-settings.d/10-broken.json"),
+        format!("not json {MANAGED_SECRET}"),
+    );
+    write(
+        &format!("{claude}/managed-mcp.json"),
+        format!(r#"{{"mcpServers":{{"{MANAGED_SECRET}":{{"command":"x"}}}}}}"#),
+    );
+    write(
+        "Library/Managed Preferences/com.anthropic.claudecode.plist",
+        MANAGED_SECRET.to_string(),
+    );
+    write(
+        "etc/codex/requirements.toml",
+        format!(
+            "allowed_sandbox_modes = [\"read-only\"]\ndefault_permissions = \"{MANAGED_SECRET}\"\n"
+        ),
+    );
+    let system = SystemPaths {
+        root: root.path().to_path_buf(),
+        platform: Platform::Macos,
+    };
+    let mut report = full_report();
+    for found in &mut report.providers {
+        found.managed_settings = scan(found.provider, &system);
+    }
+    (root, report)
+}
+
+#[test]
+fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
+    let (root, report) = report_with_managed_settings();
+    let shown = report.to_text();
+    let dir = root
+        .path()
+        .join("Library/Application Support/ClaudeCode")
+        .display()
+        .to_string();
+    for expected in [
+        "  managed settings: 4 found; the provider applies them over what delega passes"
+            .to_string(),
+        "docs/providers.md".to_string(),
+        format!("    {dir}/managed-settings.json (read)"),
+        "      allowManagedPermissionRulesOnly: only managed permission rules count".to_string(),
+        "      permissions.deny: ".to_string(),
+        "      apiKeyHelper: ".to_string(),
+        "      env: ".to_string(),
+        format!(
+            "    {dir}/managed-settings.d/10-broken.json (present, could not be read or parsed)"
+        ),
+        format!("    {dir}/managed-mcp.json (read)"),
+        "--strict-mcp-config".to_string(),
+        "com.anthropic.claudecode.plist (present, not inspected)".to_string(),
+        "  managed settings: 1 found".to_string(),
+        "etc/codex/requirements.toml (read)".to_string(),
+        "      allowed_sandbox_modes: ".to_string(),
+        "      default_permissions: ".to_string(),
+    ] {
+        assert!(shown.contains(&expected), "{expected}\n{shown}");
+    }
+    assert!(!shown.contains(MANAGED_SECRET), "{shown}");
+    // A key that does not affect a launch is not shown.
+    assert!(!shown.contains("model:"), "{shown}");
+}
+
+#[test]
+fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
+    let (_root, report) = report_with_managed_settings();
+    let json = report.to_json();
+    assert!(!json.contains(MANAGED_SECRET), "{json}");
+    let document: Value = serde_json::from_str(&json).expect("report is JSON");
+    let schema: Value = serde_json::from_str(DOCTOR_SCHEMA).expect("schema is JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    assert!(validator.is_valid(&document), "{document}");
+    let claude = document["providers"][0]["managed_settings"]
+        .as_array()
+        .expect("sources");
+    let shape: Vec<(&str, &str)> = claude
+        .iter()
+        .map(|s| {
+            (
+                s["kind"].as_str().expect("kind"),
+                s["state"].as_str().expect("state"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("settings_file", "read"),
+            ("settings_drop_in", "unreadable"),
+            ("mcp_file", "read"),
+            ("managed_preferences", "not_inspected"),
+        ]
+    );
+    let names: Vec<&str> = claude[0]["keys"]
+        .as_array()
+        .expect("keys")
+        .iter()
+        .map(|k| k["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "allowManagedPermissionRulesOnly",
+            "permissions.deny",
+            "apiKeyHelper",
+            "env"
+        ]
+    );
+    // A key is a name and an effect, nothing else.
+    for key in claude[0]["keys"].as_array().expect("keys") {
+        let fields: Vec<&String> = key.as_object().expect("object").keys().collect();
+        assert_eq!(fields, ["effect", "name"]);
+    }
+    assert_eq!(claude[1]["keys"], json!([]));
+    assert_eq!(claude[1]["note"], Value::Null);
+    let codex = &document["providers"][1]["managed_settings"];
+    assert_eq!(codex[0]["kind"], "requirements_file");
+    assert_eq!(codex[0]["keys"][0]["name"], "allowed_sandbox_modes");
+    assert_eq!(codex[0]["keys"][1]["name"], "default_permissions");
+}
+
+#[test]
+fn managed_settings_are_a_notice_that_adds_no_problem_and_keeps_the_exit_status() {
+    let plain = full_report();
+    let (_root, report) = report_with_managed_settings();
+    assert_eq!(report.problems, plain.problems);
+    assert_eq!(report.ready, plain.ready);
+    assert_eq!(report.exit_status(), plain.exit_status());
+    let mut ready = report;
+    ready.ready = true;
+    assert_eq!(ready.exit_status(), 0);
+}
+
+#[test]
+fn no_managed_settings_block_is_shown_when_none_was_found() {
+    let report = full_report();
+    assert!(!report.to_text().contains("managed settings"));
+    let document: Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    assert_eq!(document["providers"][0]["managed_settings"], json!([]));
+    assert_eq!(document["providers"][1]["managed_settings"], json!([]));
 }

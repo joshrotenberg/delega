@@ -103,6 +103,10 @@ pub struct Rig {
     pub record: PathBuf,
 }
 
+/// The test-only variable that moves where `delega doctor` looks for managed
+/// settings.
+pub const SYSTEM_ROOT_ENV: &str = "DELEGA_TEST_SYSTEM_ROOT";
+
 fn fake(provider: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../delega-core/src/provider/tests/fakes")
@@ -164,6 +168,24 @@ impl Rig {
             .env("DELEGA_CLAUDE_BIN", fake("claude"))
             .env("DELEGA_CODEX_BIN", fake("codex"))
             .env("FAKE_RECORD_DIR", &self.record);
+    }
+
+    /// The directory `delega doctor` looks for system locations under in
+    /// tests, in place of `/`. Nothing creates it; a test that wants managed
+    /// settings writes them below it.
+    pub fn system_root(&self) -> PathBuf {
+        self.path("system")
+    }
+
+    /// [`Rig::command`] for `delega doctor`: every test that runs doctor
+    /// starts from this, so doctor looks for managed settings under
+    /// [`Rig::system_root`] and never reads the real system locations. The
+    /// variable is not set for other commands, whose environment counts it
+    /// would change.
+    pub fn doctor_command(&self) -> Command {
+        let mut command = self.command();
+        command.env(SYSTEM_ROOT_ENV, self.system_root());
+        command
     }
 
     /// Run `delega` with these arguments to its end.

@@ -16,6 +16,7 @@ use crate::process::Ending;
 
 use super::deny::{DenyFile, SkippedFile};
 use super::limits::{MIN_CLAUDE_HOOK_VERSION, VERSION_PROBE_TIMEOUT};
+use super::managed::ManagedSource;
 use super::options::ProviderOptions;
 use super::plan::{self, Plan};
 use super::program;
@@ -143,6 +144,11 @@ pub struct ProviderCheck {
     /// The deny rules a Claude run would apply. Null for Codex, which reads
     /// none, and when the launch could not be built.
     pub deny_rules: Option<DenyInfo>,
+    /// The managed (administrator) settings sources found on this system for
+    /// the provider, with the names of the keys in them that can change how a
+    /// delega launch is honoured. Empty when none was found. They are a
+    /// notice: they are not problems and do not change `ready`.
+    pub managed_settings: Vec<ManagedSource>,
     /// Whether no problem stops every run with this provider.
     pub ready: bool,
 }
@@ -169,7 +175,9 @@ fn source(provider: Provider, options: &ProviderOptions) -> String {
 }
 
 /// Check one provider in the current directory. Returns what was found and the
-/// problems that would stop a run, in the order found.
+/// problems that would stop a run, in the order found. `managed_settings` is
+/// left empty: `doctor::diagnose_at` fills it, since it knows where the system
+/// locations are looked for.
 ///
 /// Returns the refusal when the current directory cannot be used at all, which
 /// is `doctor` itself failing; every other finding is in the returned values.
@@ -199,6 +207,7 @@ pub async fn check(
         command_hook: None,
         env: None,
         deny_rules: None,
+        managed_settings: Vec::new(),
         ready: false,
     };
     if let Some(plan) = &planned {

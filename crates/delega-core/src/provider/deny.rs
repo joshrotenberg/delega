@@ -38,7 +38,9 @@
 //!    links, as a dotfiles setup makes them.
 //!
 //! The directories come from the environment the worker will receive, not from
-//! the calling process. Managed (enterprise) settings are not read.
+//! the calling process. Managed (administrator) settings are not read here:
+//! Claude Code applies them itself, and `delega doctor` reports the local ones
+//! (see [`super::managed`]).
 //!
 //! Rules are passed as written. A `Read` or `Edit` rule with exactly one leading
 //! slash means a path from the directory of its settings file, which is lost

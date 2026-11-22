@@ -286,6 +286,117 @@
         "supervisor"
       ]
     },
+    "ManagedKey": {
+      "description": "A key in a managed source that can change how a delega launch is honoured.",
+      "type": "object",
+      "properties": {
+        "effect": {
+          "description": "What the key can do to a delega launch. Fixed text for the key.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The key's name, dotted when it is nested, such as `permissions.deny`.\nNever its value.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "effect"
+      ]
+    },
+    "ManagedSource": {
+      "description": "A managed source that exists on this system.",
+      "type": "object",
+      "properties": {
+        "keys": {
+          "description": "The keys in it that can affect a delega launch, by name, in the order of\nthe provider's table (Claude Code) or of the names (Codex). Empty when\nthe source was not read or sets none of them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ManagedKey"
+          }
+        },
+        "kind": {
+          "description": "What it is.",
+          "$ref": "#/$defs/ManagedSourceKind"
+        },
+        "note": {
+          "description": "What the presence of the source means for a delega launch, when that\ndoes not depend on a key in it. Fixed text for the kind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The path of the file or directory.",
+          "type": "string"
+        },
+        "state": {
+          "description": "Whether it was read.",
+          "$ref": "#/$defs/ManagedSourceState"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "state",
+        "keys"
+      ]
+    },
+    "ManagedSourceKind": {
+      "description": "What kind of managed source a path is.",
+      "oneOf": [
+        {
+          "description": "Claude Code's `managed-settings.json`.",
+          "type": "string",
+          "const": "settings_file"
+        },
+        {
+          "description": "A `*.json` file in Claude Code's `managed-settings.d/`, or that\ndirectory itself when it cannot be listed.",
+          "type": "string",
+          "const": "settings_drop_in"
+        },
+        {
+          "description": "Claude Code's `managed-mcp.json`.",
+          "type": "string",
+          "const": "mcp_file"
+        },
+        {
+          "description": "Codex's `requirements.toml`.",
+          "type": "string",
+          "const": "requirements_file"
+        },
+        {
+          "description": "Codex's legacy `managed_config.toml`.",
+          "type": "string",
+          "const": "managed_config_file"
+        },
+        {
+          "description": "A macOS managed preferences file of the provider's domain.",
+          "type": "string",
+          "const": "managed_preferences"
+        }
+      ]
+    },
+    "ManagedSourceState": {
+      "description": "What doctor could do with a managed source.",
+      "oneOf": [
+        {
+          "description": "It was read and parsed, and `keys` lists what was found in it.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "It is there and could not be read or parsed, so nothing is known about\nwhat it sets.",
+          "type": "string",
+          "const": "unreadable"
+        },
+        {
+          "description": "It is there and doctor does not open it (managed preferences).",
+          "type": "string",
+          "const": "not_inspected"
+        }
+      ]
+    },
     "ProcessInspection": {
       "description": "Whether the process listing that confirms cleanup works.",
       "type": "object",
@@ -372,6 +483,13 @@
             "null"
           ]
         },
+        "managed_settings": {
+          "description": "The managed (administrator) settings sources found on this system for\nthe provider, with the names of the keys in them that can change how a\ndelega launch is honoured. Empty when none was found. They are a\nnotice: they are not problems and do not change `ready`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ManagedSource"
+          }
+        },
         "provider": {
           "description": "The provider.",
           "$ref": "#/$defs/Provider"
@@ -390,6 +508,7 @@
       },
       "required": [
         "provider",
+        "managed_settings",
         "ready"
       ]
     },

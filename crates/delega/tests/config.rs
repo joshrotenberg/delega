@@ -659,7 +659,7 @@ fn mcp_refuses_to_start_on_a_file_it_cannot_use() {
 fn doctor(rig: &Rig) -> Output {
     // The process listing has a deadline of its own; the fields read here do not
     // depend on it, and neither does the refusal status.
-    rig.command()
+    rig.doctor_command()
         .args(["doctor", "--output", "json"])
         .current_dir(&rig.work)
         .guarded_output()
@@ -686,7 +686,7 @@ fn doctor_reports_the_file_it_read_and_applies_its_executables_environment_and_l
         ),
     );
     let out = rig
-        .command()
+        .doctor_command()
         .env_remove("DELEGA_CODEX_BIN")
         .args(["doctor", "--output", "json"])
         .current_dir(&rig.work)
@@ -755,7 +755,7 @@ fn doctor_reports_the_file_it_read_and_applies_its_executables_environment_and_l
     assert_no_secret(&out);
     // Text form names the file and the keys, never a value.
     let out = rig
-        .command()
+        .doctor_command()
         .env_remove("DELEGA_CODEX_BIN")
         .args(["doctor"])
         .current_dir(&rig.work)
@@ -790,14 +790,14 @@ fn doctor_without_a_file_says_so_and_changes_nothing_else() {
     assert_eq!(report["limits"]["supervisor"]["max_live_workers"], 16);
     assert_eq!(report["limits"]["supervisor"]["default_wait_secs"], 30);
     let text_out = rig
-        .command()
+        .doctor_command()
         .arg("doctor")
         .guarded_output()
         .expect("run delega doctor");
     assert!(text(&text_out.stdout).contains("state: not found; nothing is configured"));
     // With no HOME and no variable, there is nowhere to look.
     let out = rig
-        .command()
+        .doctor_command()
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
         .args(["doctor", "--output", "json"])
@@ -839,7 +839,7 @@ fn doctor_reports_a_refused_file_as_a_problem_that_stops_runs_and_keeps_reportin
         assert!(report["skills"].as_array().expect("skills").len() >= 2);
         assert_no_secret(&out);
         let text_out = rig
-            .command()
+            .doctor_command()
             .arg("doctor")
             .guarded_output()
             .expect("run delega doctor");
@@ -864,7 +864,7 @@ fn doctor_reports_an_unsafe_file_and_applies_nothing_from_it() {
     );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).expect("chmod");
     let out = rig
-        .command()
+        .doctor_command()
         .env_remove("DELEGA_CLAUDE_BIN")
         .args(["doctor", "--output", "json"])
         .current_dir(&rig.work)
