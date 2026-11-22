@@ -406,6 +406,50 @@ fn a_dry_run_in_json_is_a_versioned_object_with_names_and_no_values() {
 }
 
 #[test]
+fn the_build_flag_selects_build_mode_for_each_provider() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = dry_run(&rig, provider, &["--build", "--output", "json"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{provider}: {}",
+            text(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        assert_eq!(value["dry_run"]["mapping"]["mode"], "build", "{provider}");
+        assert!(!rig.record.join("argv").exists());
+    }
+}
+
+#[test]
+fn the_build_flag_with_an_allowed_command_is_a_refused_request() {
+    let rig = Rig::new();
+    let out = dry_run(
+        &rig,
+        "claude",
+        &[
+            "--build",
+            "--allow-command",
+            "cargo test",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let result = result_of(&out);
+    assert_eq!(result.outcome, Outcome::Refused);
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "invalid_request");
+    let message = error.message;
+    assert!(
+        message.contains("permissions.commands: must be empty in build mode"),
+        "{message}"
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
 fn a_dry_run_of_a_request_that_would_be_refused_prints_the_refusal_and_exits_two() {
     let rig = Rig::new();
     let missing = rig.path("nowhere");

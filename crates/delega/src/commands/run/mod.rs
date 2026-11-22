@@ -36,7 +36,7 @@ pub enum Effort {
 
 /// Options from `docs/api.md`.
 #[derive(Debug, Parser)]
-#[command(group(ArgGroup::new("mode").args(["read", "write", "full"])))]
+#[command(group(ArgGroup::new("mode").args(["read", "write", "build", "full"])))]
 pub struct Args {
     /// A request or profile file; explicit options override it
     #[arg(long, value_name = "FILE")]
@@ -71,7 +71,12 @@ pub struct Args {
     /// Allow editing files in the working directory
     #[arg(long)]
     write: bool,
-    /// No restriction from delega
+    /// Allow editing files in the working directory and running any command
+    /// inside the provider's sandbox: writes only to the working directory and
+    /// a temporary directory, no network
+    #[arg(long)]
+    build: bool,
+    /// No sandbox and no scope from delega
     #[arg(long)]
     full: bool,
     /// Refuse the run when the provider cannot enforce the permissions as

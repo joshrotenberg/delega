@@ -182,7 +182,7 @@ fn a_symlinked_user_file_to_a_regular_file_is_followed() {
 #[test]
 fn with_no_settings_files_nothing_is_added_and_the_note_says_none_were_found() {
     let rig = Rig::new();
-    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+    for mode in [Mode::Read, Mode::Write, Mode::Build, Mode::Full] {
         let mut request = rig.request(Provider::Claude, "p");
         request.permissions.mode = mode;
         let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
@@ -481,7 +481,7 @@ fn notes_name_the_files_and_counts_and_say_what_else_is_not_loaded() {
         &project_file(&rig, "settings.json"),
         &deny_file(&["Bash(c)"]),
     );
-    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+    for mode in [Mode::Read, Mode::Write, Mode::Build, Mode::Full] {
         let mut request = rig.request(Provider::Claude, "p");
         request.permissions.mode = mode;
         let plan = dry_run(&request, &rig.options(Provider::Claude)).unwrap();
@@ -754,7 +754,7 @@ async fn a_denied_file_inside_the_working_directory_is_denied_and_recorded_in_re
 }
 
 #[tokio::test]
-async fn a_deny_rule_narrows_write_and_full_modes_too() {
+async fn a_deny_rule_narrows_write_build_and_full_modes_too() {
     let rig = Rig::new();
     let target = rig.work.join("keep.txt");
     let free = rig.work.join("free.txt");
@@ -762,7 +762,7 @@ async fn a_deny_rule_narrows_write_and_full_modes_too() {
         &project_file(&rig, "settings.local.json"),
         &deny_file(&["Edit(./keep.txt)", "Read(./keep.txt)"]),
     );
-    for mode in [Mode::Write, Mode::Full] {
+    for mode in [Mode::Write, Mode::Build, Mode::Full] {
         let result = claude(
             &rig,
             mode,

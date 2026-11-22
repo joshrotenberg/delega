@@ -136,7 +136,12 @@
           "const": "write"
         },
         {
-          "description": "No restriction from delega.",
+          "description": "May edit files in the working directory and run any command inside the\nprovider's OS sandbox. Commands write only to the working directory and\na temporary directory, and have no network. `permissions.commands` must\nbe empty: every command already runs inside the sandbox.",
+          "type": "string",
+          "const": "build"
+        },
+        {
+          "description": "No sandbox and no scope from delega. For Claude Code the user's deny\nrules still apply and tools beyond the nine built-ins stay off.",
           "type": "string",
           "const": "full"
         }
@@ -157,7 +162,7 @@
       "type": "object",
       "properties": {
         "commands": {
-          "description": "Shell commands the worker may run, matched exactly.",
+          "description": "Shell commands the worker may run, matched exactly. Must be empty in\n`build` mode.",
           "type": "array",
           "items": {
             "type": "string"
@@ -187,7 +192,22 @@
           "type": "boolean"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "not": {
+        "properties": {
+          "commands": {
+            "type": "array",
+            "minItems": 1
+          },
+          "mode": {
+            "const": "build"
+          }
+        },
+        "required": [
+          "mode",
+          "commands"
+        ]
+      }
     },
     "Provider": {
       "description": "The provider CLI that runs the assignment.",

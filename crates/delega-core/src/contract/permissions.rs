@@ -14,7 +14,13 @@ pub enum Mode {
     Read,
     /// May edit files in the working directory.
     Write,
-    /// No restriction from delega.
+    /// May edit files in the working directory and run any command inside the
+    /// provider's OS sandbox. Commands write only to the working directory and
+    /// a temporary directory, and have no network. `permissions.commands` must
+    /// be empty: every command already runs inside the sandbox.
+    Build,
+    /// No sandbox and no scope from delega. For Claude Code the user's deny
+    /// rules still apply and tools beyond the nine built-ins stay off.
     Full,
 }
 
@@ -36,7 +42,8 @@ pub struct Permissions {
     /// How much the worker may do. Defaults to `read`.
     #[serde(default)]
     pub mode: Mode,
-    /// Shell commands the worker may run, matched exactly.
+    /// Shell commands the worker may run, matched exactly. Must be empty in
+    /// `build` mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
     /// Extra directories the worker may read.

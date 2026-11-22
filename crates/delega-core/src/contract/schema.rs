@@ -23,11 +23,12 @@ pub const REQUEST_SCHEMA: &str = include_str!("../../../../schemas/request.schem
 pub const RESULT_SCHEMA: &str = include_str!("../../../../schemas/result.schema.json");
 
 // The schema states what a document may look like: structure, types, enums,
-// numeric ranges, list lengths, the schema version and the rule that
-// `ephemeral` and `resume` exclude each other. It does not state content rules
-// such as "not blank" or byte-length limits on strings; `Request::validate`
-// enforces those. The refinements below are the one place the generated schema
-// is adjusted, so that the limits in `limits.rs` and the schema cannot drift.
+// numeric ranges, list lengths, the schema version, the rule that
+// `ephemeral` and `resume` exclude each other and the rule that `build` takes
+// no `commands`. It does not state content rules such as "not blank" or
+// byte-length limits on strings; `Request::validate` enforces those. The
+// refinements below are the one place the generated schema is adjusted, so
+// that the limits in `limits.rs` and the schema cannot drift.
 // One known difference: a JSON Schema `integer` also accepts `1.0`, which
 // serde rejects.
 
@@ -157,6 +158,17 @@ pub(super) fn refine_permissions(schema: &mut Schema) {
         "/properties/directories",
         "maxItems",
         json!(MAX_DIRECTORIES),
+    );
+    // `build` runs every command inside the sandbox, so it takes no command list.
+    schema.insert(
+        "not".to_string(),
+        json!({
+            "required": ["mode", "commands"],
+            "properties": {
+                "mode": {"const": "build"},
+                "commands": {"type": "array", "minItems": 1}
+            }
+        }),
     );
 }
 

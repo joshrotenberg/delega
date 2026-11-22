@@ -100,6 +100,44 @@ fn codex_with_commands_and_strict_names_commands() {
 }
 
 #[test]
+fn build_with_strict_is_refused_on_both_providers_for_read_confinement() {
+    let rig = Rig::new();
+    for provider in [Provider::Claude, Provider::Codex] {
+        let r = refusal(&rig, &request(&rig, provider, Mode::Build, &[], true), true);
+        assert_eq!(r.kind, "permissions_not_enforceable");
+        assert!(
+            r.message.contains("not confined to the working directory"),
+            "{}",
+            r.message
+        );
+        assert!(
+            !r.message.contains("allows only the commands it lists"),
+            "build allows every command, so that part does not apply: {}",
+            r.message
+        );
+    }
+}
+
+#[test]
+fn build_without_strict_runs_on_both_providers_with_a_wider_note() {
+    let rig = Rig::new();
+    for provider in [Provider::Claude, Provider::Codex] {
+        let plan = dry_run(
+            &request(&rig, provider, Mode::Build, &[], false),
+            &options(&rig, provider, false),
+        )
+        .expect("runs");
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n.starts_with("wider than requested")),
+            "{:?}",
+            plan.notes
+        );
+    }
+}
+
+#[test]
 fn full_mode_with_strict_runs_on_both_providers() {
     let rig = Rig::new();
     for provider in [Provider::Claude, Provider::Codex] {

@@ -285,6 +285,7 @@ fn enums_serialize_as_snake_case_strings() {
         json!("medium")
     );
     assert_eq!(serde_json::to_value(Mode::Full).unwrap(), json!("full"));
+    assert_eq!(serde_json::to_value(Mode::Build).unwrap(), json!("build"));
     assert_eq!(
         serde_json::to_value(OnRequest::Deny).unwrap(),
         json!("deny")
@@ -471,6 +472,48 @@ fn exit_status_follows_the_documented_mapping() {
     assert_eq!(Outcome::Refused.exit_status(), 2);
     assert_eq!(Outcome::TimedOut.exit_status(), 124);
     assert_eq!(Outcome::Interrupted.exit_status(), 130);
+}
+
+#[test]
+fn build_mode_with_commands_is_a_validation_problem() {
+    let mut r = minimal();
+    r.permissions.mode = Mode::Build;
+    assert_eq!(r.validate(), Ok(()));
+    r.permissions.commands = vec!["cargo test".into()];
+    assert_eq!(problem_fields(&r), ["permissions.commands"]);
+}
+
+#[test]
+fn modes_are_ordered_with_build_between_write_and_full() {
+    let schema: Value = serde_json::to_value(schemars::schema_for!(Mode)).unwrap();
+    let names: Vec<&str> = schema["oneOf"]
+        .as_array()
+        .expect("variants in schema")
+        .iter()
+        .map(|v| {
+            v["const"]
+                .as_str()
+                .or_else(|| v["enum"][0].as_str())
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(names, ["read", "write", "build", "full"]);
+}
+
+#[test]
+fn request_schema_refuses_build_mode_with_commands() {
+    let schema: Value = serde_json::from_str(super::schema::REQUEST_SCHEMA).unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let mut request = serde_json::to_value(minimal()).unwrap();
+    request["permissions"] = json!({"mode": "build"});
+    assert!(validator.is_valid(&request), "build alone is valid");
+    request["permissions"] = json!({"mode": "build", "commands": ["cargo test"]});
+    assert!(!validator.is_valid(&request), "build with commands is not");
+    request["permissions"] = json!({"mode": "write", "commands": ["cargo test"]});
+    assert!(
+        validator.is_valid(&request),
+        "write with commands stays valid"
+    );
 }
 
 #[test]

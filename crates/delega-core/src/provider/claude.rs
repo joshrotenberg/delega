@@ -156,8 +156,8 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
     })
 }
 
-/// The `--settings` value: the command guard hook, or hooks switched off, and
-/// the user's deny rules when there are any.
+/// The `--settings` value: the command guard hook, or hooks switched off, the
+/// user's deny rules when there are any, and the sandbox for `build`.
 ///
 /// Deny rules are written only as elements of the `permissions.deny` array of
 /// this JSON document, which `serde_json` escapes. Text in a rule cannot end its
@@ -165,11 +165,11 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
 /// the `--allowedTools` value is built from delega's own data alone. A string in
 /// a deny list is a deny pattern whatever it contains, so a rule that is not
 /// well formed matches less and never allows anything.
-fn settings_json(guard: Option<&HookCommand>, deny: &[String]) -> Value {
-    crate::canonical::sorted(settings_value(guard, deny))
+fn settings_json(guard: Option<&HookCommand>, deny: &[String], sandbox: Option<&Value>) -> Value {
+    crate::canonical::sorted(settings_value(guard, deny, sandbox))
 }
 
-fn settings_value(guard: Option<&HookCommand>, deny: &[String]) -> Value {
+fn settings_value(guard: Option<&HookCommand>, deny: &[String], sandbox: Option<&Value>) -> Value {
     let mut settings = match guard {
         Some(hook) => json!({
             "disableAllHooks": false,
@@ -186,7 +186,40 @@ fn settings_value(guard: Option<&HookCommand>, deny: &[String]) -> Value {
     if !deny.is_empty() {
         settings["permissions"] = json!({ "deny": deny });
     }
+    if let Some(sandbox) = sandbox {
+        settings["sandbox"] = sandbox.clone();
+    }
     settings
+}
+
+/// The `sandbox` settings for `build`. Commands run inside Claude Code's OS
+/// sandbox, which refuses to start unsandboxed (`failIfUnavailable`), never
+/// retries a command outside it (`allowUnsandboxedCommands: false`) and
+/// approves sandboxed commands without a `Bash` allow rule
+/// (`autoAllowBashIfSandboxed`). The sandbox treats every `--add-dir` directory
+/// as writable, so each of `permissions.directories` is listed in
+/// `filesystem.denyWrite`. No network domain is allowed, so under `dontAsk`
+/// every host is refused.
+fn sandbox_value(directories: &[String]) -> Value {
+    let mut sandbox = json!({
+        "enabled": true,
+        "failIfUnavailable": true,
+        "allowUnsandboxedCommands": false,
+        "autoAllowBashIfSandboxed": true,
+    });
+    if !directories.is_empty() {
+        sandbox["filesystem"] = json!({ "denyWrite": directories });
+    }
+    sandbox
+}
+
+/// A directory as a sandbox path: `//abs/dir`, the absolute form Claude Code
+/// reads in its permission rules and sandbox settings.
+fn sandbox_path(dir: &Path) -> Result<String, Refusal> {
+    let rule = rule_path(dir, "directory_unusable")?;
+    Ok(rule
+        .strip_suffix("/**")
+        .map_or_else(|| "//".to_string(), str::to_string))
 }
 
 /// Characters refused in a command that becomes a rule: parentheses and commas
@@ -222,6 +255,7 @@ struct Grants {
     tools: Vec<&'static str>,
     allowed: Vec<String>,
     guard: Option<HookCommand>,
+    sandbox: Option<Value>,
     commands: Vec<String>,
     notes: Vec<String>,
     unenforceable: Vec<String>,
@@ -240,6 +274,7 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
             tools: BUILTINS.to_vec(),
             allowed: BUILTINS.iter().map(ToString::to_string).collect(),
             guard: None,
+            sandbox: None,
             commands: Vec::new(),
             notes,
             unenforceable: Vec::new(),
@@ -253,11 +288,21 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
     }
     // Glob and Grep stay in --tools but are not allow rules: Claude Code then
     // applies the scoped Read rules above to them.
-    if scope.mode == Mode::Write {
+    if matches!(scope.mode, Mode::Write | Mode::Build) {
         tools.extend(["Edit", "Write"]);
         allowed.push(format!("Edit({})", rule_path(&scope.cwd, "cwd_unusable")?));
         allowed.push(format!("Write({})", rule_path(&scope.cwd, "cwd_unusable")?));
-        notes.push("NotebookEdit is not granted in write mode".to_string());
+        notes.push(format!(
+            "NotebookEdit is not granted in {} mode",
+            if scope.mode == Mode::Build {
+                "build"
+            } else {
+                "write"
+            }
+        ));
+    }
+    if scope.mode == Mode::Build {
+        return build_grants(scope, tools, allowed, notes);
     }
 
     let mut guard = None;
@@ -294,9 +339,57 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
         tools,
         allowed,
         guard,
+        sandbox: None,
         commands,
         notes,
         unenforceable,
+    })
+}
+
+/// `build`: `Bash` without an allow rule, run inside Claude Code's sandbox.
+/// `permissions.commands` is empty: request validation refuses it with `build`.
+fn build_grants(
+    scope: &super::permissions::Scope,
+    mut tools: Vec<&'static str>,
+    allowed: Vec<String>,
+    mut notes: Vec<String>,
+) -> Result<Grants, Refusal> {
+    tools.push("Bash");
+    let directories = scope
+        .directories
+        .iter()
+        .map(|dir| sandbox_path(dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    notes.extend([
+        "build runs Bash inside Claude Code's sandbox, which approves sandboxed commands; \
+         commands write only to the working directory and Claude Code's temporary directory, \
+         permissions.directories is denied for writing, and the network is refused"
+            .to_string(),
+        "wider than requested: commands inside the sandbox can read files outside the working \
+         directory and permissions.directories"
+            .to_string(),
+        "Claude Code sets TMPDIR to its own per-user directory; the rest of /tmp is not writable \
+         by commands"
+            .to_string(),
+        "commands Claude Code does not approve inside the sandbox (for example one starting with \
+         a variable assignment, or eval) are denied and listed in permissions.denied"
+            .to_string(),
+        "on Linux the sandbox needs bubblewrap and socat; without them Claude Code fails at \
+         startup rather than run commands unsandboxed"
+            .to_string(),
+    ]);
+    Ok(Grants {
+        tools,
+        allowed,
+        guard: None,
+        sandbox: Some(sandbox_value(&directories)),
+        commands: Vec::new(),
+        notes,
+        unenforceable: vec![
+            "reads by commands are not confined to the working directory and \
+             permissions.directories"
+                .to_string(),
+        ],
     })
 }
 
@@ -317,7 +410,8 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let request = inputs.request;
     let scope = inputs.scope;
     let g = grants(inputs)?;
-    let settings = settings_json(g.guard.as_ref(), &inputs.deny.rules).to_string();
+    let settings =
+        settings_json(g.guard.as_ref(), &inputs.deny.rules, g.sandbox.as_ref()).to_string();
     if settings.len() > SETTINGS_ARGUMENT_LIMIT {
         let kind = if inputs.deny.rules.is_empty() {
             "unsupported_command"
@@ -420,6 +514,12 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
             }
         ),
     ];
+    if let Some(sandbox) = &g.sandbox {
+        mapping.push(format!(
+            "sandbox={}",
+            crate::canonical::sorted(sandbox.clone())
+        ));
+    }
     if request.session.ephemeral {
         mapping.push("session=ephemeral".to_string());
     }

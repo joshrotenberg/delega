@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::SCHEMA_VERSION;
 use super::limits::*;
 use super::outcome::Outcome;
+use super::permissions::Mode;
 use super::request::{Request, Session};
 use super::result::RunResult;
 
@@ -174,6 +175,13 @@ impl Request {
                 problems.push(too_long(&field, command.len(), MAX_COMMAND_BYTES));
             }
             check_nul(problems, &field, command);
+        }
+        if perms.mode == Mode::Build && !perms.commands.is_empty() {
+            problems.push(Problem::new(
+                "permissions.commands",
+                "must be empty in build mode, which already runs every command inside the \
+                 provider's sandbox",
+            ));
         }
 
         if perms.directories.len() > MAX_DIRECTORIES {

@@ -132,6 +132,85 @@ fn claude_write_mode_adds_edit_and_write_scoped_to_the_working_directory() {
 }
 
 #[test]
+fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.permissions.mode = Mode::Build;
+    let plan = dry(&rig, &request);
+    let allowed = format!(
+        "{},{},{}",
+        rule(&rig, "Read"),
+        rule(&rig, "Edit"),
+        rule(&rig, "Write")
+    );
+    let settings = json!({
+        "disableAllHooks": true,
+        "sandbox": {
+            "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": true,
+            "enabled": true,
+            "failIfUnavailable": true
+        }
+    });
+    let expected = claude_base(&rig, "Read,Glob,Grep,Edit,Write,Bash", &allowed, &settings);
+    assert_eq!(plan.args[..plan.args.len() - 1], expected[..]);
+    assert_eq!(plan.mapping.mode, Mode::Build);
+    assert!(plan.mapping.commands.is_empty());
+    assert!(
+        !plan
+            .env_names
+            .contains(&"DELEGA_EXACT_BASH_GRANTS".to_string()),
+        "build needs no command guard"
+    );
+    assert!(
+        plan.mapping
+            .settings
+            .iter()
+            .any(|s| s.starts_with("sandbox=") && s.contains("\"failIfUnavailable\":true")),
+        "{:?}",
+        plan.mapping.settings
+    );
+    for part in [
+        "wider than requested: commands inside the sandbox can read",
+        "TMPDIR",
+        "bubblewrap and socat",
+        "listed in permissions.denied",
+    ] {
+        assert!(
+            plan.notes.iter().any(|n| n.contains(part)),
+            "missing note {part}: {:?}",
+            plan.notes
+        );
+    }
+}
+
+#[test]
+fn claude_build_mode_denies_writes_to_extra_directories_in_the_sandbox() {
+    let rig = Rig::new();
+    let extra = rig.home.join("docs");
+    std::fs::create_dir(&extra).unwrap();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.permissions.mode = Mode::Build;
+    request.permissions.directories = vec![extra.clone()];
+    let plan = dry(&rig, &request);
+    let settings = settings_of(&plan.args);
+    let resolved = std::fs::canonicalize(&extra).unwrap();
+    assert_eq!(
+        settings["sandbox"]["filesystem"]["denyWrite"],
+        json!([format!(
+            "//{}",
+            resolved.to_string_lossy().trim_matches('/')
+        )])
+    );
+    assert!(
+        plan.args
+            .windows(2)
+            .any(|w| w[0] == "--add-dir" && w[1] == resolved.to_string_lossy()),
+        "the directory is still added for reading"
+    );
+}
+
+#[test]
 fn claude_full_mode_grants_the_nine_builtin_tools_unscoped_and_no_hook() {
     let rig = Rig::new();
     let mut request = rig.request(Provider::Claude, "p");
@@ -221,7 +300,7 @@ fn every_claude_launch_turns_off_memory_files_and_auto_memory() {
     // Without these the worker can get the user's auto-memory index from their
     // home directory, whatever --setting-sources says (#106).
     let rig = Rig::new();
-    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+    for mode in [Mode::Read, Mode::Write, Mode::Build, Mode::Full] {
         let mut request = rig.request(Provider::Claude, "p");
         request.permissions.mode = mode;
         let scope = permissions::scope(&request).unwrap();
@@ -428,6 +507,28 @@ fn codex_write_mode_is_workspace_write_without_network_or_temporary_directories(
             .iter()
             .any(|n| n.contains("wider than requested: the workspace-write sandbox"))
     );
+}
+
+#[test]
+fn codex_build_mode_is_workspace_write_without_network_but_with_temporary_directories() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Codex, "p");
+    request.permissions.mode = Mode::Build;
+    let plan = dry(&rig, &request);
+    let extra = [
+        "sandbox_workspace_write.network_access=false",
+        "sandbox_workspace_write.exclude_slash_tmp=false",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=false",
+    ];
+    assert_eq!(
+        normalized(&plan.args),
+        codex_expected("workspace-write", &extra)
+    );
+    assert_eq!(plan.mapping.mode, Mode::Build);
+    assert!(plan.notes.iter().any(|n| {
+        n.contains("wider than requested: the workspace-write sandbox")
+            && n.contains("the temporary directories")
+    }));
 }
 
 #[test]
