@@ -350,7 +350,7 @@ for its limit in awake time. It also reads the wall clock when it starts and
 again once a second of awake time (`WALL_CHECK_INTERVAL`), and ends at a check
 that reads at least the limit more than the start did.
 
-The bound ends the waiting, not the response:
+When the waiting ends:
 
 - After the machine slept past the limit, the waiting ends within about one
   check interval of awake time after the machine wakes, plus scheduling. It
@@ -361,13 +361,9 @@ The bound ends the waiting, not the response:
 - A wall clock set forward ends the waiting early only if the elapsed wall time
   a check reads reaches the limit while the call is still waiting.
 
-Once the waiting has ended, by either clock, the call answers as it does at any
-timeout. A `wait` asks the supervisor for the states of what it named and
-reports them as they are at that moment: usually `timed_out: true`, but
-`timed_out: false` if something named finished between the end of the waiting
-and that view. An `interrupt` or `close` answers `settled: false` if the run had
-not reported that it stopped by the time the waiting ended, and the stop goes
-on; if the run reported first, the answer is the settled one.
+Once the waiting has ended, by either clock, the call answers exactly as it
+does when its limit passes, as [Waiting and cursors](#waiting-and-cursors)
+describes for `wait` and [Stopping](#stopping) for `interrupt` and `close`.
 
 A run's time limit counts awake time only, on purpose: a run paused by sleep has
 not used its time. The preflight bound, `shutdown_bound` and retention are also

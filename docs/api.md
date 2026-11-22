@@ -990,12 +990,11 @@ Rules that hold for every tool:
   wakes, plus scheduling; it does not end while the machine sleeps. A wall
   clock set forward ends the waiting early only if the elapsed wall time read
   reaches the limit while the call is still waiting, and one that reads earlier
-  than at the start counts as no time passed. The limit ends the waiting, not
-  the response: `wait` then reports the states as they are at that moment,
-  usually with `timed_out: true`, but `timed_out: false` if something named
-  finished meanwhile; `interrupt` and `close` answer `settled: false` if the
-  run had not reported that it stopped by then. A run's `timeout_secs` counts
-  awake time only: a run paused by sleep has not used its time.
+  than at the start counts as no time passed. Once the waiting has ended, by
+  either clock, the call answers exactly as it does when its limit passes, as
+  the table of tools above describes for `wait`, `interrupt` and `close`. A
+  run's `timeout_secs` counts awake time only: a run paused by sleep has not
+  used its time.
   [supervisor.md](supervisor.md#how-the-bounds-count-time) has the detail.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
   **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
