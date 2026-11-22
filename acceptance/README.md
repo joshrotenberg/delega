@@ -12,9 +12,9 @@ matrix of fake-provider behaviours crossed with caller actions, and records for
 each row what was reported and what was really left running. It adapts the
 matrix of the outcome spike (`delega-dot-spike-outcomes`, commit `7f4da23`),
 which drove counterpart's and due's libraries, so the results can be compared:
-[COMPARISON.md](COMPARISON.md).
+[COMPARISON.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/COMPARISON.md).
 
-Results: [RESULTS.md](RESULTS.md) (summary and expected failures),
+Results: [RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md) (summary and expected failures),
 `results.jsonl` (one row per case), `repeats.jsonl` (three more full runs, for
 variation).
 

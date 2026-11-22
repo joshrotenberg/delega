@@ -1,0 +1,17 @@
+fail-on-warnings = true
+# These chapters get their headings and content from includes at build time.
+ignore-paths = ["docs/introduction.md", "docs/acceptance.md"]
+disabled-rules = [
+  "MD007",     # The API uses nested lists inside list items with continuation paragraphs.
+  "MD013",     # Existing prose wraps near 80 columns and reference tables have long rows.
+  "MD024",     # Provider sections intentionally reuse the same subheadings.
+  "MD034",     # A quoted provider diagnostic contains a bare URL.
+  "MD038",     # Output examples show significant leading and trailing spaces.
+  "MD044",     # CLI arguments, filenames, and field names use literal lowercase spelling.
+  "MD049",     # The checker treats underscores inside literal identifiers as emphasis.
+  "MD060",     # Existing reference tables use compact and padded column spacing.
+  "MDBOOK004", # The checker treats repeated provider subheadings as chapter titles.
+  "CONTENT001", # The supervisor uses “a bug:” in prose about an invariant.
+  "CONTENT004", # The provider heading preserves the product name Claude Code.
+  "CONTENT007", # The reference uses both “config keys” and “configuration”.
+]

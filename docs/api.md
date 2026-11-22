@@ -843,8 +843,8 @@ and `delega://identity` carry `stale_server` ([Stale server](#stale-server)).
 `operation` field is `install` or `uninstall`. Both documents have `ok`,
 `dry_run`, `install_dir`, `hosts` (each with its `status`, the `commands` run
 and the `reload` step) and `error`. Tests validate the documents against
-[`schemas/plugin-install.schema.json`](../schemas/plugin-install.schema.json) and
-[`schemas/plugin-uninstall.schema.json`](../schemas/plugin-uninstall.schema.json).
+[`schemas/plugin-install.schema.json`](https://github.com/joshrotenberg/delega/blob/main/schemas/plugin-install.schema.json) and
+[`schemas/plugin-uninstall.schema.json`](https://github.com/joshrotenberg/delega/blob/main/schemas/plugin-uninstall.schema.json).
 
 Exit status: 0 on success, including a dry run; 1 when a host command failed or
 something was refused (a host not found, a foreign directory, an invalid marker,

@@ -10,6 +10,9 @@ and MCP. `README.md` states the goal and the six acceptance criteria. They
 decide what is in scope. `README.md` is canonical for what exists; keep it
 current in the same change that alters behavior.
 
+Build the documentation book with `mdbook build`, preview it with
+`mdbook serve`, and lint it with `mdbook-lint lint docs`.
+
 ## Ground rules
 
 - Work from an issue. If none covers the task, file one first.
