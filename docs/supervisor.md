@@ -352,18 +352,20 @@ that reads at least the limit more than the start did.
 
 When the waiting ends:
 
-- After the machine slept past the limit, the waiting ends within about one
-  check interval of awake time after the machine wakes, plus scheduling. It
-  does not end while the machine sleeps, so in wall time it can outlast its
-  limit by the rest of the sleep.
+- After the machine slept past the limit, the waiting ends at the first wall
+  check after the machine wakes, about one check interval of awake time later
+  plus scheduling, unless the wall clock was set back meanwhile so that the
+  check reads less than the limit. It does not end while the machine sleeps, so
+  in wall time it can outlast its limit by the rest of the sleep.
 - A wall clock that reads earlier than it did at the start counts as no time
   passed, which leaves the awake-time bound in force.
 - A wall clock set forward ends the waiting early only if the elapsed wall time
   a check reads reaches the limit while the call is still waiting.
 
-Once the waiting has ended, by either clock, the call answers exactly as it
-does when its limit passes, as [Waiting and cursors](#waiting-and-cursors)
-describes for `wait` and [Stopping](#stopping) for `interrupt` and `close`.
+Whichever clock ends the waiting, the call then takes the same path as when its
+limit passes on the awake-time timer, so it answers the same way in both cases.
+[Waiting and cursors](#waiting-and-cursors) and [Stopping](#stopping) describe
+these calls.
 
 A run's time limit counts awake time only, on purpose: a run paused by sleep has
 not used its time. The preflight bound, `shutdown_bound` and retention are also
