@@ -156,12 +156,14 @@ with them, which the user's configuration file may have lowered. Check it before
 starting many workers. A run beyond the running limit is not refused: it stays
 `queued` until a slot frees.
 
-If `list` reports `stale_server`, the executable this server started from was
-replaced (`change` is `replaced`) or removed (`removed`) since it started, by an
-install, a reinstall of the same build or an uninstall. The server still runs
-the old file and may lack what an install brought. Tell the user to reconnect
-the server (in Claude Code, from `/mcp`) or to start a new session;
-`stale_server.what_to_do` says the same.
+If `list` reports `stale_server`, the file at the path this server started from
+is no longer the file it recorded at start: `change` is `replaced` when another
+file is there or the file was rewritten, and `removed` when nothing is there.
+An install, a reinstall of the same build and an uninstall do this, and so does
+anything else that replaces, rewrites or removes that file. It does not say
+that a newer build is installed. The server still runs what it started from.
+Tell the user to reconnect the server (in Claude Code, from `/mcp`) or to start
+a new session; `stale_server.what_to_do` says the same.
 
 ## Read an outcome
 

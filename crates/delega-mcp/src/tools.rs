@@ -64,7 +64,8 @@ const READ: &str = "Read a run, or a worker's current run: the result if it has 
     whether more follows.";
 
 const LIST: &str = "List the workers on this connection with their state, queue length and \
-    session id, and the limits in force and in use. Returns at once. Check it before starting \
+    session id, and the limits in force and in use. Returns at once, or within about 2 s when \
+    the filesystem of the server's executable does not answer. Check it before starting \
     many workers. stale_server is present when the executable this server started from was \
     replaced or removed since: tell the user to reconnect the server or start a new session.";
 

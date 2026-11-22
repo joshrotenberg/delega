@@ -1171,8 +1171,9 @@ to it. The report ends when the server is reconnected (in Claude Code,
   `delega version --output json` never has the field.
 - **What it means.** The file changed; that is all. It is not proof that a
   newer build is installed: an install of identical bytes still replaces the
-  file and gives `replaced` with equal revisions, and `delega plugin uninstall`
-  gives `removed`. Compare `running_revision` with `installed_revision` when
+  file and gives `replaced` with equal revisions, `delega plugin uninstall`
+  gives `removed`, and anything else that replaces the file, rewrites it with
+  another size or modification time, or removes it gives the same report. Compare `running_revision` with `installed_revision` when
   both are present.
 - **Bounded.** A call waits for the filesystem for 2 s at most and then answers
   without `stale_server`. `IDENTITY.json` is opened without blocking and read
@@ -1180,9 +1181,10 @@ to it. The report ends when the server is reconnected (in Claude Code,
   At most four checks wait on a filesystem that does not answer; further calls
   answer without the field until one returns.
 - **Limits of the check.** A file renamed over the executable after the process
-  started and before it recorded the file is recorded as the running one, and
-  that server never reports stale; the window is the start of the process, before
-  the configuration file is read. A server whose executable path could not be
+  started and before it recorded the file is recorded as the running one, so
+  that replacement is not reported; a replacement or removal after the
+  recording still is. The window is the start of the process, before the
+  configuration file is read. A server whose executable path could not be
   found or read at start never reports stale, and neither does one for which
   the later `stat` fails for another reason than the path being gone. A rewrite
   in place that keeps the size and the modification time is not seen. The
