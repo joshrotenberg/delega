@@ -38,7 +38,7 @@ delega doctor
 It reports each provider's executable and version, the environment and deny
 rules a worker would get, the configuration file, the limits in force and
 anything that would stop a run. It exits 0 when a run can go ahead; the other
-statuses are in [Doctor](docs/api.md#doctor).
+statuses are in [Doctor](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#doctor).
 
 To use the MCP tools and skills from Claude Code or Codex, install the plugin:
 
@@ -51,13 +51,13 @@ delega plugin install --host claude
 It copies the running `delega` into `~/.local/share/delega` and registers it
 through the hosts' own commands (`claude plugin ...`, `codex plugin ...`). Run it
 again after rebuilding to refresh the plugin. `delega plugin uninstall` removes
-it. See [Install and uninstall](docs/api.md#install-and-uninstall).
+it. See [Install and uninstall](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#install-and-uninstall).
 
 A running host session keeps the server it started with. After an install, start
 a new session, or in Claude Code reconnect `plugin:delega:delega` from `/mcp`
 (`/reload-plugins` does not restart the server). Until then, `list` and
 `delega://identity` report `stale_server` when they detect that the server's
-executable was replaced or removed ([Stale server](docs/api.md#stale-server)).
+executable was replaced or removed ([Stale server](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#stale-server)).
 
 ## Quickstart
 
@@ -71,9 +71,9 @@ When the result is delivered normally, a completed run prints the answer on
 standard output and exits 0, a failed run exits 1, a refused one 2 and one that
 timed out 124. `--output json` prints the whole result instead of the answer.
 The other cases, including usage errors, `--dry-run` and a result that cannot
-be written, are under [Command line](docs/api.md#command-line). A run that did
+be written, are under [Command line](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#command-line). A run that did
 not complete gives its reason in `error.kind`
-([error kinds](docs/providers.md#error-kinds)).
+([error kinds](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#error-kinds)).
 
 More forms:
 
@@ -85,7 +85,7 @@ delega run --provider codex --resume SESSION_ID -p "Now add tests"
 delega run --provider claude -p "Plan the change" --dry-run
 ```
 
-`delega run --help` lists every option. [Command line](docs/api.md#command-line)
+`delega run --help` lists every option. [Command line](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#command-line)
 describes profiles, `--progress`, `--env` and the configuration file.
 
 ### MCP, from a host session
@@ -93,8 +93,8 @@ describes profiles, `--progress`, `--env` and the configuration file.
 From a host session with the plugin installed, a caller starts a worker with
 `start`, waits with `wait` (passing back the `cursor` it returns), reads the
 result with `read` and frees the worker with `close`. The
-[`delegate` skill](skills/delegate/SKILL.md) and the
-[tool table](docs/api.md#mcp) in `docs/api.md` describe the tool arguments
+[`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/skills/delegate/SKILL.md) and the
+[tool table](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#mcp) in `docs/api.md` describe the tool arguments
 and responses.
 
 ### Library
@@ -108,7 +108,7 @@ delega-core = { git = "https://github.com/joshrotenberg/delega" }
 
 One run, from the body of an async function on a Tokio runtime. The same lines
 are the `no_run` doc test in
-[`crates/delega-core/src/provider/mod.rs`](crates/delega-core/src/provider/mod.rs),
+[`crates/delega-core/src/provider/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/provider/mod.rs),
 which `cargo test` compiles:
 
 ```rust
@@ -122,7 +122,7 @@ println!("{:?}", result.outcome);
 
 Several workers at once go through `delega_core::supervisor::Supervisor`, whose
 module documentation has the same kind of example. See
-[docs/supervisor.md](docs/supervisor.md).
+[docs/supervisor.md](https://github.com/joshrotenberg/delega/blob/main/docs/supervisor.md).
 
 ## Acceptance criteria
 
@@ -151,10 +151,10 @@ Where each stands:
 | 2 | Partly met. The result reports the cleanup problems delega detects; the documented gaps (below) can leave a process running while cleanup is reported as confirmed. | `process`; tested by `process/tests` and the acceptance matrix. |
 | 3 | Partly met. Permissions are stated up front, and a request not granted is answered no. Asking the caller live is not built. | `contract/permissions.rs`, `provider`; tested by `provider/tests` against fakes that honour the permission arguments. |
 | 4 | Met for the differences delega can identify, which it reports in `provider_notes`. With `permissions.strict`, a run with a permission that delega identifies as one the provider cannot enforce is refused with `permissions_not_enforceable`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
-| 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
+| 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](https://github.com/joshrotenberg/delega/tree/main/schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
 | 6 | Partly met. The fake-provider tests run in CI; the live suite is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)). | `crates/delega-core/src/provider/tests/fakes`. |
 
-The committed acceptance run ([acceptance/RESULTS.md](acceptance/RESULTS.md),
+The committed acceptance run ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),
 fake providers only, Darwin arm64) has 188 rows: 158 pass, 29 are expected
 failures, 1 is a documented gap that did not show in that run, and none failed
 unexpectedly.
@@ -173,21 +173,21 @@ unexpectedly.
   0.170.0): Claude Code's read scoping, command guard and deny rules; that
   Codex's `workspace-write` sandbox blocks writes outside the working directory;
   session resume, version parsing, usage reporting and several failure shapes.
-  [providers.md](docs/providers.md#verified-against-the-real-cli) has the list
+  [providers.md](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#verified-against-the-real-cli) has the list
   of live checks and the
-  [remaining assumptions](docs/providers.md#unverified-against-the-real-cli).
+  [remaining assumptions](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#unverified-against-the-real-cli).
 - **Permission modes.** `read` (default), `write` and `full`, plus exact
   commands (`--allow-command`) and extra readable directories. Work that builds
   and runs tests needs `full` today, because `read` and `write` allow only
   commands listed exactly ([#98](https://github.com/joshrotenberg/delega/issues/98)).
   Codex confines neither reads nor commands, so a `read` or `write` Codex run is
   wider than requested and says so in `provider_notes`; with `--strict` it is
-  refused ([Wider than requested](docs/providers.md#wider-than-requested)).
+  refused ([Wider than requested](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#wider-than-requested)).
 - **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
   descendant called `setsid` and was orphaned before any process listing saw it,
   or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`
   itself leaves the worker running. See the expected failures in
-  [acceptance/RESULTS.md](acceptance/RESULTS.md).
+  [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
 - **Environment.** A worker gets a fixed environment allowlist plus what `--env`
   or the configuration file adds. The installed plugin starts `delega mcp` with
   no `--env`.
@@ -216,11 +216,11 @@ Out of scope:
 
 | Document | Covers |
 | --- | --- |
-| [docs/api.md](docs/api.md) | The request and result, outcomes, the CLI and its exit statuses, `doctor`, plugin install, the configuration file (`~/.config/delega/config.toml`), the MCP tools, skills, the library, and what is deferred. |
-| [docs/supervisor.md](docs/supervisor.md) | The supervisor: operations, worker and run states, limits and defaults, cursors, retention. |
-| [docs/providers.md](docs/providers.md) | How each provider is started, the permission mapping, error kinds, the environment policy, managed settings, and what is verified against the real CLIs. |
-| [acceptance/README.md](acceptance/README.md) | The acceptance harness for criteria 1 and 2 and its matrix. |
-| [skills](skills) | The `run` and `delegate` skills built into the executable (`delega skill list`). |
+| [docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md) | The request and result, outcomes, the CLI and its exit statuses, `doctor`, plugin install, the configuration file (`~/.config/delega/config.toml`), the MCP tools, skills, the library, and what is deferred. |
+| [docs/supervisor.md](https://github.com/joshrotenberg/delega/blob/main/docs/supervisor.md) | The supervisor: operations, worker and run states, limits and defaults, cursors, retention. |
+| [docs/providers.md](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md) | How each provider is started, the permission mapping, error kinds, the environment policy, managed settings, and what is verified against the real CLIs. |
+| [acceptance/README.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md) | The acceptance harness for criteria 1 and 2 and its matrix. |
+| [skills](https://github.com/joshrotenberg/delega/tree/main/skills) | The `run` and `delegate` skills built into the executable (`delega skill list`). |
 
 `delega schema request|result` prints the contracts built into the executable,
 and `delega version --output json` its build identity.
@@ -252,13 +252,17 @@ cargo run --release -p delega-acceptance -- --all
 ```
 
 It writes `acceptance/results.jsonl`; the committed run took 82 s with 8 cases
-at a time on Darwin arm64 ([acceptance/RESULTS.md](acceptance/RESULTS.md)).
+at a time on Darwin arm64 ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md)).
 
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.
-Read [AGENTS.md](AGENTS.md) before contributing.
+
+Build the documentation book with `mdbook build`, preview it with
+`mdbook serve`, and lint it with `mdbook-lint lint docs`.
+
+Read [AGENTS.md](https://github.com/joshrotenberg/delega/blob/main/AGENTS.md) before contributing.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT), at your option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/joshrotenberg/delega/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/joshrotenberg/delega/blob/main/LICENSE-MIT), at your option.
