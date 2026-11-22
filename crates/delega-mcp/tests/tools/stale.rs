@@ -40,48 +40,6 @@ fn set_modified(path: &Path, to: SystemTime) {
         .expect("set the modification time");
 }
 
-/// Let go every open of the FIFO at `path` that waits for a writer, now or
-/// later, without waiting on anything: a failing test must end, and the
-/// runtime does not end while a thread of its is stuck in `open`.
-///
-/// Both ends are opened at once without blocking, which needs no reader (a
-/// write end alone would fail with `ENXIO` when nothing is reading) and gives a
-/// reader stuck in `open` its writer. While that handle is held the path is
-/// removed, so an open that arrives later finds nothing instead of a FIFO
-/// without a writer.
-fn release_fifo(path: &Path) {
-    use std::os::unix::fs::OpenOptionsExt;
-    let nonblocking = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).expect("a flag");
-    let both_ends = File::options()
-        .read(true)
-        .write(true)
-        .custom_flags(nonblocking)
-        .open(path);
-    let _ = std::fs::remove_file(path);
-    drop(both_ends);
-}
-
-/// Make a FIFO at `path` with the `mkfifo` program, waiting for it for a
-/// bounded time: the standard library has no call for it.
-async fn make_fifo(path: &Path) {
-    let mut child = crate::guarded_spawn(
-        std::process::Command::new("/usr/bin/mkfifo")
-            .arg(path)
-            .stdin(std::process::Stdio::null()),
-    )
-    .expect("run mkfifo");
-    for _ in 0..3000 {
-        if let Some(status) = child.try_wait().expect("wait for mkfifo") {
-            assert!(status.success(), "mkfifo failed");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    panic!("mkfifo did not finish");
-}
-
 fn inode(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).expect("status").ino()
@@ -370,25 +328,6 @@ async fn the_installed_revision_is_absent_when_the_identity_is_missing_or_unusab
         stale.get("installed_revision").is_none(),
         "directory: {stale}"
     );
-    installed.supervisor.shutdown().await;
-}
-
-#[tokio::test]
-async fn an_identity_that_is_a_fifo_with_no_writer_is_ignored_and_holds_no_call() {
-    let mut installed = Installed::new().await;
-    installed.replace_by_rename();
-    let fifo = installed.plugin.join("IDENTITY.json");
-    make_fifo(&fifo).await;
-    // Opening a FIFO for reading waits for a writer unless it is opened
-    // without blocking. The limit here is the test's own, under the server's
-    // bound on the check, so a server that waited on the FIFO fails.
-    let waited = tokio::time::timeout(Duration::from_millis(1500), installed.stale_server()).await;
-    let Ok(stale) = waited else {
-        release_fifo(&fifo);
-        panic!("list and the identity read waited on a FIFO");
-    };
-    assert_eq!(stale["change"], "replaced", "{stale}");
-    assert!(stale.get("installed_revision").is_none(), "{stale}");
     installed.supervisor.shutdown().await;
 }
 

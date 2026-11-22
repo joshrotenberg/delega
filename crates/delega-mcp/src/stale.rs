@@ -18,7 +18,7 @@
 //! `delega plugin uninstall` removes the file, and an install of identical
 //! bytes replaces it.
 
-use std::fs::{Metadata, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -158,26 +158,46 @@ pub struct StaleServer {
     pub what_to_do: String,
 }
 
+/// Why a file was not opened for reading by [`open_regular`].
+#[derive(Debug)]
+enum NotOpened {
+    /// The open or the status call failed, a missing file included.
+    Failed,
+    /// Something is at the path that is not a regular file: a FIFO, a
+    /// directory, a device.
+    NotARegularFile,
+}
+
+/// Open `path` for reading if it is a regular file, without ever waiting.
+///
+/// The open is non-blocking: opening a FIFO for reading otherwise waits for a
+/// writer. What kind of file it is is asked of the open handle, so the answer
+/// is about the file that will be read and not about what the path named a
+/// moment earlier.
+fn open_regular(path: &Path) -> Result<File, NotOpened> {
+    let nonblocking =
+        i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).map_err(|_| NotOpened::Failed)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblocking)
+        .open(path)
+        .map_err(|_| NotOpened::Failed)?;
+    let metadata = file.metadata().map_err(|_| NotOpened::Failed)?;
+    if metadata.is_file() {
+        Ok(file)
+    } else {
+        Err(NotOpened::NotARegularFile)
+    }
+}
+
 /// The `revision` of `<directory of the executable>/../IDENTITY.json`, where
 /// `delega plugin install` writes the identity of the build it installed. Any
 /// failure is `None`: a missing file, one that is not a regular file (a FIFO
-/// is not waited on), one over
-/// [`IDENTITY_LIMIT`], or one that is not a JSON object with a string
-/// `revision`.
+/// is not waited on), one over [`IDENTITY_LIMIT`], or one that is not a JSON
+/// object with a string `revision`.
 fn installed_revision(executable: &Path) -> Option<String> {
     let path = executable.parent()?.parent()?.join("IDENTITY.json");
-    // Opened without blocking: opening a FIFO for reading otherwise waits for
-    // a writer. What kind of file it is is asked of the open handle, so the
-    // answer is about the file that will be read and not about the path.
-    let nonblocking = rustix::fs::OFlags::NONBLOCK.bits();
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(i32::try_from(nonblocking).ok()?)
-        .open(&path)
-        .ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
+    let file = open_regular(&path).ok()?;
     let mut bytes = Vec::new();
     file.take(IDENTITY_LIMIT + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() as u64 > IDENTITY_LIMIT {
@@ -241,10 +261,59 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::Instant;
 
     use super::*;
+
+    /// Make a FIFO at `path` with the `mkfifo` program, under the spawn lock
+    /// every spawn in this workspace holds. The standard library has no call
+    /// for it.
+    #[allow(clippy::disallowed_methods)]
+    fn make_fifo(path: &Path) {
+        let status = {
+            let _held = delega_core::process::spawn_guard();
+            std::process::Command::new("mkfifo").arg(path).status()
+        };
+        assert!(status.expect("run mkfifo").success(), "mkfifo failed");
+    }
+
+    #[test]
+    fn opening_a_fifo_with_no_writer_answers_not_a_regular_file_without_waiting() {
+        let tmp = tempfile::tempdir().expect("create temporary directory");
+        let path = tmp.path().join("IDENTITY.json");
+        make_fifo(&path);
+        // On a thread of its own, so that an open that waits for a writer
+        // fails this test by the deadline below. That thread is then left
+        // behind: nothing here tries to release or join it.
+        let (answer, answered) = channel();
+        let opened = path.clone();
+        std::thread::spawn(move || {
+            let _ = answer.send(open_regular(&opened).map(drop));
+        });
+        match answered.recv_timeout(Duration::from_secs(10)) {
+            Ok(Err(NotOpened::NotARegularFile)) => {}
+            Ok(other) => panic!("a FIFO was answered with {other:?}"),
+            Err(RecvTimeoutError::Timeout) => panic!("the open waited on a FIFO with no writer"),
+            Err(RecvTimeoutError::Disconnected) => panic!("the opening thread ended unanswered"),
+        }
+    }
+
+    #[test]
+    fn a_regular_file_is_opened_and_a_directory_or_a_missing_file_is_not() {
+        let tmp = tempfile::tempdir().expect("create temporary directory");
+        let file = tmp.path().join("IDENTITY.json");
+        std::fs::write(&file, b"{}").expect("write");
+        assert!(open_regular(&file).is_ok());
+        assert!(matches!(
+            open_regular(tmp.path()),
+            Err(NotOpened::NotARegularFile)
+        ));
+        assert!(matches!(
+            open_regular(&tmp.path().join("absent")),
+            Err(NotOpened::Failed)
+        ));
+    }
 
     /// A long time for a test to wait before it calls something stuck.
     const STUCK: Duration = Duration::from_secs(60);

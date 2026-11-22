@@ -1184,8 +1184,8 @@ to it. The report ends when the server is reconnected (in Claude Code,
   started and before it recorded the file is recorded as the running one, so
   that replacement is not reported; a replacement or removal after the
   recording still is. The window is the start of the process, before the
-  configuration file is read. A server whose executable path could not be
-  found or read at start never reports stale, and neither does one for which
+  configuration file is read. A server that could not find its executable's
+  path at start, or could not get that file's status then, never reports stale, and neither does one for which
   the later `stat` fails for another reason than the path being gone. A rewrite
   in place that keeps the size and the modification time is not seen. The
   library builds a server that never reports unless it is given the executable
