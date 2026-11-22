@@ -9,9 +9,12 @@ enforces part of it. The fields are in [Permissions](../api.md#permissions).
 - **`read`**, the built-in default: read the working directory and any extra
   directories.
 - **`write`**: also edit files in the working directory.
+- **`build`**: also run any command inside the provider's OS sandbox. Commands
+  write only to the working directory and a temporary directory, and have no
+  network. `permissions.commands` must be empty.
 - **`full`**: for Claude Code, the nine built-in tools without directory
-  scopes, with eligible deny rules still applied; for Codex, the sandbox is
-  off.
+  scopes or a sandbox, with eligible deny rules still applied; for Codex, the
+  sandbox is off.
 
 A configuration file can change the default mode
 ([Configuration file](../api.md#configuration-file)), so ask for the mode you
@@ -26,13 +29,16 @@ directory.
 the working directory and the extra directories, and it gets no edit tools. In
 `write`, `Edit` and `Write` are also granted, in the working directory only. A
 command granted with `--allow-command` is matched by its text; once it runs, it
-can write files or reach paths outside those scopes. See
+can write files or reach paths outside those scopes. In `build`, commands run in
+Claude Code's sandbox, which confines their writes and refuses the network but
+does not confine their reads ([Build](../providers.md#build)). See
 [Permission mapping](../providers.md#permission-mapping),
 [Commands and directories](../providers.md#commands-and-directories) and
 [What cannot be enforced](../providers.md#what-cannot-be-enforced).
 
 **Codex** does not limit reads to the requested directories or commands to the
-requested list. Results of runs that go ahead note what is wider than
+requested list. In `write` and `build` its sandbox limits writes and turns the
+network off; `build` also allows the temporary directories. Results of runs that go ahead note what is wider than
 requested. See [Permission mapping](../providers.md#permission-mapping-1) and
 [Wider than requested](../providers.md#wider-than-requested).
 

@@ -20,15 +20,15 @@ stands. This page lists the limits a user meets.
   [Providers](../providers.md#verified-against-the-real-cli) has the list of
   live checks and the
   [remaining assumptions](../providers.md#unverified-against-the-real-cli).
-- **Permission modes.** `read` (default), `write` and `full`, plus exact
-  commands (`--allow-command`) and extra readable directories. In delega's own
-  development, workers that build and run the test suite needed `full`, because
-  `write` on Claude Code runs only exactly granted commands and Codex's `write`
-  sandbox excludes temporary directories
+- **Permission modes.** `read` (default), `write`, `build` and `full`, plus
+  exact commands (`--allow-command`) and extra readable directories. `build`
+  runs any command inside the provider's OS sandbox, with writes limited to the
+  working directory and a temporary directory and no network, for workers that
+  build and run tests
   ([#98](https://github.com/joshrotenberg/delega/issues/98)). A fixed command
-  can be granted with `--allow-command`.
-  Codex confines neither reads nor commands, so a `read` or `write` Codex run is
-  wider than requested and says so in `provider_notes`; with `--strict` it is
+  can be granted with `--allow-command` in `read` and `write`.
+  Codex confines neither reads nor commands, so a `read`, `write` or `build`
+  Codex run is wider than requested and says so in `provider_notes`; with `--strict` it is
   refused ([Wider than requested](../providers.md#wider-than-requested)).
 - **Asking permission live** is not built. A request not granted is answered
   no.

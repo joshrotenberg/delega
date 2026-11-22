@@ -30,7 +30,7 @@ separate working directory, not an isolation boundary.
   "name": "impl-issue-123",
   "cwd": "/path/to/repo-issue-123",
   "prompt": "Fix issue 123: <the issue text>. Read AGENTS.md first. Run the formatter, linter and tests. Commit on the current branch. Do not push.",
-  "permissions": { "mode": "full" },
+  "permissions": { "mode": "build" },
   "timeout_secs": 3600
 }
 ```
@@ -38,12 +38,17 @@ separate working directory, not an isolation boundary.
 `cwd` must be absolute, or the start is refused `cwd_required`. The worker does
 not see the supervising conversation, so the prompt must stand alone.
 
-**Permissions.** An implementer that builds and runs tests needs
-`permissions.mode: full` today. `write` allows only the exact commands listed in
-`permissions.commands`, which cannot cover the varying commands a build runs on
-Claude Code, and Codex's `write` sandbox excludes the temporary directories
-([#98](https://github.com/joshrotenberg/delega/issues/98)). With `full` the
-worker is not confined to its working directory.
+**Permissions.** Give an implementer that builds and runs tests
+`permissions.mode: build`. It may edit the working directory and run any command
+inside the provider's sandbox; commands write only to the working directory and
+a temporary directory, and have no network. `write` allows only the exact
+commands listed in `permissions.commands`, which cannot cover the varying
+commands a build runs. Use `full` only when the build needs the network (to
+fetch dependencies, for example) or writes outside the working directory and
+the temporary directory; with `full` the worker is not confined to its working
+directory. On Linux, Claude Code's sandbox needs `bubblewrap` and `socat`, and
+a `build` run fails at startup without them
+([Build](../providers.md#build)).
 Claude workers still receive the applicable
 [deny rules](../providers.md#deny-rules) in every mode. See
 [Permissions](../api.md#permissions) and the per-provider mappings in

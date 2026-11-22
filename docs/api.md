@@ -92,8 +92,8 @@ result reports what happened.
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `full`: no path or command scope from delega; the provider mapping is in [providers](providers.md). |
-| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`. In `full` the provider mapping does not use them; the request still validates the list. |
+| `permissions.mode` | `read` (default), `write`, `build`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `build`: may also run any command inside the provider's OS sandbox, where commands write only to the working directory and a temporary directory and have no network. `full`: no path or command scope and no sandbox from delega. The provider mappings are in [providers](providers.md). |
+| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`. With `build` the list must be empty, or the request is refused `invalid_request`. In `full` the provider mapping does not use them; the request still validates the list. |
 | `permissions.directories` | list of paths | Extra directories the worker may read, at most 64. Each must exist, or the run is refused `directory_unusable`. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
 | `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: this check does not refuse the run; when the plan reaches the result, a `provider_notes` entry says what is wider than requested. `full` is not refused by this check. |
@@ -315,7 +315,7 @@ description, URI and digest that `delega skill list --output json` gives.
 
 `delega run` options: `--request FILE`, `--provider`, `-p/--prompt`, `--stdin`,
 `-C/--cwd`, `--name`, `--model`, `--effort`, `--timeout`, `--read`, `--write`,
-`--full`, `--strict`, `--allow-command CMD` (repeatable), `--add-dir DIR` (repeatable),
+`--build`, `--full`, `--strict`, `--allow-command CMD` (repeatable), `--add-dir DIR` (repeatable),
 `-e/--env NAME[=VALUE]` (repeatable), `--schema FILE`, `--resume ID`, `--ephemeral`,
 `--output text|json`, `--dry-run`, `--progress`, and provider options after `--`.
 `--name` is checked but does not appear in the result, because `delega run`
@@ -387,7 +387,7 @@ Behavior:
   every flag that was given replaces the matching field; a flag that was not
   given leaves the profile's value. Lists (`--allow-command`, `--add-dir`,
   provider options after `--`) replace the profile's list, they are not added
-  to it. `--read`, `--write` and `--full` replace `permissions.mode`;
+  to it. `--read`, `--write`, `--build` and `--full` replace `permissions.mode`;
   `--resume` replaces `session.ephemeral` and `--ephemeral` replaces
   `session.resume`. The prompt comes from `-p` or from `--stdin`, which reads
   standard input as UTF-8 up to the prompt limit; giving both is a refusal, not
@@ -435,8 +435,8 @@ Behavior:
   on standard error, `delega run: refused: <field>: <problem>`, and standard
   output stays empty. The exit status is 2 in both. Such a result has no
   `worker`, no `started_at` and a confirmed `cleanup`, and the CLI makes its run
-  id. Only an argument clap rejects (an unknown flag, two of `--read`, `--write`
-  and `--full`, `--resume` with `--ephemeral`, a malformed `--timeout`) is a
+  id. Only an argument clap rejects (an unknown flag, two of `--read`, `--write`,
+  `--build` and `--full`, `--resume` with `--ephemeral`, a malformed `--timeout`) is a
   plain usage error with its own message and no result. If `delega` cannot
   start its async runtime or install the signal handlers, it prints a `refused`
   result with kind `runtime_unavailable` or `signals_unavailable` and starts
@@ -1412,7 +1412,7 @@ Settled by Josh on 2026-11-18.
 | Default `timeout_secs` | 600 (10 minutes), stated in the result. |
 | A run denied a permission that still finished | A recorded denial does not by itself decide the outcome. `refused` only when the run stopped because of it. |
 | Names | `worker` and `run`; tools `start`, `follow_up`, `wait`, `read`, `list`, `interrupt`, `close`, and later `respond`. |
-| Permission modes | `read`, `write`, `full`. |
+| Permission modes | `read`, `write`, `full`; `build` added on 2026-11-22 ([#98](https://github.com/joshrotenberg/delega/issues/98)). |
 | CLI scope | Foreground `run` only. |
 | Tracing | Stderr progress only in the first version. |
 | Exit status | 0 `completed`, 1 `failed`, 2 `refused`, 124 `timed_out`, 130 `interrupted`. |
