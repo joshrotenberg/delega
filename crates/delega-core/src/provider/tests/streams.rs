@@ -126,6 +126,39 @@ fn claude_negative_or_missing_model_costs_are_ignored() {
     assert_eq!(parsed.session_usage, None);
 }
 
+/// A result whose per-run figures cannot be used whole, with a session total.
+fn claude_result_with_run_figures(figures: &str) -> Vec<u8> {
+    lines(&[&format!(
+        r#"{{"type":"result","subtype":"success","result":"x","total_cost_usd":0.75,"usage":{{"output_tokens":2}},"model_usage_since_last_result":{figures}}}"#
+    )])
+}
+
+#[test]
+fn claude_empty_per_run_figures_give_no_run_cost_and_a_fresh_run_the_total() {
+    let parsed = claude::parse(&claude_result_with_run_figures("{}"));
+    // Resumed: no cost. Fresh: the session's total.
+    assert_eq!(parsed.usage.unwrap().cost_usd, None);
+    assert_eq!(parsed.fresh_usage.unwrap().cost_usd, Some(0.75));
+}
+
+#[test]
+fn claude_per_run_figures_with_an_entry_missing_its_cost_are_not_summed() {
+    let parsed = claude::parse(&claude_result_with_run_figures(
+        r#"{"a":{"costUSD":0.25},"b":{"outputTokens":2}}"#,
+    ));
+    assert_eq!(parsed.usage.unwrap().cost_usd, None);
+    assert_eq!(parsed.fresh_usage.unwrap().cost_usd, Some(0.75));
+}
+
+#[test]
+fn claude_per_run_figures_that_are_all_usable_are_summed() {
+    let parsed = claude::parse(&claude_result_with_run_figures(
+        r#"{"a":{"costUSD":0.25},"b":{"costUSD":0.125}}"#,
+    ));
+    assert_eq!(parsed.usage.unwrap().cost_usd, Some(0.375));
+    assert_eq!(parsed.fresh_usage.unwrap().cost_usd, Some(0.375));
+}
+
 #[test]
 fn claude_with_no_usable_numbers_reports_no_usage() {
     let parsed = claude::parse(&lines(&[

@@ -602,10 +602,11 @@ become `session_usage`: `cost_usd` is `total_cost_usd`, and the tokens are the
 sums over the models in `modelUsage` (`inputTokens` plus
 `cacheCreationInputTokens` as `input_tokens`, `outputTokens`,
 `cacheReadInputTokens` as `cached_tokens`). The run's own `cost_usd` is the sum
-of `costUSD` over `model_usage_since_last_result`. Only when that field is
-missing does a run that did not resume take `total_cost_usd`; a resumed run
-without it has no `usage.cost_usd`. Negative and non-finite values are
-ignored. Messages with `parent_tool_use_id` are sub-agent messages
+of `costUSD` over `model_usage_since_last_result`, used only when that object
+has at least one entry and every entry has a usable (finite, non-negative)
+`costUSD`; there are no partial sums. Otherwise a run that did not resume takes
+`total_cost_usd`, and a resumed run has no `usage.cost_usd`. Negative and
+non-finite values are ignored throughout. Messages with `parent_tool_use_id` are sub-agent messages
 and are not used as the worker's text. When the result carries no text, the last
 assistant message is used and a note says so.
 
@@ -750,9 +751,12 @@ mismatch on a resumed run and the several-ids note on a fresh one). A message it
 `reasoning_output_tokens`); `turn.failed` is failure with its message, and its
 `usage`, when it has one, is read the same way. These counts are the thread's
 totals, also on a resumed run; Codex reports no per-turn figure. They become
-`session_usage`, and `usage` only for a run that did not resume. A resumed
-run's `usage` is left empty here; the supervisor works a follow-up's out from
-the worker's previous totals (see [supervisor.md](supervisor.md#follow-up-usage)). `error`
+`session_usage`, and `usage` only for a run that did not resume. For a resumed
+run delega does not know the run's own consumption: `usage` is empty and only
+`session_usage` is reported. The difference between two runs' `session_usage`
+is one run's own only if nothing else used the thread in between (another
+worker or a CLI `--resume` on the same thread, or a failed or timed-out run
+that reported no totals); delega does not compute it. `error`
 events are kept: they fail the run only if no terminal event follows.
 
 The [provider failure kind](#provider-failure-kinds) comes from the
@@ -1023,6 +1027,5 @@ each.
 - **Stopping at the final result.** A provider that writes its result and then
   does not exit holds the run until the time limit.
 - **Usage during a run.** Usage is taken from the terminal event only.
-- **A resumed Codex run's own usage outside the supervisor.** `delega run
-  --resume` has no earlier totals to subtract, so its `usage` is empty and only
-  `session_usage` is reported.
+- **A resumed Codex run's own usage.** Codex reports only the thread's totals,
+  so a resumed run's `usage` is empty and only `session_usage` is reported.

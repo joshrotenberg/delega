@@ -471,13 +471,19 @@ fn model_count(models: Option<&Value>, keys: &[&str]) -> Option<u64> {
         .reduce(u64::saturating_add)
 }
 
-/// The sum of `costUSD` over every model's entry in a per-model usage object.
+/// The sum of `costUSD` over every model's entry in a per-model usage object,
+/// only when there is at least one entry and every entry has a usable cost (a
+/// finite number that is not negative). A partial sum would understate the
+/// cost, so anything else is `None`.
 fn model_cost(models: Option<&Value>) -> Option<f64> {
     let entries = models?.as_object()?;
+    if entries.is_empty() {
+        return None;
+    }
     entries
         .values()
-        .filter_map(|entry| cost(entry.get("costUSD")))
-        .reduce(|a, b| a + b)
+        .map(|entry| cost(entry.get("costUSD")))
+        .sum::<Option<f64>>()
         .filter(|c| c.is_finite())
 }
 
@@ -510,8 +516,8 @@ fn usages(event: &Map<String, Value>, parsed: &mut Parsed) {
         cost_usd: run_cost,
         ..tokens.clone()
     });
-    // Without the per-run figures, the session total is the run's cost only
-    // when the run started the session.
+    // Without usable per-run figures, the session total is the run's cost
+    // only when the run started the session.
     parsed.fresh_usage = non_empty(Usage {
         cost_usd: run_cost.or(total_cost),
         ..tokens

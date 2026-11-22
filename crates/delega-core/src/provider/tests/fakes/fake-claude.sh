@@ -28,9 +28,11 @@
 #   FAKE_RESUMED_SESSION_ID  the session id reported when the run is resuming
 #                    one, instead of the id it was asked to resume
 #   FAKE_USAGE_DIR   where to count each session's turns (see `turn` below)
-#   FAKE_NO_RUN_USAGE  when set, a successful result leaves out
-#                    model_usage_since_last_result, as an older Claude Code
-#                    would
+#   FAKE_RUN_USAGE   the shape of model_usage_since_last_result on a
+#                    successful result. Unset, it has one model entry with the
+#                    run's figures; `none` leaves it out, as an older Claude
+#                    Code would; `empty` makes it {}; `partial` adds a second
+#                    model entry with no costUSD
 #
 # A successful result carries usage the way Claude Code 2.1.329 does: `usage`
 # is the run's own tokens (12 in, 4 cached, 7 out), model_usage_since_last_result
@@ -335,8 +337,12 @@ init() {
 }
 success() {
   total=$(awk -v t="$turn" 'BEGIN { printf "%.3f", 0.001 * t }')
-  since=""
-  [ -z "$FAKE_NO_RUN_USAGE" ] && since="\"model_usage_since_last_result\":{\"fake-model\":{\"inputTokens\":12,\"outputTokens\":7,\"cacheReadInputTokens\":4,\"cacheCreationInputTokens\":0,\"costUSD\":0.001}},"
+  case "$FAKE_RUN_USAGE" in
+    none) since="" ;;
+    empty) since="\"model_usage_since_last_result\":{}," ;;
+    partial) since="\"model_usage_since_last_result\":{\"fake-model\":{\"inputTokens\":12,\"outputTokens\":7,\"cacheReadInputTokens\":4,\"cacheCreationInputTokens\":0,\"costUSD\":0.001},\"fake-other\":{\"inputTokens\":0,\"outputTokens\":0}}," ;;
+    *) since="\"model_usage_since_last_result\":{\"fake-model\":{\"inputTokens\":12,\"outputTokens\":7,\"cacheReadInputTokens\":4,\"cacheCreationInputTokens\":0,\"costUSD\":0.001}}," ;;
+  esac
   models="\"modelUsage\":{\"fake-model\":{\"inputTokens\":$((12 * turn)),\"outputTokens\":$((7 * turn)),\"cacheReadInputTokens\":$((4 * turn)),\"cacheCreationInputTokens\":0,\"costUSD\":$total}},"
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":$total,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},$models$since\"permission_denials\":$2}"
 }

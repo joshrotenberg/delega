@@ -272,8 +272,7 @@ pub(super) fn settle(
     result.provider_notes = notes;
     result.applied = s.facts.result_applied();
     // A resumed run's stream may give only session totals, which are not the
-    // run's own; the supervisor works a follow-up's out from the worker's
-    // previous totals.
+    // run's own, so only what the stream gives as the run's own is kept.
     result.usage = if s.resume.is_some() {
         parsed.usage.clone()
     } else {

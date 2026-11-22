@@ -181,19 +181,10 @@ report one.
 
 ### Follow-up usage
 
-A worker keeps the latest `session_usage` that a run of its session reported.
-A run whose result has `session_usage` but no run token counts in `usage`
-(Codex reports only the thread's totals on a resumed turn) gets `usage` filled
-with the difference from those previous totals, field by field over the fields
-both have, only when every such value is at least the previous one; otherwise
-`usage` stays empty. Fields the result already has are kept, and a result with
-its own token counts (Claude Code) is left as it is. The result's totals then
-become the worker's. Only a run that reported the worker's session (or the
-first session of a worker that had none) counts.
-
-The difference covers everything since the previous reported totals, including
-a run in between that reported none, such as a failed run: a follow-up after
-it reports the usage of both.
+The supervisor passes `usage` and `session_usage` through as the provider layer
+reported them and never changes either. A resumed Codex follow-up has
+`session_usage` and no `usage`; see [api.md](api.md#usage) for why delega does
+not subtract one run's totals from another's.
 
 ## Waiting and cursors
 

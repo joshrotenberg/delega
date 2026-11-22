@@ -256,9 +256,8 @@ pub struct RunResult {
     pub session_id: Option<String>,
     /// This run's own token counts and cost. A field is present only when
     /// delega knows the run's own value: a resumed run's provider may report
-    /// only session totals, and then delega leaves the field out or, for a
-    /// worker's follow-up, works it out from the totals the worker's previous
-    /// run reported. See `docs/api.md`.
+    /// only session totals, and then delega leaves the field out and reports
+    /// the totals in `session_usage`. See `docs/api.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     /// The provider's totals for the whole session through this run, when the

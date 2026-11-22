@@ -182,16 +182,21 @@ and `cleanup`.
 On a resumed run the providers report session totals for some values, so
 `usage` is not copied from the provider as is:
 
-- Claude Code: the tokens are the run's own. `cost_usd` is the run's own cost
-  from `model_usage_since_last_result`; without it, a run that did not resume
-  takes the session's total cost, and a resumed run has no `cost_usd`.
-  `session_usage` has the session's total cost and tokens.
+- Claude Code: the tokens are the run's own. The run's own `cost_usd` is the
+  sum of `costUSD` over `model_usage_since_last_result`, used only when that
+  object has at least one entry and every entry has a usable (finite,
+  non-negative) `costUSD`; there are no partial sums. Otherwise a run that did
+  not resume takes `total_cost_usd` (the session is the run), and a resumed run
+  has no `cost_usd`. `session_usage` has the session's total cost and tokens.
 - Codex: only the thread's totals are reported. They are `session_usage`, and
-  `usage` too for a run that did not resume. A resumed run has no `usage` from
-  the provider layer (`delega run --resume`).
-- Under the supervisor (MCP, library), a follow-up that has `session_usage` but
-  no run token counts gets `usage` from the difference with the worker's
-  previous totals; see [supervisor.md](supervisor.md#follow-up-usage).
+  `usage` too for a run that did not resume. For a resumed Codex run delega
+  does not know the run's own consumption: it has no `usage` and reports only
+  `session_usage`, through `delega run`, MCP and the library alike.
+
+The difference between two runs' `session_usage` is one run's own consumption
+only if nothing else used the provider session in between: another worker or a
+`delega run --resume` on the same session, or a failed or timed-out run that
+reported no totals, all add to it. delega does not compute it.
 
 Compact reads leave out `usage` and `session_usage`, as they do provenance.
 

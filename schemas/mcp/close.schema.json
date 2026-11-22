@@ -874,7 +874,7 @@
             ]
           },
           "usage": {
-            "description": "This run's own token counts and cost. A field is present only when\ndelega knows the run's own value: a resumed run's provider may report\nonly session totals, and then delega leaves the field out or, for a\nworker's follow-up, works it out from the totals the worker's previous\nrun reported. See `docs/api.md`.",
+            "description": "This run's own token counts and cost. A field is present only when\ndelega knows the run's own value: a resumed run's provider may report\nonly session totals, and then delega leaves the field out and reports\nthe totals in `session_usage`. See `docs/api.md`.",
             "anyOf": [
               {
                 "$ref": "#/$defs/Usage"

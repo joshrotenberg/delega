@@ -32,11 +32,13 @@ async fn run(rig: &Rig, provider: Provider, resume: bool, options: ProviderOptio
     result
 }
 
-fn without_run_usage(rig: &Rig) -> ProviderOptions {
+/// Claude options whose fake writes `model_usage_since_last_result` in the
+/// given shape (`none`, `empty` or `partial`, see the fake).
+fn run_usage_shape(rig: &Rig, shape: &str) -> ProviderOptions {
     let mut options = rig.options(Provider::Claude);
     options
         .env_set
-        .push(("FAKE_NO_RUN_USAGE".into(), "1".into()));
+        .push(("FAKE_RUN_USAGE".into(), shape.into()));
     options
 }
 
@@ -63,7 +65,7 @@ async fn claude_resume_reports_its_own_cost_not_the_session_total() {
 #[tokio::test]
 async fn claude_resume_without_per_run_figures_leaves_the_run_cost_out() {
     let rig = Rig::new();
-    let result = run(&rig, Provider::Claude, true, without_run_usage(&rig)).await;
+    let result = run(&rig, Provider::Claude, true, run_usage_shape(&rig, "none")).await;
     assert_eq!(result.usage, Some(usage(12, 7, 4, None, None)));
     assert_eq!(result.session_usage.and_then(|u| u.cost_usd), Some(0.002));
 }
@@ -71,9 +73,40 @@ async fn claude_resume_without_per_run_figures_leaves_the_run_cost_out() {
 #[tokio::test]
 async fn claude_start_without_per_run_figures_takes_the_session_cost() {
     let rig = Rig::new();
-    let result = run(&rig, Provider::Claude, false, without_run_usage(&rig)).await;
+    let result = run(&rig, Provider::Claude, false, run_usage_shape(&rig, "none")).await;
     assert_eq!(result.usage, Some(usage(12, 7, 4, None, Some(0.001))));
     assert_eq!(result.session_usage.and_then(|u| u.cost_usd), Some(0.001));
+}
+
+/// Per-run figures delega cannot use whole: an empty object, or an entry
+/// without a cost. A partial sum would understate the run's cost.
+async fn unusable_run_figures(shape: &str) {
+    let rig = Rig::new();
+    let fresh = run(&rig, Provider::Claude, false, run_usage_shape(&rig, shape)).await;
+    assert_eq!(
+        fresh.usage.and_then(|u| u.cost_usd),
+        Some(0.001),
+        "{shape}: a start takes the session's total cost"
+    );
+    let resumed = run(&rig, Provider::Claude, true, run_usage_shape(&rig, shape)).await;
+    let usage = resumed.usage.expect("the run's own tokens");
+    assert_eq!(usage.output_tokens, Some(7), "{shape}");
+    assert_eq!(usage.cost_usd, None, "{shape}: a resumed run has no cost");
+    assert_eq!(
+        resumed.session_usage.and_then(|u| u.cost_usd),
+        Some(0.002),
+        "{shape}"
+    );
+}
+
+#[tokio::test]
+async fn claude_empty_per_run_figures_give_no_run_cost_on_resume_and_the_total_on_start() {
+    unusable_run_figures("empty").await;
+}
+
+#[tokio::test]
+async fn claude_per_run_figures_with_an_entry_missing_its_cost_are_not_summed() {
+    unusable_run_figures("partial").await;
 }
 
 #[tokio::test]
