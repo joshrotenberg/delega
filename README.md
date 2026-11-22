@@ -79,8 +79,8 @@ unexpectedly.
 
 ## Documentation
 
-The documentation is an mdBook in [`docs`](https://github.com/joshrotenberg/delega/tree/main/docs).
-It is not published yet; the pages read on GitHub:
+The documentation is an mdBook in [`docs`](https://github.com/joshrotenberg/delega/tree/main/docs),
+published at <https://joshrotenberg.com/delega/>. The pages also read on GitHub:
 
 - [Introduction](https://github.com/joshrotenberg/delega/blob/main/docs/introduction.md):
   what delega is, its surfaces, and when to use it.
