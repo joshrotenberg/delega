@@ -1,36 +1,130 @@
 # delega
 
-Run Claude Code and Codex agents from a program, for any purpose, reliably.
+Run Claude Code and Codex agents from a program.
 
-`delega` starts a provider CLI as a worker, gives it an assignment, and returns a
-definite result. It is reached from a command line, from Rust, and over MCP.
+`delega` starts a provider CLI (`claude` or `codex`) as a worker, gives it an
+assignment, and returns one result with a stated outcome. It is reached three
+ways, over one library:
 
-This repository is new. The request and result contract, the process layer, the
-provider layer, the supervisor (several workers at once, as a library) and the
-MCP server over it exist so far. `delega run`, `delega mcp`,
-`delega plugin install`, `delega plugin uninstall`, `delega schema request|result`,
-`delega skill list|show NAME`, `delega doctor` and `delega version` work.
-`delega plugin install` and `delega plugin uninstall` have been tested against
-fake host CLIs only.
-`delega mcp` serves seven tools (`start`, `follow_up`, `wait`, `read`, `list`,
-`interrupt`, `close`) over standard input and output, and has been tested
-against fake providers only. A host session keeps running the server it started
-with after `delega plugin install` refreshes the plugin. When the executable a
-server started from has been replaced or removed since, `list` and
-`delega://identity` report `stale_server` until the server is reconnected or a
-new session starts. `delega run` runs one assignment on a
-Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
-`--progress`, `--allow-command` and the exit statuses in
-[docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md); it has been tested against fake providers only, not
-against the real CLIs. A readable, parsing Claude Code `managed-mcp.json`
-refuses Claude runs before launch, and `delega doctor` reports the problem.
-See [Managed settings](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#managed-settings). It merges two earlier
-projects, [due](https://github.com/joshrotenberg/due) and
-[counterpart](https://github.com/joshrotenberg/counterpart), and the first work
-is deciding what to carry over and proving the core. The design record that led
-here is counterpart issue 223.
+- `delega run`: one assignment in the foreground, for a script or a shell.
+- `delega mcp`: an MCP server that supervises several workers at once, for a
+  Claude Code or Codex session that hands work to other agents.
+- `delega-core`: the Rust library both are built on.
 
-## What "reliably" means
+A request says which provider, what to do, in which directory, what the worker
+may do and how long it may take. The result gives the outcome and the answer,
+and reports the denials, cleanup problems and provider differences delega
+detects.
+
+## Install
+
+Requirements: macOS or Linux, Rust 1.90 or later, and Claude Code, Codex or both
+installed and logged in. Windows is not supported. There is no release yet
+([#140](https://github.com/joshrotenberg/delega/issues/140)), so build from
+source:
+
+```sh
+git clone https://github.com/joshrotenberg/delega
+cd delega
+cargo install --locked --path crates/delega
+```
+
+Check what a run would meet, without starting a worker:
+
+```sh
+delega doctor
+```
+
+It reports each provider's executable and version, the environment and deny
+rules a worker would get, the configuration file, the limits in force and
+anything that would stop a run. It exits 0 when a run can go ahead; the other
+statuses are in [Doctor](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#doctor).
+
+To use the MCP tools and skills from Claude Code or Codex, install the plugin:
+
+```sh
+delega plugin install --dry-run   # print the files and host commands, change nothing
+delega plugin install             # every host found
+delega plugin install --host claude
+```
+
+It copies the running `delega` into `~/.local/share/delega` and registers it
+through the hosts' own commands (`claude plugin ...`, `codex plugin ...`). Run it
+again after rebuilding to refresh the plugin. `delega plugin uninstall` removes
+it. See [Install and uninstall](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#install-and-uninstall).
+
+A running host session keeps the server it started with. After an install, start
+a new session, or in Claude Code reconnect `plugin:delega:delega` from `/mcp`
+(`/reload-plugins` does not restart the server). Until then, `list` and
+`delega://identity` report `stale_server` when they detect that the server's
+executable was replaced or removed ([Stale server](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#stale-server)).
+
+## Quickstart
+
+### Command line
+
+```sh
+delega run --provider codex -p "Summarize this repository"
+```
+
+When the result is delivered normally, a completed run prints the answer on
+standard output and exits 0, a failed run exits 1, a refused one 2 and one that
+timed out 124. `--output json` prints the whole result instead of the answer.
+The other cases, including usage errors, `--dry-run` and a result that cannot
+be written, are under [Command line](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#command-line). A run that did
+not complete gives its reason in `error.kind`
+([error kinds](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#error-kinds)).
+
+More forms:
+
+```sh
+delega run --provider claude --stdin --output json < task.txt > result.json
+delega run --provider codex --write --timeout 20m -p "Fix the failing test"
+delega run --provider claude --allow-command "cargo test" -p "Run the tests and report"
+delega run --provider codex --resume SESSION_ID -p "Now add tests"
+delega run --provider claude -p "Plan the change" --dry-run
+```
+
+`delega run --help` lists every option. [Command line](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#command-line)
+describes profiles, `--progress`, `--env` and the configuration file.
+
+### MCP, from a host session
+
+From a host session with the plugin installed, a caller starts a worker with
+`start`, waits with `wait` (passing back the `cursor` it returns), reads the
+result with `read` and frees the worker with `close`. The
+[`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/skills/delegate/SKILL.md) and the
+[tool table](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#mcp) in `docs/api.md` describe the tool arguments
+and responses.
+
+### Library
+
+`delega-core` is not published to crates.io. Depend on it from git:
+
+```toml
+[dependencies]
+delega-core = { git = "https://github.com/joshrotenberg/delega" }
+```
+
+One run, from the body of an async function on a Tokio runtime. The same lines
+are the `no_run` doc test in
+[`crates/delega-core/src/provider/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/provider/mod.rs),
+which `cargo test` compiles:
+
+```rust
+use delega_core::contract::request::{Provider, Request};
+use delega_core::provider::{ProviderOptions, run};
+
+let request = Request::new(Provider::Codex, "Summarize this repository");
+let result = run(request, ProviderOptions::default()).await;
+println!("{:?}", result.outcome);
+```
+
+Several workers at once go through `delega_core::supervisor::Supervisor`, whose
+module documentation has the same kind of example. See
+[docs/supervisor.md](https://github.com/joshrotenberg/delega/blob/main/docs/supervisor.md).
+
+## Acceptance criteria
 
 These six points are the acceptance criteria for the core. Nothing else is
 ported until the core meets them.
@@ -46,8 +140,63 @@ ported until the core meets them.
    Codex. Where the providers differ, the result names the difference.
 5. **A versioned contract.** Requests and results are documented, versioned and
    the same from the CLI, the library and MCP.
-6. **Proven.** Tests against fake providers cover every outcome. A small live
-   suite per provider runs in CI.
+6. **Tested.** Tests against fake providers cover every outcome. A small live
+   suite per provider is run locally by a maintainer before a release.
+
+Where each stands:
+
+| # | Status | Where |
+| --- | --- | --- |
+| 1 | Met against fake providers. | `contract`, `process`, `provider/settle.rs`; tested by the provider, CLI and supervisor tests and the acceptance matrix. |
+| 2 | Partly met. The result reports the cleanup problems delega detects; the documented gaps (below) can leave a process running while cleanup is reported as confirmed. | `process`; tested by `process/tests` and the acceptance matrix. |
+| 3 | Partly met. Permissions are stated up front, and a request not granted is answered no. Asking the caller live is not built. | `contract/permissions.rs`, `provider`; tested by `provider/tests` against fakes that honour the permission arguments. |
+| 4 | Met for the differences delega can identify, which it reports in `provider_notes`. With `permissions.strict`, a run with a permission that delega identifies as one the provider cannot enforce is refused with `permissions_not_enforceable`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
+| 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](https://github.com/joshrotenberg/delega/tree/main/schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
+| 6 | Partly met. The fake-provider tests run in CI; the live suite is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)). | `crates/delega-core/src/provider/tests/fakes`. |
+
+The committed acceptance run ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),
+fake providers only, Darwin arm64) has 188 rows: 158 pass, 29 are expected
+failures, 1 is a documented gap that did not show in that run, and none failed
+unexpectedly.
+
+## Status and limits
+
+- **Version** 0.1.0-dev. No release; build from source.
+- **Platforms.** macOS and Linux. CI runs fmt, clippy, the tests and the full
+  acceptance matrix on `macos-latest` and `ubuntu-latest`, and builds on Rust
+  1.90. Windows is not supported.
+- **Use.** delega's own development runs on real Claude Code and Codex workers
+  through the installed plugin, as implementers and as independent reviewers:
+  more than a hundred worker runs behind ten merged pull requests between
+  2026-11-20 and 2026-11-22.
+- **Verified against the real CLIs** (Claude Code 2.1.328 and 2.1.329, codex-cli
+  0.170.0): Claude Code's read scoping, command guard and deny rules; that
+  Codex's `workspace-write` sandbox blocks writes outside the working directory;
+  session resume, version parsing, usage reporting and several failure shapes.
+  [providers.md](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#verified-against-the-real-cli) has the list
+  of live checks and the
+  [remaining assumptions](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#unverified-against-the-real-cli).
+- **Permission modes.** `read` (default), `write` and `full`, plus exact
+  commands (`--allow-command`) and extra readable directories. Work that builds
+  and runs tests needs `full` today, because `read` and `write` allow only
+  commands listed exactly ([#98](https://github.com/joshrotenberg/delega/issues/98)).
+  Codex confines neither reads nor commands, so a `read` or `write` Codex run is
+  wider than requested and says so in `provider_notes`; with `--strict` it is
+  refused ([Wider than requested](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#wider-than-requested)).
+- **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
+  descendant called `setsid` and was orphaned before any process listing saw it,
+  or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`
+  itself leaves the worker running. See the expected failures in
+  [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
+- **Environment.** A worker gets a fixed environment allowlist plus what `--env`
+  or the configuration file adds. The installed plugin starts `delega mcp` with
+  no `--env`.
+- **Hosts.** Claude.ai and Cowork refuse plugins with a top-level `bin/`, so the
+  plugin installs only into Claude Code and Codex.
+- Claude Code workers cannot run on a machine where a `managed-mcp.json` that
+  Claude Code can read and parse is deployed: delega refuses such runs up front
+  with `managed_mcp_exclusive`, and `delega doctor` reports it. See
+  [Managed settings](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#managed-settings).
 
 ## Scope
 
@@ -67,20 +216,32 @@ Out of scope:
 - A JavaScript harness and a JSON-RPC surface. due has both; they are left out
   until the core is solid and then reconsidered.
 
-## Layout
+## Documentation
+
+| Document | Covers |
+| --- | --- |
+| [docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md) | The request and result, outcomes, the CLI and its exit statuses, `doctor`, plugin install, the configuration file (`~/.config/delega/config.toml`), the MCP tools, skills, the library, and what is deferred. |
+| [docs/supervisor.md](https://github.com/joshrotenberg/delega/blob/main/docs/supervisor.md) | The supervisor: operations, worker and run states, limits and defaults, cursors, retention. |
+| [docs/providers.md](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md) | How each provider is started, the permission mapping, error kinds, the environment policy, managed settings, and what is verified against the real CLIs. |
+| [acceptance/README.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md) | The acceptance harness for criteria 1 and 2 and its matrix. |
+| [skills](https://github.com/joshrotenberg/delega/tree/main/skills) | The `run` and `delegate` skills built into the executable (`delega skill list`). |
+
+`delega schema request|result` prints the contracts built into the executable,
+and `delega version --output json` its build identity.
+
+## Development
 
 | Path | Holds |
 | --- | --- |
-| `crates/delega-core` | The library: the request and result contract, the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result) and the supervisor (`supervisor`: several workers at once, with follow-ups, a queue, limits, wait, read, interrupt and close). |
-| `schemas` | JSON Schemas for the request and result, generated from the core types, the doctor report, the optional user-level configuration file (`config.schema.json`, described in `docs/api.md`), and under `schemas/mcp` the input and output schemas of each MCP tool. |
-| `crates/delega-mcp` | The MCP server over the supervisor: the seven tools, the skills and the identity as resources, the report of a server whose executable was replaced or removed after it started (`stale_server`), and serving on standard input and output with an orderly stop. Its tests run the router in process against the fake providers. |
-| `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`, and `run/` split into request building, execution, signals, progress and output. Its tests run the built binary against the fake providers kept in the core crate. |
-| `acceptance` | `delega-acceptance`, the acceptance test for criteria 1 and 2: it drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. Results are in `acceptance/RESULTS.md`. |
-| `docs/api.md` | The agreed design for the CLI and MCP surface, including the optional user-level configuration file (`~/.config/delega/config.toml`). |
-| `docs/supervisor.md` | The supervisor API, the worker and run states with their transition tables, limits and defaults, retention, and what is not built. |
-| `docs/providers.md` | How each provider is started: command shape, permission mapping, `native_args` allowlist, environment policy, and what is unverified against the real CLIs. |
+| `crates/delega-core` | The library: the contract (`contract`), the process layer (`process`: one child, one terminal report, cleanup), the provider layer (`provider`: a request to a Claude Code or Codex child and back to one result), the supervisor (`supervisor`), the configuration file (`config`), profiles, `doctor` and the embedded skills. |
+| `crates/delega-mcp` | The MCP server over the supervisor: the seven tools, the skills and the identity as resources, the `stale_server` report, and serving on standard input and output. Its tests run the router in process against the fake providers. |
+| `crates/delega` | The `delega` binary: one module per subcommand under `src/commands/`. Its tests run the built binary against the fake providers kept in the core crate. |
+| `acceptance` | `delega-acceptance`, which drives the built `delega` against fake providers through a matrix of behaviours and caller actions and measures what was reported and what was left running. |
+| `schemas` | JSON Schemas generated from the types: request, result, doctor report, configuration file, plugin install and uninstall reports, and under `schemas/mcp` each MCP tool. |
+| `skills` | The skills embedded in the binary and installed with the plugin. |
+| `docs` | The design documents listed above. |
 
-Run Cargo from the repository root:
+Run Cargo from the repository root. These are the checks CI runs:
 
 ```sh
 cargo fmt --all -- --check
@@ -88,44 +249,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The acceptance harness runs the whole matrix on demand; `cargo test --workspace`
-runs only a handful of its rows:
+`cargo test --workspace` runs a handful of acceptance rows. The whole matrix:
 
 ```sh
 cargo run --release -p delega-acceptance -- --all
 ```
 
-It takes about 75 seconds and writes `acceptance/results.jsonl`. See
-[acceptance/README.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md) for the options, the matrix and how
-to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
-
-Build the documentation book with `mdbook build`, preview it with
-`mdbook serve`, and lint it with `mdbook-lint lint docs`.
-
-## The API
-
-[docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md) describes the contract, the CLI, the MCP server and
-the skills. Everything in it is built except the parts marked **Later** and the
-items listed under Deferred at the end.
-
-A failed run's `error.kind` says why it failed, including account, billing,
-capacity, model and context failures the provider reports (`provider_auth`,
-`provider_capacity`, `provider_model_unavailable` and others); see the
-[error kinds](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#error-kinds).
+It writes `acceptance/results.jsonl`; the committed run took 82 s with 8 cases
+at a time on Darwin arm64 ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md)).
 
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.
 
-## Where the parts come from
+Build the documentation book with `mdbook build`, preview it with
+`mdbook serve`, and lint it with `mdbook-lint lint docs`.
 
-| Part | Starting point | Why |
-| --- | --- | --- |
-| Worker transport, request and result contracts, CLI `run` | due | Long-lived native sessions with live permission requests; versioned schemas; CI |
-| Process cleanup, deadlines, queue | counterpart | Descendant tracking, repeated signalling, settlement diagnostics |
-| Review layer | counterpart | Snapshots with digests, checkpoints, findings, final review |
-
-Whether due's engine can meet points 1 and 2 is unproven. That is the first
-thing to establish.
+Read [AGENTS.md](https://github.com/joshrotenberg/delega/blob/main/AGENTS.md) before contributing.
 
 ## License
 
