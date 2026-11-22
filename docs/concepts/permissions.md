@@ -6,7 +6,8 @@ enforces part of it. The fields are in [Permissions](../api.md#permissions).
 
 ## Modes
 
-- **`read`**, the built-in default: read the working directory, with no edits.
+- **`read`**, the built-in default: read the working directory and any extra
+  directories.
 - **`write`**: also edit files in the working directory.
 - **`full`**: for Claude Code, the nine built-in tools without directory
   scopes, with eligible deny rules still applied; for Codex, the sandbox is
@@ -21,9 +22,11 @@ directory.
 
 ## What each provider enforces
 
-**Claude Code**, in `read` and `write`, scopes its file tools to the working
-directory and the listed directories, and allows a listed command only through
-a hook that matches it exactly. See
+**Claude Code**: in `read`, its `Read`, `Glob` and `Grep` tools are scoped to
+the working directory and the extra directories, and it gets no edit tools. In
+`write`, `Edit` and `Write` are also granted, in the working directory only. A
+command granted with `--allow-command` is matched by its text; once it runs, it
+can write files or reach paths outside those scopes. See
 [Permission mapping](../providers.md#permission-mapping),
 [Commands and directories](../providers.md#commands-and-directories) and
 [What cannot be enforced](../providers.md#what-cannot-be-enforced).
@@ -33,15 +36,17 @@ requested list. Results of runs that go ahead note what is wider than
 requested. See [Permission mapping](../providers.md#permission-mapping-1) and
 [Wider than requested](../providers.md#wider-than-requested).
 
-`permissions.strict` (`--strict`) asks delega to refuse a request the provider
-cannot enforce as stated, instead of running it with a note. When it applies is
-in [Permissions](../api.md#permissions) and Claude Code's
-[Strict](../providers.md#strict).
+`permissions.strict` (`--strict`) refuses a run when the provider adapter
+reports, while planning, a permission it cannot enforce as stated. It covers
+only what the adapter reports; managed settings, for example, can take
+precedence without a note. See [Permissions](../api.md#permissions) and Claude
+Code's [Strict](../providers.md#strict).
 
 ## Denials
 
-The adapters record the denials they recognise in `permissions.denied`. How a
-denial affects the outcome is in [Outcomes](../providers.md#outcomes).
+The adapters record the denials they recognise in `permissions.denied` (a long
+list is capped, with the rest counted in a note). How a denial affects the
+outcome is in [Outcomes](../providers.md#outcomes).
 
 ## Deny rules
 
