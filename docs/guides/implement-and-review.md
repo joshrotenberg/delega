@@ -41,11 +41,11 @@ not see the supervising conversation, so the prompt must stand alone.
 **Permissions.** Give an implementer that builds and runs tests
 `permissions.mode: build`. It may edit the working directory and run any command
 inside the provider's sandbox; commands write only to the working directory and
-a temporary directory, and have no network. `write` allows only the exact
+temporary directories, and have no network. `write` allows only the exact
 commands listed in `permissions.commands`, which cannot cover the varying
 commands a build runs. Use `full` only when the build needs the network (to
 fetch dependencies, for example) or writes outside the working directory and
-the temporary directory; with `full` the worker is not confined to its working
+the temporary directories; with `full` the worker is not confined to its working
 directory. On Linux, Claude Code's sandbox needs `bubblewrap` and `socat`, and
 a `build` run fails at startup without them
 ([Build](../providers.md#build)).
@@ -53,6 +53,13 @@ Claude workers still receive the applicable
 [deny rules](../providers.md#deny-rules) in every mode. See
 [Permissions](../api.md#permissions) and the per-provider mappings in
 [providers.md](../providers.md).
+
+**Committing.** A Claude Code `build` implementer can commit in its worktree, as
+the prompt above asks. A Codex `build` implementer cannot: Codex keeps `.git`
+unwritable in `workspace-write`, so `git add` and `git commit` fail
+([Wider than requested](../providers.md#wider-than-requested)). Tell a Codex
+implementer to leave its changes uncommitted, and commit them for it after
+reading the diff. The same applies to the follow-ups in step 5.
 
 ## 3. Wait and read
 

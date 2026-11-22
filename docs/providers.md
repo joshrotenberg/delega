@@ -407,16 +407,20 @@ carries:
   retried outside it.
 - `autoAllowBashIfSandboxed`: the sandbox approves sandboxed commands, so `Bash`
   gets no allow rule. A command Claude Code does not approve this way (one that
-  starts with a variable assignment, or `eval`) is denied and listed in
+  starts with a variable assignment, `eval`, or
+  `git -c user.name=x -c user.email=y commit`) is denied and listed in
   `permissions.denied`.
 - `filesystem.denyWrite`: one `//DIR` entry per resolved
-  `permissions.directories` entry, present only when there are any. The sandbox treats every `--add-dir`
-  directory as writable, and delega passes those directories with `--add-dir`.
+  `permissions.directories` entry, present only when there are any. The sandbox
+  treats every `--add-dir` directory as writable, and delega passes those
+  directories with `--add-dir`.
 - No network domain is allowed, so under `dontAsk` every host is refused.
 
-Commands write to the working directory and to Claude Code's temporary
-directory: Claude Code sets `TMPDIR` to its own per-user directory, and the rest
-of `/tmp` is not writable. Commands can read files outside the working
+Commands write to the working directory and to Claude Code's per-user temporary
+directory: Claude Code sets `TMPDIR` to it (`/tmp/claude-<uid>`), and the rest
+of `/tmp` is not writable. Commands can write anywhere in that directory, which
+other Claude Code sessions of the same user also use. In a git worktree, a
+`build` worker could run `git add` and `git commit`. Commands can read files outside the working
 directory, so a `build` run carries a `wider than requested` note.
 `permissions.commands` must be empty with `build`; the request is refused as
 invalid otherwise.
@@ -828,6 +832,12 @@ preparation failures. The differences:
 - Writes are stricter than `write` strictly needs: temporary directories and the
   network are excluded. `build` includes the temporary directories, which test
   runners and build tools use, and keeps the network off.
+- In `build`, commands can write anywhere under `/tmp` and `$TMPDIR`, including
+  a `permissions.directories` entry that lies there, which the request asks to
+  be read-only.
+- In `build`, the sandbox keeps `.git` unwritable, so `git add` and
+  `git commit` fail and the worker cannot commit; the caller commits its
+  changes. A `build` run carries a note saying so.
 - `full` has no sandbox at all.
 
 The mapping is not stricter than the request here because Codex has no setting
@@ -841,13 +851,16 @@ working directory and `permissions.directories`; commands that need no write
 access and no network access can run although the request allows only the
 commands it lists (in `write`, commands that write inside the working directory
 also run; in `build` this part does not apply); and, when
-`permissions.commands` is set, that it has no effect. `strict` does not refuse a Codex `full` run for this reason, because
-`full` asks for nothing confined; other checks still apply.
+`permissions.commands` is set, that it has no effect. `strict` does not refuse a
+Codex `full` run for this reason, because `full` asks for nothing confined;
+other checks still apply.
 
 ### What cannot be enforced
 
 - Reads are not limited to the working directory or the listed directories.
 - Commands are not limited to the list in `read` and `write`.
+- In `build`, a `permissions.directories` entry under `/tmp` or `$TMPDIR` is
+  writable by commands.
 - Denials are reported only for commands the stream marks `declined`. Other
   blocked actions appear as failed commands and are not in `permissions.denied`.
   A note says so on every run.
@@ -1122,6 +1135,27 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
     `-c`. The network is also off by default in `workspace-write`, and no probe
     ran with `network_access=true`, so this does not show that Codex honours
     `network_access` ([Unverified](#unverified-against-the-real-cli)).
+- With the branch binary for #98, Claude Code 2.1.330 (model haiku) and
+  codex-cli 0.171.0 on macOS on 2026-11-22, live `build` workers in a Rust
+  project:
+  - Both: `cargo test` passed and a write to `$HOME` was denied. Codex had the
+    network off; Claude Code refused it (`deny network-outbound
+    crates.io:443`).
+  - Codex: `git add` and `git commit` failed in a normal checkout and in a git
+    worktree with "Unable to create .../.git/index.lock: Operation not
+    permitted" (in the worktree, the path was the main checkout's
+    `.git/worktrees/<name>/index.lock`). Writing `.git/hooks/x` also failed. A
+    `permissions.directories` entry under `/tmp` was written by `touch`.
+  - Claude Code: `TMPDIR` was `/tmp/claude-<uid>`, and commands could write
+    anywhere under it, including the supervising Claude Code session's own
+    scratch directory there. In a git worktree outside that directory, writing
+    a file, `git add` and `git commit` succeeded; writing the main checkout's
+    `.git/hooks/x`, a file in the main checkout, and a
+    `permissions.directories` entry were denied, and `git config --local`
+    failed to lock `.git/config`. `git -c user.name=x -c user.email=y commit`
+    was denied under `dontAsk` ("Permission to use Bash has been denied
+    because Claude Code is running in don't ask mode") and listed in
+    `permissions.denied`; the same commit without `-c` succeeded.
 
 ## Unverified against the real CLI
 

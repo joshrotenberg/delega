@@ -23,7 +23,7 @@ stands. This page lists the limits a user meets.
 - **Permission modes.** `read` (default), `write`, `build` and `full`, plus
   exact commands (`--allow-command`) and extra readable directories. `build`
   runs any command inside the provider's OS sandbox, with writes limited to the
-  working directory and a temporary directory and no network, for workers that
+  working directory and temporary directories and no network, for workers that
   build and run tests
   ([#98](https://github.com/joshrotenberg/delega/issues/98)). A fixed command
   can be granted with `--allow-command` in `read` and `write`.
