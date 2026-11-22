@@ -2,7 +2,7 @@
 
 `delega_core::supervisor` runs several workers at once. It is the library
 behind the MCP tools of [api.md](api.md#mcp): each tool is one operation of
-[`Supervisor`](../crates/delega-core/src/supervisor/mod.rs), with the same
+[`Supervisor`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/mod.rs), with the same
 arguments and a serializable response. The MCP server (`delega-mcp`, served by
 `delega mcp`) maps tool arguments to these calls and returns the responses as
 they are; every response type also derives `JsonSchema`, which is where the

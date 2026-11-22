@@ -1,0 +1,15 @@
+[book]
+title = "delega"
+description = "Documentation for the Claude Code and Codex agent runner."
+src = "docs"
+
+[build]
+build-dir = "target/book"
+
+[output.html]
+git-repository-url = "https://github.com/joshrotenberg/delega"
+# mdBook 0.5 prefixes the chapter path with the source directory.
+edit-url-template = "https://github.com/joshrotenberg/delega/edit/main/{path}"
+
+[output.html.search]
+enable = true

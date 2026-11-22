@@ -21,7 +21,7 @@ server started from has been replaced or removed since, `list` and
 new session starts. `delega run` runs one assignment on a
 Claude Code or Codex worker, with profiles, `--stdin`, `--dry-run`,
 `--progress`, `--allow-command` and the exit statuses in
-[docs/api.md](docs/api.md); it has been tested against fake providers only, not
+[docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md); it has been tested against fake providers only, not
 against the real CLIs. It merges two earlier
 projects, [due](https://github.com/joshrotenberg/due) and
 [counterpart](https://github.com/joshrotenberg/counterpart), and the first work
@@ -94,19 +94,21 @@ cargo run --release -p delega-acceptance -- --all
 ```
 
 It takes about 75 seconds and writes `acceptance/results.jsonl`. See
-[acceptance/README.md](acceptance/README.md) for the options, the matrix and how
+[acceptance/README.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md) for the options, the matrix and how
 to regenerate `acceptance/RESULTS.md` and `acceptance/COMPARISON.md`.
+
+Build with `mdbook build`, preview with `mdbook serve`, and lint with `mdbook-lint lint docs`.
 
 ## The API
 
-[docs/api.md](docs/api.md) describes the contract, the CLI, the MCP server and
+[docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md) describes the contract, the CLI, the MCP server and
 the skills. Everything in it is built except the parts marked **Later** and the
 items listed under Deferred at the end.
 
 A failed run's `error.kind` says why it failed, including account, billing,
 capacity, model and context failures the provider reports (`provider_auth`,
 `provider_capacity`, `provider_model_unavailable` and others); see the
-[error kinds](docs/providers.md#error-kinds).
+[error kinds](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#error-kinds).
 
 After changing a contract type, regenerate the schemas with
 `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`.
@@ -124,5 +126,5 @@ thing to establish.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT), at your option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/joshrotenberg/delega/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/joshrotenberg/delega/blob/main/LICENSE-MIT), at your option.
