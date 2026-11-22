@@ -43,9 +43,9 @@ not stay open without a deadline.
 `completed` says the provider finished. It does not say the work is correct;
 checking that belongs to the caller.
 
-A run that was denied a permission but still returned a final answer is
-`completed`, with the denial listed in `permissions.denied`. It is `refused`,
-with kind `permission_denied`, only when the run stopped because of the denial
+A denied permission is listed in `permissions.denied` and does not by itself
+decide the outcome. The run is `refused`, with kind `permission_denied`, only
+when delega judges that it stopped because of the denial
 ([providers.md](providers.md#outcomes) gives the rule).
 
 Error kinds are listed in [providers.md](providers.md#error-kinds). The
@@ -91,11 +91,11 @@ result reports what happened.
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `full`: no restriction from delega. |
-| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`; `full` already allows every command. |
+| `permissions.mode` | `read` (default), `write`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `full`: no path or command scope from delega; what the provider mapping still applies (for Claude Code, the built-in tool set and the user's deny rules) is in [providers](providers.md). |
+| `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`; `full` ignores them. |
 | `permissions.directories` | list of paths | Extra directories the worker may read, at most 64. Each must exist, or the run is refused `directory_unusable`. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
-| `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: the run goes ahead and a `provider_notes` entry says what is wider than requested. `full` asks for nothing confined, so it is never refused for this. |
+| `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: this check does not refuse the run, and a `provider_notes` entry says what is wider than requested. `full` asks for nothing confined, so it is never refused for this. |
 
 Each mode maps to concrete provider settings (Claude tool lists, hooks and
 permission mode; Codex sandbox and approval policy). The mapping is documented
@@ -112,11 +112,9 @@ neither reads nor commands. With Claude Code it refuses only
 `delega run`, because there is no flag to turn it off. MCP `start` can pass
 `permissions.strict: false` to override a profile.
 
-Refusals before start come in a fixed order, and the first one found is
-reported. For `delega run` the first of all is the configuration file
-(`config_unreadable`, `config_invalid`, or `invalid_env_name` or
-`forbidden_env_name` for a name in its `[env]`), because the request is built
-from it; see [Configuration file](#configuration-file). Then `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
+The provider layer, which `delega run`, the supervisor and a dry run all use,
+checks a request before start in a fixed order and reports the first refusal it
+finds: `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
 `cwd_unusable` or `directory_unusable`, `provider_not_found`, Claude Code's
 `settings_unreadable` and `deny_rules_over_limit` from reading the settings
 files, `managed_mcp_exclusive` from a readable, parsing Claude Code
@@ -134,13 +132,20 @@ confirmed stopped, the result is `failed` with the same kind. For Codex, a faile
 listing of its MCP servers is then `failed` with kind
 `provider_preparation_failed`. A dry run starts no probe, so it reports neither.
 
-Under the supervisor, `start` first checks the request (`invalid_request`), the
-name (`name_in_use`) and the live-worker limit (`limit_reached`), then this
-list, bounded by 10 s (`preflight_timeout`). `delega mcp` adds one refusal,
-`cwd_required`, for a `start` whose merged request (after any `profile`) has no
-`cwd` or a relative one. It is found after `invalid_request`, a name in use and
-the live-worker limit, and before every provider check above, so no provider
-check or process runs. See [MCP](#mcp). `delega run` has no such refusal.
+Each surface adds checks of its own. `delega run` checks the configuration file
+before it builds the request (`config_unreadable`, `config_invalid`, or
+`invalid_env_name` or `forbidden_env_name` for a name in its `[env]`; see
+[Configuration file](#configuration-file)), and refuses `runtime_unavailable`
+or `signals_unavailable` before the provider checks.
+
+Under the supervisor, `start` runs the provider checks first, bounded by 10 s
+(`preflight_timeout`), but reports in this order: `invalid_request`,
+`name_in_use`, `limit_reached`, then the provider refusal or
+`preflight_timeout`. `delega mcp` adds `cwd_required` for a `start` whose
+merged request (after any `profile`) has no `cwd` or a relative one. It is
+reported after `limit_reached`, and when it applies the provider checks do not
+run, so no provider process starts. See [MCP](#mcp). `delega run` has no such
+refusal.
 
 `permissions.strict` is an optional field with a default, so a request without it
 means what it meant before and `schema_version` stays 1. The result does not
@@ -161,11 +166,11 @@ One JSON object, versioned, the same from every surface.
 | `worker` | Worker id and `name`. Present only under the supervisor (MCP, library), and absent for a refused `start`; `delega run` results have none. |
 | `provider` | Absent only on a refused result for a request that named no provider. |
 | `outcome` | One of the five above. |
-| `text` | The final answer, or empty. |
+| `text` | The final answer of a completed run. Other outcomes can carry the partial text the provider wrote before it ended. Can be empty. |
 | `structured` | The structured answer when `answer_schema` was given. |
 | `structured_valid` | Whether `structured` satisfied the schema; present with `structured`. |
 | `error` | `kind`, `message`, and `provider_exit_code` when the provider process exited with one. Present unless `completed`. |
-| `cleanup` | `confirmed: true` when a final sweep after the provider exited found nothing left in its process group, its session or its tracked descendants; otherwise `confirmed: false` with `pids`, `process_groups` and `reason`. Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
+| `cleanup` | `confirmed: true` when no process was started, or when a final sweep after each process the run started (the provider, and the version probe and Codex MCP listing during preparation) found nothing left in its process group, its session or its tracked descendants; otherwise `confirmed: false` with `pids`, `process_groups` and `reason`. Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
 | `permissions` | `mode` applied, and `denied`: requests answered no. **Later:** `asked`, requests the caller answered. |
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied: the configuration file, which layer set each request field, the environment, the deny rules and the context mode, as names, counts, paths and digests. Optional; see [`applied`](#applied). |
@@ -343,7 +348,9 @@ Behavior:
   root of the git repository and, when that root is a linked worktree, from the
   main checkout), takes
   only that list, and adds the rules to the worker, where they can only narrow
-  the run (also in `full`). A settings file that exists and cannot be used
+  the run (also in `full`). A local file at a repository root or main checkout
+  that fails the ownership and link checks is skipped and named in
+  `provider_notes`. Any other settings file delega reads that exists and cannot be used
   (unreadable, not a regular file, not JSON, a wrong type, over a limit) refuses the run with kind
   `settings_unreadable` or `deny_rules_over_limit`, naming the file. The result's
   `provider_notes` say how many rules were applied and from which files, and
@@ -672,7 +679,7 @@ fails for it.
 | `version_probe_failed` | `command_grants` for Claude, `nothing` for Codex | `--version` exited with an error, or was ended by a signal. A run records no version and goes on; only a Claude run that grants exact commands is refused. |
 | `version_probe_timed_out` | `command_grants` for Claude, `nothing` for Codex | `--version` did not answer in five seconds. Same effect as a failed probe. |
 | `unsupported_provider_version` | `command_grants` | Claude Code is older than 2.1.325 or its version could not be read, so a run with `--allow-command` is refused. Other runs go ahead. |
-| `settings_unreadable` | `run` | A Claude Code settings file in the user's or the current directory's places exists and cannot be used, so every Claude run here is refused. The message names the file. |
+| `settings_unreadable` | `run` | A Claude Code settings file that delega reads for deny rules exists and cannot be used, so every Claude run here is refused. The message names the file. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound, so every Claude run here is refused. |
 | `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`. The message names the file and links to the Claude Code reference. |
 | `config_unreadable` | `run` | The configuration file exists and cannot be used as a file (unreadable, not a regular file, owned by another user, writable by group or others, a link that is not trusted, over 1 MiB), or `DELEGA_CONFIG` names a file that does not exist or a path that is not absolute. About the whole system, so every run is stopped. Nothing from the file is applied to the rest of the report. |
@@ -917,7 +924,7 @@ otherwise, and an unknown key is refused at any level, naming it (such as
 | `[env]` `pass` | A list of names, as `--env NAME`. |
 | `[env.set]` | Names set to string values, as `--env NAME=VALUE`. A value is never printed, in a result, a report, a message or a debug text. |
 | `[providers.claude]`, `[providers.codex]` `executable` | An absolute path. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` overrides it; it comes before `PATH` ([providers.md](providers.md#finding-the-executable)). |
-| `[mcp]` | The supervisor's limits, each bounded by the constant that is its default today, so the file can lower a limit and cannot raise one: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300, `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300), and `max_waits_in_flight` 1 to 64 (the server handles 128 requests at once, so waits never take more than half of them). A file that lowers only the ceiling lowers the default with it, so `list` and `doctor` report what a wait applies. Only `delega mcp` uses them; `delega doctor` shows them. |
+| `[mcp]` | The supervisor's limits. Each except `wait_default_secs` is bounded by its built-in default, so the file can lower it and cannot raise it; `wait_default_secs` can be set above its default of 30. The bounds: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300, `wait_default_secs` 0 to 300 and not more than the ceiling in force (the file's, or 300), and `max_waits_in_flight` 1 to 64 (the server handles 128 requests at once, so waits never take more than half of them). A file that lowers only the ceiling lowers the default with it, so `list` and `doctor` report what a wait applies. Only `delega mcp` uses them; `delega doctor` shows them. |
 
 The names in `[env]` follow the rules and have the refusals of `--env` ([Command
 line](#command-line)): an invalid name is `invalid_env_name`, a calling-session,
@@ -1390,7 +1397,7 @@ every run waits for it.
 | Cleanup report | Settlement reporting; limits documented | `cleanup` field, descendant identity tracking, repeated signalling | Counterpart's model, built: process group and session sweeps, descendant tracking by start time, repeated signalling, and an unconfirmed verdict that names pids, groups and the reason. |
 | Permissions, stated up front | Provider options passed through, allowlisted | Tool lists, exact Bash guard hook, sandbox mode, deny rules | Provider-neutral modes over counterpart's enforcement. |
 | Permissions, asked live | `respond`, interaction references, `Reject` mode | none | Later: take due's, behind `on_request: ask`. |
-| Long-lived provider session | Resident engine | One process per run, resumed by session id | One process per run, continued by provider session id (`session.resume`, `follow_up`); a resident session is deferred (issue 1). |
+| Long-lived provider session | Resident engine | One process per run, resumed by session id | One provider session process per run (preparation can also start short probes), continued by provider session id (`session.resume`, `follow_up`); a resident session is deferred (issue 1). |
 | Queue and limits | Admission limits, 16 sessions | Queue, pool of 4 running, lifetime cap of 64 | Queue with admission limits (16 live workers, 4 running runs, 16 queued per worker); no lifetime cap. |
 | MCP tools | `spawn`, `follow_up`, `inspect`, `wait`, `interrupt`, `respond`, `release_run`, `release_session`, `read_items` | `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `read_agent`, `list_agents`, `interrupt_agent`, `close_agent` | The seven above, then `respond`. |
 | Compact and full responses | none | `detail: summary\|full` with a field audit | Take counterpart's idea, simpler. |
@@ -1408,7 +1415,7 @@ Settled by Josh on 2026-11-18.
 | --- | --- |
 | Live permission asking in the first version | No. The first version only denies; asking comes later. |
 | Default `timeout_secs` | 600 (10 minutes), stated in the result. |
-| A run denied a permission that still finished | `completed`, with the denial listed. `refused` only when the run stopped because of it. |
+| A run denied a permission that still finished | The denial is listed and does not by itself decide the outcome. `refused` only when the run stopped because of it. |
 | Names | `worker` and `run`; tools `start`, `follow_up`, `wait`, `read`, `list`, `interrupt`, `close`, and later `respond`. |
 | Permission modes | `read`, `write`, `full`. |
 | CLI scope | Foreground `run` only. |
