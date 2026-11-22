@@ -290,11 +290,16 @@ shorten the text.
 
 Taking both findings removes at least what each removes alone, and sometimes
 more than the key: a value across a block's end line leaves the block without
-one in the second look, so everything after it is removed. The remaining limit
-is a key block that known values are crafted around: one overlapping its
-`BEGIN` marker and one containing a whole end line inside its body. Then
-neither look finds the rest of the body. A whole end line inside a key body
-ends the block in any case; what follows it is not part of a key block.
+one in the second look, so everything after it is removed.
+
+The remaining limit: the rule finds a block from a `BEGIN` line to the first
+end line after it. An end line is `-----END `, a label ending in `PRIVATE KEY`,
+and closing dashes within 64 bytes of the marker; it is accepted anywhere in a
+line, not only at its start. Known values crafted around a block can make both
+looks end it early, and text after that point can show: for example a value
+that overlaps the block's `BEGIN` marker, one that is itself an end line inside
+the body, or one that turns other text into an end line once it is replaced. A
+well-formed block is not affected unless known values are built around it.
 
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,
