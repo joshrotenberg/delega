@@ -1247,8 +1247,8 @@ async fn stderr_excerpt_redacts_a_token_on_the_line_after_a_bearer_8_kib_into_a_
 /// The message of a fake that exits 3 after standard error whose cut capture
 /// has no text to show: it says so, and does not read as no standard error.
 const NOTHING_SHOWN: &str = "the provider exited with code 3 without a final result (standard \
-                             error not shown: the capture was cut and no text was left after \
-                             redaction and the guard at its start)";
+                             error not shown: the capture was cut and nothing was left to show \
+                             after redaction and the cuts)";
 
 /// A fake mode that exits 3 after more standard error than the capture
 /// holds, with the capture starting inside a secret and the rest redacting to

@@ -396,9 +396,10 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
 /// builds), and that count must stay within a constant factor of the length of
 /// the input at two sizes. A counted search that looked at the rest of the text
 /// for every begin marker counts a number that grows with the square of the
-/// length, far over the factor. Linear work counts about four times the length
-/// here: once for the search, and at most 64 bytes of label window for each 22
-/// byte marker.
+/// length, far over the factor. Linear work counts about seven times the
+/// length here: the scan runs twice (on the text as given, and again after
+/// known values are replaced), and each run counts the text once for the
+/// search and at most 64 bytes of label window for each 22 byte marker.
 ///
 /// The test sees only searches that call `redact::examined`: a new search in
 /// the scan must call it too, or this test cannot see it. The count must also
@@ -407,7 +408,7 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
 /// zero.
 #[test]
 fn private_key_removal_is_linear_in_the_input() {
-    const FACTOR: usize = 8;
+    const FACTOR: usize = 12;
     let redactor = Redactor::default();
     for repeats in [12_500, 100_000] {
         // Many begin markers that are not keys, and many unterminated labels.
@@ -428,7 +429,7 @@ fn private_key_removal_is_linear_in_the_input() {
             "{} bytes were scanned for {} bytes of input; linear is about {}",
             examined,
             noise.len(),
-            4 * noise.len()
+            7 * noise.len()
         );
     }
     let keys = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".repeat(50_000);

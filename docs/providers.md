@@ -247,11 +247,15 @@ neither applies to a capture that was not cut:
   so the first 8 KiB of the decoded capture end up within the first
   8192 * 10 / 6, rounded up, plus 10 bytes of the redacted text. The guard is
   cut from text that is already redacted, so it cannot split a secret that the
-  capture holds whole. When nothing but whitespace is left after the guard, the
-  message has no excerpt and says so instead: `(standard error not shown: the
-  capture was cut and no text was left after redaction and the guard at its
-  start)`. This happens when redaction removes most of a cut capture. A
-  provider that wrote no standard error gets neither an excerpt nor this note.
+  capture holds whole.
+
+A cut capture can end up with no excerpt: redaction can remove most of it so
+that nothing but whitespace is left after the guard, or text can be left after
+the guard while the last 8 KiB are blank. In both cases the message says so in
+place of the excerpt: `(standard error not shown: the capture was cut and
+nothing was left to show after redaction and the cuts)`. A capture that was not
+cut and has no text (a provider that wrote no standard error, or only
+whitespace) gets neither an excerpt nor this note.
 
 The remaining limit: a credential-shaped secret that the capture's start cuts
 and of which more than 8 KiB was captured (a very long token or private key
@@ -266,13 +270,15 @@ after redaction. Two kinds of text are replaced with `[redacted]`:
   `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Slack tokens, AWS access key ids, JSON
   web tokens, `Bearer` tokens and private key blocks.
 
-The values are replaced in one pass over the text as the provider wrote it.
-Every occurrence of every value is found, occurrences that overlap included;
-stretches that overlap or touch are replaced together by one `[redacted]`, so
-a value that overlaps another is removed whole. The replacements are not
-searched for values again, so a value that happens to match inside
-`[redacted]` cannot lengthen the text. The key shapes, `Bearer` tokens and
-private key blocks are replaced after that, and only shorten the text.
+The values and private key blocks are replaced in one pass over the text as
+the provider wrote it. Every occurrence of every value is found, occurrences
+that overlap included, and every private key block (from its `BEGIN` line
+through its `END` line, or to the end of the text when it has none). Stretches
+that overlap or touch are replaced together by one `[redacted]`, so a value
+that overlaps another value, or the `BEGIN` line of a key, is removed whole
+with it. The replacements are not searched for values again, so a value that
+happens to match inside `[redacted]` cannot lengthen the text. The key shapes
+and `Bearer` tokens are replaced after that, and only shorten the text.
 
 Tokens are found inside words, so `token=ghp_...`, `key: "sk-ant-..."`,
 `https://user:ghp_...@host/` and JSON values are caught; `=`, `:`, `/`, `@`,

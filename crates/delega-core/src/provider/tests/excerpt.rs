@@ -5,7 +5,7 @@ use crate::provider::limits::{
     MIN_REDACTED_VALUE_CHARS, STDERR_CUT_START_BYTES, STDERR_EXCERPT_CHARS,
 };
 use crate::provider::redact::{MASK, Redactor};
-use crate::provider::settle::{STDERR_CUT_GUARD_BYTES, excerpt};
+use crate::provider::settle::{STDERR_CUT_GUARD_BYTES, STDERR_NOT_SHOWN, excerpt, stderr_note};
 
 /// Twenty long keys, which redact to twenty markers: less than one excerpt.
 fn keys() -> String {
@@ -316,4 +316,91 @@ fn apply_cut_steps_over_only_the_bytes_of_a_character_the_cut_split() {
     );
     // A cut character with no value after it stays as it decoded.
     assert_eq!(redactor.apply_cut(b"\xA9 plain"), "\u{FFFD} plain");
+}
+
+#[test]
+fn a_value_that_overlaps_a_private_key_begin_marker_does_not_hide_the_key() {
+    // The two values overlap, and together they cover the block's begin
+    // marker. Replaced before the block was looked for, they left a body
+    // with no marker in front of it.
+    let redactor = Redactor::new([
+        "a-long-prefix-OVERLAP".to_string(),
+        "OVERLAP-----BEGIN".to_string(),
+    ]);
+    let block = "a-long-prefix-OVERLAP-----BEGIN PRIVATE KEY-----\nMIIEkeybody0123456789\n\
+                 -----END PRIVATE KEY-----";
+    let out = redactor.apply(&format!("before {block} after"));
+    assert!(!out.contains("MIIEkeybody"), "{out}");
+    assert_eq!(out, "before [redacted] after");
+    // A block with no end line goes to the end of the text, as before.
+    let open = "a-long-prefix-OVERLAP-----BEGIN RSA PRIVATE KEY-----\nMIIEkeybody0123456789\nmore";
+    assert_eq!(
+        redactor.apply(&format!("before {open}")),
+        "before [redacted]"
+    );
+    // A value across the end line: the block is still one marker.
+    let redactor = Redactor::new(["KEY-----tail-of-value".to_string()]);
+    let text =
+        "x -----BEGIN PRIVATE KEY-----\nMIIEkeybody\n-----END PRIVATE KEY-----tail-of-value y";
+    assert_eq!(redactor.apply(text), "x [redacted] y");
+    // A begin marker that is not a key is only text, with or without a value
+    // on it.
+    let redactor = Redactor::new(["OVERLAP-----BEGIN".to_string()]);
+    assert_eq!(
+        redactor.apply("x OVERLAP-----BEGIN CERTIFICATE-----\nMIIB\n y"),
+        "x [redacted] CERTIFICATE-----\nMIIB\n y"
+    );
+    // The same in a cut capture, through the excerpt.
+    let redactor = Redactor::new([
+        "a-long-prefix-OVERLAP".to_string(),
+        "OVERLAP-----BEGIN".to_string(),
+    ]);
+    let text = format!("{}{block}\nend\n", "plain line\n".repeat(1500));
+    let out = excerpt(&capture(text.as_bytes(), true), &redactor).expect("excerpt");
+    assert!(!out.contains("MIIEkeybody"), "{out}");
+    assert!(out.ends_with("plain line [redacted] end"), "{out}");
+}
+
+#[test]
+fn many_repetitive_values_on_a_repetitive_capture_are_one_marker() {
+    // Every one of these 500 values occurs at nearly every byte of the
+    // capture: about 32 million occurrences. They are marked on the text, not
+    // collected.
+    let redactor = Redactor::new((6..=505).map(|len| "a".repeat(len)));
+    let all = "a".repeat(64 * 1024);
+    // Five do not make a value, so the runs at the ends are kept.
+    let text = format!("aaaaa {all} aaaaa");
+    assert_eq!(redactor.apply(&text), "aaaaa [redacted] aaaaa");
+    assert_eq!(redactor.apply_cut(all.as_bytes()), MASK);
+    // Runs that do not touch stay apart, and what is between them is kept.
+    let runs = format!("{} ", "a".repeat(654)).repeat(100);
+    assert_eq!(redactor.apply(&runs), "[redacted] ".repeat(100));
+}
+
+#[test]
+fn a_cut_capture_with_no_excerpt_says_so_whatever_left_it_without_one() {
+    let note = format!(" {STDERR_NOT_SHOWN}");
+    // A word after the guard, and a blank last 8 KiB: the guard left text,
+    // and still there is nothing to show.
+    let mut blank_end = vec![b' '; 64 * 1024];
+    blank_end[30_000..30_004].copy_from_slice(b"word");
+    const { assert!(30_000 > STDERR_CUT_GUARD_BYTES) };
+    assert_eq!(excerpt(&capture(&blank_end, true), &none()), None);
+    assert_eq!(stderr_note(&capture(&blank_end, true), &none()), note);
+    // Nothing after the guard.
+    let short = format!("fragment\n{}", keys());
+    assert_eq!(stderr_note(&capture(short.as_bytes(), true), &none()), note);
+    // With an excerpt, the excerpt.
+    let text = "shown ".repeat(4000);
+    assert_eq!(
+        stderr_note(&capture(text.as_bytes(), true), &none()),
+        format!(
+            "; its standard error ended with: ... {}",
+            " shown".repeat(50)
+        )
+    );
+    // A capture that was not cut says nothing when it has no text.
+    assert_eq!(stderr_note(&capture(&blank_end, false), &none()), "");
+    assert_eq!(stderr_note(&capture(b"", false), &none()), "");
+    assert_eq!(stderr_note(&capture(b" \n ", false), &none()), "");
 }

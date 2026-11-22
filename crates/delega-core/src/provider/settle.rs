@@ -145,17 +145,19 @@ const _: () = {
 
 /// What an error message says in place of an excerpt of a cut standard error
 /// capture that has no text to show, so it does not read as a provider that
-/// wrote nothing.
-pub(super) const STDERR_NOT_SHOWN: &str = "(standard error not shown: the capture was cut and no \
-                                           text was left after redaction and the guard at its start)";
+/// wrote nothing. Redaction, the guard at the capture's start and the cut to
+/// its last [`STDERR_SCAN_BYTES`] can each leave nothing but whitespace.
+pub(super) const STDERR_NOT_SHOWN: &str = "(standard error not shown: the capture was cut and \
+                                           nothing was left to show after redaction and the cuts)";
 
 /// What an error message says about the provider's standard error, to follow
-/// the message: its excerpt (see [`excerpt`]), [`STDERR_NOT_SHOWN`], or
-/// nothing when it wrote none.
-fn stderr_report(report: &ProcessReport, redactor: &Redactor) -> String {
-    match excerpt(&report.stderr, redactor) {
+/// the message: its excerpt (see [`excerpt`]); [`STDERR_NOT_SHOWN`] for a cut
+/// capture with no excerpt, whatever left it without one; or nothing for a
+/// capture that was not cut and has no text.
+pub(super) fn stderr_note(stderr: &Captured, redactor: &Redactor) -> String {
+    match excerpt(stderr, redactor) {
         Some(excerpt) => format!("; its standard error ended with: {excerpt}"),
-        None if report.stderr.truncated => format!(" {STDERR_NOT_SHOWN}"),
+        None if stderr.truncated => format!(" {STDERR_NOT_SHOWN}"),
         None => String::new(),
     }
 }
@@ -174,7 +176,7 @@ fn stderr_report(report: &ProcessReport, redactor: &Redactor) -> String {
 /// with the whole values ([`Redactor::apply_cut`]), and the excerpt is taken
 /// only from redacted text after the first [`STDERR_CUT_GUARD_BYTES`]. That
 /// cut is made in text that is already redacted, so it cannot split a secret
-/// either. When it leaves no text, there is no excerpt and the message says
+/// either. When a cut capture has no excerpt, the message says
 /// [`STDERR_NOT_SHOWN`].
 pub(super) fn excerpt(stderr: &Captured, redactor: &Redactor) -> Option<String> {
     let redacted = if stderr.truncated {
@@ -437,7 +439,7 @@ fn no_terminal(
     }
     if code != 0 {
         let mut message = format!("the provider exited with code {code} without a final result");
-        message.push_str(&stderr_report(report, redactor));
+        message.push_str(&stderr_note(&report.stderr, redactor));
         return error("provider_exit", message, Some(code));
     }
     if parsed.stats.unparseable > 0 || parsed.stats.oversize > 0 {

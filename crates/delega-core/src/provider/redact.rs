@@ -43,9 +43,9 @@ fn prefix_table(pattern: &[u8]) -> Vec<usize> {
     table
 }
 
-/// Add the byte span of every place `pattern` occurs in `text` to `spans`,
+/// Report the byte span of every place `pattern` occurs in `text` to `found`,
 /// overlapping occurrences included, in one pass over `text`.
-fn occurrences(text: &[u8], pattern: &[u8], table: &[usize], spans: &mut Vec<(usize, usize)>) {
+fn occurrences(text: &[u8], pattern: &[u8], table: &[usize], mut found: impl FnMut(usize, usize)) {
     if pattern.is_empty() {
         return;
     }
@@ -58,7 +58,7 @@ fn occurrences(text: &[u8], pattern: &[u8], table: &[usize], spans: &mut Vec<(us
             k += 1;
         }
         if k == pattern.len() {
-            spans.push((i + 1 - k, i + 1));
+            found(i + 1 - k, i + 1);
             k = table[k - 1];
         }
     }
@@ -189,44 +189,114 @@ pub(super) fn take_examined() -> usize {
     EXAMINED.with(|total| total.replace(0))
 }
 
-/// Replace private key blocks, up to their end line or the end of the text.
-/// One forward pass: every search starts where the last one stopped, and a
-/// begin marker that is not a key is skipped after a bounded look.
-fn without_private_keys(text: &str) -> String {
+/// Report the byte span of every private key block in `text` to `found`: from
+/// its begin marker up to its end line, or to the end of the text when it has
+/// none. One forward pass: every search starts where the last one stopped, and
+/// a begin marker that is not a key is skipped after a bounded look.
+fn private_key_blocks(text: &str, mut found: impl FnMut(usize, usize)) {
     const BEGIN: &str = "-----BEGIN ";
     const END: &str = "PRIVATE KEY-----";
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find(BEGIN) {
-        examined(start + BEGIN.len());
-        let after = &rest[start + BEGIN.len()..];
-        let window = &after.as_bytes()[..after.len().min(BEGIN_LABEL_WINDOW)];
+    let mut from = 0;
+    while let Some(at) = text[from..].find(BEGIN) {
+        examined(at + BEGIN.len());
+        let start = from + at;
+        let label = start + BEGIN.len();
+        let after = &text.as_bytes()[label..];
+        let window = &after[..after.len().min(BEGIN_LABEL_WINDOW)];
         examined(window.len());
         let label_end = window.windows(5).position(|w| w == b"-----");
-        let is_key = label_end.is_some_and(|i| after.as_bytes()[..i].ends_with(b"PRIVATE KEY"));
-        if !is_key {
-            out.push_str(&rest[..start + BEGIN.len()]);
-            rest = after;
+        let Some(label_end) = label_end.filter(|i| after[..*i].ends_with(b"PRIVATE KEY")) else {
+            from = label;
             continue;
-        }
-        out.push_str(&rest[..start]);
-        out.push_str(MASK);
-        let body = &after[label_end.unwrap_or(0) + 5..];
-        rest = match body.find(END) {
+        };
+        let body = label + label_end + 5;
+        from = match text[body..].find(END) {
             Some(end) => {
                 examined(end + END.len());
-                &body[end + END.len()..]
+                body + end + END.len()
             }
             None => {
-                examined(body.len());
-                ""
+                examined(text.len() - body);
+                text.len()
             }
         };
+        found(start, from);
     }
     // The search that found no further marker looked at all of what was left.
-    examined(rest.len());
-    out.push_str(rest);
+    examined(text.len() - from);
+}
+
+/// Replace private key blocks (see [`private_key_blocks`]).
+fn without_private_keys(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    private_key_blocks(text, |start, end| {
+        out.push_str(&text[copied..start]);
+        out.push_str(MASK);
+        copied = end;
+    });
+    out.push_str(&text[copied..]);
     out
+}
+
+/// Which bytes of a text are to be replaced, as a difference array: one more
+/// at the start of each marked span and one less at its end, so the running
+/// sum is above zero exactly on the marked bytes. It takes one entry for each
+/// byte of the text and one more, however many spans are marked, and nothing
+/// until the first span.
+struct Coverage {
+    len: usize,
+    steps: Vec<i32>,
+}
+
+impl Coverage {
+    fn new(len: usize) -> Self {
+        Self {
+            len,
+            steps: Vec::new(),
+        }
+    }
+
+    /// Mark the bytes `start..end`. Any one start or end is marked at most
+    /// once for each known value, private key block and cut start, so an
+    /// entry stays far inside its range.
+    fn mark(&mut self, start: usize, end: usize) {
+        if start >= end || end > self.len {
+            return;
+        }
+        if self.steps.is_empty() {
+            self.steps = vec![0; self.len + 1];
+        }
+        self.steps[start] += 1;
+        self.steps[end] -= 1;
+    }
+
+    /// `text` with each run of marked bytes replaced by one [`MASK`]. Marked
+    /// spans that overlap or touch are one run.
+    fn masked(&self, text: &str) -> String {
+        if self.steps.is_empty() {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut depth = 0i64;
+        let mut copied = Some(0);
+        for (at, step) in self.steps[..self.len].iter().enumerate() {
+            depth += i64::from(*step);
+            match copied {
+                Some(from) if depth > 0 => {
+                    out.push_str(&text[from..at]);
+                    out.push_str(MASK);
+                    copied = None;
+                }
+                None if depth <= 0 => copied = Some(at),
+                _ => {}
+            }
+        }
+        if let Some(from) = copied {
+            out.push_str(&text[from..]);
+        }
+        out
+    }
 }
 
 impl Redactor {
@@ -278,14 +348,16 @@ impl Redactor {
         self.redact(&String::from_utf8_lossy(capture), Some(cut_chars))
     }
 
-    /// The byte spans of `text` that hold known values, merged and in order.
-    /// Every occurrence of every value counts, overlapping ones included, and
-    /// for a cut capture (`cut_chars` is the length of the replacement
-    /// characters its cut left) the end of a value at the start. Spans that
-    /// overlap or touch are one span, so a value that overlaps another is
-    /// removed whole, whichever is found first.
-    fn value_spans(&self, text: &str, cut_chars: Option<usize>) -> Vec<(usize, usize)> {
-        let mut spans = Vec::new();
+    /// Which bytes of `text` are secrets that are found in the text as it was
+    /// given: every occurrence of every known value, overlapping ones
+    /// included; for a cut capture (`cut_chars` is the length of the
+    /// replacement characters its cut left) the end of a value at the start;
+    /// and every private key block. Each span starts and ends between
+    /// characters: a value and the text are both whole characters, a block
+    /// starts and ends at its markers or the end of the text, and the cut
+    /// start is checked below.
+    fn coverage(&self, text: &str, cut_chars: Option<usize>) -> Coverage {
+        let mut covered = Coverage::new(text.len());
         for value in &self.values {
             // The table scan is linear but slower than `contains`, and most
             // text holds no value.
@@ -294,7 +366,7 @@ impl Redactor {
                     text.as_bytes(),
                     value.text.as_bytes(),
                     &value.table,
-                    &mut spans,
+                    |start, end| covered.mark(start, end),
                 );
             }
             let Some(body) = cut_chars.and_then(|skip| text.get(skip..)) else {
@@ -308,37 +380,24 @@ impl Redactor {
                 .get(..len)
                 .is_some_and(|end| end.chars().count() >= MIN_REDACTED_VALUE_CHARS);
             if enough {
-                spans.push((0, cut_chars.unwrap_or(0) + len));
+                covered.mark(0, cut_chars.unwrap_or(0) + len);
             }
         }
-        spans.sort_unstable();
-        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
-        for (start, end) in spans {
-            match merged.last_mut() {
-                Some(last) if start <= last.1 => last.1 = last.1.max(end),
-                _ => merged.push((start, end)),
-            }
-        }
-        merged
+        // On the text as it was given, so a value that overlaps a block's
+        // begin marker cannot hide the block from the pass below.
+        private_key_blocks(text, |start, end| covered.mark(start, end));
+        covered
     }
 
-    /// Known values are replaced in one pass over the text as it was given:
-    /// each merged span of [`Self::value_spans`] becomes one [`MASK`], and a
-    /// mask is never searched again. Every span is at least
-    /// [`MIN_REDACTED_VALUE_CHARS`] characters, so this pass makes text longer
-    /// by at most `MASK.len() / MIN_REDACTED_VALUE_CHARS`. The passes after it
-    /// (private keys, credential shapes, `Bearer`) only make text shorter.
+    /// Known values and private key blocks are replaced in one pass over the
+    /// text as it was given: each run of [`Self::coverage`] becomes one
+    /// [`MASK`], and a mask is never searched for values again. Every run is
+    /// at least [`MIN_REDACTED_VALUE_CHARS`] characters, so this pass makes
+    /// text longer by at most `MASK.len() / MIN_REDACTED_VALUE_CHARS`. The
+    /// passes after it (private keys again, credential shapes, `Bearer`) only
+    /// make text shorter.
     fn redact(&self, text: &str, cut_chars: Option<usize>) -> String {
-        let spans = self.value_spans(text, cut_chars);
-        let mut without_values = String::with_capacity(text.len());
-        let mut copied = 0;
-        for (start, end) in spans {
-            without_values.push_str(&text[copied..start]);
-            without_values.push_str(MASK);
-            copied = end;
-        }
-        without_values.push_str(&text[copied..]);
-        let text = without_values;
+        let text = self.coverage(text, cut_chars).masked(text);
         let text = without_private_keys(&text);
         let mut out = String::with_capacity(text.len());
         let mut previous_word = String::new();
