@@ -220,6 +220,7 @@ Out of scope:
 
 | Document | Covers |
 | --- | --- |
+| [docs/guides](https://github.com/joshrotenberg/delega/tree/main/docs/guides) | Use cases: implementation with independent review, review across providers, scripts and CI, read-only analysis, several workers over MCP, and `delega doctor`. |
 | [docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md) | The request and result, outcomes, the CLI and its exit statuses, `doctor`, plugin install, the configuration file (`~/.config/delega/config.toml`), the MCP tools, skills, the library, and what is deferred. |
 | [docs/supervisor.md](https://github.com/joshrotenberg/delega/blob/main/docs/supervisor.md) | The supervisor: operations, worker and run states, limits and defaults, cursors, retention. |
 | [docs/providers.md](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md) | How each provider is started, the permission mapping, error kinds, the environment policy, managed settings, and what is verified against the real CLIs. |

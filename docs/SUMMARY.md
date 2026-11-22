@@ -12,12 +12,12 @@
 
 # Guides
 
-- [Delegate implementation and independent review]()
-- [Review across providers]()
-- [Run from a script or CI]()
-- [Analyze a repository with read-only access]()
-- [Run independent workers over MCP]()
-- [Check provider readiness]()
+- [Delegate implementation and independent review](guides/implement-and-review.md)
+- [Review across providers](guides/cross-provider-review.md)
+- [Run from a script or CI](guides/scripts-and-ci.md)
+- [Analyze a repository with read-only access](guides/read-only-analysis.md)
+- [Run independent workers over MCP](guides/mcp-workers.md)
+- [Check provider readiness](guides/doctor.md)
 
 # Concepts
 
