@@ -1117,7 +1117,11 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
   - Codex `workspace-write` with `network_access=false` and both temporary
     directory exclusions `true` failed `cargo test` with `PermissionDenied` on
     the temporary directory; with both `false`, `cargo test` passed, `$TMPDIR`
-    and `/tmp` were writable, `$HOME` was not, and the network was off.
+    and `/tmp` were writable, `$HOME` was not, and the network was off. So
+    Codex honours `exclude_slash_tmp` and `exclude_tmpdir_env_var` given with
+    `-c`. The network is also off by default in `workspace-write`, and no probe
+    ran with `network_access=true`, so this does not show that Codex honours
+    `network_access` ([Unverified](#unverified-against-the-real-cli)).
 
 ## Unverified against the real CLI
 
@@ -1132,6 +1136,7 @@ each.
 | Assumption | Conservative choice |
 | --- | --- |
 | `full` for Claude Code needs no `--permission-mode bypassPermissions` | The nine built-in tools are allowed under `dontAsk`, the mechanism the earlier project already used. |
+| Codex honours `sandbox_workspace_write.network_access=false` given with `-c`. The probes do not show it, because the network is also off by default in `workspace-write` | It only narrows the sandbox. An unknown key would fail the run. |
 | Codex's own default exclusion of secret-looking variable names, which applies to the environment of the commands it runs, does not drop a variable the caller passed with `--env` | Not tested. If it does, a named secret-looking variable reaches Codex but not its commands. |
 | A declined command is `item.completed` with `status: "declined"` | Only those are listed in `permissions.denied`, and a note says other blocks are not. |
 | `model_verbosity` and `model_reasoning_summary` are accepted config keys with the listed values | They are the only `-c` keys allowed. |

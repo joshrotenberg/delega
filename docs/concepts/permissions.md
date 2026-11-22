@@ -38,8 +38,8 @@ does not confine their reads ([Build](../providers.md#build)). See
 
 **Codex** does not limit reads to the requested directories or commands to the
 requested list. In `write` and `build` its sandbox limits writes and turns the
-network off; `build` also allows the temporary directories. Results of runs that go ahead note what is wider than
-requested. See [Permission mapping](../providers.md#permission-mapping-1) and
+network off; `build` also allows the temporary directories. Results of runs
+that go ahead note what is wider than requested. See [Permission mapping](../providers.md#permission-mapping-1) and
 [Wider than requested](../providers.md#wider-than-requested).
 
 `permissions.strict` (`--strict`) refuses a run when the provider adapter
