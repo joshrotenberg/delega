@@ -746,6 +746,16 @@ case "$mode" in
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done
     ;;
+  # Ignores the polite stop and runs until the file named after `hang-until:`
+  # exists, then exits with no result. Writes `<file>.started` once it ignores
+  # the stop, so a test decides when the run can end.
+  hang-until:*)
+    init
+    release=${mode#hang-until:}
+    trap '' TERM
+    : > "$release.started"
+    while [ ! -e "$release" ]; do sleep 0.05; done
+    ;;
   hang)
     init
     trap '' TERM

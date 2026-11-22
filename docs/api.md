@@ -983,7 +983,20 @@ Rules that hold for every tool:
   (300 s) and accepts `timeout_secs: 0`, which returns the current states at
   once; `interrupt` and `close` wait for the run to settle for at most 30 s,
   after which the response says it has not settled. A caller should keep each
-  wait short and pass the cursor back instead of waiting long.
+  wait short and pass the cursor back instead of waiting long. These three
+  limits are counted in awake time and also checked against wall time about
+  once a second of awake time. After the machine slept past a limit, the
+  first wall check after it wakes, due within about one check interval of
+  awake time plus scheduling, ends a waiting that is still pending if it reads
+  elapsed wall time at or above the limit; the waiting does not end while the
+  machine sleeps. A wall clock set forward ends the waiting early
+  only if the elapsed wall time read reaches the limit while the call is still
+  waiting, and one that reads earlier than at the start counts as no time
+  passed. Whichever clock ends the waiting, the call then takes the same path
+  as when its limit passes on the awake-time timer, so it answers the same way
+  in both cases. A run's `timeout_secs` counts awake time only: a run paused by
+  sleep has not used its time.
+  [supervisor.md](supervisor.md#how-the-bounds-count-time) has the detail.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
   **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
   an outcome. A worker is `queued` when nothing is running and a run waits for a
@@ -1103,7 +1116,8 @@ Rules that hold for every tool:
   names or values (`delega run` prints the parser's full message, because the
   file is the caller's own).
 - **Wait.** `timeout_secs` defaults to 30 (`mcp.wait_default_secs`) and is
-  capped by the wait ceiling (300, `mcp.wait_ceiling_secs`).
+  capped by the wait ceiling (300, `mcp.wait_ceiling_secs`). It is counted in
+  awake time and checked against wall time, as the rule on starting says.
   `read` takes `text_offset`, a number of characters, to page a long answer;
   page by run id, because a worker's latest run can change between pages.
 

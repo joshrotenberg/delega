@@ -58,6 +58,7 @@ use crate::contract::result::Cleanup;
 
 mod activity;
 mod actor;
+mod bound;
 mod command;
 mod config;
 mod core;
@@ -99,6 +100,9 @@ struct Shared {
     failed: Arc<Mutex<Option<String>>>,
     /// Runs the request checks of `start`.
     preflight: preflight::Preflight,
+    /// Wall time for the bounds of `wait`, `interrupt` and `close`. The
+    /// system's clock; only tests replace it.
+    wall_clock: bound::WallClock,
     /// Test only: holds the next `wait` between its timeout and its view.
     #[cfg(test)]
     view_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
@@ -161,6 +165,18 @@ impl Supervisor {
         )
     }
 
+    /// Test only: a supervisor whose `wait`, `interrupt` and `close` read wall
+    /// time from `wall_clock`, so a test can move wall time without moving
+    /// Tokio's.
+    #[cfg(test)]
+    pub(crate) fn with_wall_clock(config: SupervisorConfig, wall_clock: bound::WallClock) -> Self {
+        let mut supervisor = Self::new(config);
+        Arc::get_mut(&mut supervisor.shared)
+            .expect("a new supervisor has one clone")
+            .wall_clock = wall_clock;
+        supervisor
+    }
+
     #[cfg(test)]
     pub(crate) fn with_launcher(config: SupervisorConfig, launch: runner::Launch) -> Self {
         Self::with_hooks(config, launch, preflight::Preflight::provider())
@@ -201,6 +217,7 @@ impl Supervisor {
                 root,
                 failed,
                 preflight,
+                wall_clock: bound::system_clock(),
                 #[cfg(test)]
                 view_pause: Mutex::new(None),
             }),
@@ -334,7 +351,9 @@ impl Supervisor {
 
     /// Wait until any named run finishes, or any named worker's current run
     /// finishes, or the time passes. A timeout is a response with `timed_out`,
-    /// not an error.
+    /// not an error. The time is counted in the time the machine was awake and
+    /// checked against wall time about once a second, so after the machine
+    /// slept past the limit the wait ends shortly after it wakes.
     ///
     /// `timeout_secs` defaults to the configured wait default
     /// ([`limits::DEFAULT_WAIT`] unless changed) and is capped at the wait
@@ -367,10 +386,10 @@ impl Supervisor {
             WaitStart::Ready => (None, false, false),
             WaitStart::Released => (None, false, true),
             WaitStart::Pending { id, mut rx } => {
-                let woke = tokio::time::timeout(applied, &mut rx).await;
+                let woke = bound::within(applied, &self.shared.wall_clock, &mut rx).await;
                 match woke {
-                    Ok(woke) => (None, false, matches!(woke, Ok(Wake::Shutdown))),
-                    Err(_) => {
+                    Some(woke) => (None, false, matches!(woke, Ok(Wake::Shutdown))),
+                    None => {
                         pending = Some(rx);
                         (Some(id), true, false)
                     }
@@ -469,7 +488,8 @@ impl Supervisor {
 
     /// Stop a run and return its `interrupted` result once it has stopped and
     /// cleanup was attempted, bounded by the process layer and by the
-    /// supervisor's interrupt bound.
+    /// supervisor's interrupt bound. That bound is counted in the time the
+    /// machine was awake and checked against wall time, as a `wait` is.
     ///
     /// A queued run is removed and finishes `interrupted` without ever starting.
     /// A finished run is returned unchanged. For a worker, acts on its current
@@ -482,10 +502,8 @@ impl Supervisor {
             Stopping::Done(response) => Ok(*response),
             Stopping::Pending { base, run, rx } => {
                 let mut response = *base;
-                let waited = tokio::time::timeout(self.shared.config.interrupt_bound, rx).await;
-                if waited.is_ok()
-                    && let Some(view) = self.settled(run).await?
-                {
+                let waited = self.stopped_in_time(rx).await;
+                if waited && let Some(view) = self.settled(run).await? {
                     response.state = Some(RunState::Finished);
                     response.settled = true;
                     response.result = Some(view);
@@ -498,7 +516,8 @@ impl Supervisor {
     /// Close a worker: stop its running run, discard its queued runs (each
     /// finishes `interrupted`, saying it was discarded by close), and free its
     /// slot. Finished results stay readable for the retention bound. Closing a
-    /// closed worker answers the same way.
+    /// closed worker answers the same way. Waits for the running run as
+    /// [`interrupt`](Self::interrupt) does, with the same bound.
     pub async fn close(&self, worker: &str) -> Result<CloseResponse, Error> {
         let closing = self
             .call(|reply| Command::Close {
@@ -510,16 +529,23 @@ impl Supervisor {
             Closing::Done(response) => Ok(*response),
             Closing::Pending { base, run, rx } => {
                 let mut response = *base;
-                let waited = tokio::time::timeout(self.shared.config.interrupt_bound, rx).await;
-                if waited.is_ok()
-                    && let Some(view) = self.settled(run).await?
-                {
+                let waited = self.stopped_in_time(rx).await;
+                if waited && let Some(view) = self.settled(run).await? {
                     response.settled = true;
                     response.result = Some(view);
                 }
                 Ok(response)
             }
         }
+    }
+
+    /// Whether the run a stop is waiting on reported within the interrupt
+    /// bound, counted in awake time and checked against wall time.
+    async fn stopped_in_time(&self, rx: oneshot::Receiver<()>) -> bool {
+        let bound = self.shared.config.interrupt_bound;
+        bound::within(bound, &self.shared.wall_clock, rx)
+            .await
+            .is_some()
     }
 
     async fn settled(&self, run: String) -> Result<Option<ResultView>, Error> {
