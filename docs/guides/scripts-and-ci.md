@@ -68,7 +68,8 @@ delega run --request profile.json -C /path/to/repo --stdin --output json < task.
 ```
 
 `instructions` has no flag and comes only from a profile. Run with `--dry-run`
-to see the merged request without starting anything. See
+to see the launch plan and where each setting came from, without starting
+anything; it leaves out the prompt and instruction text. See
 [The request](../api.md#the-request) for every field.
 
 ## Permissions and environment
@@ -85,8 +86,9 @@ to see the merged request without starting anything. See
 
 ## Stopping
 
-Stop `delega` with SIGTERM or SIGINT: it stops the worker and prints the result
-before it exits. SIGKILL cannot be handled and leaves the worker running with no
+Stop `delega` with SIGTERM or SIGINT, which let it stop the worker and clean
+up. The result can be missing or incomplete if the signal interrupts writing
+it; the script above already handles that. SIGKILL cannot be handled and leaves the worker running with no
 time limit enforced, so a CI job's cancel step should send SIGTERM first.
 
 ## What to check

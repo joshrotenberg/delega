@@ -21,8 +21,8 @@ Code deny rules are read from is in [Deny rules](../providers.md#deny-rules).
 ## What it reports
 
 For each provider: the executable a run would use and where it came from, its
-version, counts of the environment a worker would get, the deny rules a Claude
-run would apply, and managed settings found. Also the configuration file, the
+version, counts of the environment a worker would get, the files a Claude run
+would read deny rules from, with their rule counts (not the rules), and managed settings found. Also the configuration file, the
 limits in force, the built-in skills, and whether process inspection works. It
 never prints an environment value, a deny rule or a file's content. See
 [Doctor](../api.md#doctor) for each field.

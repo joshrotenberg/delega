@@ -7,8 +7,8 @@ are described in [MCP](../api.md#mcp) and [the supervisor](../supervisor.md).
 
 ## Start
 
-Each `start` returns once its request checks finish (at most 10 s), without
-waiting for the run, with a `worker` id, a `run` id and a state:
+`start` checks the request and returns a run (and a worker, if it was
+admitted); the [tool table](../api.md#mcp) in `docs/api.md` lists every answer.
 
 ```json
 {
@@ -85,9 +85,12 @@ time after that. Workers also stop when the connection that started them closes.
 | Waits blocked at once | 64 | `max_waits_in_flight` |
 | Finished results kept | 256, 64 MiB, 1 hour | none; fixed for the server |
 
-The [configuration file](../api.md#configuration-file) can lower each limit
-that has a key, and cannot raise one. `list` and `delega doctor` report the
-values in force. See [Limits and defaults](../supervisor.md#limits-and-defaults).
+The `[mcp]` keys are `max_live_workers`, `max_running_runs`,
+`max_queued_per_worker`, `wait_default_secs`, `wait_ceiling_secs` and
+`max_waits_in_flight`. Each is bounded as described in the
+[configuration file](../api.md#configuration-file) section. Retention has no
+key and is fixed for the server. `list` and `delega doctor` report the values
+in force. See [Limits and defaults](../supervisor.md#limits-and-defaults).
 
 ## What to check
 

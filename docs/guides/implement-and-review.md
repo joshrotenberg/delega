@@ -43,8 +43,9 @@ not see the supervising conversation, so the prompt must stand alone.
 `permissions.commands`, which cannot cover the varying commands a build runs on
 Claude Code, and Codex's `write` sandbox excludes the temporary directories
 ([#98](https://github.com/joshrotenberg/delega/issues/98)). `full` means no
-restriction from delega: the worker can reach any directory the user running
-delega can, not only its worktree. See
+restriction from delega: the worker is not confined to its working directory.
+Claude workers still receive the applicable
+[deny rules](../providers.md#deny-rules) in every mode. See
 [Permissions](../api.md#permissions) and the per-provider mappings in
 [providers.md](../providers.md).
 
