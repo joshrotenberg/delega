@@ -1,0 +1,80 @@
+# Status and limits
+
+The [README](https://github.com/joshrotenberg/delega/blob/main/README.md) is
+canonical for what exists and states where each of the six acceptance criteria
+stands. This page lists the limits a user meets.
+
+- **Version** 0.1.0-dev. No release; build from source
+  ([#140](https://github.com/joshrotenberg/delega/issues/140)).
+- **Platforms.** macOS and Linux. CI runs fmt, clippy, the tests and the full
+  acceptance matrix on `macos-latest` and `ubuntu-latest`, and builds on Rust
+  1.90. Windows is not supported.
+- **Use.** delega's own development runs on real Claude Code and Codex workers
+  through the installed plugin, as implementers and as independent reviewers:
+  more than a hundred worker runs behind ten merged pull requests between
+  2026-11-20 and 2026-11-22.
+- **Verified against the real CLIs** (Claude Code 2.1.328 and 2.1.329, codex-cli
+  0.170.0): Claude Code's read scoping, command guard and deny rules; that
+  Codex's `workspace-write` sandbox blocks writes outside the working directory;
+  session resume, version parsing, usage reporting and several failure shapes.
+  [Providers](../providers.md#verified-against-the-real-cli) has the list of
+  live checks and the
+  [remaining assumptions](../providers.md#unverified-against-the-real-cli).
+- **Permission modes.** `read` (default), `write` and `full`, plus exact
+  commands (`--allow-command`) and extra readable directories. In delega's own
+  development, workers that build and run the test suite needed `full`, because
+  `write` on Claude Code runs only exactly granted commands and Codex's `write`
+  sandbox excludes temporary directories
+  ([#98](https://github.com/joshrotenberg/delega/issues/98)). A fixed command
+  can be granted with `--allow-command`.
+  Codex confines neither reads nor commands, so a `read` or `write` Codex run is
+  wider than requested and says so in `provider_notes`; with `--strict` it is
+  refused ([Wider than requested](../providers.md#wider-than-requested)).
+- **Asking permission live** is not built. A request not granted is answered
+  no.
+- **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
+  descendant called `setsid` and was orphaned before any process listing saw it,
+  or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`
+  itself leaves the worker running. See the expected failures in
+  [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
+- **Environment.** A worker gets a fixed environment allowlist plus what `--env`
+  or the configuration file adds. The installed plugin starts `delega mcp` with
+  no `--env`.
+- **Hosts.** Claude.ai and Cowork refuse plugins with a top-level `bin/`, so the
+  plugin installs only into Claude Code and Codex.
+- **Managed MCP configuration.** Claude Code workers cannot run on a machine
+  where a `managed-mcp.json` that Claude Code can read and parse is deployed:
+  delega refuses such runs up front with `managed_mcp_exclusive`, and
+  `delega doctor` reports it. See
+  [Managed settings](../providers.md#managed-settings).
+- **Live suite.** The fake-provider tests run in CI; the live suite per provider
+  is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)).
+
+## Acceptance run
+
+The committed acceptance run
+([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),
+fake providers only, Darwin arm64) has 188 rows: 158 pass, 29 are expected
+failures, 1 is a documented gap that did not show in that run, and none failed
+unexpectedly. [Guarantees and how they are tested](../acceptance.md) describes
+the harness.
+
+## Scope
+
+In scope now:
+
+- The runner: start, follow up, interrupt, wait, read the result.
+- Surfaces: CLI and MCP, over one library.
+
+Later, as layers over the runner, once the core meets the six criteria:
+
+- Enforced independent review of a worker's change.
+- Work loops and other orchestration.
+
+Out of scope:
+
+- Session history. That is
+  [trovador](https://github.com/joshrotenberg/trovador).
+- [due](https://github.com/joshrotenberg/due)'s JavaScript scripting harness
+  and its standalone JSON-RPC interface. They are left out until the core is
+  solid and then reconsidered.
