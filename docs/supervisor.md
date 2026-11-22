@@ -182,8 +182,9 @@ report one.
 ### Follow-up usage
 
 The supervisor passes `usage` and `session_usage` through as the provider layer
-reported them and never changes either. A resumed Codex follow-up has
-`session_usage` and no `usage`; see [api.md](api.md#usage) for why delega does
+reported them and never changes either. A resumed Codex follow-up has no
+`usage`, and has `session_usage` only when Codex reported totals: a run that
+timed out or failed before any terminal event has neither field. See [api.md](api.md#usage) for why delega does
 not subtract one run's totals from another's.
 
 ## Waiting and cursors

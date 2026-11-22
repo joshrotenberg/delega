@@ -736,6 +736,14 @@ case "$mode" in
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done
     ;;
+  # A successful result with usage, then no exit until stopped.
+  success-then-hang)
+    init
+    success '"fake final answer"' '[]'
+    trap '' TERM
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
+    while :; do sleep 1; done
+    ;;
   hang)
     init
     trap '' TERM

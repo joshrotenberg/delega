@@ -753,7 +753,8 @@ mismatch on a resumed run and the several-ids note on a fresh one). A message it
 totals, also on a resumed run; Codex reports no per-turn figure. They become
 `session_usage`, and `usage` only for a run that did not resume. For a resumed
 run delega does not know the run's own consumption: `usage` is empty and only
-`session_usage` is reported. The difference between two runs' `session_usage`
+`session_usage` is reported, when Codex reported totals (a run that times out
+or fails before any terminal event has neither). The difference between two runs' `session_usage`
 is one run's own only if nothing else used the thread in between (another
 worker or a CLI `--resume` on the same thread, or a failed or timed-out run
 that reported no totals); delega does not compute it. `error`
@@ -1028,4 +1029,5 @@ each.
   does not exit holds the run until the time limit.
 - **Usage during a run.** Usage is taken from the terminal event only.
 - **A resumed Codex run's own usage.** Codex reports only the thread's totals,
-  so a resumed run's `usage` is empty and only `session_usage` is reported.
+  so a resumed run's `usage` is empty and only `session_usage` is reported,
+  when the run reported totals at all.

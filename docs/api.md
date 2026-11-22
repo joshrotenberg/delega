@@ -193,6 +193,10 @@ On a resumed run the providers report session totals for some values, so
   does not know the run's own consumption: it has no `usage` and reports only
   `session_usage`, through `delega run`, MCP and the library alike.
 
+Both fields come from the provider's terminal event. A run that times out, is
+interrupted or fails before any terminal event has neither; one that hangs
+after its terminal event keeps what that event reported.
+
 The difference between two runs' `session_usage` is one run's own consumption
 only if nothing else used the provider session in between: another worker or a
 `delega run --resume` on the same session, or a failed or timed-out run that
