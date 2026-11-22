@@ -154,6 +154,11 @@ impl SystemPaths {
         }
     }
 
+    /// The location of Claude Code's managed MCP file under this root.
+    pub fn claude_mcp_file(&self) -> PathBuf {
+        self.claude_dir().join("managed-mcp.json")
+    }
+
     fn claude_dir(&self) -> PathBuf {
         self.join(match self.platform {
             Platform::Macos => "/Library/Application Support/ClaudeCode",
@@ -523,9 +528,11 @@ const CODEX_PREFERENCES_NOTE: &str = "can carry a managed configuration (config_
 const USER_PREFERENCES_NOTE: &str = "managed preferences of the provider in users' directories; \
                                      only the current user's apply, and doctor does not read them";
 
+pub(crate) const MCP_EXCLUSIVE: &str = "managed_mcp_exclusive";
+
 /// Refuse the strict MCP launch when Claude Code's managed file parses.
 pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
-    let path = system.claude_dir().join("managed-mcp.json");
+    let path = system.claude_mcp_file();
     if file_source(
         system,
         &Limits::default(),
@@ -535,7 +542,7 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
     .is_some_and(|source| source.state == ManagedSourceState::Read)
     {
         return Err(Refusal::new(
-            "managed_mcp_exclusive",
+            MCP_EXCLUSIVE,
             format!(
                 "Claude Code exits at startup when given --strict-mcp-config while {} is deployed. \
                  See https://code.claude.com/docs/en/managed-mcp#servers-passed-with---mcp-config-or---strict-mcp-config",
@@ -569,7 +576,7 @@ pub fn scan_with(provider: Provider, system: &SystemPaths, limits: &Limits) -> V
             found.extend(file_source(
                 system,
                 limits,
-                &dir.join("managed-mcp.json"),
+                &system.claude_mcp_file(),
                 ManagedSourceKind::McpFile,
             ));
             preferences(

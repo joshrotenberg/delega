@@ -1100,7 +1100,8 @@ doctor's own spelling; a key of a Codex file that doctor does not know is
 counted (`other_keys`) and not named.
 
 Planning refuses Claude Code with `managed_mcp_exclusive` when it can read
-and parse `managed-mcp.json`. Claude Code exits at startup if it receives
+and parse `managed-mcp.json`. Any valid JSON value counts as parsing, including
+a non-object such as `[]` or `null`. Claude Code exits at startup if it receives
 `--strict-mcp-config` while this file is deployed. An empty server map
 (`{"mcpServers":{}}`) still exercises exclusive control. A zero-byte file
 contains no JSON, so it leaves the run eligible to start. Doctor lists the

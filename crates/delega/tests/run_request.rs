@@ -1601,3 +1601,31 @@ fn cli_refuses_claude_with_managed_mcp_before_starting_the_provider() {
     assert!(error.message.contains(&path.display().to_string()));
     assert!(rig.record.read_dir().expect("records").next().is_none());
 }
+
+#[test]
+fn dry_run_refuses_claude_with_managed_mcp_before_starting_the_provider() {
+    let rig = Rig::new();
+    let path = support::managed_mcp_path(&rig.system_root());
+    std::fs::create_dir_all(path.parent().expect("managed directory")).expect("create directory");
+    for contents in ["[]", "null"] {
+        std::fs::write(&path, contents).expect("write managed MCP");
+        let out = rig.run(
+            "claude",
+            "success",
+            &[
+                "--dry-run",
+                "--output",
+                "json",
+                "--env",
+                "FAKE_VERSION_SLEEP=0",
+            ],
+        );
+        assert_eq!(out.status.code(), Some(2));
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Refused);
+        let error = result.error.expect("refusal");
+        assert_eq!(error.kind, "managed_mcp_exclusive");
+        assert!(error.message.contains(&path.display().to_string()));
+        assert!(rig.record.read_dir().expect("records").next().is_none());
+    }
+}

@@ -1139,3 +1139,35 @@ fn mcp_start_returns_a_refused_run_when_managed_mcp_blocks_claude() {
     assert_stop_status(&session, status, 0);
     rig.assert_nothing_left();
 }
+
+#[test]
+fn mcp_follow_up_refuses_claude_if_managed_mcp_appears_after_the_first_run() {
+    let rig = Rig::new();
+    let mut session = rig.start(&["--env", "FAKE_RECORD_DIR", "--env", "FAKE_VERSION_SLEEP=0"]);
+    session.initialize();
+    let started = session.call(
+        "start",
+        json!({"provider": "claude", "prompt": "success", "cwd": rig.work}),
+    );
+    let first = finished_result(&mut session, &started["run"]);
+    assert_eq!(first["outcome"], "completed", "{first}");
+    assert!(first["session_id"].is_string(), "{first}");
+    let probe = rig.record.join("probe-started");
+    std::fs::remove_file(&probe).expect("first version probe recorded");
+    let path = support::managed_mcp_path(&rig.root.join("system"));
+    std::fs::create_dir_all(path.parent().expect("managed directory")).expect("create directory");
+    std::fs::write(path, r#"{"mcpServers":{}}"#).expect("write managed MCP");
+
+    let followed = session.call(
+        "follow_up",
+        json!({"worker": started["worker"], "prompt": "more"}),
+    );
+    let second = finished_result(&mut session, &followed["run"]);
+    assert_eq!(second["outcome"], "refused", "{second}");
+    assert_eq!(second["error"]["kind"], "managed_mcp_exclusive", "{second}");
+    assert!(!probe.exists(), "the follow-up started a version probe");
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
+}

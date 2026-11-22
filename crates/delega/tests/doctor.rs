@@ -658,6 +658,7 @@ fn parsing_managed_mcp_blocks_only_claude_and_doctor_reports_no_file_values() {
         "These managed keys can change how Claude Code treats what delega passes at launch",
         "permissions: allowManagedPermissionRulesOnly",
         "authentication: apiKeyHelper",
+        "managed-mcp.json (present, see managed_mcp_exclusive under problems)",
         "--strict-mcp-config",
         "requirements.toml (read)",
         "These managed keys can change how Codex treats what delega passes at launch",
