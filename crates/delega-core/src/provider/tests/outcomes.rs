@@ -477,13 +477,22 @@ both!(
     session_mismatch
 );
 
+/// The note needs the fake's first event, which names the session, to arrive
+/// before the time limit. The limit is far above the time the fake takes to
+/// start on a loaded machine, and the fake's `started` record, written after
+/// that event, shows it came out before the limit. A missing note then means
+/// the run dropped it.
 async fn mismatch_after_timeout(provider: Provider) {
     let rig = Rig::new();
     let mut request = rig.request(provider, "hang");
     request.session.resume = Some("asked-session".into());
-    request.timeout_secs = 1;
+    request.timeout_secs = 5;
     let result = run_checked(request, resumed_as(&rig, provider, "other-session")).await;
     assert_eq!(result.outcome, Outcome::TimedOut, "{result:#?}");
+    assert!(
+        rig.record.join("started").exists(),
+        "the fake did not report its session before the time limit: {result:#?}"
+    );
     assert_eq!(result.error.expect("error").kind, "timed_out");
     assert!(
         result
