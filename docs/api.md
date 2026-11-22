@@ -985,13 +985,17 @@ Rules that hold for every tool:
   after which the response says it has not settled. A caller should keep each
   wait short and pass the cursor back instead of waiting long. These three
   limits are counted in awake time and also checked against wall time about
-  once a second of awake time. After the machine slept past a limit, the call
-  ends within about one check interval of awake time after the machine wakes,
-  plus scheduling; it does not end while the machine sleeps. A wall clock set
-  forward ends the call early only if the elapsed wall time read reaches the
-  limit while the call is still waiting, and one that reads earlier than at the
-  start counts as no time passed. A run's `timeout_secs` counts awake time
-  only: a run paused by sleep has not used its time.
+  once a second of awake time. After the machine slept past a limit, the
+  waiting ends within about one check interval of awake time after the machine
+  wakes, plus scheduling; it does not end while the machine sleeps. A wall
+  clock set forward ends the waiting early only if the elapsed wall time read
+  reaches the limit while the call is still waiting, and one that reads earlier
+  than at the start counts as no time passed. The limit ends the waiting, not
+  the response: `wait` then reports the states as they are at that moment,
+  usually with `timed_out: true`, but `timed_out: false` if something named
+  finished meanwhile; `interrupt` and `close` answer `settled: false` if the
+  run had not reported that it stopped by then. A run's `timeout_secs` counts
+  awake time only: a run paused by sleep has not used its time.
   [supervisor.md](supervisor.md#how-the-bounds-count-time) has the detail.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
   **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with

@@ -30,8 +30,9 @@ pub(super) fn system_clock() -> WallClock {
 /// Await `future` for at most `limit`, counted in awake time and in wall time,
 /// whichever is seen to pass first. `None` means the limit passed.
 ///
-/// The awake-time bound is `tokio::time::timeout`, exact as before, and keeps a
-/// limit of any length. Wall time is read at the start and again every
+/// The awake-time bound is `tokio::time::timeout`, as it was before this
+/// function existed, so it behaves exactly as it did then, including for very
+/// long limits. Wall time is read at the start and again every
 /// [`WALL_CHECK_INTERVAL`] of awake time, and the bound ends at a check that
 /// reads at least `limit` more than the start did. So after the machine slept
 /// past the limit, the bound ends within about one interval of awake time
@@ -70,7 +71,8 @@ pub(super) async fn within<F: Future>(
         }
     };
     // `timeout`, not `sleep`: `sleep` clamps a duration to about 30 years,
-    // and a caller may configure a longer bound.
+    // and a caller may configure a longer bound, which must behave as it did
+    // under `timeout` before.
     tokio::time::timeout(limit, until_wall_limit)
         .await
         .ok()
@@ -163,7 +165,7 @@ mod tests {
     }
 
     /// A library caller may configure a bound longer than the 30 years or so
-    /// that Tokio's `sleep` clamps a duration to. The bound keeps its limit.
+    /// that Tokio's `sleep` clamps a duration to. The bound does not end early.
     #[tokio::test(start_paused = true)]
     async fn a_bound_longer_than_thirty_years_has_not_ended_after_thirty_one() {
         const YEAR: Duration = Duration::from_secs(365 * 24 * 60 * 60);

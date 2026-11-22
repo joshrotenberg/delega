@@ -350,16 +350,24 @@ for its limit in awake time. It also reads the wall clock when it starts and
 again once a second of awake time (`WALL_CHECK_INTERVAL`), and ends at a check
 that reads at least the limit more than the start did.
 
-- After the machine slept past the limit, the call ends within about one check
-  interval of awake time after the machine wakes, plus scheduling. It does not
-  end while the machine sleeps, so in wall time it can outlast its limit by the
-  rest of the sleep.
+The bound ends the waiting, not the response:
+
+- After the machine slept past the limit, the waiting ends within about one
+  check interval of awake time after the machine wakes, plus scheduling. It
+  does not end while the machine sleeps, so in wall time it can outlast its
+  limit by the rest of the sleep.
 - A wall clock that reads earlier than it did at the start counts as no time
   passed, which leaves the awake-time bound in force.
-- A wall clock set forward ends the bound early only if the elapsed wall time a
-  check reads reaches the limit while the call is still waiting. Then a `wait`
-  answers `timed_out`, and an `interrupt` or `close` answers `settled: false`
-  while the stop goes on.
+- A wall clock set forward ends the waiting early only if the elapsed wall time
+  a check reads reaches the limit while the call is still waiting.
+
+Once the waiting has ended, by either clock, the call answers as it does at any
+timeout. A `wait` asks the supervisor for the states of what it named and
+reports them as they are at that moment: usually `timed_out: true`, but
+`timed_out: false` if something named finished between the end of the waiting
+and that view. An `interrupt` or `close` answers `settled: false` if the run had
+not reported that it stopped by the time the waiting ended, and the stop goes
+on; if the run reported first, the answer is the settled one.
 
 A run's time limit counts awake time only, on purpose: a run paused by sleep has
 not used its time. The preflight bound, `shutdown_bound` and retention are also
