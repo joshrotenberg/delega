@@ -1,6 +1,6 @@
 fail-on-warnings = true
-# This chapter gets its heading and content from an include at build time.
-ignore-paths = ["docs/acceptance.md"]
+# These chapters get their heading and content from an include at build time.
+ignore-paths = ["docs/acceptance.md", "docs/project/contributing.md"]
 disabled-rules = [
   "MD007",     # The API uses nested lists inside list items with continuation paragraphs.
   "MD013",     # Existing prose wraps near 80 columns and reference tables have long rows.

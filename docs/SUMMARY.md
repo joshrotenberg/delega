@@ -30,14 +30,9 @@
 - [The delega API](api.md)
 - [The supervisor](supervisor.md)
 - [Providers](providers.md)
-- [CLI]()
-- [MCP tools]()
-- [Configuration]()
-- [Contract]()
-- [Doctor]()
 
 # Project
 
 - [Guarantees and how they are tested](acceptance.md)
 - [Status and limits](project/status.md)
-- [Contributing]()
+- [Contributing](project/contributing.md)
