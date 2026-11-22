@@ -10,8 +10,8 @@
 //! value, a deny rule or the content of a file.
 //!
 //! Managed (administrator) settings found for a provider are listed with the
-//! provider ([`provider::managed`]). They are a notice: they add no problem and
-//! do not change `ready` or the exit status.
+//! provider ([`provider::managed`]). A readable, parsing Claude Code managed MCP
+//! file is also a problem that blocks Claude runs.
 //!
 //! To regenerate the schema after changing a type here, run
 //! `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas`
@@ -206,7 +206,8 @@ impl ConfigReport {
 pub struct ReportedProblem {
     /// The provider it is about, or null when it is about the whole system.
     pub provider: Option<Provider>,
-    /// A stable label. See [`Problem::kind`] and
+    /// A stable label, including `managed_mcp_exclusive` when managed MCP blocks
+    /// Claude runs. See [`Problem::kind`] and
     /// [`PROCESS_INSPECTION_UNAVAILABLE`].
     pub kind: String,
     /// A description.
@@ -285,7 +286,7 @@ pub async fn diagnose_with(
     options: &ProviderOptions,
     status: &crate::config::Status,
 ) -> Result<Report, Refusal> {
-    diagnose_at(options, status, &SystemPaths::default()).await
+    diagnose_at(options, status, &options.system_paths).await
 }
 
 /// [`diagnose_with`] with the system locations of managed settings looked for
@@ -295,9 +296,13 @@ pub async fn diagnose_at(
     status: &crate::config::Status,
     system: &SystemPaths,
 ) -> Result<Report, Refusal> {
+    let options = ProviderOptions {
+        system_paths: system.clone(),
+        ..options.clone()
+    };
     let (claude, codex) = tokio::join!(
-        doctor::check(Provider::Claude, options),
-        doctor::check(Provider::Codex, options)
+        doctor::check(Provider::Claude, &options),
+        doctor::check(Provider::Codex, &options)
     );
     let inspection = crate::process::check_inspection().await;
     let mut providers = Vec::new();
@@ -410,7 +415,10 @@ impl Report {
         let _ = writeln!(out, "working directory: {}", self.cwd);
         for found in &self.providers {
             out.push('\n');
-            provider_text(&mut out, found);
+            let managed_mcp_blocks_run = self.problems.iter().any(|problem| {
+                problem.provider == Some(found.provider) && problem.kind == managed::MCP_EXCLUSIVE
+            });
+            provider_text(&mut out, found, managed_mcp_blocks_run);
         }
         out.push('\n');
         match &self.process_inspection.detail {
@@ -472,7 +480,7 @@ fn blocks_text(blocks: Blocks) -> &'static str {
     }
 }
 
-fn provider_text(out: &mut String, found: &ProviderCheck) {
+fn provider_text(out: &mut String, found: &ProviderCheck, managed_mcp_blocks_run: bool) {
     let state = if found.ready { "ready" } else { "not ready" };
     let _ = writeln!(out, "{}: {state}", provider_name(found.provider));
     match (&found.executable, &found.executable_source) {
@@ -517,11 +525,21 @@ fn provider_text(out: &mut String, found: &ProviderCheck) {
             let _ = writeln!(out, "    {} ignored: {}", file.path, file.reason);
         }
     }
-    managed_text(out, found.provider, &found.managed_settings);
+    managed_text(
+        out,
+        found.provider,
+        &found.managed_settings,
+        managed_mcp_blocks_run,
+    );
 }
 
 /// The managed settings block of one provider. Nothing when none was found.
-fn managed_text(out: &mut String, provider: Provider, sources: &[ManagedSource]) {
+fn managed_text(
+    out: &mut String,
+    provider: Provider,
+    sources: &[ManagedSource],
+    managed_mcp_blocks_run: bool,
+) {
     if sources.is_empty() {
         return;
     }
@@ -534,6 +552,13 @@ fn managed_text(out: &mut String, provider: Provider, sources: &[ManagedSource])
     );
     for source in sources {
         let state = match source.state {
+            ManagedSourceState::Read if source.kind == ManagedSourceKind::McpFile => {
+                if managed_mcp_blocks_run {
+                    "present, see managed_mcp_exclusive under problems"
+                } else {
+                    "present"
+                }
+            }
             ManagedSourceState::Read if source.keys.is_empty() && source.note.is_none() => {
                 if source.other_keys > 0 {
                     "read, holds no keys doctor recognizes"

@@ -198,6 +198,7 @@ impl Rig {
         };
         let text = |p: &Path| p.to_string_lossy().into_owned();
         let options = ProviderOptions {
+            system_paths: delega_core::provider::managed::SystemPaths::under(root.join("system")),
             executable: Some(fakes.join(name)),
             parent_env: Some(vec![
                 (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),

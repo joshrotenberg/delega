@@ -94,6 +94,7 @@ fn go(args: &Args, executable: Option<delega_mcp::Executable>, log: &Log) -> Exi
     // by the provider layer from this process's environment, and the command
     // guard from this executable's own path.
     let mut options = ProviderOptions {
+        system_paths: super::system_paths(),
         hook: guard_command(),
         ..ProviderOptions::default()
     };

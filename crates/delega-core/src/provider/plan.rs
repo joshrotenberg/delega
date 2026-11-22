@@ -17,6 +17,7 @@ use super::deny::{self, DenyRules};
 use super::env::{self, EnvInputs, ResolvedEnv};
 use super::launch::{Built, Elide, Inputs};
 use super::limits::{MAX_OUTPUT_BYTES, VALIDATION_MESSAGE_CHARS};
+use super::managed;
 use super::options::ProviderOptions;
 use super::permissions::{Mapping, Scope};
 use super::redact::Redactor;
@@ -54,10 +55,10 @@ pub(super) fn build(request: &Request, options: &ProviderOptions) -> Result<Plan
 }
 
 /// [`build`] for a caller that wants the launch even where a run would be
-/// refused for a missing executable or for unusable settings files. Those two
-/// refusals are pushed on `problems` and the plan goes on with an empty program
-/// path and no deny rules; every other refusal is returned as before. `doctor`
-/// uses it to report the environment a worker would get next to the problems.
+/// refused for a missing executable, unusable deny rules or exclusive managed
+/// MCP. Those refusals are pushed on `problems` and the plan goes on with
+/// defaults for anything unavailable. `doctor` uses it to report the environment
+/// a worker would get next to the problems.
 pub(super) fn build_lenient(
     request: &Request,
     options: &ProviderOptions,
@@ -116,7 +117,14 @@ fn build_with(
     )?;
     let assembled = prompt::assemble(request);
     let deny = match request.provider {
-        Provider::Claude => tolerate(claude_deny_rules(&scope, &parent, options), &mut problems)?,
+        Provider::Claude => {
+            let deny = tolerate(claude_deny_rules(&scope, &parent, options), &mut problems)?;
+            tolerate(
+                managed::check_claude_mcp(&options.system_paths),
+                &mut problems,
+            )?;
+            deny
+        }
         Provider::Codex => DenyRules::default(),
     };
 

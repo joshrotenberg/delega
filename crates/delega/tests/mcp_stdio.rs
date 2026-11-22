@@ -102,11 +102,15 @@ impl Rig {
 
     /// Like [`Rig::start_with`], for the `delega` executable at `program`.
     fn start_program(&self, program: &Path, args: &[&str], more_env: &[(&str, &str)]) -> Session {
+        if !cfg!(debug_assertions) {
+            panic!("MCP fixtures require debug system root injection");
+        }
         let config = self.root.join("home");
         let mut child = Command::new(program)
             .arg("mcp")
             .args(args)
             .env_clear()
+            .env(support::SYSTEM_ROOT_ENV, self.root.join("system"))
             .envs(more_env.iter().copied())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
@@ -1102,4 +1106,68 @@ fn a_file_the_server_cannot_use_refuses_to_start_it_and_a_missing_one_does_not()
         "nothing is served"
     );
     assert_no_secret_value(&session);
+}
+
+#[test]
+fn mcp_start_returns_a_refused_run_when_managed_mcp_blocks_claude() {
+    let rig = Rig::new();
+    let path = support::managed_mcp_path(&rig.root.join("system"));
+    std::fs::create_dir_all(path.parent().expect("managed directory")).expect("create directory");
+    std::fs::write(path, r#"{"mcpServers":{}}"#).expect("write managed MCP");
+    let mut session = rig.start(&["--env", "FAKE_RECORD_DIR", "--env", "FAKE_VERSION_SLEEP=0"]);
+    session.initialize();
+    let first = session.call(
+        "start",
+        json!({
+            "provider": "claude",
+            "prompt": "success",
+            "cwd": rig.work,
+        }),
+    );
+    assert_eq!(first["state"], "finished", "{first}");
+    assert_eq!(first["outcome"], "refused", "{first}");
+    assert_eq!(first["error"]["kind"], "managed_mcp_exclusive", "{first}");
+    assert!(first.get("worker").is_none(), "{first}");
+    let read = session.call("read", json!({"run": first["run"]}));
+    assert_eq!(
+        read["result"]["error"]["kind"], "managed_mcp_exclusive",
+        "{read}"
+    );
+    assert!(rig.record.read_dir().expect("records").next().is_none());
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
+}
+
+#[test]
+fn mcp_follow_up_refuses_claude_if_managed_mcp_appears_after_the_first_run() {
+    let rig = Rig::new();
+    let mut session = rig.start(&["--env", "FAKE_RECORD_DIR", "--env", "FAKE_VERSION_SLEEP=0"]);
+    session.initialize();
+    let started = session.call(
+        "start",
+        json!({"provider": "claude", "prompt": "success", "cwd": rig.work}),
+    );
+    let first = finished_result(&mut session, &started["run"]);
+    assert_eq!(first["outcome"], "completed", "{first}");
+    assert!(first["session_id"].is_string(), "{first}");
+    let probe = rig.record.join("probe-started");
+    std::fs::remove_file(&probe).expect("first version probe recorded");
+    let path = support::managed_mcp_path(&rig.root.join("system"));
+    std::fs::create_dir_all(path.parent().expect("managed directory")).expect("create directory");
+    std::fs::write(path, r#"{"mcpServers":{}}"#).expect("write managed MCP");
+
+    let followed = session.call(
+        "follow_up",
+        json!({"worker": started["worker"], "prompt": "more"}),
+    );
+    let second = finished_result(&mut session, &followed["run"]);
+    assert_eq!(second["outcome"], "refused", "{second}");
+    assert_eq!(second["error"]["kind"], "managed_mcp_exclusive", "{second}");
+    assert!(!probe.exists(), "the follow-up started a version probe");
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
 }

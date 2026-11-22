@@ -57,8 +57,8 @@ pub struct Problem {
     /// A stable label: `provider_not_found`, `provider_not_startable`,
     /// `version_probe_failed`, `version_probe_timed_out`,
     /// `unsupported_provider_version`,
-    /// `settings_unreadable`, `deny_rules_over_limit`, or the kind of another
-    /// refusal a run would give.
+    /// `settings_unreadable`, `deny_rules_over_limit`, `managed_mcp_exclusive`,
+    /// or another refusal a run would give.
     pub kind: String,
     /// A description. It names files and counts and never repeats an
     /// environment value or a rule.

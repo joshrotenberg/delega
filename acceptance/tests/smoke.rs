@@ -9,9 +9,9 @@ use delega_acceptance::runner::Context;
 
 #[test]
 fn the_smoke_rows_meet_their_expectations_and_leave_nothing_running() {
-    let delega = delega_bin::build().expect("build delega");
+    let delega = delega_bin::build(false).expect("build delega");
     let base = std::fs::canonicalize(std::env::temp_dir()).expect("temporary directory");
-    let ctx = Context::new(delega, base);
+    let ctx = Context::new(delega, base, true);
     let rows = matrix::smoke();
     assert_eq!(rows.len(), matrix::SMOKE.len(), "a smoke row id is wrong");
 

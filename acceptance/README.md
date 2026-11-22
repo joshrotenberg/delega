@@ -45,6 +45,14 @@ to write elsewhere. `--jobs N` sets how many cases run at once (default 8) and
 for timings: the harness builds `delega` with the profile it was built with.
 `--delega PATH` measures a binary that is already built.
 
+For selections that include Claude, the release harness checks for the system
+`managed-mcp.json` before running any case. It checks only filesystem metadata,
+including whether a symlink is present. If an entry exists or absence cannot be
+confirmed, the harness stops. Use the debug harness (omit `--release` and
+`--delega`) to build a debug binary and redirect the system root to a temporary
+directory. The harness also applies the metadata check to a supplied `--delega`
+binary because its build profile is unknown.
+
 The run exits non-zero when a row that is expected to pass fails, when a
 known-gap row fails in any way other than a missing survivor, when a known gap
 is closed (`gap_closed`, below), or when a process of the run is alive at the

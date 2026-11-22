@@ -10,6 +10,7 @@ use crate::contract::request::Provider;
 use crate::contract::result::WorkerRef;
 
 use super::hook::HookCommand;
+use super::managed::SystemPaths;
 use super::progress::ProgressSink;
 
 /// Settings for one provider run that are not part of the request.
@@ -18,6 +19,9 @@ use super::progress::ProgressSink;
 /// configuration. Debug output lists environment variable names only.
 #[derive(Clone, Default)]
 pub struct ProviderOptions {
+    /// Where to look for managed settings. Defaults to the current platform's
+    /// system locations under `/`.
+    pub system_paths: SystemPaths,
     /// The provider executable, an absolute path. Without it the lookup uses
     /// `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` from the parent environment,
     /// then the provider's name on the absolute entries of `PATH`.
@@ -103,6 +107,7 @@ impl fmt::Debug for ProviderOptions {
                 .collect()
         });
         f.debug_struct("ProviderOptions")
+            .field("system_paths", &self.system_paths)
             .field("executable", &self.executable)
             .field("claude_executable", &self.claude_executable)
             .field("codex_executable", &self.codex_executable)

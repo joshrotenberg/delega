@@ -6,13 +6,14 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::Parser;
-use delega_acceptance::delega_bin::{build, workspace_root};
+use delega_acceptance::delega_bin::{build, require_absent_managed_mcp, workspace_root};
 use delega_acceptance::matrix::{self, Row};
 use delega_acceptance::procs;
 use delega_acceptance::report;
 use delega_acceptance::run_all::{close_gaps, run_all};
 use delega_acceptance::runner::{Context, GAP_CLOSED, GAP_NOT_SHOWN, MARKER_PREFIX, Measured};
 use delega_acceptance::spawn::Guarded;
+use delega_core::provider::managed::SystemPaths;
 
 #[derive(Parser)]
 #[command(about = "Black-box acceptance measurement of the built delega binary")]
@@ -118,7 +119,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let delega = match args.delega.clone().map_or_else(build, Ok) {
+    let release = !cfg!(debug_assertions);
+    // A supplied executable may be a release build regardless of our profile.
+    if (release || args.delega.is_some())
+        && rows.iter().any(|row| row.provider == "claude")
+        && let Err(err) = require_absent_managed_mcp(&SystemPaths::default().claude_mcp_file())
+    {
+        eprintln!("delega-acceptance: {err}");
+        return ExitCode::FAILURE;
+    }
+    let delega = match args.delega.clone().map_or_else(|| build(release), Ok) {
         Ok(path) => path,
         Err(err) => {
             eprintln!("delega-acceptance: {err}");
@@ -132,7 +142,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let ctx = Context::new(delega.clone(), base);
+    let ctx = Context::new(delega.clone(), base, !release);
     eprintln!(
         "running {} rows x {} on {} jobs against {}",
         rows.len(),

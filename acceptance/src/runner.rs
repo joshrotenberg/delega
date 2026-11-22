@@ -54,6 +54,7 @@ pub struct Context {
     pub fakes: PathBuf,
     pub run_id: String,
     pub base: PathBuf,
+    redirect_system_root: bool,
 }
 
 impl Context {
@@ -62,7 +63,7 @@ impl Context {
         format!("{MARKER_PREFIX}{}-", self.run_id)
     }
 
-    pub fn new(delega: PathBuf, base: PathBuf) -> Self {
+    pub fn new(delega: PathBuf, base: PathBuf, redirect_system_root: bool) -> Self {
         let run_id = format!(
             "{}{}",
             std::process::id(),
@@ -77,6 +78,7 @@ impl Context {
                 .join("crates/delega-core/src/provider/tests/fakes"),
             run_id,
             base,
+            redirect_system_root,
         }
     }
 }
@@ -247,6 +249,9 @@ impl Fixture {
             // Its own process group: a signal the harness's terminal sends
             // never reaches it, and the harness never signals its own group.
             .process_group(0);
+        if ctx.redirect_system_root {
+            command.env("DELEGA_TEST_SYSTEM_ROOT", self.dir.join("system"));
+        }
         if case.case.ps_unavailable {
             // Test-only seam: no place to look for `ps`.
             command.env("DELEGA_TEST_NO_PROCESS_LISTING", "");

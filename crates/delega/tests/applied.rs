@@ -146,7 +146,10 @@ fn a_real_run_reports_the_file_and_the_layer_that_set_each_field() {
     .sum();
     assert_eq!(passed["total"].as_u64(), Some(parts), "{env}");
     let withheld = &env["withheld"];
-    assert_eq!(withheld["never_passed"], 2, "the two DELEGA_*_BIN: {env}");
+    assert_eq!(
+        withheld["never_passed"], 3,
+        "provider binaries and test system root: {env}"
+    );
     assert!(withheld["not_allowlisted"].as_u64() >= Some(1), "{env}");
     assert_eq!(
         withheld["total"].as_u64(),

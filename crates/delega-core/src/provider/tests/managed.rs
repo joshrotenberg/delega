@@ -9,11 +9,14 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use crate::contract::outcome::Outcome;
 use crate::contract::request::Provider;
+
+use super::{Rig, run_checked};
 use crate::provider::managed::{
     CLAUDE_GUIDANCE, CODEX_GUIDANCE, Limits, MAX_DROP_IN_FILES, MAX_MANAGED_FILE_BYTES,
     ManagedFileCounts, ManagedKeyCategory, ManagedSource, ManagedSourceKind, ManagedSourceState,
-    Platform, SystemPaths, Unread, guidance, read_stable, scan, scan_with,
+    Platform, SystemPaths, Unread, check_claude_mcp, guidance, read_stable, scan, scan_with,
 };
 use crate::test_spawn::Guarded;
 
@@ -317,8 +320,7 @@ fn a_managed_mcp_file_is_reported_by_its_presence_without_its_servers() {
     assert_eq!(found[0].kind, ManagedSourceKind::McpFile);
     assert_eq!(found[0].state, ManagedSourceState::Read);
     assert_eq!(found[0].keys, Vec::new());
-    let note = found[0].note.as_deref().expect("note");
-    assert!(note.contains("--strict-mcp-config"), "{note}");
+    assert_eq!(found[0].note, None);
     assert!(!format!("{found:?}").contains(SECRET));
     // On Linux it is looked for under /etc/claude-code.
     root.write(&format!("{LINUX_CLAUDE}/managed-mcp.json"), "{}");
@@ -331,7 +333,6 @@ fn a_managed_mcp_file_is_reported_by_its_presence_without_its_servers() {
 fn a_file_that_cannot_be_parsed_is_present_and_unreadable_with_no_content() {
     for content in [
         format!("not json {SECRET}"),
-        format!(r#"["{SECRET}"]"#),
         format!(r#"{{"disableAllHooks": true, "{SECRET}"#),
     ] {
         let root = Root::new();
@@ -636,11 +637,15 @@ fn an_empty_settings_file_is_read_as_an_empty_object_as_claude_code_does() {
 }
 
 #[test]
-fn a_pipe_where_a_file_belongs_is_unreadable_and_does_not_block() {
+fn managed_fifos_neither_hang_nor_refuse_a_claude_plan() {
     let root = Root::new();
     let dir = root.dir.path().join(MAC_CLAUDE);
     std::fs::create_dir_all(dir.join("managed-settings.d")).expect("create directories");
-    for name in ["managed-settings.json", "managed-settings.d/a.json"] {
+    for name in [
+        "managed-settings.json",
+        "managed-settings.d/a.json",
+        "managed-mcp.json",
+    ] {
         let status = std::process::Command::new("/usr/bin/mkfifo")
             .arg(dir.join(name))
             .guarded_status()
@@ -655,15 +660,17 @@ fn a_pipe_where_a_file_belongs_is_unreadable_and_does_not_block() {
     };
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        assert_eq!(check_claude_mcp(&system), Ok(()));
         let _ = send.send(scan(Provider::Claude, &system));
     });
     let found = receive
         .recv_timeout(std::time::Duration::from_secs(20))
         .expect("the scan returned");
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
     assert_eq!(found[0].state, ManagedSourceState::Unreadable);
     assert_eq!(found[1].state, ManagedSourceState::Unreadable);
     assert_eq!(found[1].files, counts(1, 1, false));
+    assert_eq!(found[2].state, ManagedSourceState::Unreadable);
 }
 
 #[test]
@@ -1132,7 +1139,7 @@ fn one_sentence_per_provider_points_at_the_providers_reference() {
         .chain(&codex)
         .filter_map(|s| s.note.as_ref())
         .collect();
-    assert_eq!(notes.len(), 4, "{notes:?}");
+    assert_eq!(notes.len(), 3, "{notes:?}");
     for note in notes {
         assert!(
             !note.is_empty() && !note.contains('\u{2014}') && !note.contains("  "),
@@ -1315,4 +1322,93 @@ fn a_member_name_that_is_not_text_hides_only_that_member() {
         claude_names(r#"{"env":{},"permissions":{"deny":[]}}"#),
         ["permissions.deny", "env"]
     );
+}
+
+#[tokio::test]
+async fn valid_managed_mcp_refuses_claude_before_even_its_version_probe() {
+    for body in [
+        r#"{"mcpServers":{}}"#,
+        r#"{"mcpServers":{"sk-distinctive-managed-value-4417":{"command":"x"}},"number":1e9999}"#,
+    ] {
+        let rig = Rig::new();
+        let root = Root::new();
+        let path = root.write(&format!("{MAC_CLAUDE}/managed-mcp.json"), body);
+        let mut options = rig.options(Provider::Claude);
+        options.system_paths = SystemPaths {
+            root: root.dir.path().to_path_buf(),
+            platform: Platform::Macos,
+        };
+        options
+            .env_set
+            .push(("FAKE_VERSION_SLEEP".into(), "0".into()));
+        let result = run_checked(rig.request(Provider::Claude, "success"), options).await;
+        assert_eq!(result.outcome, Outcome::Refused);
+        let error = result.error.expect("refusal");
+        assert_eq!(error.kind, "managed_mcp_exclusive");
+        assert!(error.message.contains(&text(&path)));
+        assert!(error.message.contains("--strict-mcp-config"));
+        assert!(
+            error
+                .message
+                .contains("https://code.claude.com/docs/en/managed-mcp")
+        );
+        assert!(!error.message.contains(SECRET));
+        assert!(rig.record.read_dir().expect("records").next().is_none());
+    }
+}
+
+#[tokio::test]
+async fn absent_invalid_and_zero_byte_managed_mcp_leave_claude_runnable() {
+    let rig = Rig::new();
+    let root = Root::new();
+    let mut options = rig.options(Provider::Claude);
+    options.system_paths = SystemPaths {
+        root: root.dir.path().to_path_buf(),
+        platform: Platform::Linux,
+    };
+    for body in [None, Some("{"), Some("")] {
+        if let Some(body) = body {
+            root.write(&format!("{LINUX_CLAUDE}/managed-mcp.json"), body);
+        }
+        let result = run_checked(rig.request(Provider::Claude, "success"), options.clone()).await;
+        assert_eq!(result.outcome, Outcome::Completed, "{body:?}: {result:?}");
+    }
+}
+
+#[test]
+fn a_managed_mcp_file_that_cannot_be_read_does_not_refuse_claude() {
+    let root = Root::new();
+    let path = root.write(
+        &format!("{MAC_CLAUDE}/managed-mcp.json"),
+        r#"{"mcpServers":{}}"#,
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    // A privileged caller can still read a file with mode 000.
+    if std::fs::File::open(&path).is_err() {
+        let rig = Rig::new();
+        let mut options = rig.options(Provider::Claude);
+        options.system_paths = SystemPaths {
+            root: root.dir.path().to_path_buf(),
+            platform: Platform::Macos,
+        };
+        crate::provider::dry_run(&rig.request(Provider::Claude, "success"), &options)
+            .expect("unreadable managed MCP must not refuse planning");
+    }
+}
+
+#[tokio::test]
+async fn a_parsing_claude_managed_mcp_file_does_not_refuse_codex() {
+    let rig = Rig::new();
+    let root = Root::new();
+    root.write(
+        &format!("{LINUX_CLAUDE}/managed-mcp.json"),
+        r#"{"mcpServers":{}}"#,
+    );
+    let mut options = rig.options(Provider::Codex);
+    options.system_paths = SystemPaths {
+        root: root.dir.path().to_path_buf(),
+        platform: Platform::Linux,
+    };
+    let result = run_checked(rig.request(Provider::Codex, "success"), options).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:?}");
 }

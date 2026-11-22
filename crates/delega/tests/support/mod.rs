@@ -103,8 +103,7 @@ pub struct Rig {
     pub record: PathBuf,
 }
 
-/// The test-only variable that moves where `delega doctor` looks for managed
-/// settings.
+/// The test-only variable that moves the managed settings lookup.
 pub const SYSTEM_ROOT_ENV: &str = "DELEGA_TEST_SYSTEM_ROOT";
 
 fn fake(provider: &str) -> PathBuf {
@@ -156,10 +155,14 @@ impl Rig {
     /// streams as they are set, so they are set here; a caller that wants
     /// others sets them after this.
     pub fn configure(&self, command: &mut Command) {
+        if !cfg!(debug_assertions) {
+            panic!("CLI fixtures require debug system root injection");
+        }
         let config = self.path("home");
         command.captured();
         command
             .env_clear()
+            .env(SYSTEM_ROOT_ENV, self.system_root())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &config)
@@ -170,31 +173,10 @@ impl Rig {
             .env("FAKE_RECORD_DIR", &self.record);
     }
 
-    /// The directory `delega doctor` looks for system locations under in
-    /// tests, in place of `/`. Nothing creates it; a test that wants managed
-    /// settings writes them below it.
+    /// A temporary root for managed settings. A test that needs a managed
+    /// source writes it below this directory.
     pub fn system_root(&self) -> PathBuf {
         self.path("system")
-    }
-
-    /// [`Rig::command`] for `delega doctor`: every test that runs doctor
-    /// starts from this, so doctor looks for managed settings under
-    /// [`Rig::system_root`] and never reads the real system locations. The
-    /// variable is not set for other commands, whose environment counts it
-    /// would change. `delega` honours it only in a build with debug
-    /// assertions, which is what `cargo test` builds.
-    pub fn doctor_command(&self) -> Command {
-        // A build without debug assertions ignores the variable and would look
-        // at the real system locations, so such a build must not get this far.
-        if !cfg!(debug_assertions) {
-            panic!(
-                "the doctor tests need a build with debug assertions: a release build ignores \
-                 DELEGA_TEST_SYSTEM_ROOT and would read the real managed settings locations"
-            );
-        }
-        let mut command = self.command();
-        command.env(SYSTEM_ROOT_ENV, self.system_root());
-        command
     }
 
     /// Run `delega` with these arguments to its end.
@@ -516,4 +498,13 @@ pub fn result_of(out: &Output) -> RunResult {
     });
     assert_eq!(result.validate(), Ok(()), "{result:#?}");
     result
+}
+
+/// The fixture path for Claude Code's managed MCP file on this platform.
+pub fn managed_mcp_path(root: &Path) -> PathBuf {
+    root.join(if cfg!(target_os = "macos") {
+        "Library/Application Support/ClaudeCode/managed-mcp.json"
+    } else {
+        "etc/claude-code/managed-mcp.json"
+    })
 }

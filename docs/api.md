@@ -119,7 +119,8 @@ reported. For `delega run` the first of all is the configuration file
 from it; see [Configuration file](#configuration-file). Then `invalid_request`, `native_arg_rejected`, `invalid_answer_schema`,
 `cwd_unusable` or `directory_unusable`, `provider_not_found`, Claude Code's
 `settings_unreadable` and `deny_rules_over_limit` from reading the settings
-files, then the provider's own mapping of the request (for Claude Code:
+files, `managed_mcp_exclusive` from a readable, parsing Claude Code
+`managed-mcp.json`, then the provider's own mapping of the request (for Claude Code:
 `cwd_unusable` or `directory_unusable` for a path it cannot write as a rule,
 `unsupported_command`, and, for a generated settings argument over its bound,
 `deny_rules_over_limit` when user deny rules are part of it and
@@ -575,7 +576,7 @@ Behavior:
   override. There is no flag for it. `--allow-command` for Claude Code is enforced by this executable's own
   hidden `command-guard` subcommand, which Claude Code starts before a `Bash`
   call; it is not part of the public surface.
-- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface. `DELEGA_TEST_SYSTEM_ROOT`, when set to an absolute path, makes `delega doctor` look for managed settings under that directory in place of `/`, so the tests never read the real system locations. It is honoured only in a build with debug assertions, which is what `cargo test` builds: a release build ignores it, so a variable inherited from the environment cannot hide what is on the system. Under such a directory doctor opens nothing that resolves outside it. It changes no run and is not part of the public surface either.
+- **Test-only variable.** `DELEGA_TEST_NO_PROCESS_LISTING`, when set to any value, makes process inspection unavailable so `cleanup` is reported as not confirmed; it is for the acceptance harness, can only make the verdict weaker, and is not part of the public surface. `DELEGA_TEST_SYSTEM_ROOT`, when set to an absolute path, makes planning and `delega doctor` look for managed settings under that directory in place of `/`, so the tests never read the real system locations. It is honoured only in a build with debug assertions, which is what `cargo test` builds: a release build ignores it, so a variable inherited from the environment cannot hide what is on the system. Under such a directory delega only opens managed sources that resolve inside it. The variable is private to the test harness.
 - **Scope.** The CLI runs in the foreground only. It does not list or stop runs
   started by another process; supervising several workers is done over MCP.
 
@@ -634,10 +635,9 @@ It reports, for `claude` and `codex` each:
   and what doctor cannot see, such as settings a provider fetches from its
   server.
 
-**Managed settings are a notice.** They are not in `problems`, and they do not
-change a provider's `ready`, the report's `ready` or the exit status: a provider
-applies them itself and delega cannot tell from a file whether a given run will
-be refused.
+A readable, parsing Claude Code `managed-mcp.json` is listed in
+`managed_settings` and produces the Claude problem `managed_mcp_exclusive`
+with `blocks: run`. Other managed settings are informational.
 
 It also reports the configuration file: the path it looked at and what chose it
 (`DELEGA_CONFIG`, `XDG_CONFIG_HOME` or `HOME`; null when there is nowhere to
@@ -674,6 +674,7 @@ fails for it.
 | `unsupported_provider_version` | `command_grants` | Claude Code is older than 2.1.325 or its version could not be read, so a run with `--allow-command` is refused. Other runs go ahead. |
 | `settings_unreadable` | `run` | A Claude Code settings file in the user's or the current directory's places exists and cannot be used, so every Claude run here is refused. The message names the file. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound, so every Claude run here is refused. |
+| `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`. The message names the file and links to the Claude Code reference. |
 | `config_unreadable` | `run` | The configuration file exists and cannot be used as a file (unreadable, not a regular file, owned by another user, writable by group or others, a link that is not trusted, over 1 MiB), or `DELEGA_CONFIG` names a file that does not exist or a path that is not absolute. About the whole system, so every run is stopped. Nothing from the file is applied to the rest of the report. |
 | `config_invalid` | `run` | The file is not UTF-8 or TOML, has an unknown key, a value of the wrong type or outside its bound, or a path that is not absolute. The message names the key or the line. |
 | `invalid_env_name`, `forbidden_env_name` | `run` | A name in the file's `[env]` that `--env` would refuse for the same reason. |

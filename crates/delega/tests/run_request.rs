@@ -1174,10 +1174,10 @@ fn a_dry_run_groups_the_names_counts_the_withheld_and_prints_no_value() {
                 .contains(&"NAMED_ONE".into())
         );
         assert_eq!(env["named_not_set"][0], "NOT_SET_ANYWHERE");
-        // Nine withheld: the other provider's key and its configuration
-        // variable the rig sets, a token, EDITOR, JAVA_HOME, DATABASE_URL,
-        // NAMED_TOKEN, and the two DELEGA_*_BIN variables the rig sets.
-        assert_eq!(env["withheld_count"], 9, "{env}");
+        // Ten withheld: the other provider's key and config path, a token,
+        // EDITOR, JAVA_HOME, DATABASE_URL, NAMED_TOKEN, the two provider
+        // binary overrides and the test system root.
+        assert_eq!(env["withheld_count"], 10, "{env}");
         assert!(!text(&out.stdout).contains(CANARY));
         assert!(!rig.record.join("argv").exists(), "{provider} was started");
     }
@@ -1573,4 +1573,59 @@ fn a_profile_with_strict_merges_and_refuses() {
         "permissions_not_enforceable"
     );
     assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn cli_refuses_claude_with_managed_mcp_before_starting_the_provider() {
+    let rig = Rig::new();
+    let path = support::managed_mcp_path(&rig.system_root());
+    std::fs::create_dir_all(path.parent().expect("managed directory")).expect("create directory");
+    std::fs::write(&path, r#"{"mcpServers":{}}"#).expect("write managed MCP");
+    let out = rig
+        .command()
+        .args(rig.run_args(
+            "claude",
+            "success",
+            &["--output", "json", "--env", "FAKE_VERSION_SLEEP=0"],
+        ))
+        .guarded_output()
+        .expect("run delega");
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(Outcome::Refused.exit_status()))
+    );
+    let result = result_of(&out);
+    assert_eq!(result.outcome, Outcome::Refused);
+    let error = result.error.expect("refusal");
+    assert_eq!(error.kind, "managed_mcp_exclusive");
+    assert!(error.message.contains(&path.display().to_string()));
+    assert!(rig.record.read_dir().expect("records").next().is_none());
+}
+
+#[test]
+fn dry_run_refuses_claude_with_managed_mcp_before_starting_the_provider() {
+    let rig = Rig::new();
+    let path = support::managed_mcp_path(&rig.system_root());
+    std::fs::create_dir_all(path.parent().expect("managed directory")).expect("create directory");
+    for contents in ["[]", "null"] {
+        std::fs::write(&path, contents).expect("write managed MCP");
+        let out = rig.run(
+            "claude",
+            "success",
+            &[
+                "--dry-run",
+                "--output",
+                "json",
+                "--env",
+                "FAKE_VERSION_SLEEP=0",
+            ],
+        );
+        assert_eq!(out.status.code(), Some(2));
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Refused);
+        let error = result.error.expect("refusal");
+        assert_eq!(error.kind, "managed_mcp_exclusive");
+        assert!(error.message.contains(&path.display().to_string()));
+        assert!(rig.record.read_dir().expect("records").next().is_none());
+    }
 }
