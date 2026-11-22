@@ -482,6 +482,8 @@ case "$mode" in
     init
     final '"fake final answer"'
     done_ok
+    # Written once the result is out, so a test can tell it arrived.
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/result-written"
     trap '' TERM
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done
