@@ -338,11 +338,13 @@ fn a_value_that_overlaps_a_private_key_begin_marker_does_not_hide_the_key() {
         redactor.apply(&format!("before {open}")),
         "before [redacted]"
     );
-    // A value across the end line: the block is still one marker.
+    // A value across the end line. With the value replaced the block has no
+    // end line left, and a block without one goes to the end of the text:
+    // more is removed than the block, never less.
     let redactor = Redactor::new(["KEY-----tail-of-value".to_string()]);
     let text =
         "x -----BEGIN PRIVATE KEY-----\nMIIEkeybody\n-----END PRIVATE KEY-----tail-of-value y";
-    assert_eq!(redactor.apply(text), "x [redacted] y");
+    assert_eq!(redactor.apply(text), "x [redacted]");
     // A begin marker that is not a key is only text, with or without a value
     // on it.
     let redactor = Redactor::new(["OVERLAP-----BEGIN".to_string()]);
@@ -403,4 +405,225 @@ fn a_cut_capture_with_no_excerpt_says_so_whatever_left_it_without_one() {
     assert_eq!(stderr_note(&capture(&blank_end, false), &none()), "");
     assert_eq!(stderr_note(&capture(b"", false), &none()), "");
     assert_eq!(stderr_note(&capture(b" \n ", false), &none()), "");
+}
+
+/// `apply` and `apply_cut` of `text` with these known values: neither may
+/// show any of `bodies`.
+fn hides_bodies(values: &[&str], text: &str, bodies: &[&str]) {
+    let redactor = Redactor::new(values.iter().map(|v| v.to_string()));
+    for (which, out) in [
+        ("apply", redactor.apply(text)),
+        ("apply_cut", redactor.apply_cut(text.as_bytes())),
+    ] {
+        for body in bodies {
+            assert!(
+                !out.contains(body),
+                "{which} shows {body}\nvalues: {values:?}\ntext: {text}\nout: {out}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_begin_line_that_is_a_known_value_does_not_expose_the_key_after_it() {
+    // On the text as given, the first begin line has no key of its own and
+    // takes the next block's begin line for its end; the value covers the
+    // first line; the second key's body was left.
+    let text = "-----BEGIN RSA PRIVATE KEY-----\n-----BEGIN PRIVATE KEY-----\nMIIEsecondbody0123\n\
+                -----END PRIVATE KEY-----\nafter";
+    hides_bodies(
+        &["-----BEGIN RSA PRIVATE KEY-----"],
+        text,
+        &["MIIEsecondbody0123"],
+    );
+    let redactor = Redactor::new(["-----BEGIN RSA PRIVATE KEY-----".to_string()]);
+    assert_eq!(redactor.apply(text), "[redacted]\nafter");
+}
+
+#[test]
+fn a_known_value_with_the_end_marker_inside_a_key_body_does_not_end_the_key_early() {
+    let text = "-----BEGIN PRIVATE KEY-----\nMIIEfirstline\nvalue-with-PRIVATE KEY-----\n\
+                MIIEafterthevalue\n-----END PRIVATE KEY-----\nafter";
+    hides_bodies(
+        &["value-with-PRIVATE KEY-----"],
+        text,
+        &["MIIEfirstline", "MIIEafterthevalue"],
+    );
+    let redactor = Redactor::new(["value-with-PRIVATE KEY-----".to_string()]);
+    assert_eq!(redactor.apply(text), "[redacted]\nafter");
+}
+
+#[test]
+fn known_values_on_private_key_markers_never_expose_a_key_body() {
+    const BLOCK: &str = "-----BEGIN PRIVATE KEY-----\nMIIEbodyone\nMIIEbodytwo\n\
+                         -----END PRIVATE KEY-----";
+    const RSA: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIErsabody\n-----END RSA PRIVATE KEY-----";
+    let one = ["MIIEbodyone", "MIIEbodytwo"];
+    let both = ["MIIEbodyone", "MIIEbodytwo", "MIIErsabody"];
+    let adjacent = format!("{BLOCK}\n{RSA}\nafter");
+    let touching = format!("{BLOCK}{RSA}");
+    let after_prefix = format!("a-long-prefix-OVERLAP{BLOCK}\nafter");
+    let lone_then_block = format!("-----BEGIN EC PRIVATE KEY-----\n{BLOCK}\nafter");
+    let open = "before\n-----BEGIN PRIVATE KEY-----\nMIIEbodyone\nMIIEbodytwo";
+    let cases: &[(&[&str], &str, &[&str])] = &[
+        // No value at all.
+        (&[], &adjacent, &both),
+        // A value that is a whole begin line.
+        (&["-----BEGIN PRIVATE KEY-----"], &adjacent, &both),
+        (&["-----BEGIN RSA PRIVATE KEY-----"], &adjacent, &both),
+        (
+            &[
+                "-----BEGIN PRIVATE KEY-----",
+                "-----BEGIN RSA PRIVATE KEY-----",
+            ],
+            &adjacent,
+            &both,
+        ),
+        (&["-----BEGIN PRIVATE KEY-----"], open, &one),
+        (&["-----BEGIN EC PRIVATE KEY-----"], &lone_then_block, &one),
+        // A value that overlaps a begin marker, from before it and from
+        // inside it.
+        (
+            &["a-long-prefix-OVERLAP", "OVERLAP-----BEGIN"],
+            &after_prefix,
+            &one,
+        ),
+        (&["OVERLAP-----BEGIN PRIVATE"], &after_prefix, &one),
+        (&["GIN PRIVATE KEY-----\nMIIEbody"], &adjacent, &both),
+        (&["-BEGIN RSA"], &adjacent, &both),
+        // A value that is a whole block, a whole end line, or part of one.
+        (&[BLOCK], &adjacent, &both),
+        (&[RSA], &adjacent, &both),
+        (&[BLOCK, RSA], &touching, &both),
+        (&["-----END PRIVATE KEY-----"], &adjacent, &both),
+        (&["-----END RSA PRIVATE KEY-----"], &adjacent, &both),
+        (&["KEY-----\n-----BEGIN RSA"], &adjacent, &both),
+        // Two blocks with nothing between them, and a value across the seam.
+        (&[], &touching, &both),
+        (&["KEY----------BEGIN"], &touching, &both),
+        // Values in a body.
+        (&["MIIEbodyone"], &adjacent, &both),
+        (&["bodyone\nMIIEbody"], &adjacent, &both),
+    ];
+    for (values, text, bodies) in cases {
+        hides_bodies(values, text, bodies);
+    }
+}
+
+/// A small fixed-seed generator (a 64-bit linear congruential one), so the
+/// test below is the same on every run.
+struct Seeded(u64);
+
+impl Seeded {
+    fn below(&mut self, limit: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 33) as usize) % limit
+    }
+
+    fn chance(&mut self, of: usize) -> bool {
+        self.below(of) == 0
+    }
+}
+
+/// Generated texts of plain lines and private key blocks, with known values
+/// placed where they interfere with one of the two ways blocks are looked
+/// for, never both ways for the same block. What is generated:
+///
+/// - Every block has its own label (`K7 PRIVATE KEY`), so a value on one
+///   block's begin line is not on another's.
+/// - A block is of one of three kinds. A plain one has no value on its
+///   markers. A block hidden from the look at the replaced text has a value
+///   on its begin marker: the whole begin line, its start, or the end of the
+///   line before it and the marker. A block hidden from the look at the given
+///   text has a begin line with no key right before it, or a line that holds
+///   the end marker in its body, and that line is a known value.
+/// - Further values are whole body lines, whole plain lines, and the whole
+///   text of blocks of the first two kinds.
+/// - The last block can lack its end line.
+///
+/// Not generated, because the output can show a body line then: a block
+/// defeated both ways (for example a body line holding the end marker in a
+/// block whose begin marker a value overlaps, or whose begin marker starts a
+/// cut capture and ends a value), and a value on an end line.
+#[test]
+fn generated_values_on_private_key_markers_never_expose_a_key_body() {
+    let mut random = Seeded(0x00C0_FFEE);
+    let mut kinds = [0usize; 3];
+    for round in 0..400 {
+        // A first line that ends no value: `apply_cut` replaces the end of a
+        // value at the start, and on a begin marker that is a value on it.
+        let mut text = String::from("the text starts here\n");
+        let mut values: Vec<String> = Vec::new();
+        let mut bodies: Vec<String> = Vec::new();
+        let units = 1 + random.below(6);
+        for unit in 0..units {
+            let id = format!("{round}x{unit}");
+            if random.chance(3) {
+                let line = format!("plain line {id} of ordinary text");
+                text.push_str(&line);
+                text.push('\n');
+                if random.chance(4) {
+                    values.push(line);
+                }
+                continue;
+            }
+            let begin = format!("-----BEGIN K{id} PRIVATE KEY-----");
+            let kind = random.below(3);
+            kinds[kind] += 1;
+            // Hidden from the look at the given text, in one of two ways.
+            let lone_begin_before = kind == 2 && random.chance(2);
+            let early_end = kind == 2 && !lone_begin_before;
+            if lone_begin_before {
+                let lone = format!("-----BEGIN L{id} PRIVATE KEY-----");
+                text.push_str(&lone);
+                text.push('\n');
+                values.push(lone);
+            }
+            // Hidden from the look at the replaced text.
+            if kind == 1 {
+                let before = text
+                    .strip_suffix('\n')
+                    .filter(|t| t.ends_with("ordinary text"));
+                match (random.below(3), before) {
+                    (0, _) => values.push(begin.clone()),
+                    (1, Some(before)) => {
+                        values.push(format!("{}\n-----BEGIN", &before[before.len() - 8..]));
+                    }
+                    _ => values.push(format!("-----BEGIN K{id} PRIV")),
+                }
+            }
+            let mut block = format!("{begin}\n");
+            for line in 0..1 + random.below(3) {
+                let body = format!("MIIE{id}y{line}Body");
+                block.push_str(&body);
+                block.push('\n');
+                if random.chance(5) {
+                    values.push(body.clone());
+                }
+                bodies.push(body);
+                if early_end && line == 0 {
+                    let piece = format!("piece{id}-PRIVATE KEY-----");
+                    block.push_str(&piece);
+                    block.push('\n');
+                    values.push(piece);
+                }
+            }
+            let open = unit + 1 == units && random.chance(3);
+            if !open {
+                block.push_str(&format!("-----END K{id} PRIVATE KEY-----\n"));
+                if kind != 2 && random.chance(4) {
+                    values.push(block.trim_end().to_string());
+                }
+            }
+            text.push_str(&block);
+        }
+        let values: Vec<&str> = values.iter().map(String::as_str).collect();
+        let bodies: Vec<&str> = bodies.iter().map(String::as_str).collect();
+        hides_bodies(&values, &text, &bodies);
+    }
+    // Every kind of block was generated many times.
+    assert!(kinds.iter().all(|count| *count > 100), "{kinds:?}");
 }

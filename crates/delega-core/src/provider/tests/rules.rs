@@ -396,9 +396,10 @@ fn credentials_are_redacted_after_equals_colon_quotes_commas_and_in_urls_and_jso
 /// builds), and that count must stay within a constant factor of the length of
 /// the input at two sizes. A counted search that looked at the rest of the text
 /// for every begin marker counts a number that grows with the square of the
-/// length, far over the factor. Linear work counts about seven times the
-/// length here: the scan runs twice (on the text as given, and again after
-/// known values are replaced), and each run counts the text once for the
+/// length, far over the factor. Linear work counts about eight times the
+/// length here: the scan runs twice when the text holds no known value (on the
+/// text as given, and on the result; a third time, on the text with the values
+/// replaced, when it holds one), and each run counts the text once for the
 /// search and at most 64 bytes of label window for each 22 byte marker.
 ///
 /// The test sees only searches that call `redact::examined`: a new search in
@@ -429,7 +430,7 @@ fn private_key_removal_is_linear_in_the_input() {
             "{} bytes were scanned for {} bytes of input; linear is about {}",
             examined,
             noise.len(),
-            7 * noise.len()
+            8 * noise.len()
         );
     }
     let keys = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".repeat(50_000);
