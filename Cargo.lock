@@ -318,6 +318,7 @@ name = "delega-mcp"
 version = "0.1.0-dev"
 dependencies = [
  "delega-core",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

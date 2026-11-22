@@ -903,10 +903,24 @@ fn a_server_whose_executable_was_replaced_after_it_started_says_so_over_stdio() 
     let current = read_identity(&mut session);
     assert!(current.get("stale_server").is_none(), "{current}");
 
-    // What `delega plugin install` does: a staged file renamed over the path,
-    // and the identity of the build it installed beside `bin`.
+    // What `delega plugin install` does, here with identical bytes: a staged
+    // file renamed over the path, and the identity of the build it installed
+    // beside `bin`. The size is the same, and the modification time is set to
+    // be, so the report rests on the file being another one.
     let staged = plugin.join("bin/delega.staged");
-    std::fs::write(&staged, b"a later build").expect("write staged");
+    std::fs::copy(env!("CARGO_BIN_EXE_delega"), &staged).expect("stage a copy");
+    let before = std::fs::metadata(&executable)
+        .and_then(|status| status.modified())
+        .expect("modification time");
+    std::fs::File::options()
+        .write(true)
+        .open(&staged)
+        .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(before)))
+        .expect("set the modification time");
+    assert_eq!(
+        std::fs::metadata(&staged).expect("status").len(),
+        std::fs::metadata(&executable).expect("status").len()
+    );
     std::fs::rename(&staged, &executable).expect("rename over the executable");
     std::fs::write(
         plugin.join("IDENTITY.json"),

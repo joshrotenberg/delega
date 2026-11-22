@@ -5,7 +5,9 @@
 //! plugin is (`plugin/bin/delega` with `plugin/IDENTITY.json` beside `bin`),
 //! never the test binary. The supervisors start nothing.
 
+use std::fs::{File, FileTimes};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use delega_core::contract::partial::PartialRequest;
 use delega_core::provider::ProviderOptions;
@@ -16,6 +18,32 @@ use tempfile::TempDir;
 use tower_mcp::TestClient;
 
 const RUNNING: &str = "running-revision";
+
+/// The bytes of the executable the server records.
+const BYTES: &[u8] = b"the build that is running";
+
+/// When `path` was last modified.
+fn modified(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .expect("status")
+        .modified()
+        .expect("modification time")
+}
+
+/// Set when `path` was last modified.
+fn set_modified(path: &Path, to: SystemTime) {
+    File::options()
+        .write(true)
+        .open(path)
+        .expect("open")
+        .set_times(FileTimes::new().set_modified(to))
+        .expect("set the modification time");
+}
+
+fn inode(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).expect("status").ino()
+}
 
 /// A plugin directory with an executable, and a server that recorded it.
 struct Installed {
@@ -32,7 +60,7 @@ impl Installed {
         let plugin = tmp.path().join("plugin");
         std::fs::create_dir_all(plugin.join("bin")).expect("create bin");
         let executable = plugin.join("bin/delega");
-        std::fs::write(&executable, b"the build that is running").expect("write executable");
+        std::fs::write(&executable, BYTES).expect("write executable");
         let recorded = Executable::at(&executable).expect("record the executable");
         assert_eq!(recorded.path(), executable);
         let (supervisor, client) = server(Some(recorded)).await;
@@ -172,6 +200,53 @@ async fn an_executable_replaced_by_rename_is_reported_as_replaced() {
 }
 
 #[tokio::test]
+async fn an_identical_file_renamed_over_the_executable_is_reported_as_replaced() {
+    // What installing identical bytes does. The size and the modification
+    // time are the same, so only the inode tells the files apart.
+    let mut installed = Installed::new().await;
+    assert_eq!(installed.stale_server().await, Value::Null);
+    let before = modified(&installed.executable);
+    let old_inode = inode(&installed.executable);
+    let staged = installed.plugin.join("bin/delega.staged");
+    std::fs::write(&staged, BYTES).expect("write staged");
+    set_modified(&staged, before);
+    std::fs::rename(&staged, &installed.executable).expect("rename over the executable");
+    assert_eq!(std::fs::read(&installed.executable).expect("read"), BYTES);
+    assert_eq!(modified(&installed.executable), before);
+    assert_ne!(inode(&installed.executable), old_inode);
+    let stale = installed.stale_server().await;
+    assert_eq!(stale["change"], "replaced", "{stale}");
+    installed.supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_same_size_rewrite_in_place_at_another_time_is_reported_as_replaced() {
+    // The same inode and the same size: only the modification time differs.
+    let mut installed = Installed::new().await;
+    assert_eq!(installed.stale_server().await, Value::Null);
+    let before = modified(&installed.executable);
+    let old_inode = inode(&installed.executable);
+    let mut other = BYTES.to_vec();
+    other.reverse();
+    File::options()
+        .write(true)
+        .open(&installed.executable)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &other))
+        .expect("rewrite in place");
+    set_modified(&installed.executable, before + Duration::from_secs(10));
+    assert_eq!(inode(&installed.executable), old_inode);
+    assert_eq!(
+        std::fs::metadata(&installed.executable)
+            .expect("status")
+            .len(),
+        BYTES.len() as u64
+    );
+    let stale = installed.stale_server().await;
+    assert_eq!(stale["change"], "replaced", "{stale}");
+    installed.supervisor.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_executable_rewritten_in_place_is_reported_as_replaced() {
     let mut installed = Installed::new().await;
     assert_eq!(installed.stale_server().await, Value::Null);
@@ -253,6 +328,34 @@ async fn the_installed_revision_is_absent_when_the_identity_is_missing_or_unusab
         stale.get("installed_revision").is_none(),
         "directory: {stale}"
     );
+    installed.supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_identity_that_is_a_fifo_with_no_writer_is_ignored_and_holds_no_call() {
+    let mut installed = Installed::new().await;
+    installed.replace_by_rename();
+    let fifo = installed.plugin.join("IDENTITY.json");
+    let made = crate::guarded_spawn(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(|mut child| child.wait())
+    .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+    // Opening a FIFO for reading waits for a writer unless it is opened
+    // without blocking. The limit here is the test's own, well under the
+    // server's bound on the check, so a server that waited at all fails.
+    let waited = tokio::time::timeout(Duration::from_millis(1500), installed.stale_server()).await;
+    let Ok(stale) = waited else {
+        // Give the stuck open its writer, so the failure is reported instead
+        // of the runtime waiting for that thread for ever.
+        drop(File::options().write(true).open(&fifo));
+        panic!("list and the identity read waited on a FIFO");
+    };
+    assert_eq!(stale["change"], "replaced", "{stale}");
+    assert!(stale.get("installed_revision").is_none(), "{stale}");
     installed.supervisor.shutdown().await;
 }
 

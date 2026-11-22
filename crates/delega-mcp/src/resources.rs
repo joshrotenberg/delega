@@ -80,7 +80,7 @@ pub(crate) fn identity_resource(build: &BuildInfo, staleness: Staleness) -> Reso
         .name("identity")
         .description(
             "The version, contract schema version and skill digests of this build, and \
-             stale_server when the installed executable is no longer the one running",
+             stale_server when the executable the server started from was replaced or removed",
         )
         .mime_type("application/json")
         .handler(move || {

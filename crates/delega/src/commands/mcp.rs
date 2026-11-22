@@ -64,14 +64,20 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> ExitCode {
+    // Recorded first, before anything else is read, so that `list` and the
+    // identity resource can say when this executable is replaced or removed
+    // later. A replacement between the start of the process and this line is
+    // recorded as the file the server runs and is never reported. When the
+    // file cannot be recorded the server never reports itself stale.
+    let executable = delega_mcp::Executable::current();
     let log = Log::start();
-    let code = go(&args, &log);
+    let code = go(&args, executable, &log);
     // Bounded: a blocked standard error cannot hold the exit.
     log.finish();
     code
 }
 
-fn go(args: &Args, log: &Log) -> ExitCode {
+fn go(args: &Args, executable: Option<delega_mcp::Executable>, log: &Log) -> ExitCode {
     // The configuration file is read once, now: a file that cannot be used
     // refuses to start the server, as a bad `--env` does.
     let status = super::config::read();
@@ -122,6 +128,7 @@ fn go(args: &Args, log: &Log) -> ExitCode {
         supervisor_config,
         config.request_defaults(),
         file,
+        executable,
         log,
     ));
     // Every worker was stopped, or reported not to be, before this point. The
@@ -135,6 +142,7 @@ async fn serve(
     config: SupervisorConfig,
     defaults: PartialRequest,
     file: Option<AppliedConfig>,
+    executable: Option<delega_mcp::Executable>,
     log: &Log,
 ) -> ExitCode {
     let signals = match Signals::install() {
@@ -147,15 +155,12 @@ async fn serve(
         }
     };
     let supervisor = Supervisor::new(config);
-    // Recorded now, so that `list` and the identity resource can say when a
-    // later `delega plugin install` has replaced or removed this executable.
-    // When it cannot be recorded the server never reports itself stale.
     let router = match delega_mcp::router_with_executable(
         supervisor.clone(),
         &version::build_info(),
         defaults,
         file,
-        delega_mcp::Executable::current(),
+        executable,
     ) {
         Ok(router) => router,
         Err(err) => {

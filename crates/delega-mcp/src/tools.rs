@@ -65,8 +65,8 @@ const READ: &str = "Read a run, or a worker's current run: the result if it has 
 
 const LIST: &str = "List the workers on this connection with their state, queue length and \
     session id, and the limits in force and in use. Returns at once. Check it before starting \
-    many workers. stale_server is present when the installed executable is no longer the one \
-    this server runs: tell the user to reconnect the server or start a new session.";
+    many workers. stale_server is present when the executable this server started from was \
+    replaced or removed since: tell the user to reconnect the server or start a new session.";
 
 const INTERRUPT: &str = "Stop a run, or a worker's current run. Returns when the run has \
     stopped and cleanup was attempted, after 30 s at most; settled false means the stop has \

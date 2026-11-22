@@ -11,20 +11,39 @@
 //! `delega://identity` asks for the file's status once more and reports a
 //! [`StaleServer`] when the file is gone or is another file. The check is one
 //! `stat`; the neighbouring `IDENTITY.json` is read only once the server is
-//! known to be stale. Nothing is hashed and no provider is run.
+//! known to be stale. Nothing is hashed and no provider is run. A call waits
+//! for the filesystem for [`CHECK_LIMIT`] at most and then reports nothing.
+//!
+//! The report means that the file changed, not that a newer build is installed:
+//! `delega plugin uninstall` removes the file, and an install of identical
+//! bytes replaces it.
 
-use std::fs::{File, Metadata};
+use std::fs::{Metadata, OpenOptions};
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 /// What a caller is told to do about a stale server.
-pub const WHAT_TO_DO: &str = "Reconnect the delega MCP server (for example from /mcp in Claude \
-    Code) or start a new session, so that the installed build is the one running.";
+pub const WHAT_TO_DO: &str = "The executable this server was started from has been replaced or \
+    removed since it started. Reconnect the delega MCP server (for example from /mcp in Claude \
+    Code) or start a new session.";
+
+/// How long a `list` or a read of the identity waits for the filesystem check.
+/// Past it the call reports nothing about staleness and answers.
+const CHECK_LIMIT: Duration = Duration::from_secs(2);
+
+/// How many checks may be waiting on the filesystem at once. A check that
+/// outlives [`CHECK_LIMIT`] keeps its thread until the filesystem answers;
+/// while this many are held, further calls report nothing without starting
+/// another.
+const CHECKS_AT_ONCE: usize = 4;
 
 /// The most of `IDENTITY.json` that is read. The file `delega plugin install`
 /// writes is a few hundred bytes; a larger one is ignored.
@@ -141,16 +160,24 @@ pub struct StaleServer {
 
 /// The `revision` of `<directory of the executable>/../IDENTITY.json`, where
 /// `delega plugin install` writes the identity of the build it installed. Any
-/// failure is `None`: a missing file, one that is not a regular file, one over
+/// failure is `None`: a missing file, one that is not a regular file (a FIFO
+/// is not waited on), one over
 /// [`IDENTITY_LIMIT`], or one that is not a JSON object with a string
 /// `revision`.
 fn installed_revision(executable: &Path) -> Option<String> {
     let path = executable.parent()?.parent()?.join("IDENTITY.json");
-    // Checked before opening: opening a FIFO would wait for a writer.
-    if !std::fs::metadata(&path).ok()?.is_file() {
+    // Opened without blocking: opening a FIFO for reading otherwise waits for
+    // a writer. What kind of file it is is asked of the open handle, so the
+    // answer is about the file that will be read and not about the path.
+    let nonblocking = rustix::fs::OFlags::NONBLOCK.bits();
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(nonblocking).ok()?)
+        .open(&path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
         return None;
     }
-    let file = File::open(&path).ok()?;
     let mut bytes = Vec::new();
     file.take(IDENTITY_LIMIT + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() as u64 > IDENTITY_LIMIT {
@@ -166,6 +193,8 @@ fn installed_revision(executable: &Path) -> Option<String> {
 pub(crate) struct Staleness {
     executable: Option<Executable>,
     running_revision: String,
+    /// Bounds the checks waiting on the filesystem ([`CHECKS_AT_ONCE`]).
+    checks: Arc<Semaphore>,
 }
 
 impl Staleness {
@@ -173,19 +202,98 @@ impl Staleness {
         Self {
             executable,
             running_revision: running_revision.to_string(),
+            checks: Arc::new(Semaphore::new(CHECKS_AT_ONCE)),
         }
     }
 
     /// The report, or `None` when the server is current or nothing was
-    /// recorded. The file calls run off the runtime's threads, so a stuck
-    /// filesystem holds up this call only; a check that fails to run reports
-    /// nothing.
+    /// recorded. Returns within [`CHECK_LIMIT`]: a check that has not answered
+    /// by then, or that fails to run, reports nothing.
     pub(crate) async fn check(&self) -> Option<StaleServer> {
         let executable = self.executable.clone()?;
         let revision = self.running_revision.clone();
-        tokio::task::spawn_blocking(move || executable.stale(&revision))
-            .await
-            .ok()
-            .flatten()
+        bounded(CHECK_LIMIT, &self.checks, move || {
+            executable.stale(&revision)
+        })
+        .await
+    }
+}
+
+/// Run `work`, which touches the filesystem, on a thread for blocking work and
+/// wait for it for `limit` at most. `None` when it has not answered by then,
+/// when it could not run, or when every permit of `checks` is held by work
+/// that is still waiting. Work past its limit keeps its permit and its thread
+/// until the filesystem answers, so a stuck filesystem costs a bounded number
+/// of threads and never holds a call.
+async fn bounded<T, F>(limit: Duration, checks: &Arc<Semaphore>, work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Option<T> + Send + 'static,
+{
+    let permit = checks.clone().try_acquire_owned().ok()?;
+    let task = tokio::task::spawn_blocking(move || {
+        let answer = work();
+        drop(permit);
+        answer
+    });
+    tokio::time::timeout(limit, task).await.ok()?.ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    use super::*;
+
+    /// A long time for a test to wait before it calls something stuck.
+    const STUCK: Duration = Duration::from_secs(60);
+
+    #[tokio::test]
+    async fn a_check_the_filesystem_does_not_answer_reports_nothing_and_does_not_hold_the_call() {
+        let checks = Arc::new(Semaphore::new(2));
+        let (release, held) = channel::<()>();
+        let (release_second, held_second) = channel::<()>();
+        let began = Instant::now();
+        // Work that does not answer until released, as a stuck `stat` would.
+        let first = bounded(Duration::from_millis(50), &checks, move || {
+            held.recv().ok().map(|()| 1)
+        })
+        .await;
+        assert_eq!(first, None);
+        let second = bounded(Duration::from_millis(50), &checks, move || {
+            held_second.recv().ok().map(|()| 2)
+        })
+        .await;
+        assert_eq!(second, None);
+        // Both permits are held by stuck work: the next call does not start
+        // more, and answers without waiting even for its limit.
+        let third = bounded(STUCK, &checks, || Some(3)).await;
+        assert_eq!(third, None);
+        assert!(began.elapsed() < STUCK, "a call was held");
+        // Once the filesystem answers, checks work again.
+        release.send(()).expect("release");
+        release_second.send(()).expect("release");
+        let mut answered = None;
+        for _ in 0..6000 {
+            answered = bounded(STUCK, &checks, || Some(4)).await;
+            if answered.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(answered, Some(4));
+    }
+
+    #[tokio::test]
+    async fn a_check_that_answers_in_time_is_returned() {
+        let checks = Arc::new(Semaphore::new(1));
+        assert_eq!(
+            bounded(STUCK, &checks, || Some("stale")).await,
+            Some("stale")
+        );
+        assert_eq!(bounded(STUCK, &checks, || None::<u8>).await, None);
+        // The permit came back each time.
+        assert_eq!(checks.available_permits(), 1);
     }
 }
