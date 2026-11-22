@@ -738,11 +738,13 @@ case "$mode" in
     ;;
   # A successful result with usage, then no exit until stopped.
   success-then-hang)
+    # TERM is ignored before the first event, so a stop that lands once output
+    # has begun cannot end the fake before it writes its records.
+    trap '' TERM
     init
     success '"fake final answer"' '[]'
     # Written once the result is out, so a test can tell it arrived.
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/result-written"
-    trap '' TERM
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done
     ;;
@@ -757,8 +759,10 @@ case "$mode" in
     while [ ! -e "$release" ]; do sleep 0.05; done
     ;;
   hang)
-    init
+    # TERM is ignored before the first event, so a stop that lands once output
+    # has begun cannot end the fake before it writes `started`.
     trap '' TERM
+    init
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done
     ;;
