@@ -67,10 +67,11 @@ executable was replaced or removed ([Stale server](docs/api.md#stale-server)).
 delega run --provider codex -p "Summarize this repository"
 ```
 
-A completed run prints the answer on standard output and exits 0. A run that
-fails exits 1, a refused one 2, one that timed out 124. `--output json` prints
-the whole result instead of the answer. Other cases, including usage errors and
-`--dry-run`, are under [Command line](docs/api.md#command-line). A run that did
+When the result is delivered normally, a completed run prints the answer on
+standard output and exits 0, a failed run exits 1, a refused one 2 and one that
+timed out 124. `--output json` prints the whole result instead of the answer.
+The other cases, including usage errors, `--dry-run` and a result that cannot
+be written, are under [Command line](docs/api.md#command-line). A run that did
 not complete gives its reason in `error.kind`
 ([error kinds](docs/providers.md#error-kinds)).
 
@@ -93,18 +94,22 @@ With the plugin installed, the host has seven tools: `start`, `follow_up`,
 `wait`, `read`, `list`, `interrupt` and `close`. The `delegate` skill that comes
 with the plugin tells the host agent how to use them. A minimal sequence:
 
-1. `start` with a provider, a prompt and an absolute `cwd`; it returns a run id.
+1. `start` with a provider, a prompt and an absolute `cwd`. Keep the run id and
+   the worker id it returns.
 
    ```json
    {"provider": "codex", "prompt": "Review the diff on this branch", "cwd": "/abs/path/to/repo"}
    ```
 
-2. `wait` on the run, passing back the `cursor` of the previous response as
-   `after`. A timeout is not an error; call it again.
+2. `wait` on the run, without `after` on the first call:
 
    ```json
-   {"runs": ["RUN_ID"], "timeout_secs": 60, "after": 7}
+   {"runs": ["RUN_ID"], "timeout_secs": 60}
    ```
+
+   Check the run's state in the response. If it has not finished, call `wait`
+   again with the `cursor` the response returned as `after`. A timeout is not
+   an error.
 
 3. `read` the run's result.
 
@@ -112,7 +117,7 @@ with the plugin tells the host agent how to use them. A minimal sequence:
    {"run": "RUN_ID"}
    ```
 
-4. `close` the worker when done.
+4. `close` the worker, by the worker id from `start`, when done.
 
    ```json
    {"worker": "WORKER_ID"}
@@ -175,7 +180,7 @@ Where each stands:
 | 1 | Met against fake providers. | `contract`, `process`, `provider/settle.rs`; tested by the provider, CLI and supervisor tests and the acceptance matrix. |
 | 2 | Partly met. The result reports the cleanup problems delega detects; the documented gaps (below) can leave a process running while cleanup is reported as confirmed. | `process`; tested by `process/tests` and the acceptance matrix. |
 | 3 | Partly met. Permissions are stated up front, and a request not granted is answered no. Asking the caller live is not built. | `contract/permissions.rs`, `provider`; tested by `provider/tests` against fakes that honour the permission arguments. |
-| 4 | Met for the differences delega can identify, which it reports in `provider_notes`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
+| 4 | Met for the differences delega can identify, which it reports in `provider_notes`. With `permissions.strict`, a run is refused with `permissions_not_enforceable`, naming each part the provider cannot enforce. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
 | 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
 | 6 | Partly met. The fake-provider tests run in CI; the live suite is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)). | `crates/delega-core/src/provider/tests/fakes`. |
 
@@ -198,8 +203,9 @@ unexpectedly.
   0.170.0): Claude Code's read scoping, command guard and deny rules; that
   Codex's `workspace-write` sandbox blocks writes outside the working directory;
   session resume, version parsing, usage reporting and several failure shapes.
-  The rest is tested against fakes only; [providers.md](docs/providers.md#unverified-against-the-real-cli)
-  lists the assumptions.
+  [providers.md](docs/providers.md#verified-against-the-real-cli) has the full
+  list of live checks and the
+  [remaining assumptions](docs/providers.md#unverified-against-the-real-cli).
 - **Permission modes.** `read` (default), `write` and `full`, plus exact
   commands (`--allow-command`) and extra readable directories. Work that builds
   and runs tests needs `full` today, because `read` and `write` allow only
