@@ -1221,12 +1221,12 @@ to it. The report ends when the server is reconnected (in Claude Code,
   recording still is. The window is the start of the process, before the
   configuration file is read. A server that could not find its executable's
   path at start, or could not get that file's status then, never reports stale.
-  A later `stat` that fails for another reason than the path being gone, or
-  that does not finish within the bound, leaves `stale_server` out of that call
-  only; the next call checks again, unless four checks are still waiting. A
-  rewrite in place that keeps the size and the modification time is not seen. The
-  library builds a server that never reports unless it is given the executable
-  (`router_with_executable`).
+  A later `stat` that fails for another reason than the path being gone, or a
+  check that does not finish within the bound, leaves `stale_server` out of
+  that call only; the next call checks again, unless four earlier checks have
+  not finished. A rewrite in place that keeps the size and the modification
+  time is not seen. The library builds a server that never reports unless it
+  is given the executable (`router_with_executable`).
 
 ### Running the server
 
