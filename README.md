@@ -1,6 +1,6 @@
 # delega
 
-Run Claude Code and Codex agents from a program, for any purpose, reliably.
+Run Claude Code and Codex agents from a program.
 
 `delega` starts a provider CLI (`claude` or `codex`) as a worker, gives it an
 assignment, and returns one result with a stated outcome. It is reached three
@@ -12,9 +12,9 @@ ways, over one library:
 - `delega-core`: the Rust library both are built on.
 
 A request says which provider, what to do, in which directory, what the worker
-may do and how long it may take. The result says how the run ended, the answer,
-what was denied, whether every process was cleaned up, and where the provider
-did something other than what was asked.
+may do and how long it may take. The result gives the outcome and the answer,
+and reports the denials, cleanup problems and provider differences delega
+detects.
 
 ## Install
 
@@ -37,9 +37,8 @@ delega doctor
 
 It reports each provider's executable and version, the environment and deny
 rules a worker would get, the configuration file, the limits in force and
-anything that would stop a run. It exits 0 when a run can go ahead, and 1 when
-no provider is ready, the configuration file cannot be used or process
-inspection does not work. See [Doctor](docs/api.md#doctor).
+anything that would stop a run. It exits 0 when a run can go ahead; the other
+statuses are in [Doctor](docs/api.md#doctor).
 
 To use the MCP tools and skills from Claude Code or Codex, install the plugin:
 
@@ -57,7 +56,8 @@ it. See [Install and uninstall](docs/api.md#install-and-uninstall).
 A running host session keeps the server it started with. After an install, start
 a new session, or in Claude Code reconnect `plugin:delega:delega` from `/mcp`
 (`/reload-plugins` does not restart the server). Until then, `list` and
-`delega://identity` report `stale_server` when the executable was replaced.
+`delega://identity` report `stale_server` when they detect that the server's
+executable was replaced or removed ([Stale server](docs/api.md#stale-server)).
 
 ## Quickstart
 
@@ -67,18 +67,12 @@ a new session, or in Claude Code reconnect `plugin:delega:delega` from `/mcp`
 delega run --provider codex -p "Summarize this repository"
 ```
 
-With the default `--output text`, standard output holds the answer and nothing
-else, and only when the run completed. A run that did not complete prints one
-line on standard error, `delega run: <outcome>: <error.kind>: <error.message>`.
-`--output json` prints the whole result. The exit status follows the outcome:
-
-| Outcome | Exit status |
-| --- | --- |
-| `completed` | 0 |
-| `failed` | 1 |
-| `refused` (including usage errors) | 2 |
-| `timed_out` | 124 |
-| `interrupted` | 130 |
+A completed run prints the answer on standard output and exits 0. A run that
+fails exits 1, a refused one 2, one that timed out 124. `--output json` prints
+the whole result instead of the answer. Other cases, including usage errors and
+`--dry-run`, are under [Command line](docs/api.md#command-line). A run that did
+not complete gives its reason in `error.kind`
+([error kinds](docs/providers.md#error-kinds)).
 
 More forms:
 
@@ -97,39 +91,36 @@ describes profiles, `--progress`, `--env` and the configuration file.
 
 With the plugin installed, the host has seven tools: `start`, `follow_up`,
 `wait`, `read`, `list`, `interrupt` and `close`. The `delegate` skill that comes
-with the plugin tells the host agent how to use them. A typical sequence:
+with the plugin tells the host agent how to use them. A minimal sequence:
 
-1. `start` returns at once with a run id and a worker id. `cwd` must be an
-   absolute path.
+1. `start` with a provider, a prompt and an absolute `cwd`; it returns a run id.
 
    ```json
    {"provider": "codex", "prompt": "Review the diff on this branch", "cwd": "/abs/path/to/repo"}
    ```
 
-2. `wait` returns when a named run finishes or after `timeout_secs` (30 by
-   default, at most 300). A timeout is not an error. Each response has a
-   `cursor`, a number; pass it back as `after` on the next call, and the wait
-   returns only for runs that finished after it.
+2. `wait` on the run, passing back the `cursor` of the previous response as
+   `after`. A timeout is not an error; call it again.
 
    ```json
    {"runs": ["RUN_ID"], "timeout_secs": 60, "after": 7}
    ```
 
-3. `read` returns the result once the run has finished, or its progress before.
+3. `read` the run's result.
 
    ```json
    {"run": "RUN_ID"}
    ```
 
-4. `close` stops the worker and frees its slot. `follow_up` before it continues
-   the same provider session.
+4. `close` the worker when done.
 
    ```json
    {"worker": "WORKER_ID"}
    ```
 
-Every tool's input and output schema is under [`schemas/mcp`](schemas/mcp).
-See [MCP](docs/api.md#mcp) and [`skills/delegate/SKILL.md`](skills/delegate/SKILL.md).
+What each tool returns, its bounds and its refusals are in the
+[tool table](docs/api.md#mcp). Every tool's input and output schema is under [`schemas/mcp`](schemas/mcp);
+see also [`skills/delegate/SKILL.md`](skills/delegate/SKILL.md).
 
 ### Library
 
@@ -158,7 +149,7 @@ Several workers at once go through `delega_core::supervisor::Supervisor`, whose
 module documentation has the same kind of example. See
 [docs/supervisor.md](docs/supervisor.md).
 
-## Guarantees
+## Acceptance criteria
 
 These six points are the acceptance criteria for the core. Nothing else is
 ported until the core meets them.
@@ -174,26 +165,24 @@ ported until the core meets them.
    Codex. Where the providers differ, the result names the difference.
 5. **A versioned contract.** Requests and results are documented, versioned and
    the same from the CLI, the library and MCP.
-6. **Proven.** Tests against fake providers cover every outcome. A small live
+6. **Tested.** Tests against fake providers cover every outcome. A small live
    suite per provider is run locally by a maintainer before a release.
 
-Where each is enforced and how it is tested:
+Where each stands:
 
-| # | Enforced in | Tested by |
+| # | Status | Where |
 | --- | --- | --- |
-| 1 | The `Outcome` type and `RunResult::validate` (`crates/delega-core/src/contract`); time limits in the process layer (`process`); the provider layer maps every ending to one result (`provider/settle.rs`); the supervisor replaces a result that fails validation with `failed`. | `provider/tests/outcomes.rs`, `crates/delega/tests/run_outcomes.rs`, `crates/delega-core/tests/supervisor`, and the acceptance matrix in CI on `ubuntu-latest` and `macos-latest`. |
-| 2 | The process layer (`crates/delega-core/src/process`): process group and session sweeps, descendant tracking, repeated signalling, and a `cleanup` verdict that names what remains. | `process/tests` and the acceptance matrix, which measures what is still running 1 s after `delega` exits. Known gaps are listed under [Status and limits](#status-and-limits). |
-| 3 | `permissions` in the request (`contract/permissions.rs`), mapped per provider (`provider/permissions.rs`, `claude.rs`, `codex.rs`, the command guard in `hook.rs`, deny rules in `deny.rs`). A request not granted is answered no and listed in `permissions.denied`. Live asking is not built. | `provider/tests/enforce.rs`, `mapping.rs`, `strict.rs`, `hook.rs`, `deny.rs`, with fakes that honour the permission arguments; parts are verified against the real CLIs ([providers.md](docs/providers.md#verified-against-the-real-cli)). |
-| 4 | One `Request` type with a `provider` field; each adapter reports what it could not do as asked in `provider_notes`, or refuses with `permissions.strict`. | The provider tests, against a fake of each CLI (`fake-claude.sh`, `fake-codex.sh`); the acceptance matrix runs the same 94 rows on each provider. |
-| 5 | `schema_version` 1 on the request and result (`crates/delega-core/src/contract`); schemas generated from the types into [`schemas`](schemas); the CLI, the MCP server and the library use the same types. | `committed_schemas` in `contract/schema.rs` and `crates/delega-mcp/tests/committed_schemas.rs` fail when a committed schema is stale. |
-| 6 | | Fake providers: `crates/delega-core/src/provider/tests/fakes`, run by `cargo test --workspace` and the acceptance matrix on every pull request. The live suite is not built yet ([#139](https://github.com/joshrotenberg/delega/issues/139)). |
+| 1 | Met against fake providers. | `contract`, `process`, `provider/settle.rs`; tested by the provider, CLI and supervisor tests and the acceptance matrix. |
+| 2 | Partly met. The result reports the cleanup problems delega detects; the documented gaps (below) can leave a process running while cleanup is reported as confirmed. | `process`; tested by `process/tests` and the acceptance matrix. |
+| 3 | Partly met. Permissions are stated up front, and a request not granted is answered no. Asking the caller live is not built. | `contract/permissions.rs`, `provider`; tested by `provider/tests` against fakes that honour the permission arguments. |
+| 4 | Met for the differences delega can identify, which it reports in `provider_notes`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
+| 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
+| 6 | Partly met. The fake-provider tests run in CI; the live suite is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)). | `crates/delega-core/src/provider/tests/fakes`. |
 
-The latest committed acceptance run ([acceptance/RESULTS.md](acceptance/RESULTS.md),
-188 rows on Darwin arm64, fake providers only): every row met its expectation or
-is a listed expected failure. In each of the 172 rows where the harness neither
-closed standard output nor killed `delega`, `delega` printed exactly one valid
-result and exited. The expected failures are the documented gaps of criterion 2
-below.
+The committed acceptance run ([acceptance/RESULTS.md](acceptance/RESULTS.md),
+fake providers only, Darwin arm64) has 188 rows: 158 pass, 29 are expected
+failures, 1 is a documented gap that did not show in that run, and none failed
+unexpectedly.
 
 ## Status and limits
 
@@ -201,29 +190,28 @@ below.
 - **Platforms.** macOS and Linux. CI runs fmt, clippy, the tests and the full
   acceptance matrix on `macos-latest` and `ubuntu-latest`, and builds on Rust
   1.90. Windows is not supported.
-- **Use.** Since 2026-11-19 delega's own development has run on real Claude Code
-  and Codex workers through the installed plugin, as implementers and as
-  independent reviewers: more than a hundred worker runs behind ten merged pull
-  requests between 2026-11-20 and 2026-11-22.
+- **Use.** delega's own development runs on real Claude Code and Codex workers
+  through the installed plugin, as implementers and as independent reviewers:
+  more than a hundred worker runs behind ten merged pull requests between
+  2026-11-20 and 2026-11-22.
 - **Verified against the real CLIs** (Claude Code 2.1.328 and 2.1.329, codex-cli
-  0.170.0): permission scoping, the command guard, deny rules, the Codex
-  sandbox, session resume, version parsing, usage reporting and several failure
-  shapes. Other provider behaviour is assumed and tested against fakes only. Both
-  lists are in [providers.md](docs/providers.md#verified-against-the-real-cli).
+  0.170.0): Claude Code's read scoping, command guard and deny rules; that
+  Codex's `workspace-write` sandbox blocks writes outside the working directory;
+  session resume, version parsing, usage reporting and several failure shapes.
+  The rest is tested against fakes only; [providers.md](docs/providers.md#unverified-against-the-real-cli)
+  lists the assumptions.
 - **Permission modes.** `read` (default), `write` and `full`, plus exact
   commands (`--allow-command`) and extra readable directories. Work that builds
   and runs tests needs `full` today, because `read` and `write` allow only
   commands listed exactly ([#98](https://github.com/joshrotenberg/delega/issues/98)).
   Codex confines neither reads nor commands, so a `read` or `write` Codex run is
   wider than requested and says so in `provider_notes`; with `--strict` it is
-  refused. A permission request not granted is answered no; asking the caller
-  live is not built.
+  refused ([Wider than requested](docs/providers.md#wider-than-requested)).
 - **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
   descendant called `setsid` and was orphaned before any process listing saw it,
   or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`
-  itself leaves the worker running. These are the 30 documented-gap rows in
-  [acceptance/RESULTS.md](acceptance/RESULTS.md), described in
-  `crates/delega-core/src/process/mod.rs`.
+  itself leaves the worker running. See the expected failures in
+  [acceptance/RESULTS.md](acceptance/RESULTS.md).
 - **Environment.** A worker gets a fixed environment allowlist plus what `--env`
   or the configuration file adds. The installed plugin starts `delega mcp` with
   no `--env`.
@@ -257,6 +245,9 @@ Out of scope:
 | [docs/providers.md](docs/providers.md) | How each provider is started, the permission mapping, error kinds, the environment policy, managed settings, and what is verified against the real CLIs. |
 | [acceptance/README.md](acceptance/README.md) | The acceptance harness for criteria 1 and 2 and its matrix. |
 | [skills](skills) | The `run` and `delegate` skills built into the executable (`delega skill list`). |
+
+`delega schema request|result` prints the contracts built into the executable,
+and `delega version --output json` its build identity.
 
 ## Development
 
