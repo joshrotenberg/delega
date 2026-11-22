@@ -168,6 +168,10 @@ pub(super) enum Command {
     },
     /// Stop everything and end the task.
     Quit,
+    /// Move the time retention reads forward by this much, and do nothing
+    /// else: what has aged out is pruned by the command that follows.
+    #[cfg(test)]
+    AdvanceRetentionClock(Duration),
     /// Make the task panic.
     #[cfg(test)]
     PanicForTest,

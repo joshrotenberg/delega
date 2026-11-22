@@ -1689,3 +1689,77 @@ async fn a_close_says_not_settled_once_wall_time_passed_its_bound_though_awake_t
     );
     release_and_settle(&dir, &supervisor, &started.run).await;
 }
+
+#[tokio::test]
+async fn a_parked_wait_whose_run_aged_out_does_not_hold_its_slot_against_the_next_wait() {
+    let dir = Dir::new();
+    let mut config = dir.config();
+    config.limits.max_waits_in_flight = 1;
+    let supervisor = Supervisor::new(config);
+    let held = supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let old = supervisor
+        .start(dir.request("success"))
+        .await
+        .expect("start");
+    let targets = |run: &str| WaitTargets {
+        runs: vec![run.to_string()],
+        workers: Vec::new(),
+    };
+    let done = supervisor
+        .wait(targets(&old.run), Some(60), None)
+        .await
+        .expect("wait");
+    assert!(!done.timed_out, "{done:#?}");
+
+    // Parked on the finished run with a cursor past its finish: nothing wakes
+    // it until its result ages out. Retention is an hour of the supervisor's
+    // clock, which only this test moves, so the result cannot go early.
+    let stale = {
+        let supervisor = supervisor.clone();
+        let targets = targets(&old.run);
+        tokio::spawn(async move { supervisor.wait(targets, Some(120), Some(done.cursor)).await })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while supervisor
+        .list()
+        .await
+        .expect("list")
+        .limits
+        .waits_in_flight
+        != 1
+    {
+        assert!(!stale.is_finished(), "the wait was answered, not parked");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the wait never parked"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The result ages out between two commands. The wait below is the command
+    // that prunes it, and it must find the one slot free.
+    supervisor.advance_retention_clock(Duration::from_secs(2 * 60 * 60));
+    let next = supervisor
+        .wait(targets(&held.run), Some(1), None)
+        .await
+        .expect("wait");
+    assert_eq!(next.limit_reached, None, "{next:#?}");
+    assert_eq!(next.timeout_secs, 1);
+    assert!(next.timed_out, "{next:#?}");
+
+    let gone = tokio::time::timeout(Duration::from_secs(60), stale)
+        .await
+        .expect("pruning woke the parked wait")
+        .expect("task")
+        .expect("wait");
+    assert_eq!(gone.unknown, [old.run.as_str()], "{gone:#?}");
+    assert_eq!(gone.limit_reached, None);
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}

@@ -678,64 +678,6 @@ async fn a_wait_whose_default_timeout_is_zero_is_a_poll_and_is_never_turned_away
 }
 
 #[tokio::test]
-async fn a_parked_wait_whose_run_aged_out_does_not_hold_its_slot_against_the_next_wait() {
-    let rig = Rig::new();
-    let limits = Limits {
-        max_waits_in_flight: 1,
-        retention: Duration::from_secs(3),
-        ..Limits::default()
-    };
-    let supervisor = Supervisor::new(rig.config_with(Provider::Claude, limits));
-    let (old, held) = (rig.gate("old"), rig.gate("held"));
-    let b = supervisor
-        .start(rig.request(Provider::Claude, &held.prompt()))
-        .await
-        .expect("start");
-    held.started().await;
-    let a = supervisor
-        .start(rig.request(Provider::Claude, &old.prompt()))
-        .await
-        .expect("start");
-    old.started().await;
-    old.open();
-    let done = finished(&supervisor, &[&a.run]).await;
-
-    // Parked on the finished run with a cursor past its finish: nothing will
-    // wake it until the result ages out.
-    let stale = {
-        let supervisor = supervisor.clone();
-        let targets = runs(&[&a.run]);
-        let cursor = done.cursor;
-        tokio::spawn(async move {
-            supervisor
-                .wait(targets, Some(PARKED_SECS), Some(cursor))
-                .await
-        })
-    };
-    waits_in_flight(&supervisor, 1).await;
-    // No command is sent while the result ages out, so the pruning happens in
-    // the command of the wait below, which must find the slot free.
-    tokio::time::sleep(Duration::from_millis(3500)).await;
-    let next = supervisor
-        .wait(runs(&[&b.run]), Some(1), None)
-        .await
-        .expect("wait");
-    assert_eq!(next.limit_reached, None, "{next:#?}");
-    assert_eq!(next.timeout_secs, 1);
-    assert!(next.timed_out);
-
-    let gone = stale.await.expect("task").expect("wait");
-    assert_eq!(gone.unknown, [a.run.as_str()], "{gone:#?}");
-    assert_eq!(gone.limit_reached, None);
-    let listed = supervisor.list().await.expect("list");
-    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
-    held.open();
-    result_of(&supervisor, &b.run).await;
-    supervisor.shutdown().await;
-    rig.assert_nothing_left().await;
-}
-
-#[tokio::test]
 async fn a_wait_whose_caller_went_away_frees_its_slot() {
     let rig = Rig::new();
     let supervisor = limited(&rig, 1);

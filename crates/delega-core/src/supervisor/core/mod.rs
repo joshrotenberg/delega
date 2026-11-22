@@ -68,6 +68,9 @@ pub(super) struct Core {
     /// not depend on what is still readable. Capped at
     /// [`MAX_UNCONFIRMED`]; the oldest are dropped past it.
     unconfirmed: VecDeque<(String, Cleanup)>,
+    /// Test only: how far ahead of the real clock retention reads time.
+    #[cfg(test)]
+    retention_ahead: std::time::Duration,
 }
 
 /// Most unconfirmed runs remembered. A run costs its id and a verdict, and a
@@ -113,6 +116,8 @@ impl Core {
             root,
             retained_bytes: 0,
             unconfirmed: VecDeque::new(),
+            #[cfg(test)]
+            retention_ahead: std::time::Duration::ZERO,
         }
     }
 
@@ -121,7 +126,7 @@ impl Core {
     /// shutdown. Pruning comes first so a read never sees a result past its
     /// retention time.
     pub fn handle(&mut self, command: Command) {
-        self.prune_and_wake(Instant::now());
+        self.prune_and_wake(self.retention_now());
         match command {
             Command::Start {
                 request,
@@ -201,6 +206,14 @@ impl Core {
                 let _ = self.shutdown();
             }
             #[cfg(test)]
+            Command::AdvanceRetentionClock(by) => {
+                self.retention_ahead += by;
+                // Nothing follows from it here, so the next command is the one
+                // that finds the results aged out, as when real time passes
+                // between two commands.
+                return;
+            }
+            #[cfg(test)]
             Command::PanicForTest => panic!("the supervisor's task was told to panic"),
         }
         self.settle_changes();
@@ -265,7 +278,16 @@ impl Core {
         self.dispatch();
         self.check_shutdown();
         self.wake_waiters();
-        self.prune_and_wake(Instant::now());
+        self.prune_and_wake(self.retention_now());
+    }
+
+    /// The time retention compares a result's age with. The real clock; only
+    /// a test moves it ahead.
+    fn retention_now(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + self.retention_ahead;
+        #[cfg(not(test))]
+        Instant::now()
     }
 
     /// Prune, and if anything went, wake the waits that named it. A wait on a

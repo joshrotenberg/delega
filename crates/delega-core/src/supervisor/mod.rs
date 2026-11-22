@@ -442,6 +442,17 @@ impl Supervisor {
         self.shared.config.limits.clone().normalized()
     }
 
+    /// Test only: make retention read time as `by` later than it does now, so
+    /// a result ages out without real time passing. Nothing is pruned until
+    /// the next command.
+    #[cfg(test)]
+    pub(crate) fn advance_retention_clock(&self, by: Duration) {
+        self.shared
+            .tx
+            .send(Command::AdvanceRetentionClock(by))
+            .expect("the supervisor's task is running");
+    }
+
     /// Test only: hold the next `wait` after its timeout has elapsed and before
     /// it asks for the view. Returns a receiver that fires when the wait is held
     /// and a sender that lets it go on.

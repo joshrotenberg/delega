@@ -213,9 +213,8 @@ carries its value as `cursor`.
   is absent from every other answer. Its cursor is good for the next call. A
   wait that has something to report, or whose ids are all unknown, is answered
   whatever the count. A wait whose applied timeout is 0 (`timeout_secs: 0`, or
-  none given with a `wait_default` of 0) is a poll: it is answered in one
-  command, is never registered, takes no slot and never carries
-  `limit_reached`. The count is taken from the registrations whose caller is
+  none given with a `wait_default` of 0) is a poll: it is never registered,
+  takes no slot and never carries `limit_reached`. The count is taken from the registrations whose caller is
   still blocked, so a slot frees when a wait is woken, as soon as its time has
   passed (before it asks for its answer), when shutdown releases it and when
   the caller drops the future mid-wait. When retention removes the run or
