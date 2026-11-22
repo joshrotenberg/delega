@@ -145,6 +145,10 @@ pub struct AppliedPermissions {
 }
 
 /// Token counts and cost, where the provider reports them.
+///
+/// In a result's `usage` every field is the run's own consumption, and a field
+/// is present only when delega knows the run's own value. In `session_usage`
+/// every field is the provider's total for the whole session through the run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Usage {
     /// Tokens sent to the model.
@@ -250,9 +254,17 @@ pub struct RunResult {
     /// The provider's own session id, for the provider's `resume`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Token counts and cost.
+    /// This run's own token counts and cost. A field is present only when
+    /// delega knows the run's own value: a resumed run's provider may report
+    /// only session totals, and then delega leaves the field out and reports
+    /// the totals in `session_usage`. See `docs/api.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// The provider's totals for the whole session through this run, when the
+    /// provider reports totals. For a run that started its session, the
+    /// session is the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_usage: Option<Usage>,
     /// When the run was queued, started and finished.
     pub timing: Timing,
     /// The build and provider executable behind the result.
@@ -339,6 +351,7 @@ impl RunResult {
             applied: None,
             session_id: None,
             usage: None,
+            session_usage: None,
             timing: ctx.timing,
             provenance: ctx.provenance,
         }
@@ -411,6 +424,7 @@ impl RunResult {
             applied: None,
             session_id: None,
             usage: None,
+            session_usage: None,
             timing,
             provenance: ctx.provenance,
         }

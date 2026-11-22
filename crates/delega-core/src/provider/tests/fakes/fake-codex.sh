@@ -14,6 +14,11 @@
 #   FAKE_SESSION_ID  the thread id reported when the run is not resuming one
 #   FAKE_RESUMED_SESSION_ID  the thread id reported when the run is resuming
 #                    one, instead of the id it was asked to resume
+#   FAKE_USAGE_DIR   where to count each thread's turns (see `turn` below)
+#
+# turn.completed carries usage the way Codex 0.170.0 does: the thread's totals
+# through this turn, here 100 in, 10 cached, 7 out and 3 reasoning per turn,
+# times the turn.
 #
 # Modes about sessions:
 #   unknown-session  what Codex 0.170.0 does when `resume` names a thread that
@@ -121,6 +126,20 @@ done
 sid="${FAKE_SESSION_ID:-fake-codex-thread-1}"
 [ -n "$resume" ] && sid="${FAKE_RESUMED_SESSION_ID:-$resume}"
 
+# The turn of the session this run is: 1 for a run that starts a session, 2
+# for a resumed one. With FAKE_USAGE_DIR set, a counter per session is kept
+# there instead, so each resumed run is the turn after the last one recorded.
+turn=1
+[ -n "$resume" ] && turn=2
+if [ -n "$FAKE_USAGE_DIR" ]; then
+  counter="$FAKE_USAGE_DIR/turns-$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_')"
+  if [ -n "$resume" ]; then
+    last=$(cat "$counter" 2>/dev/null || echo 1)
+    turn=$((last + 1))
+  fi
+  printf '%s\n' "$turn" > "$counter"
+fi
+
 IFS= read -r mode || true
 rest=$(cat)
 
@@ -142,7 +161,7 @@ final() {
   emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"phase\":\"final_answer\",\"text\":$1}}"
 }
 done_ok() {
-  emit '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":7,"reasoning_output_tokens":3}}'
+  emit "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":$((100 * turn)),\"cached_input_tokens\":$((10 * turn)),\"output_tokens\":$((7 * turn)),\"reasoning_output_tokens\":$((3 * turn))}}"
 }
 
 # The acceptance harness's process behaviours (`acc:<behaviour>:<variant>`, see
@@ -454,6 +473,17 @@ case "$mode" in
       emit "{\"type\":\"item.completed\",\"item\":{\"id\":\"i\",\"type\":\"agent_message\",\"phase\":\"commentary\",\"text\":\"x\"}}"
       i=$((i+1))
     done
+    trap '' TERM
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
+    while :; do sleep 1; done
+    ;;
+  # A final answer and turn.completed with usage, then no exit until stopped.
+  success-then-hang)
+    init
+    final '"fake final answer"'
+    done_ok
+    # Written once the result is out, so a test can tell it arrived.
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/result-written"
     trap '' TERM
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done

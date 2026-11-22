@@ -81,6 +81,17 @@
         "null"
       ]
     },
+    "session_usage": {
+      "description": "The provider's totals for the whole session through this run, when the\nprovider reports totals. For a run that started its session, the\nsession is the run.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "structured": {
       "description": "The structured answer, when the request gave an `answer_schema`.\n\nA JSON `null` answer is not representable: it reads back as absent,\nbecause absent and null share one representation here. Report such an\nanswer in `text` with `structured_valid` left out."
     },
@@ -100,7 +111,7 @@
       "$ref": "#/$defs/Timing"
     },
     "usage": {
-      "description": "Token counts and cost.",
+      "description": "This run's own token counts and cost. A field is present only when\ndelega knows the run's own value: a resumed run's provider may report\nonly session totals, and then delega leaves the field out and reports\nthe totals in `session_usage`. See `docs/api.md`.",
       "anyOf": [
         {
           "$ref": "#/$defs/Usage"
@@ -784,7 +795,7 @@
       ]
     },
     "Usage": {
-      "description": "Token counts and cost, where the provider reports them.",
+      "description": "Token counts and cost, where the provider reports them.\n\nIn a result's `usage` every field is the run's own consumption, and a field\nis present only when delega knows the run's own value. In `session_usage`\nevery field is the provider's total for the whole session through the run.",
       "type": "object",
       "properties": {
         "cached_tokens": {

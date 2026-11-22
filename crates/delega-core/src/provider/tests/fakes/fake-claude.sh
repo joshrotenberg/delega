@@ -27,6 +27,18 @@
 #   FAKE_SESSION_ID  the session id reported when the run is not resuming one
 #   FAKE_RESUMED_SESSION_ID  the session id reported when the run is resuming
 #                    one, instead of the id it was asked to resume
+#   FAKE_USAGE_DIR   where to count each session's turns (see `turn` below)
+#   FAKE_RUN_USAGE   the shape of model_usage_since_last_result on a
+#                    successful result. Unset, it has one model entry with the
+#                    run's figures; `none` leaves it out, as an older Claude
+#                    Code would; `empty` makes it {}; `partial` adds a second
+#                    model entry with no costUSD
+#
+# A successful result carries usage the way Claude Code 2.1.329 does: `usage`
+# is the run's own tokens (12 in, 4 cached, 7 out), model_usage_since_last_result
+# the run's own figures per model (cost 0.001), and total_cost_usd and
+# modelUsage the session's totals through this run, which are the run's figures
+# times the turn.
 #
 # Modes about sessions:
 #   unknown-session  what Claude Code 2.1.329 does when --resume names a
@@ -151,6 +163,20 @@ for arg in "$@"; do
 done
 sid="${FAKE_SESSION_ID:-fake-claude-session-1}"
 [ -n "$resume" ] && sid="${FAKE_RESUMED_SESSION_ID:-$resume}"
+
+# The turn of the session this run is: 1 for a run that starts a session, 2
+# for a resumed one. With FAKE_USAGE_DIR set, a counter per session is kept
+# there instead, so each resumed run is the turn after the last one recorded.
+turn=1
+[ -n "$resume" ] && turn=2
+if [ -n "$FAKE_USAGE_DIR" ]; then
+  counter="$FAKE_USAGE_DIR/turns-$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_')"
+  if [ -n "$resume" ]; then
+    last=$(cat "$counter" 2>/dev/null || echo 1)
+    turn=$((last + 1))
+  fi
+  printf '%s\n' "$turn" > "$counter"
+fi
 
 # The strings of the `permissions.deny` array of the settings JSON, one per
 # line. The scan follows JSON strings, so a comma, bracket or escaped quote in a
@@ -310,7 +336,15 @@ init() {
   emit "{\"type\":\"assistant\",\"session_id\":\"$sid\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}"
 }
 success() {
-  emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":0.001,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},\"permission_denials\":$2}"
+  total=$(awk -v t="$turn" 'BEGIN { printf "%.3f", 0.001 * t }')
+  case "$FAKE_RUN_USAGE" in
+    none) since="" ;;
+    empty) since="\"model_usage_since_last_result\":{}," ;;
+    partial) since="\"model_usage_since_last_result\":{\"fake-model\":{\"inputTokens\":12,\"outputTokens\":7,\"cacheReadInputTokens\":4,\"cacheCreationInputTokens\":0,\"costUSD\":0.001},\"fake-other\":{\"inputTokens\":0,\"outputTokens\":0}}," ;;
+    *) since="\"model_usage_since_last_result\":{\"fake-model\":{\"inputTokens\":12,\"outputTokens\":7,\"cacheReadInputTokens\":4,\"cacheCreationInputTokens\":0,\"costUSD\":0.001}}," ;;
+  esac
+  models="\"modelUsage\":{\"fake-model\":{\"inputTokens\":$((12 * turn)),\"outputTokens\":$((7 * turn)),\"cacheReadInputTokens\":$((4 * turn)),\"cacheCreationInputTokens\":0,\"costUSD\":$total}},"
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"$sid\",\"result\":$1,\"total_cost_usd\":$total,\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":7},$models$since\"permission_denials\":$2}"
 }
 
 # key_block N: a private key block with N bytes of body and no newline, which
@@ -698,6 +732,16 @@ case "$mode" in
       emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}"
       i=$((i+1))
     done
+    trap '' TERM
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
+    while :; do sleep 1; done
+    ;;
+  # A successful result with usage, then no exit until stopped.
+  success-then-hang)
+    init
+    success '"fake final answer"' '[]'
+    # Written once the result is out, so a test can tell it arrived.
+    [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/result-written"
     trap '' TERM
     [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/started"
     while :; do sleep 1; done

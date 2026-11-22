@@ -169,12 +169,40 @@ One JSON object, versioned, the same from every surface.
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied: the configuration file, which layer set each request field, the environment, the deny rules and the context mode, as names, counts, paths and digests. Optional; see [`applied`](#applied). |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
-| `usage` | Tokens in and out, cached, reasoning; `cost_usd` when the provider reports it. |
+| `usage` | This run's own consumption: tokens in and out, cached, reasoning, and `cost_usd`. A field is present only when delega knows the run's own value. See [Usage](#usage). |
+| `session_usage` | The provider's totals for the whole session through this run, in the same fields, when the provider reports totals. For a run that started its session, the session is the run. |
 | `timing` | Queued, started and finished times, duration, and the time limit applied as `timeout_secs`. |
 | `provenance` | delega version, and the provider executable path and version. `build` is in the schema but not filled yet. |
 
 A caller that only needs to know what happened reads `outcome`, `text`, `error`
 and `cleanup`.
+
+### Usage
+
+On a resumed run the providers report session totals for some values, so
+`usage` is not copied from the provider as is:
+
+- Claude Code: the tokens are the run's own. The run's own `cost_usd` is the
+  sum of `costUSD` over `model_usage_since_last_result`, used only when that
+  object has at least one entry and every entry has a usable (finite,
+  non-negative) `costUSD`; there are no partial sums. Otherwise a run that did
+  not resume takes `total_cost_usd` (the session is the run), and a resumed run
+  has no `cost_usd`. `session_usage` has the session's total cost and tokens.
+- Codex: only the thread's totals are reported. They are `session_usage`, and
+  `usage` too for a run that did not resume. For a resumed Codex run delega
+  does not know the run's own consumption: it has no `usage` and reports only
+  `session_usage`, through `delega run`, MCP and the library alike.
+
+Both fields come from the provider's terminal event. A run that times out, is
+interrupted or fails before any terminal event has neither; one that hangs
+after its terminal event keeps what that event reported.
+
+The difference between two runs' `session_usage` is one run's own consumption
+only if nothing else used the provider session in between: another worker or a
+`delega run --resume` on the same session, or a failed or timed-out run that
+reported no totals, all add to it. delega does not compute it.
+
+Compact reads leave out `usage` and `session_usage`, as they do provenance.
 
 ### `applied`
 

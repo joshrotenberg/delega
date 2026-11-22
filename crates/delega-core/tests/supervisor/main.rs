@@ -41,6 +41,7 @@ mod reads;
 mod state;
 mod stops;
 mod stress;
+mod usage;
 mod waits;
 
 /// How many of these tests may run at once. Each starts shell processes and

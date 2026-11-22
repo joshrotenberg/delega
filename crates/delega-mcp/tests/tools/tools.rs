@@ -79,6 +79,7 @@ async fn a_run_goes_from_start_through_wait_to_a_result_read_with_read() {
     let full = rig.read_full(&run).await;
     assert_eq!(full["result"]["outcome"], "completed");
     assert!(full["result"]["usage"].is_object(), "{full}");
+    assert!(full["result"]["session_usage"].is_object(), "{full}");
     rig.finish().await;
 }
 

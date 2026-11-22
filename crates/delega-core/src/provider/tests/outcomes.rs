@@ -254,6 +254,86 @@ async fn timeout(provider: Provider) {
 }
 both!(times_out_a_hung_provider_and_stops_it, timeout);
 
+/// A run that reported its usage and then hung past the time limit, started
+/// fresh or resumed (the fakes' second turn). The limit is far above the time
+/// the fake takes to start on a loaded machine, and the fake's
+/// `result-written` record shows its result came out before the limit.
+async fn timed_out_after_usage(
+    provider: Provider,
+    resume: bool,
+) -> crate::contract::result::RunResult {
+    let rig = Rig::new();
+    let mut request = rig.request(provider, "success-then-hang");
+    request.timeout_secs = 5;
+    if resume {
+        request.session.resume = Some("saved-session-9".into());
+    }
+    let result = run_checked(request, rig.options(provider)).await;
+    assert_eq!(result.outcome, Outcome::TimedOut, "{result:#?}");
+    assert!(
+        rig.record.join("result-written").exists(),
+        "the fake did not write its result before the time limit: {result:#?}"
+    );
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("a final result had been received before the time limit")),
+        "{result:#?}"
+    );
+    rig.assert_nothing_left().await;
+    result
+}
+
+async fn timeout_keeps_usage(provider: Provider) {
+    use crate::contract::result::Usage;
+    let fresh = timed_out_after_usage(provider, false).await;
+    let resumed = timed_out_after_usage(provider, true).await;
+    match provider {
+        Provider::Claude => {
+            let run = Usage {
+                input_tokens: Some(12),
+                output_tokens: Some(7),
+                cached_tokens: Some(4),
+                reasoning_tokens: None,
+                cost_usd: Some(0.001),
+            };
+            assert_eq!(fresh.usage, Some(run.clone()));
+            assert_eq!(fresh.session_usage, Some(run.clone()));
+            // A resumed run keeps its own figures; the totals cover two turns.
+            assert_eq!(resumed.usage, Some(run));
+            assert_eq!(
+                resumed.session_usage,
+                Some(Usage {
+                    input_tokens: Some(24),
+                    output_tokens: Some(14),
+                    cached_tokens: Some(8),
+                    reasoning_tokens: None,
+                    cost_usd: Some(0.002),
+                })
+            );
+        }
+        Provider::Codex => {
+            let turns = |n: u64| Usage {
+                input_tokens: Some(100 * n),
+                output_tokens: Some(7 * n),
+                cached_tokens: Some(10 * n),
+                reasoning_tokens: Some(3 * n),
+                cost_usd: None,
+            };
+            assert_eq!(fresh.usage, Some(turns(1)));
+            assert_eq!(fresh.session_usage, Some(turns(1)));
+            // Thread totals are not a resumed run's own consumption.
+            assert_eq!(resumed.usage, None);
+            assert_eq!(resumed.session_usage, Some(turns(2)));
+        }
+    }
+}
+both!(
+    keeps_reported_usage_when_the_provider_hangs_past_the_time_limit,
+    timeout_keeps_usage
+);
+
 async fn interrupt(provider: Provider) {
     let rig = Rig::new();
     let handle = start(rig.request(provider, "hang"), rig.options(provider));

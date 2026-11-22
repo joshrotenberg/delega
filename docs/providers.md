@@ -593,8 +593,20 @@ fresh one, see [Outcomes](#outcomes)). The
 `result` event gives the answer (`result`), success (`subtype == "success"` and
 `is_error` not true), errors, `usage` (`input_tokens` plus
 `cache_creation_input_tokens`, reported as `input_tokens`; `output_tokens`;
-`cache_read_input_tokens` as `cached_tokens`), `total_cost_usd` and
-`permission_denials`. Messages with `parent_tool_use_id` are sub-agent messages
+`cache_read_input_tokens` as `cached_tokens`), `total_cost_usd`, `modelUsage`,
+`model_usage_since_last_result` and `permission_denials`.
+
+The result's `usage` token counts are the run's own and become the result's
+`usage` tokens. `total_cost_usd` and `modelUsage` are the session's totals and
+become `session_usage`: `cost_usd` is `total_cost_usd`, and the tokens are the
+sums over the models in `modelUsage` (`inputTokens` plus
+`cacheCreationInputTokens` as `input_tokens`, `outputTokens`,
+`cacheReadInputTokens` as `cached_tokens`). The run's own `cost_usd` is the sum
+of `costUSD` over `model_usage_since_last_result`, used only when that object
+has at least one entry and every entry has a usable (finite, non-negative)
+`costUSD`; there are no partial sums. Otherwise a run that did not resume takes
+`total_cost_usd`, and a resumed run has no `usage.cost_usd`. Negative and
+non-finite values are ignored throughout. Messages with `parent_tool_use_id` are sub-agent messages
 and are not used as the worker's text. When the result carries no text, the last
 assistant message is used and a note says so.
 
@@ -736,7 +748,16 @@ terminal event does not change it but still counts for the session checks (the
 mismatch on a resumed run and the several-ids note on a fresh one). A message item that is not marked
 `commentary` is the answer. `turn.completed` is success and carries `usage`
 (`input_tokens`, `output_tokens`, `cached_input_tokens`,
-`reasoning_output_tokens`); `turn.failed` is failure with its message. `error`
+`reasoning_output_tokens`); `turn.failed` is failure with its message, and its
+`usage`, when it has one, is read the same way. These counts are the thread's
+totals, also on a resumed run; Codex reports no per-turn figure. They become
+`session_usage`, and `usage` only for a run that did not resume. For a resumed
+run delega does not know the run's own consumption: `usage` is empty and only
+`session_usage` is reported, when Codex reported totals (a run that times out
+or fails before any terminal event has neither). The difference between two runs' `session_usage`
+is one run's own only if nothing else used the thread in between (another
+worker or a CLI `--resume` on the same thread, or a failed or timed-out run
+that reported no totals); delega does not compute it. `error`
 events are kept: they fail the run only if no terminal event follows.
 
 The [provider failure kind](#provider-failure-kinds) comes from the
@@ -940,6 +961,24 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
   `verification_required`, `billing_error`, `rate_limit`, `overloaded`,
   `invalid_request`, `model_not_found`, `server_error`, `unknown`,
   `max_output_tokens`, `cloud_credential_error`. Only the two above were run.
+- With Claude Code 2.1.329 and Codex 0.170.0 (#115), a start writing about
+  600 output tokens and two one-word follow-ups resuming it reported:
+
+  | Run | Claude `output_tokens` | Claude `total_cost_usd` | Codex `input_tokens` | Codex `output_tokens` | Codex `cached_input_tokens` |
+  | --- | --- | --- | --- | --- | --- |
+  | start | 601 | 0.0283 | 16,229 | 603 | 13,440 |
+  | follow-up 1 | 4 | 0.0374 | 33,074 | 608 | 26,880 |
+  | follow-up 2 | 3 | 0.0388 | 49,937 | 613 | 43,648 |
+
+  Claude Code's `usage` token counts are per run and `total_cost_usd` is the
+  session's. Its result also has `modelUsage` (session totals per model) and
+  `model_usage_since_last_result` (this run's own, per model): a start had
+  `total_cost_usd` 0.01142 and `model_usage_since_last_result.<m>.costUSD`
+  0.01142; the resumed run had `total_cost_usd` 0.0173514,
+  `modelUsage.<m>.costUSD` 0.0173514, `model_usage_since_last_result.<m>.costUSD`
+  0.0059314, `model_usage_since_last_result.<m>.outputTokens` 4 and
+  `modelUsage.<m>.outputTokens` 205. Every Codex `turn.completed.usage` count
+  on a resumed run is the thread's total.
 - With Codex 0.170.0 (#116), `codex exec --json` carries no structured codes
   for these failures, only text. An unknown model with a ChatGPT login gives an
   `error` event and a `turn.failed` with the message "The 'no-such-model' model
@@ -989,3 +1028,6 @@ each.
 - **Stopping at the final result.** A provider that writes its result and then
   does not exit holds the run until the time limit.
 - **Usage during a run.** Usage is taken from the terminal event only.
+- **A resumed Codex run's own usage.** Codex reports only the thread's totals,
+  so a resumed run's `usage` is empty and only `session_usage` is reported,
+  when the run reported totals at all.
