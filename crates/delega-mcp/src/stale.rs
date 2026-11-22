@@ -168,12 +168,14 @@ enum NotOpened {
     NotARegularFile,
 }
 
-/// Open `path` for reading if it is a regular file, without ever waiting.
+/// Open `path` for reading if it is a regular file.
 ///
-/// The open is non-blocking: opening a FIFO for reading otherwise waits for a
-/// writer. What kind of file it is is asked of the open handle, so the answer
-/// is about the file that will be read and not about what the path named a
-/// moment earlier.
+/// The open has `O_NONBLOCK`, which keeps it from waiting for a writer when
+/// the path is a FIFO. The filesystem calls themselves (the open, the status
+/// call and later reads) can still wait on a filesystem that does not answer,
+/// which is why callers bound the whole check ([`CHECK_LIMIT`]). What kind of
+/// file it is is asked of the open handle, so the answer is about the file
+/// that will be read and not about what the path named a moment earlier.
 fn open_regular(path: &Path) -> Result<File, NotOpened> {
     let nonblocking =
         i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).map_err(|_| NotOpened::Failed)?;
@@ -266,16 +268,17 @@ mod tests {
 
     use super::*;
 
-    /// Make a FIFO at `path` with the `mkfifo` program, under the spawn lock
-    /// every spawn in this workspace holds. The standard library has no call
-    /// for it.
-    #[allow(clippy::disallowed_methods)]
+    /// Make a FIFO at `path` with the `mkfifo` system call: no child process,
+    /// so nothing to wait for and no spawn lock to hold. The standard library
+    /// has no call for it, and rustix leaves `mkfifoat` out on macOS.
+    #[allow(unsafe_code)]
     fn make_fifo(path: &Path) {
-        let status = {
-            let _held = delega_core::process::spawn_guard();
-            std::process::Command::new("mkfifo").arg(path).status()
-        };
-        assert!(status.expect("run mkfifo").success(), "mkfifo failed");
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path");
+        // SAFETY: `name` is a NUL-terminated string that outlives the call,
+        // and `mkfifo` keeps no pointer to it.
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
     }
 
     #[test]
