@@ -25,8 +25,9 @@ on:
 permissions:
   contents: read
 
-# Pull request runs replace each other; a run on main is never cancelled, so a
-# Pages deployment is not stopped part way.
+# A newer pull request run cancels the older one. On main a run in progress is
+# not cancelled, so a Pages deployment is not stopped part way; GitHub keeps
+# only the newest waiting run behind it.
 concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
