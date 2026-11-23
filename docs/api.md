@@ -65,7 +65,7 @@ arguments, and the library from a struct. A partial request saved as a file is a
 | `session` | object | `ephemeral: bool`, or `resume: <provider session id>` (at most 256 bytes). Not both. A resumed session the provider cannot find fails `session_not_found`; one that reports another session id fails `session_mismatch` if it would otherwise have completed ([providers.md](providers.md#outcomes)). |
 | `native_args` | list of strings | Provider options passed through an allowlist, at most 64. A rejected one is `native_arg_rejected`. |
 
-A value outside a bound is refused `invalid_request`, with every problem listed.
+A request that breaks the contract is refused `invalid_request`, with every problem listed; MCP rejects some bad arguments earlier as tool errors ([MCP](#mcp)).
 The bounds are in `crates/delega-core/src/contract/limits.rs`; `delega schema
 request` carries the ranges and list counts but not string lengths.
 
@@ -182,9 +182,8 @@ value or a deny rule's text. Keys are sorted. A dry run carries it as
 | `deny_rules` | Settings files read with rule counts (`files`), files ignored with the reason (`skipped`), and rules passed (`applied`). | Codex, or a refusal before the settings files were read. |
 | `context` | `settings`: `deny_rules` (only the deny rules of Claude Code's settings reach the worker). `instructions`: `false`, because delega stops Claude Code from loading `CLAUDE.md` files and auto memory on its own. | Codex, or a refusal before it was decided. |
 
-`sources` keys are the request fields and `permissions.mode`,
-`permissions.commands`, `permissions.directories`, `permissions.on_request`,
-`permissions.strict`, `session.ephemeral` and `session.resume`.
+`sources` keys are request field names, dotted for nested ones (such as
+`permissions.mode`); `crates/delega-core/src/profile.rs` records them.
 `timeout_secs`, `permissions.mode`, `permissions.on_request`,
 `permissions.strict` and `session.ephemeral` are present as `default` unless a
 layer set them; the others appear only when set. An explicit `ephemeral`
@@ -260,8 +259,8 @@ Behaviour:
   `invalid_env_name`; a calling-session variable, a `DELEGA_*` variable or a
   name delega sets for the provider is `forbidden_env_name`. The message gives
   the position, not the name. A secret-looking name is allowed and named in
-  `provider_notes`, and every run carries one note with the counts withheld and
-  passed. A profile cannot carry `env`. The configuration file's `[env]`
+  `provider_notes`, and a run that reaches environment resolution carries one
+  note with the counts withheld and passed. A profile cannot carry `env`. The configuration file's `[env]`
   applies first, so a flag that sets the same variable wins.
 - **Output.** `--output text` prints the answer to standard output only for
   `completed`, with a trailing newline added. A run that did not complete
@@ -337,8 +336,8 @@ Behaviour:
 
 `delega doctor` reports what a run in the current directory would meet, with
 the [configuration file](#configuration-file) applied and no `--env`. It starts
-no worker and writes nothing. The only process it starts is each provider's
-`--version` probe (5 s limit). It prints no environment value, deny rule or
+no worker and writes nothing. It starts each provider's `--version` probe (5 s
+limit) and one `ps` listing. It prints no environment value, deny rule or
 file content.
 
 For `claude` and `codex` each it reports:
@@ -426,8 +425,9 @@ Options for both: `--host claude|codex` (repeatable), `--install-dir DIR`,
 - **Managed directory.** `--install-dir DIR`, else `DELEGA_INSTALL_HOME`, else
   `$HOME/.local/share/delega`. Must be absolute. An existing directory is
   reused only if it is empty or holds a valid marker.
-- **Hosts.** Found as `delega run` finds providers (`DELEGA_CLAUDE_BIN`,
-  `DELEGA_CODEX_BIN`, then `PATH`). Every host named with `--host` must be
+- **Hosts.** `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN`, else the absolute
+  entries of `PATH` (`find_host` in `crates/delega/src/commands/plugin/mod.rs`);
+  the configuration file is not used. Every host named with `--host` must be
   found. Without `--host`, missing hosts are skipped and at least one must be
   found.
 - **Files written** under the managed directory:
@@ -437,7 +437,7 @@ Options for both: `--host claude|codex` (repeatable), `--install-dir DIR`,
   | `plugin/delega/bin/delega` | A copy of the running executable. |
   | `plugin/delega/skills/<name>/SKILL.md` | One per built-in skill. |
   | `plugin/delega/IDENTITY.json` | The output of `delega version --output json`. |
-  | `plugin/delega/.claude-plugin/plugin.json`, `plugin/delega/.mcp.json` | Claude Code manifests. |
+  | `plugin/delega/.claude-plugin/plugin.json`, `plugin/delega/.mcp.json` | Claude Code manifests; the server is `${CLAUDE_PLUGIN_ROOT}/bin/delega mcp`. |
   | `plugin/delega/plugin.json`, `plugin/delega/mcp.json` | Codex manifests. |
   | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | The local marketplace `delega-local`. |
   | `.delega-install.json` | The ownership marker: the files written and the hosts registered. |
@@ -458,7 +458,8 @@ host still runs, the files stay, and the status is 1; fix it and run again.
 
 `delega plugin uninstall` checks each host's registrations first and stops,
 keeping every file, when they do not point at the managed directory, the marker
-is invalid, or a listing fails. With `--host` the directory is kept while
+is invalid, or a listing fails or exceeds 30 s
+(`crates/delega/src/commands/plugin/uninstall.rs`). A host named with `--host` that the marker does not list is reported `not_registered`. With `--host` the directory is kept while
 another host remains in the marker. It deletes only the files the marker lists.
 How registrations are checked: `crates/delega/src/commands/plugin/registration.rs`;
 what the marker may name: `crates/delega/src/commands/plugin/marker.rs`.
@@ -475,10 +476,10 @@ Do not run install or uninstall concurrently on one directory.
 reconnect `plugin:delega:delega` from `/mcp` (`/reload-plugins` does not
 restart the server); in Codex start a new session. Then compare
 `delega://identity` with `plugin/delega/IDENTITY.json`. Until then the old
-server reports [`stale_server`](#stale-server).
+server usually reports [`stale_server`](#stale-server).
 
-The plugin's server starts with no `--env`, so its workers get only the fixed
-allowlist. The manifests set no `cwd`, which is why MCP `start` requires an
+The plugin's server starts with no `--env`; its workers get the fixed allowlist
+plus the configuration file's `[env]`. The manifests set no `cwd`, which is why MCP `start` requires an
 absolute `cwd`. Claude Code puts the plugin's `bin/` on the Bash tool's `PATH`.
 Claude.ai and Cowork refuse plugins with a top-level `bin/`, so it cannot be
 installed there.
@@ -532,9 +533,10 @@ wait_ceiling_secs = 120
 max_waits_in_flight = 32
 ```
 
-**Location.** `DELEGA_CONFIG` (absolute; a missing file is refused), else
-`$XDG_CONFIG_HOME/delega/config.toml` when `XDG_CONFIG_HOME` is absolute, else
-`$HOME/.config/delega/config.toml`. No file in a repository or working
+**Location.** `DELEGA_CONFIG` when not empty (absolute; a missing file is
+refused), else `$XDG_CONFIG_HOME/delega/config.toml` when `XDG_CONFIG_HOME` is
+absolute, else `$HOME/.config/delega/config.toml` when `HOME` is absolute, else
+none. No file in a repository or working
 directory is read. A missing file at a default place means no configuration.
 The file is read when a command starts; `delega mcp` reads it once.
 
@@ -548,7 +550,7 @@ unknown key is refused.
 | `[env]` `pass` | Names, as `--env NAME`. |
 | `[env.set]` | Names and string values, as `--env NAME=VALUE`. Values are never printed. |
 | `[providers.claude]`, `[providers.codex]` `executable` | Absolute path. `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN` overrides it. |
-| `[mcp]` | Supervisor limits, used by `delega mcp` and shown by `delega doctor`. The file can lower them, not raise them: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300, `max_waits_in_flight` 1 to 64. `wait_default_secs` is 0 to the ceiling in force; a ceiling below 30 s set alone lowers the default to it. |
+| `[mcp]` | Supervisor limits, used by `delega mcp` and shown by `delega doctor`. The file can lower these, not raise them: `max_live_workers` 1 to 16, `max_running_runs` 1 to 4, `max_queued_per_worker` 0 to 16, `wait_ceiling_secs` 1 to 300, `max_waits_in_flight` 1 to 64. `wait_default_secs` (default 30) can be set from 0 up to the ceiling in force; a ceiling below 30 s set alone lowers the default to it. |
 
 `[env]` names have the rules and refusals of `--env`. Error positions count
 `pass` in file order and `set` keys alphabetically.
@@ -596,12 +598,12 @@ supervisor behind it is described in [supervisor.md](supervisor.md).
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides. An absolute `cwd` is required. | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, with `worker`. Queues behind a running run. |
-| `wait` | `runs` or `workers` (at most 256 ids), `timeout_secs`, `after` (cursor) | When a run finishes, an interaction needs an answer, or on timeout: `timed_out`, the `timeout_secs` applied, each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Also `released_by_shutdown: true` when shutdown released it, and `limit_reached: "max_waits_in_flight"` when too many waits were open. |
+| `wait` | `runs`, `workers` or both (at most 256 ids together), `timeout_secs`, `after` (cursor) | When a run finishes, an interaction needs an answer, or on timeout: `timed_out`, the `timeout_secs` applied, each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Also `released_by_shutdown: true` when shutdown released it, and `limit_reached: "max_waits_in_flight"` when too many waits were open. |
 | `read` | `run` or `worker`, `detail`, `after`, `text_offset` | The result if finished; otherwise state, pending interactions and `progress`. `text_window` with `text_offset`, and a `cursor`. |
 | `list` | none | Live workers, then closed ones still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; limits in force and in use (including `default_wait_secs`, `wait_ceiling_secs`, `max_waits_in_flight`, `waits_in_flight`); a `cursor`; and [`stale_server`](#stale-server) when it applies. |
-| `interrupt` | `run` or `worker` | After the run stops, at most 30 s: `settled`, `was_queued` and the compact result. |
+| `interrupt` | `run` or `worker` | When the run stops, or after 30 s with `settled: false`: `settled`, `was_queued` and the compact result. |
 | `respond` | `interaction`, `decision` (`allow`, `deny`), optional `note` (at most 256 bytes, discarded) | `accepted`, `unknown_interaction`, `already_answered`, `timed_out` or `closed`. |
-| `close` | `worker` | Stops the running run (at most 30 s), discards queued ones, frees the slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. |
+| `close` | `worker` | Stops the running run (waits at most 30 s; `settled: false` if it has not stopped), discards queued ones, frees the slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. |
 
 Rules:
 
@@ -672,7 +674,8 @@ Rules:
 A running host session keeps the server it started with. After `delega plugin
 install` or `uninstall` replaces or removes that executable, `list` and
 `delega://identity` carry a `stale_server` object until the server is
-reconnected or a new session starts.
+reconnected or a new session starts. A call whose check times out (2 s) or
+finds too many checks pending omits it.
 
 | Field | Meaning |
 | --- | --- |
@@ -697,7 +700,8 @@ once, and one input message may be at most 32 MiB.
   file stops start-up with `delega mcp: refused: <kind>: <message>` and
   status 2.
 - **Stopping.** End of input or SIGINT, SIGTERM, SIGHUP, SIGQUIT stops new
-  calls, releases open waits, and stops every worker (at most 30 s), then waits
+  calls, releases open waits, and stops the workers, waiting at most 30 s (runs
+  still unsettled then give exit status 1), then waits
   at most 15 s for the transport and exits. A second signal is acknowledged and
   ignored. SIGKILL leaves the workers running. A client that stops reading
   standard output should signal the server.
