@@ -665,7 +665,12 @@ fn judge(m: &mut Measured, case: &Case) {
                         error_suffix(m)
                     ));
                 }
-                if m.cleanup_confirmed != expect.confirmed {
+                let accepted_unconfirmed = expect.confirmed == Some(true)
+                    && m.cleanup_confirmed == Some(false)
+                    && expect.unconfirmed_ok.is_some_and(|ok| {
+                        m.cleanup_reason.as_deref().is_some_and(|r| r.contains(ok))
+                    });
+                if m.cleanup_confirmed != expect.confirmed && !accepted_unconfirmed {
                     problems.push(cleanup_mismatch(m.cleanup_confirmed, expect.confirmed));
                 }
                 if expect.confirmed == Some(false) {

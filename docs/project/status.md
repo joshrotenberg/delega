@@ -37,15 +37,15 @@ stands. This page lists the limits a user meets.
   CLI and MCP start is held by a keeper, a small `delega` process that stops the
   provider's whole tree when delega is gone, even after a `SIGKILL`. On Linux
   the keeper also adopts every orphaned descendant, so cleanup cannot miss one.
-  On macOS two cases can still be missed and reported as confirmed: a detached
-  orphan running a program whose environment macOS hides (Apple's own programs
-  under SIP, such as `/bin/sh`, `/bin/sleep` or `perl`), and a fast fork relay.
-  The first depends on the machine: a Mac that does not hide its programs'
-  environment (one with SIP disabled) shows the run marker and cleanup finds
-  such an orphan. The acceptance results record which kind of machine they come
-  from;
-  fork tracking on macOS is
-  [#167](https://github.com/joshrotenberg/delega/issues/167). On every
+  On macOS the keeper tracks forks with `kqueue` and libproc
+  ([#167](https://github.com/joshrotenberg/delega/issues/167)): it follows every
+  descendant from its fork, so it stops a detached orphan running one of
+  Apple's programs and a fast fork relay, and the acceptance matrix shows no
+  survivor. It is a user-space observer, so under heavy load a relay that
+  changes session each generation can still slip past it (1 of 20 runs beside
+  the test suite) and may then be reported as confirmed. When its start-up
+  check fails it reports fork tracking off, and the earlier macOS gaps (an
+  orphan running an Apple program, a fast fork relay) return. On every
   platform, a run is reported unconfirmed when a process still held the output
   after the kill, a `SIGKILL` of the keeper alone makes the result unconfirmed,
   and a `SIGKILL` of the keeper together with delega leaves the worker running.

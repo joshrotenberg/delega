@@ -338,45 +338,79 @@
 //! And if the owner is killed with SIGKILL, nothing stops the child (see "What
 //! no in-process code can do").
 //!
-//! A kept run closes these on Linux. On macOS it closes the SIGKILL of the
-//! owner, and the two gaps remain in part; tracking forks on macOS is
-//! delega issue 167. In detail:
+//! A kept run closes these on Linux, and on macOS in most runs (delega issue
+//! 167). In detail:
 //!
 //! - On Linux the keeper is the reaper of every orphan, so the `setsid`
 //!   descendant and every generation of the relay are the keeper's descendants
 //!   by parent links; the keeper's census keeps the verdict from being
 //!   `Confirmed` while one lives, and its freeze stops the relay, which cannot
 //!   fork once stopped. The tests `a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run`,
-//!   `an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux` and
-//!   `a_fork_relay_is_stopped_in_a_kept_run` in `tests/gaps.rs` run in the Linux
-//!   CI job; they have not run on a developer machine.
-//! - On macOS there is no subreaper, and the run marker is the only tie. A
-//!   descendant that left the session, whose parent is gone, and that does not
-//!   show the marker is not found. That covers a process started with an
-//!   environment that leaves the marker out, and, measured on macOS 27.2 with
-//!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
-//!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
-//!   for a Homebrew binary and for this crate's test binary. Whether this applies
-//!   depends on the machine: a macOS system that does not hide the environment
-//!   of its own programs shows the marker of `sleep` too, and a run on GitHub's
-//!   macos-latest runner found such an orphan by its marker. The tests probe
-//!   it (start `/bin/sleep` with a marker value and look for it in `ps -E`) and
-//!   expect accordingly, and so does the acceptance harness, which records the
-//!   answer in its results. Where it is hidden, such a descendant
-//!   ends with `Confirmed` while it runs, as without a keeper, unless it holds
-//!   the output pipes past the drain bound, which makes the verdict
-//!   `Unconfirmed`.
-//! - On macOS a fast fork relay is not stopped. In 50 interrupted kept runs of
-//!   the relay in `tests/gaps.rs` (perl, a new generation about every 5 ms, 4000
-//!   generations), measured on macOS 27.2 arm64 at a load average of about 15
-//!   (`measure_the_relay_freeze`), the freeze stopped it in none: each listing
-//!   takes 20 ms or more, so the generation it shows has exited before its
-//!   SIGSTOP, and the relay runs perl, whose environment `ps -E` does not show.
-//!   That relay holds the output pipes, and with the held-pipe verdict all 50
-//!   runs of a second measurement (load average about 20) ended `Unconfirmed`
-//!   and none `Confirmed`; before it, all 50 had ended `Confirmed` with a relay
-//!   process alive. A relay that does not hold the output still ends
-//!   `Confirmed` while it runs.
+//!   `an_orphan_that_clears_its_environment_and_runs_sleep_is_stopped_by_the_keeper`
+//!   and `a_fork_relay_is_stopped_in_a_kept_run` in `tests/gaps.rs` run in the
+//!   Linux CI job.
+//! - On macOS the keeper tracks forks (`keeper/track.rs`, calls in
+//!   `sys/darwin.rs`). A `kqueue` watches every process of the tree for
+//!   `NOTE_FORK` and `NOTE_EXIT`; on a fork the keeper lists the parent's
+//!   children at once and takes each one whose recorded parent (the unique id
+//!   from `proc_pidinfo` flavor 17, `PROC_PIDUNIQIDENTIFIERINFO`, which is not
+//!   in the public SDK headers) is the parent's. That record survives the
+//!   reparenting to launchd, so a child whose parent exited before the listing
+//!   is still recovered by a scan of the user's processes, whatever its
+//!   session, environment or program. A process in the program's session is
+//!   the tree's too, which the scans use as a second proof. Signals go by
+//!   audit token (`proc_signal_with_audittoken`), which the kernel checks
+//!   against the pid version, so a reused pid is never signalled. A process
+//!   that may come from a fork the tracker missed and cannot be proven either
+//!   way is a suspect: followed, never signalled, and reported as `ambiguous`,
+//!   which makes the verdict `Unconfirmed`. Nothing is signalled during the
+//!   run; the freeze at the stop stops every proven process and every one
+//!   found from then on. At start the keeper checks that these calls answer as
+//!   expected; when they do not, it says `tracker off` and cleanup falls back
+//!   to process listings and the run marker, with the limits of the earlier
+//!   design (an orphan running an Apple program, whose environment `ps -E`
+//!   does not show under System Integrity Protection, and a fast fork relay
+//!   are missed), and the report has `diagnostics.keeper.fork_tracking` false
+//!   and a warning.
+//! - What was measured on macOS 27.2, Apple M4 Pro (14 cores), about 950
+//!   processes, release builds, on 2026-11-23:
+//!   - `measure_the_tracker` (a perl relay of 300 generations driven on the
+//!     test thread): every generation taken, at an age of 355 µs median, 456
+//!     µs p90, 836 µs p99, 4.2 ms at most; a scan of every process 1.2 ms
+//!     median, a recovery scan of the user's processes 0.5 ms, at 967
+//!     processes.
+//!   - `measure_the_relay_freeze` (50 interrupted kept runs of the 4000
+//!     generation relay): at a load average of about 8, stopped in 50,
+//!     `Confirmed` in 50; with CPU burners (twice the core count, load average
+//!     rising to 38), stopped in 50, `Confirmed` in 49 and `Unconfirmed` in 1
+//!     because the keeper reported a hole. Interrupt to report: median 304 ms
+//!     and 356 ms.
+//!   - `measure_the_fast_double_fork` (50 kept runs): the grandchild stopped
+//!     and `Confirmed` in 50.
+//!   - `measure_the_fork_trackers_cost` (9 kept runs each, tracker on and off,
+//!     alternating): a script that runs `/usr/bin/true` 2000 times, median
+//!     3.07 s on and 3.01 s off; one `/usr/bin/true`, 111 ms on and 87 ms off,
+//!     most of the difference being the census scans. 200 kept runs of a small
+//!     script with a few forks: none `Unconfirmed`.
+//!   - The acceptance matrix with the fakes (8 cases at a time): relay, orphan
+//!     and bare rows pass on macOS, 4 full runs (202 rows each) with no
+//!     survivor and no false confirmation; before the session backstop below,
+//!     3 of 72 relay rows had ended `Confirmed` with the relay alive.
+//! - What remains on macOS, measured: the tracker is a user-space observer.
+//!   Under load a generation can be born, fork and exit while the keeper is
+//!   descheduled, and its child then names a parent that was never taken. The
+//!   tracker follows such a chain as a suspect when it sees a sign of the miss,
+//!   but the stress runs found misses with no sign: before the session
+//!   backstop, a relay that holds no output pipe ended `Confirmed` while it
+//!   ran in 1 of 25 runs beside the test suite
+//!   (`a_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_run`).
+//!   The backstop takes any process in the program's session, which catches a
+//!   relay that stays in the session (40 of 40 runs afterwards). A relay that
+//!   leaves the session each generation is not covered by it: it survived in
+//!   1 of 20 runs beside the test suite, with the verdict `Unconfirmed` in that
+//!   run, but no mechanism guarantees that verdict for one that holds no
+//!   output pipe. So on macOS a fast relay that changes session can still be
+//!   missed under load, and then the verdict can be `Confirmed`.
 //! - On Linux, two windows remain. The keeper is started with a synchronous
 //!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
 //!   example) holds the owner's start without a bound. And a keeper that stops
@@ -394,9 +428,11 @@
 //!   - a keeper that is lost, or that exits without the owner's `released`,
 //!     leaves the child unreaped to the reaper above it, and the verdict is
 //!     `Unconfirmed`;
-//!   - on macOS, a detached orphan whose environment the system hides from
-//!     `ps -E` (Apple's programs under SIP), and a fast fork relay, can be
-//!     missed;
+//!   - on macOS, a fork relay that changes session each generation can be
+//!     missed under load (measured above), and then the verdict can be
+//!     `Confirmed`; with fork tracking off, a detached orphan whose
+//!     environment the system hides from `ps -E` (Apple's programs under SIP)
+//!     and a fast fork relay can be missed;
 //!   - a process the kernel prevents inspecting or signalling (`hidepid`,
 //!     another user's, no pidfd) leaves the verdict `Unconfirmed`, and the
 //!     keeper's own cleanup keeps going until its deadline and then exits.
@@ -516,10 +552,13 @@
 //! `getsid` answered 0 there, rustix would hit the same undefined behaviour in a
 //! release build. macOS and Linux are the supported systems; on other Unix
 //! systems (FreeBSD, where kernel processes can share session 0) the same path
-//! is compiled but has not been checked. It has the only `unsafe` block in
-//! production code (the tests of `delega-mcp` have one more, for `mkfifo`): a
+//! is compiled but has not been checked. Production code has `unsafe` in two
+//! places (the tests of `delega-mcp` have one more, for `mkfifo`): a
 //! `pre_exec` hook in `sys.rs` that calls only `setsid`, used for the child and
-//! for the keeper.
+//! for the keeper, and, on macOS only, `sys/darwin.rs`, with one block per
+//! foreign call of the fork tracker (`proc_pidinfo`, `proc_listpids`,
+//! `sysctl`, `proc_signal_with_audittoken`, `kevent`) and the declaration of
+//! `proc_signal_with_audittoken`, each with its safety argument.
 //!
 //! Verified on macOS only. Not yet verified on Linux, for the Linux run to
 //! check:

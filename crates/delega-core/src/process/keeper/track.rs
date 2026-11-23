@@ -878,6 +878,19 @@ impl Tracker {
                 break;
             }
         }
+        // A backstop that needs no unique id: a process in the program's
+        // session is the tree's, whatever the tracker saw of its forks.
+        let mut queue = Vec::new();
+        for ident in &table {
+            if !self.live.contains_key(&ident.uniqueid)
+                && self.in_program_session(ident.pid)
+                && matches!(self.take(ident.pid, None, true, &mut queue), Taken::New)
+            {
+                scanned.proven += 1;
+                self.recovered += 1;
+            }
+        }
+        self.discover(queue);
         let mut queue = Vec::new();
         for ident in &table {
             if !unseen(self, ident) {

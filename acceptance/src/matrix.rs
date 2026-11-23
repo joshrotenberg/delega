@@ -486,6 +486,12 @@ pub struct Expect {
     /// which nothing can stop the worker) is strict: no survivor is
     /// `unexpected_pass`, which fails.
     pub timing_dependent: bool,
+    /// When set, a run that reports cleanup unconfirmed with a reason that
+    /// contains this text meets a row that expects it confirmed. Used for a
+    /// macOS relay run whose keeper stopped the relay and reported a process
+    /// beside it that it could not prove either way; survivors are judged as
+    /// usual.
+    pub unconfirmed_ok: Option<&'static str>,
 }
 
 /// An expected failure of criterion 2 for the rows that match. An empty list
@@ -503,6 +509,9 @@ struct Gap {
     /// Only on a system that hides the environment of its own programs from
     /// `ps -E` (see [`Machine`]).
     hidden_env_only: bool,
+    /// An unconfirmed reason accepted in place of confirmed cleanup when no
+    /// survivor remains (see [`Expect::unconfirmed_ok`]).
+    unconfirmed_ok: Option<&'static str>,
 }
 
 /// What the expectations depend on besides the matrix: the operating system,
@@ -528,59 +537,32 @@ impl Machine {
 }
 
 const KEEPER_KILLED_REASON: &str = "SIGKILL of delega and of its keeper together: no code of either runs, so nothing stops the worker or enforces its time limit. The accepted residual on every platform (process module docs, \"What remains possible\").";
-const MACOS_PLATFORM_REASON: &str = "macOS residual on a system that hides the environment of its own programs from `ps -E` (System Integrity Protection does): the process left the provider's session and its parent is gone, so no listing ties it to the run, macOS has no subreaper, and the run marker is not visible because these fakes run sh, sleep and perl. Where the environment is visible the marker finds it and the row is expected to pass. Linux closes this through the keeper (process module docs, \"What remains possible\").";
-const MACOS_RELAY_REASON: &str = "macOS residual: a fast fork relay is never in a process listing for long enough to be stopped, and the freeze of listings stopped the process-layer relay in 0 of 50 runs on macOS 27.2. Linux closes this through the keeper's own walk of its tree (process module docs, \"What remains possible\").";
+/// What a macOS kept run of the relay may report instead of confirmed
+/// cleanup: the keeper's fork tracker stopped the relay and met a process
+/// beside it that it could neither prove the tree's nor rule out (another
+/// case's orphan, made while a generation was being recovered).
+const KEEPER_UNPROVEN_PREFIX: &str = "the keeper could not prove its tree empty";
 
-const GAPS: &[Gap] = &[
-    Gap {
-        cases: &["kk"],
-        variants: &[],
-        class: LeakClass::DocumentedGap,
-        survivors: &["provider"],
-        reason: KEEPER_KILLED_REASON,
-        timing_dependent: false,
-        os: None,
-        hidden_env_only: false,
-    },
-    Gap {
-        cases: &[],
-        variants: &["relay"],
-        class: LeakClass::DocumentedGap,
-        survivors: &["relay-heartbeat"],
-        reason: MACOS_RELAY_REASON,
-        timing_dependent: true,
-        os: Some("macos"),
-        hidden_env_only: false,
-    },
-    Gap {
-        cases: &[],
-        variants: &["orphan"],
-        class: LeakClass::DocumentedGap,
-        survivors: &["leaf-setsid"],
-        reason: MACOS_PLATFORM_REASON,
-        timing_dependent: true,
-        os: Some("macos"),
-        hidden_env_only: true,
-    },
-    Gap {
-        cases: &["a"],
-        variants: &["bare"],
-        class: LeakClass::DocumentedGap,
-        survivors: &["bare"],
-        reason: MACOS_PLATFORM_REASON,
-        timing_dependent: true,
-        os: Some("macos"),
-        hidden_env_only: true,
-    },
-];
+const GAPS: &[Gap] = &[Gap {
+    cases: &["kk"],
+    variants: &[],
+    class: LeakClass::DocumentedGap,
+    survivors: &["provider"],
+    reason: KEEPER_KILLED_REASON,
+    timing_dependent: false,
+    os: None,
+    hidden_env_only: false,
+    unconfirmed_ok: None,
+}];
 
 /// Roles that survive when the process listing is unavailable: the worker's
 /// group is killed, but a descendant in a session of its own is not found.
 /// The report says so (cleanup not confirmed), so this is not a failure.
 fn unlisted_survivors(variant: &str, os: &str) -> Vec<&'static str> {
-    // On Linux the keeper stops its whole tree by walking `/proc`, which needs
-    // no process listing program.
-    if os == "linux" {
+    // On Linux the keeper stops its whole tree by walking `/proc`, and on
+    // macOS its fork tracker follows every descendant through libproc; neither
+    // needs a process listing program.
+    if os == "linux" || os == "macos" {
         return Vec::new();
     }
     match variant {
@@ -608,6 +590,7 @@ pub fn expect_for_machine(case: &Case, variant: &str, machine: Machine) -> Expec
         survivors: Vec::new(),
         reason: None,
         timing_dependent: false,
+        unconfirmed_ok: None,
     };
     if case.ps_unavailable {
         expect.survivors = unlisted_survivors(variant, os);
@@ -623,8 +606,12 @@ pub fn expect_for_machine(case: &Case, variant: &str, machine: Machine) -> Expec
             expect.survivors = gap.survivors.to_vec();
             expect.reason = Some(gap.reason);
             expect.timing_dependent = gap.timing_dependent;
+            expect.unconfirmed_ok = gap.unconfirmed_ok;
             break;
         }
+    }
+    if os == "macos" && variant == "relay" && expect.unconfirmed_ok.is_none() {
+        expect.unconfirmed_ok = Some(KEEPER_UNPROVEN_PREFIX);
     }
     expect
 }

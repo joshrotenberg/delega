@@ -1,8 +1,10 @@
 //! The operating system calls the process layer needs, through `rustix`.
 //!
 //! The workspace denies `unsafe`, so signals and non-reaping waits go through
-//! a safe wrapper crate instead of `libc`; the one exception is `new_session`. Nothing else in the module touches
-//! the OS about processes except `ps` in `tree.rs`.
+//! a safe wrapper crate instead of `libc`. The exceptions are `new_session`
+//! here and, on macOS, the fork tracker's calls in `darwin` (see its module
+//! documentation). Nothing else in the module touches the OS about processes
+//! except `ps` in `tree.rs`.
 
 use rustix::io::Errno;
 use rustix::process::{Pid, WaitId, WaitIdOptions, WaitIdStatus};

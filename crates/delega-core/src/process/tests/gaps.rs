@@ -611,6 +611,27 @@ async fn a_fork_relay_that_changes_session_each_generation_is_stopped_in_a_kept_
     assert_relay_stopped(&relay_run_of(session_relay).await);
 }
 
+/// The relay of [`RELAY`] with its output on the null device, as the
+/// acceptance fakes run it: it holds no output pipe, so nothing but the
+/// keeper's own view of its tree can keep the verdict from `Confirmed` while
+/// it runs.
+fn detached_relay(dir: &std::path::Path) -> String {
+    long_relay(dir).replacen("exec perl", "exec </dev/null >/dev/null 2>&1; exec perl", 1)
+}
+
+/// Whatever the platform, a kept run of a relay that holds no output pipe
+/// never claims `Confirmed` while a relay process is alive.
+#[tokio::test]
+async fn a_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_run() {
+    require_perl!();
+    let run = relay_run_of(detached_relay).await;
+    assert!(
+        !(run.alive && run.cleanup == Cleanup::Confirmed),
+        "a relay process was alive but cleanup says Confirmed: {}",
+        run.diagnostics
+    );
+}
+
 /// A double fork as fast as perl can do it: the program's child forks a
 /// child that calls `setsid`, forks the grandchild and exits at once, and is
 /// reaped. Where the macOS tracker took the middle process, the grandchild is
