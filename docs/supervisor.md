@@ -179,8 +179,8 @@ reported them. A resumed Codex follow-up has no `usage`, and has
 One counter numbers every finished run and every activity entry. A response
 carries its value as `cursor`.
 
-- `wait` returns the current states of what it names, after a change or its
-  timeout, with a `cursor`. Pass the cursor back as `after_cursor` to wait for
+- `wait` returns the current states of the named runs and workers, with a
+  `cursor`. Pass the cursor back as `after_cursor` to wait for
   the next change. How waits are answered:
   [`supervisor/core/waits.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/core/waits.rs).
 - A timeout is a response with `timed_out: true` and the current states.
