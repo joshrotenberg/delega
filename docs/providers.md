@@ -566,6 +566,7 @@ caller assignments and adapter settings.
 | Named by caller | `env_pass`, populated by `[env] pass` and repeatable `--env NAME` (`-e`). Missing names appear as `named_not_set` in dry runs. Already-allowed names keep their group. |
 | Set by caller | `env_set`, populated by `[env.set]` and `--env NAME=VALUE`. Flags override config; assignments override values passed from the parent. |
 | Set by adapter | The four Claude variables listed under [Claude Code](#claude-code). Attempts to name or set these are refused with `forbidden_env_name`. |
+| Run marker | `DELEGA_RUN_MARKER`, set when the provider runs through a keeper (always from the CLI and MCP). Cleanup uses it to find a descendant that left the provider's session ([`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs)). It grants nothing. |
 
 Caller names accept ASCII letters, digits and underscores and start with a
 letter or underscore. `invalid_env_name` omits the invalid name in case it
@@ -575,7 +576,7 @@ Secret-looking names added or set by the caller get a note. Use `--env NAME`
 for secrets to keep values out of shell history and the process table.
 See [Configuration file](api.md#configuration-file).
 
-Never passed, even when named: `DELEGA_*`, and the variables that describe the
+Never passed, even when named: `DELEGA_*` (other than the run marker above), and the variables that describe the
 calling session, so a worker started from inside a Claude Code session does not
 take that session's identity. A name is a calling-session variable when it is
 one of `AI_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`,

@@ -74,6 +74,7 @@ pub struct ProcessHandle {
     started: Instant,
     time_limit: Duration,
     tracking: bool,
+    kept: bool,
 }
 
 impl ProcessHandle {
@@ -90,6 +91,7 @@ impl ProcessHandle {
         let started = Instant::now();
         let time_limit = spec.time_limit;
         let tracking = spec.track_descendants;
+        let kept = spec.keeper.is_some();
         let join = tokio::spawn(run_owned(spec, stop.clone(), registry.clone()));
         Self {
             stop,
@@ -99,6 +101,7 @@ impl ProcessHandle {
             started,
             time_limit,
             tracking,
+            kept,
         }
     }
 
@@ -178,7 +181,13 @@ impl ProcessHandle {
                 process_groups: pid.into_iter().collect(),
                 reason: format!(
                     "{why}; a best-effort SIGKILL was sent to the process group but \
-                     no check confirmed it"
+                     no check confirmed it{}",
+                    if self.kept {
+                        "; the keeper stops what is left when the owner's end of its socket \
+                         closes"
+                    } else {
+                        ""
+                    }
                 ),
             },
             diagnostics: Diagnostics {
@@ -191,6 +200,7 @@ impl ProcessHandle {
                 post_exit_group_signal: false,
                 pipes_closed_by_owner: false,
                 session_members_swept: Vec::new(),
+                keeper: self.kept.then(super::report::KeeperDiagnostics::unstarted),
             },
         }
     }

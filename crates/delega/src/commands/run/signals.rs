@@ -15,8 +15,9 @@
 //! processes are still being stopped. Nothing waits without a bound: the
 //! result arrives when cleanup finishes or its deadline passes.
 //!
-//! SIGKILL cannot be handled by any process. If `delega` is killed that way the
-//! worker keeps running, without its time limit.
+//! SIGKILL cannot be handled by any process. If `delega` is killed that way no
+//! result is written, and the worker's keeper (`delega process-keeper`) stops
+//! the worker's tree by itself when `delega`'s end of its socket closes.
 
 use std::io;
 

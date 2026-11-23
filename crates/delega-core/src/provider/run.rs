@@ -26,6 +26,10 @@ use super::refusal::Refusal;
 use super::settle::{Settle, settle};
 use super::{claude, codex, program};
 
+/// The note a result carries when the provider ran without a keeper.
+pub const NO_KEEPER_NOTE: &str = "cleanup ran without a keeper: a descendant that detaches \
+     between listings, a fork relay, or a SIGKILL of the caller can leave a process running";
+
 /// A cloneable way to stop a run from another task or thread.
 #[derive(Debug, Clone)]
 pub struct RunInterrupter(CancellationToken);
@@ -233,6 +237,7 @@ pub(super) async fn probe(
         keep: Keep::Tail,
     };
     spec.stop_grace = PROBE_STOP_GRACE;
+    spec.keeper = plan.keeper.clone();
     drive(spec, cancel).await
 }
 
@@ -319,7 +324,10 @@ async fn execute_steps(
     progress: &Progress,
 ) -> RunResult {
     let began = Instant::now();
-    let notes = plan.notes.clone();
+    let mut notes = plan.notes.clone();
+    if plan.keeper.is_none() {
+        notes.push(NO_KEEPER_NOTE.to_string());
+    }
     let mut cleanup = Cleanup::Confirmed;
     if cancel.is_cancelled() {
         return unstarted(&facts, cleanup, notes, Unstarted::Interrupted);
@@ -423,6 +431,7 @@ async fn execute_steps(
     if let Some(grace) = plan.stop_grace {
         spec.stop_grace = grace;
     }
+    spec.keeper = plan.keeper.clone();
     #[cfg(test)]
     if let Some(chunks) = plan.tap_queue_chunks {
         spec.timings.tap_queue_chunks = chunks;

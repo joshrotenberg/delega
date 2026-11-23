@@ -18,6 +18,9 @@ pub enum Action {
     Signal(Sig, u64),
     /// Close the read end of `delega`'s standard output.
     CloseStdout(u64),
+    /// SIGKILL to `delega` and to its keeper together, this many milliseconds
+    /// after it started: the residual the keeper cannot cover.
+    KillWithKeeper(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +48,7 @@ impl Action {
             Action::Wait => "wait".to_string(),
             Action::Signal(sig, ms) => format!("{} at {ms} ms", sig.name()),
             Action::CloseStdout(ms) => format!("close stdout at {ms} ms"),
+            Action::KillWithKeeper(ms) => format!("SIGKILL to delega and its keeper at {ms} ms"),
         }
     }
 
@@ -52,7 +56,9 @@ impl Action {
     pub fn at_ms(self) -> Option<u64> {
         match self {
             Action::Wait => None,
-            Action::Signal(_, ms) | Action::CloseStdout(ms) => Some(ms),
+            Action::Signal(_, ms) | Action::CloseStdout(ms) | Action::KillWithKeeper(ms) => {
+                Some(ms)
+            }
         }
     }
 }
@@ -347,8 +353,24 @@ pub const CASES: &[Case] = &[
         behaviour: "hang",
         timeout_secs: None,
         action: Action::Signal(Sig::Kill, 1000),
-        variants: FEW,
+        variants: ALL,
         desc: "SIGKILL to delega at 1 s",
+        ps_unavailable: false,
+        expect: ExpectBase {
+            outcome: "none",
+            exit: Exit::Signal(9),
+            docs: Docs::None,
+            confirmed: None,
+            reason: None,
+        },
+    },
+    Case {
+        id: "kk",
+        behaviour: "hang",
+        timeout_secs: None,
+        action: Action::KillWithKeeper(1000),
+        variants: &["plain"],
+        desc: "SIGKILL to delega and its keeper at 1 s",
         ps_unavailable: false,
         expect: ExpectBase {
             outcome: "none",
@@ -392,7 +414,9 @@ pub const CASES: &[Case] = &[
 
 /// Rows that are spike rows, listed so the report can say which carried over.
 /// A case id that is in the spike keeps its meaning; these are new here.
-pub const NEW_CASES: &[&str] = &["dt", "dh", "fl", "fli", "dc", "dca", "k", "u", "ud", "ui"];
+pub const NEW_CASES: &[&str] = &[
+    "dt", "dh", "fl", "fli", "dc", "dca", "k", "kk", "u", "ud", "ui",
+];
 
 /// Cases of the spike that are not run, and why.
 pub const DROPPED: &[(&str, &str)] = &[
@@ -474,70 +498,91 @@ struct Gap {
     reason: &'static str,
     /// See [`Expect::timing_dependent`].
     timing_dependent: bool,
+    /// Only on this operating system (`std::env::consts::OS`); `None` on all.
+    os: Option<&'static str>,
+    /// Only on a system that hides the environment of its own programs from
+    /// `ps -E` (see [`Machine`]).
+    hidden_env_only: bool,
 }
 
-const SIGKILL_REASON: &str = "SIGKILL of delega cannot be handled, so the worker keeps running with nothing enforcing its time limit (docs/api.md, process module docs). Documented gap.";
-const ORPHAN_REASON: &str = "The descendant called setsid and its parent, a child of the provider, exited at once, so the descendant was a child of init in a session of its own before any listing could see it with a parent that was ours: the listing at spawn, the early ones at 50, 100 and 200 ms, or the periodic one. The rows are timing-dependent: a listing that lands between the descendant's start and its parent's exit adopts the descendant, and the gap does not show. No process table link ties it to the worker, so cleanup reports confirmed while it runs (process module gap 1).";
-const BARE_REASON: &str = "The process is a direct child of the provider that called setsid and the provider ended by itself between two listings, which are 50 to 100 ms apart in the first 200 ms of a run and 500 ms apart after it. When the provider exits, its children become children of init at once, so no listing taken afterwards ties the process to the worker, and no scan ran while the provider was its parent. Cleanup reports confirmed while it runs (process module gap 1).";
-const RELAY_REASON: &str = "A fast fork relay is never in a process listing for long enough to be a member, so cleanup reports confirmed while it runs (process module gap 2, delega issue 1).";
+/// What the expectations depend on besides the matrix: the operating system,
+/// and on macOS whether it hides the environment of its own programs from
+/// `ps -E` (System Integrity Protection does, for Apple's programs). The run
+/// marker finds an orphan of the fakes, which run `sh`, `sleep` and `perl`,
+/// only when it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Machine {
+    pub os: &'static str,
+    pub hides_system_env: bool,
+}
 
-const PROVIDER_ONLY: &[&str] = &["provider"];
+impl Machine {
+    /// This machine, probed once (see
+    /// [`system_programs_hide_environment`](crate::procs::system_programs_hide_environment)).
+    pub fn current() -> Self {
+        Self {
+            os: std::env::consts::OS,
+            hides_system_env: crate::procs::system_programs_hide_environment(),
+        }
+    }
+}
+
+const KEEPER_KILLED_REASON: &str = "SIGKILL of delega and of its keeper together: no code of either runs, so nothing stops the worker or enforces its time limit. The accepted residual on every platform (process module docs, \"What remains possible\").";
+const MACOS_PLATFORM_REASON: &str = "macOS residual on a system that hides the environment of its own programs from `ps -E` (System Integrity Protection does): the process left the provider's session and its parent is gone, so no listing ties it to the run, macOS has no subreaper, and the run marker is not visible because these fakes run sh, sleep and perl. Where the environment is visible the marker finds it and the row is expected to pass. Linux closes this through the keeper (process module docs, \"What remains possible\").";
+const MACOS_RELAY_REASON: &str = "macOS residual: a fast fork relay is never in a process listing for long enough to be stopped, and the freeze of listings stopped the process-layer relay in 0 of 50 runs on macOS 27.2. Linux closes this through the keeper's own walk of its tree (process module docs, \"What remains possible\").";
 
 const GAPS: &[Gap] = &[
     Gap {
-        cases: &["k"],
-        variants: &["child"],
-        class: LeakClass::DocumentedGap,
-        survivors: &["child", "provider"],
-        reason: SIGKILL_REASON,
-        timing_dependent: false,
-    },
-    Gap {
-        cases: &["k"],
-        variants: &["setsid"],
-        class: LeakClass::DocumentedGap,
-        survivors: &["leaf-setsid", "mid", "provider"],
-        reason: SIGKILL_REASON,
-        timing_dependent: false,
-    },
-    Gap {
-        cases: &["k"],
+        cases: &["kk"],
         variants: &[],
         class: LeakClass::DocumentedGap,
-        survivors: PROVIDER_ONLY,
-        reason: SIGKILL_REASON,
+        survivors: &["provider"],
+        reason: KEEPER_KILLED_REASON,
         timing_dependent: false,
+        os: None,
+        hidden_env_only: false,
     },
     Gap {
         cases: &[],
         variants: &["relay"],
         class: LeakClass::DocumentedGap,
         survivors: &["relay-heartbeat"],
-        reason: RELAY_REASON,
+        reason: MACOS_RELAY_REASON,
         timing_dependent: true,
+        os: Some("macos"),
+        hidden_env_only: false,
     },
     Gap {
         cases: &[],
         variants: &["orphan"],
         class: LeakClass::DocumentedGap,
         survivors: &["leaf-setsid"],
-        reason: ORPHAN_REASON,
+        reason: MACOS_PLATFORM_REASON,
         timing_dependent: true,
+        os: Some("macos"),
+        hidden_env_only: true,
     },
     Gap {
         cases: &["a"],
         variants: &["bare"],
         class: LeakClass::DocumentedGap,
         survivors: &["bare"],
-        reason: BARE_REASON,
+        reason: MACOS_PLATFORM_REASON,
         timing_dependent: true,
+        os: Some("macos"),
+        hidden_env_only: true,
     },
 ];
 
 /// Roles that survive when the process listing is unavailable: the worker's
 /// group is killed, but a descendant in a session of its own is not found.
 /// The report says so (cleanup not confirmed), so this is not a failure.
-fn unlisted_survivors(variant: &str) -> Vec<&'static str> {
+fn unlisted_survivors(variant: &str, os: &str) -> Vec<&'static str> {
+    // On Linux the keeper stops its whole tree by walking `/proc`, which needs
+    // no process listing program.
+    if os == "linux" {
+        return Vec::new();
+    }
     match variant {
         "setsid" | "orphan" => vec!["leaf-setsid"],
         "bare" => vec!["bare"],
@@ -545,7 +590,14 @@ fn unlisted_survivors(variant: &str) -> Vec<&'static str> {
     }
 }
 
+/// The expectation of one row on this machine.
 pub fn expect_for(case: &Case, variant: &str) -> Expect {
+    expect_for_machine(case, variant, Machine::current())
+}
+
+/// The expectation of one row on `machine`.
+pub fn expect_for_machine(case: &Case, variant: &str, machine: Machine) -> Expect {
+    let os = machine.os;
     let mut expect = Expect {
         outcome: case.expect.outcome,
         exit: case.expect.exit,
@@ -558,12 +610,14 @@ pub fn expect_for(case: &Case, variant: &str) -> Expect {
         timing_dependent: false,
     };
     if case.ps_unavailable {
-        expect.survivors = unlisted_survivors(variant);
+        expect.survivors = unlisted_survivors(variant, os);
         return expect;
     }
     for gap in GAPS {
         let hit = (gap.cases.is_empty() || gap.cases.contains(&case.id))
-            && (gap.variants.is_empty() || gap.variants.contains(&variant));
+            && (gap.variants.is_empty() || gap.variants.contains(&variant))
+            && gap.os.is_none_or(|only| only == os)
+            && (!gap.hidden_env_only || machine.hides_system_env);
         if hit {
             expect.leak = gap.class;
             expect.survivors = gap.survivors.to_vec();
@@ -586,6 +640,12 @@ pub struct Row {
 }
 
 pub fn all() -> Vec<Row> {
+    all_for(Machine::current())
+}
+
+/// Every row with its expectation on `machine`, so results recorded on one
+/// system can be checked on another.
+pub fn all_for(machine: Machine) -> Vec<Row> {
     let mut rows = Vec::new();
     for provider in PROVIDERS {
         for case in CASES {
@@ -595,7 +655,7 @@ pub fn all() -> Vec<Row> {
                     provider,
                     case,
                     variant,
-                    expect: expect_for(case, variant),
+                    expect: expect_for_machine(case, variant, machine),
                 });
             }
         }
@@ -611,7 +671,7 @@ pub fn is_timing_gap(row: &Row) -> bool {
 
 /// A handful of rows for `cargo test`: both providers, a normal run, an
 /// error, a timeout with a child, a signal, a crash, and a SIGKILL of delega
-/// that leaves a worker the harness must clean up.
+/// after which its keeper must leave nothing.
 pub const SMOKE: &[&str] = &[
     "claude-a-plain",
     "codex-a-plain",
@@ -658,7 +718,28 @@ mod timing_gap_tests {
 
     #[test]
     fn timing_gap_selection_is_exactly_the_timing_dependent_gap_rows() {
-        let rows = all();
+        // macOS with its programs' environment hidden has the most gap rows;
+        // Linux has none.
+        let linux = all_for(Machine {
+            os: "linux",
+            hides_system_env: false,
+        });
+        assert!(linux.iter().all(|r| !is_timing_gap(r)));
+        let rows = all_for(Machine {
+            os: "macos",
+            hides_system_env: true,
+        });
+        let visible = all_for(Machine {
+            os: "macos",
+            hides_system_env: false,
+        });
+        let count = |rows: &[Row]| rows.iter().filter(|r| is_timing_gap(r)).count();
+        assert!(count(&visible) < count(&rows));
+        assert!(
+            visible
+                .iter()
+                .all(|r| !is_timing_gap(r) || r.variant == "relay")
+        );
         let expected = rows.iter().filter(|r| r.expect.timing_dependent).count();
         let selected: Vec<&Row> = rows.iter().filter(|r| is_timing_gap(r)).collect();
         assert!(expected > 0, "the matrix has timing-dependent gap rows");
