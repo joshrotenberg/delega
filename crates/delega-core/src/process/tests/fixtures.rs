@@ -97,6 +97,12 @@ impl Drop for Reaper {
     }
 }
 
+tokio::task_local! {
+    /// Whether the test runs its children through the test keeper; set by
+    /// `both!`, read by [`sh`].
+    pub(super) static KEEP: bool;
+}
+
 /// A shell script as a child, in the scratch directory, and only `PATH`
 /// inherited. The grace, the drain bound and the cleanup deadline are long
 /// compared with anything a loaded machine adds, so a run does not end by one
@@ -110,6 +116,9 @@ pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpe
     spec.stop_grace = Duration::from_secs(1);
     spec.drain_bound = Duration::from_secs(10);
     spec.cleanup_deadline = Duration::from_secs(120);
+    if KEEP.try_with(|keep| *keep).unwrap_or(false) {
+        spec.keeper = Some(super::keeper::test_keeper());
+    }
     spec
 }
 

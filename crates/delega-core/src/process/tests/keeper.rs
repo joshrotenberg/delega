@@ -1,0 +1,356 @@
+//! Runs through the keeper. The keeper is this test binary itself, started
+//! again with a filter that runs only [`keeper_entry`] and a variable that
+//! makes it act as the keeper; its standard output, where the test harness
+//! writes, is the null device.
+
+use std::time::Duration;
+
+use super::fixtures::{
+    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
+    is_running, run_guarded, sh,
+};
+use crate::contract::result::Cleanup;
+use crate::process::{Ending, KeeperCommand, ProcessHandle, ProcessSpec};
+
+/// Set in the keeper's environment to make [`keeper_entry`] run the keeper.
+const ENTRY_ENV: &str = "DELEGA_TEST_KEEPER_ENTRY";
+
+/// The keeper for tests: this test binary, running [`keeper_entry`] only.
+pub(super) fn test_keeper() -> KeeperCommand {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    KeeperCommand::new(
+        exe,
+        [
+            "--exact",
+            "process::tests::keeper::keeper_entry",
+            "--test-threads=1",
+            "-q",
+        ],
+    )
+    .env(ENTRY_ENV, "1")
+}
+
+/// A spec run through the test keeper.
+pub(super) fn kept(spec: ProcessSpec) -> ProcessSpec {
+    let mut spec = spec;
+    spec.keeper = Some(test_keeper());
+    spec
+}
+
+/// Not a test: the keeper's entry point when this binary is started as one.
+#[test]
+fn keeper_entry() {
+    if std::env::var_os(ENTRY_ENV).is_none() {
+        return;
+    }
+    std::process::exit(crate::process::keeper_main());
+}
+
+/// Set to a number of seconds to make [`sleeper_entry`] sleep that long.
+const SLEEP_ENV: &str = "DELEGA_TEST_SLEEP_SECS";
+
+/// Not a test: a process that sleeps, when this binary is started as one. It
+/// stands in for `sleep` where a test needs a program whose environment `ps -E`
+/// shows on macOS, which it does not for Apple's own programs.
+#[test]
+fn sleeper_entry() {
+    let Some(secs) = std::env::var(SLEEP_ENV).ok().and_then(|v| v.parse().ok()) else {
+        return;
+    };
+    std::thread::sleep(Duration::from_secs(secs));
+    std::process::exit(0);
+}
+
+/// A shell command that starts a process in a session of its own, like
+/// `OWN_SESSION`, running this test binary as a 60 s sleeper instead of
+/// `sleep`, so the run marker in its environment is visible on macOS too.
+pub(super) fn own_session_sleeper() -> String {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    format!(
+        "perl -e 'use POSIX; POSIX::setsid(); $ENV{{{SLEEP_ENV}}} = 60; \
+         exec q({}), q(--exact), q(process::tests::keeper::sleeper_entry), q(--test-threads=1), q(-q)'",
+        exe.display()
+    )
+}
+
+const LONG: Duration = Duration::from_secs(60);
+
+#[tokio::test]
+async fn a_kept_run_reports_the_programs_exit_code_and_output() {
+    let s = Scratch::new();
+    let spec = kept(sh(&s, "echo out; echo err >&2; exit 3", LONG));
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.ending, Ending::Exited { code: 3 }, "{report:#?}");
+    assert_eq!(report.stdout.text(), "out\n");
+    assert_eq!(report.stderr.text(), "err\n");
+    assert_confirmed(&report);
+    let keeper = report
+        .diagnostics
+        .keeper
+        .expect("a kept run reports its keeper");
+    assert!(keeper.pid.is_some() && !keeper.lost, "{keeper:?}");
+    #[cfg(target_os = "linux")]
+    assert!(keeper.subreaper, "{keeper:?}");
+}
+
+#[tokio::test]
+async fn a_kept_run_passes_standard_input_to_the_program() {
+    let s = Scratch::new();
+    let spec = kept(sh(&s, "cat", LONG)).stdin("from the owner");
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    assert_eq!(report.stdout.text(), "from the owner");
+}
+
+#[tokio::test]
+async fn a_run_without_a_keeper_says_so() {
+    let s = Scratch::new();
+    let report = ProcessHandle::start(sh(&s, "exit 0", LONG)).wait().await;
+    assert_eq!(report.diagnostics.keeper, None);
+    assert_confirmed(&report);
+}
+
+#[tokio::test]
+async fn a_kept_program_that_cannot_start_fails_to_start_as_it_would_directly() {
+    let s = Scratch::new();
+    let mut spec = kept(sh(&s, "exit 0", LONG));
+    spec.program = "/nonexistent/delega-test-program".into();
+    let report = ProcessHandle::start(spec).wait().await;
+    match &report.ending {
+        Ending::FailedToStart { message } => assert!(
+            message.contains("/nonexistent/delega-test-program"),
+            "{message}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(report.cleanup, Cleanup::Confirmed);
+}
+
+#[tokio::test]
+async fn a_keeper_that_cannot_start_refuses_the_run_and_starts_nothing() {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "echo started > started; sleep 30", LONG);
+    spec.keeper = Some(KeeperCommand::new("/nonexistent/delega-keeper", ["x"]));
+    let report = ProcessHandle::start(spec).wait().await;
+    match &report.ending {
+        Ending::FailedToStart { message } => {
+            assert!(message.contains("keeper"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(report.cleanup, Cleanup::Confirmed);
+    assert!(!s.path("started").exists());
+}
+
+#[tokio::test]
+async fn a_kept_run_reports_a_crash_by_its_signal() {
+    let s = Scratch::new();
+    let spec = kept(sh(&s, "kill -SEGV $$", LONG));
+    let report = ProcessHandle::start(spec).wait().await;
+    assert!(
+        matches!(report.ending, Ending::Signaled { signal: 11, .. }),
+        "{report:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
+    let s = Scratch::new();
+    let script = format!("{OWN_GROUP} & echo $! > gc; echo $$ > leader; sleep 60");
+    let spec = kept(sh(&s, &script, Duration::from_millis(800)));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc", "leader"]).await;
+    assert!(
+        matches!(report.ending, Ending::TimedOut { .. }),
+        "{report:#?}"
+    );
+    assert_confirmed(&report);
+    assert_gone("descendants", &pids).await;
+}
+
+#[tokio::test]
+async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
+    require_perl!();
+    let s = Scratch::new();
+    let script = format!(
+        "{OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} echo ready > ready; sleep 60"
+    );
+    let spec = kept(sh(&s, &script, LONG));
+    let handle = ProcessHandle::start(spec);
+    let gc = s.pid("gc").await;
+    let _reaper = Reaper(vec![gc]);
+    s.exists("ready").await;
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    assert_confirmed(&report);
+    assert_gone("setsid descendant", &[gc]).await;
+}
+
+/// A process the run did not start, carrying another run's marker value, is
+/// never signalled: the marker matches one run's value exactly.
+#[tokio::test]
+async fn a_process_with_another_runs_marker_is_never_signalled() {
+    use crate::process::MARKER_ENV;
+    use crate::test_spawn::Guarded;
+    let mut other = std::process::Command::new("sleep")
+        .arg("60")
+        .env(MARKER_ENV, "0123456789abcdef0123456789abcdef")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .guarded_spawn()
+        .expect("start a foreign process");
+    let pid = i32::try_from(other.id()).expect("a pid");
+    let _reaper = Reaper(vec![pid]);
+    let s = Scratch::new();
+    let report = ProcessHandle::start(kept(sh(&s, "exit 0", LONG)))
+        .wait()
+        .await;
+    assert_confirmed(&report);
+    assert!(is_running(pid), "a foreign marked process was signalled");
+    let _ = other.kill();
+    let _ = other.wait();
+}
+
+/// Set to a scratch directory to make [`owner_entry`] act as an owner.
+const OWNER_ENV: &str = "DELEGA_TEST_OWNER_DIR";
+
+/// Not a test: an owning process, when this binary is started as one. It runs
+/// one kept program in the directory named by [`OWNER_ENV`] that starts a
+/// descendant in its own group, one in a session of its own, and one that
+/// ignores TERM, and then waits; the test kills it with SIGKILL.
+#[test]
+fn owner_entry() {
+    let Some(dir) = std::env::var_os(OWNER_ENV) else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let script = format!(
+        "echo $$ > leader; {OWN_GROUP} & echo $! > group; \
+         {} >/dev/null 2>&1 & echo $! > session; \
+         sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
+         sleep 60",
+        own_session_sleeper()
+    );
+    let mut spec = ProcessSpec::new("/bin/sh", LONG)
+        .args(["-c", &script])
+        .cwd(&dir)
+        .env(crate::process::EnvPolicy::inherit_only(["PATH"]));
+    spec.keeper = Some(test_keeper());
+    spec.stop_grace = Duration::from_millis(500);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let _ = runtime.block_on(crate::process::run(spec));
+    std::process::exit(0);
+}
+
+/// The parent of `pid`, from `ps`.
+fn parent_of(pid: i32) -> Option<i32> {
+    use crate::test_spawn::Guarded;
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .guarded_output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Gap 3: the owner is killed with SIGKILL, so no code of the owner runs. The
+/// keeper sees the owner's end of its socket close and stops the whole tree,
+/// TERM, the grace, then KILL, and exits.
+#[tokio::test]
+async fn sigkill_of_the_owner_leaves_nothing_running() {
+    require_perl!();
+    use crate::test_spawn::Guarded;
+    let s = Scratch::new();
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let mut owner = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "process::tests::keeper::owner_entry",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env(OWNER_ENV, s.dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .guarded_spawn()
+        .expect("start the owner");
+    let owner_pid = i32::try_from(owner.id()).expect("a pid");
+    let mut pids = Vec::new();
+    for file in ["leader", "group", "session", "stubborn"] {
+        pids.push(s.pid(file).await);
+    }
+    let keeper = parent_of(pids[0]).expect("the program's parent");
+    assert_ne!(keeper, owner_pid, "the program's parent must be the keeper");
+    pids.push(keeper);
+    let _reaper = Reaper(pids.clone());
+    super::fixtures::wait_own_group(pids[2]).await;
+    let _ = crate::process::sys::signal_process(owner_pid, crate::process::sys::Signal::KILL);
+    let _ = owner.wait();
+    assert_gone("the program, its descendants and the keeper", &pids).await;
+}
+
+/// The accepted residual on every platform: SIGKILL aimed at the keeper. The
+/// program's pid stops pinning its group once the keeper is gone, so the owner
+/// sends no more group signals, and the verdict says why it cannot confirm.
+#[tokio::test]
+async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
+    let s = Scratch::new();
+    let spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let _reaper = Reaper(vec![leader]);
+    let keeper = parent_of(leader).expect("the program's parent");
+    let _ = crate::process::sys::signal_process(keeper, crate::process::sys::Signal::KILL);
+    let report = handle.wait().await;
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => {
+            assert!(reason.contains("keeper"), "{reason}");
+        }
+        other => panic!("a lost keeper must not confirm cleanup: {other:?}"),
+    }
+    assert!(
+        report.diagnostics.keeper.as_ref().is_some_and(|k| k.lost),
+        "{report:#?}"
+    );
+}
+
+/// The cost of a keeper per run: 40 runs of `/usr/bin/true` owned directly and
+/// 40 through the keeper named by `DELEGA_KEEPER_BIN` (a `delega` binary, run
+/// as `delega process-keeper`), the median and the 90th percentile of each,
+/// from start to report. Run with `DELEGA_KEEPER_BIN=target/release/delega
+/// cargo test --release -- --ignored measure_the_keepers_cost --nocapture`.
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn measure_the_keepers_cost() {
+    let Some(bin) = std::env::var_os("DELEGA_KEEPER_BIN") else {
+        eprintln!("DELEGA_KEEPER_BIN is not set; nothing measured");
+        return;
+    };
+    let bin = std::fs::canonicalize(bin).expect("the keeper binary");
+    let mut results = Vec::new();
+    for kept_run in [false, true] {
+        let mut took = Vec::new();
+        for _ in 0..40 {
+            let mut spec = ProcessSpec::new("/usr/bin/true", LONG);
+            if kept_run {
+                spec.keeper = Some(KeeperCommand::new(&bin, ["process-keeper"]));
+            }
+            let began = std::time::Instant::now();
+            let report = ProcessHandle::start(spec).wait().await;
+            took.push(began.elapsed());
+            assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+        }
+        took.sort();
+        results.push((kept_run, took[20], took[36]));
+    }
+    for (kept_run, median, p90) in results {
+        eprintln!(
+            "{}: median {median:?}, p90 {p90:?}",
+            if kept_run { "kept" } else { "direct" }
+        );
+    }
+}

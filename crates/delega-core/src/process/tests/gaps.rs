@@ -34,6 +34,8 @@ use crate::process::Ending;
 use crate::process::tree::{Lister, list_processes};
 use crate::test_spawn::Guarded;
 
+use super::keeper::{kept, own_session_sleeper};
+
 const LONG: Duration = Duration::from_secs(60);
 
 /// A lister that reads the real table and then drops a marker file, so a
@@ -189,32 +191,62 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
     assert_gone("descendant", &pids).await;
 }
 
+/// Gap 1 without a keeper: a `setsid` descendant whose parent, the leader,
+/// exits before any listing saw the two together. With a keeper it is found
+/// (Linux: it becomes the keeper's child; elsewhere: it carries the run
+/// marker), stopped, and the verdict is `Confirmed` only once it is gone. The
+/// descendant runs this test binary, not `sleep`: on macOS `ps -E` shows no
+/// environment for Apple's own programs, so an orphan running one of them is
+/// the documented residual there.
 #[tokio::test]
-#[ignore = "known gap: the parent was the leader, orphaned before any listing"]
-async fn a_setsid_grandchild_whose_parent_exits_at_once_is_not_reported_as_cleaned_up() {
+async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0",
+        own_session_sleeper()
     );
-    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("orphaned setsid descendant", &pids).await;
 }
 
 #[tokio::test]
-#[ignore = "known gap: the parent was the leader, orphaned before any listing"]
-async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_not_reported_as_cleaned_up()
- {
+async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped_in_a_kept_run() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
-         sleep 0.15; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+         sleep 0.15; kill -KILL $$; sleep 5",
+        own_session_sleeper()
     );
-    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("orphaned setsid descendant", &pids).await;
+}
+
+/// Gap 1 when the descendant also clears its environment: on Linux the keeper
+/// is its reaper and it is stopped; on macOS it carries no marker and no
+/// listing ties it to the run, the documented residual, so only the absence of
+/// a false confirmation could be asked there, and even that is not promised.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux() {
+    require_perl!();
+    let s = Scratch::new();
+    let detach =
+        "perl -e 'use POSIX; POSIX::setsid(); %ENV = (); exec { q(/bin/sleep) } q(sleep), q(60)'";
+    let script = format!(
+        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {detach} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
+    );
+    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("orphan without the marker", &pids).await;
 }
 
 /// A middle process that stays alive in the child's session and group and
@@ -370,6 +402,12 @@ const RELAY: &str = "exec perl -e 'use POSIX; \
       exit 0 } \
     sleep 60'";
 
+/// The same relay with 4000 generations, so it outlives any stop by many
+/// seconds and only a stop can explain its end.
+fn long_relay() -> String {
+    RELAY.replace("(1..300)", "(1..4000)")
+}
+
 fn heartbeat_age(scratch: &Scratch) -> Duration {
     std::fs::metadata(scratch.path("beat"))
         .and_then(|m| m.modified())
@@ -378,31 +416,94 @@ fn heartbeat_age(scratch: &Scratch) -> Duration {
         .unwrap_or(Duration::MAX)
 }
 
-#[tokio::test]
-#[ignore = "known gap: a relay is never in a listing long enough"]
-async fn a_fork_relay_is_not_reported_as_cleaned_up_while_it_runs() {
-    require_perl!();
+/// What one interrupted kept run of the long relay came to: whether a relay
+/// process was alive when the report arrived, the verdict, and how long the
+/// stop took from the interrupt to the report.
+async fn relay_run() -> (bool, Cleanup, Duration) {
     let s = Scratch::new();
-    let mut spec = sh(&s, RELAY, LONG);
+    let mut spec = kept(sh(&s, &long_relay(), LONG));
     spec.stop_grace = Duration::from_millis(100);
     let handle = crate::process::ProcessHandle::start(spec);
     s.exists("beat").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = std::time::Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
+    let took = asked.elapsed();
     // The heartbeat is touched by every generation, so a recent one means a
     // relay process is alive now, however short each one lives.
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let alive = heartbeat_age(&s) < Duration::from_millis(150);
-    // Let the relay finish by itself before asserting, so nothing is left.
-    for _ in 0..500 {
+    // A relay that survived is ended here, so nothing is left: the last
+    // writer of the heartbeat is the live generation, and the relay is
+    // killed generation by generation until the heartbeat goes stale.
+    for _ in 0..3000 {
         if heartbeat_age(&s) > Duration::from_millis(300) {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        if let Ok(pid) = std::fs::read_to_string(s.path("beat"))
+            && let Ok(pid) = pid.trim().parse::<i32>()
+        {
+            let _ = crate::process::sys::signal_process(pid, crate::process::sys::Signal::KILL);
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
+    (alive, report.cleanup, took)
+}
+
+/// Gap 2. On Linux the keeper's own walk of its tree stops the relay: every
+/// generation becomes the keeper's child as its parent exits, and the walk
+/// stops it before it reads its children. On macOS a freeze of listings does
+/// not reliably catch it (see the measurement below and the module
+/// documentation), so the test is ignored there.
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "macOS residual: in 50 interrupted kept runs on macOS 27.2 the freeze stopped the relay in 0, and all 50 reported Confirmed with a relay process alive; see process/mod.rs"
+)]
+async fn a_fork_relay_is_stopped_in_a_kept_run() {
+    require_perl!();
+    let (alive, cleanup, _) = relay_run().await;
     assert!(
-        !(alive && report.cleanup == Cleanup::Confirmed),
-        "a relay process was alive but cleanup says Confirmed"
+        !alive,
+        "a relay process was alive after the report: {cleanup:?}"
+    );
+    assert_eq!(cleanup, Cleanup::Confirmed);
+}
+
+/// The measurement behind the macOS residual: 50 interrupted kept runs of the
+/// relay, counting those that stopped it and those that claimed `Confirmed`
+/// with a relay process alive. Run with `cargo test -- --ignored
+/// measure_the_relay_freeze --nocapture`.
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn measure_the_relay_freeze() {
+    if !super::fixtures::perl_available() {
+        return;
+    }
+    let mut stopped = 0;
+    let mut false_confirmations = 0;
+    let mut unconfirmed = 0;
+    let mut took = Vec::new();
+    for _ in 0..50 {
+        let (alive, cleanup, stop) = relay_run().await;
+        took.push(stop);
+        if !alive {
+            stopped += 1;
+        }
+        if alive && cleanup == Cleanup::Confirmed {
+            false_confirmations += 1;
+        }
+        if cleanup != Cleanup::Confirmed {
+            unconfirmed += 1;
+        }
+    }
+    took.sort();
+    eprintln!(
+        "relay: stopped in {stopped} of 50 runs; Confirmed with a relay alive in \
+         {false_confirmations}; Unconfirmed in {unconfirmed}; interrupt to report median \
+         {:?}, max {:?}",
+        took[25], took[49]
     );
 }
 
