@@ -900,6 +900,43 @@ impl Tracker {
                 || (ident.puniqueid == LAUNCHD_UNIQUEID && ident.uniqueid > self.floor))
     }
 
+    /// Whether a process not held, read with `record`, is a suspect: this
+    /// user's, reparented to launchd, not in a group or session that proves
+    /// it someone else's, and either forked by a process created during the
+    /// run and never taken, or (exec'd after it was reparented) created
+    /// during the run, naming launchd and not leading a session of its own.
+    /// A record read while its parent was alive goes stale when the parent
+    /// exits before the scan reads the parent's row: when the parent is not
+    /// among the identities the scan saw alive (`seen_alive`), the record is
+    /// read again, and kept only while the pid still has the unique id.
+    fn is_suspect(
+        &self,
+        ident: &Ident,
+        record: darwin::KernProc,
+        seen_alive: &HashSet<u64>,
+    ) -> bool {
+        let mut record = record;
+        if record.ppid != 1 && !seen_alive.contains(&ident.puniqueid) {
+            if let (Ok(Some(again)), Ok(Some(still))) =
+                (darwin::kern_proc(ident.pid), darwin::identity(ident.pid))
+                && still.uniqueid == ident.uniqueid
+            {
+                record = again;
+            }
+        }
+        // An orphan that exec'd after it was reparented names launchd as its
+        // parent, as launchd's own jobs do; those lead a session of their
+        // own, and an orphan that did not call setsid after its parent died
+        // does not.
+        let exec_after_reparent = ident.puniqueid == LAUNCHD_UNIQUEID
+            && !matches!(sys::session_lookup(ident.pid), sys::SessionLookup::In(s) if s == ident.pid);
+        !record.zombie()
+            && record.ppid == 1
+            && record.ruid == self.my_uid
+            && (ident.puniqueid != LAUNCHD_UNIQUEID || exec_after_reparent)
+            && !self.provably_foreign(ident.pid, record.pgid)
+    }
+
     /// Whether a process cannot be the tree's by its group or session. A
     /// process of the tree is in a group and a session that a process of the
     /// tree created, so each id is the pid of a process that started after
@@ -996,6 +1033,8 @@ impl Tracker {
         for window in self.windows.iter_mut().filter(|w| w.open > 0) {
             window.until = window.until.max(read_at);
         }
+        // The unique ids this scan saw alive.
+        let seen_alive: HashSet<u64> = table.iter().map(|i| i.uniqueid).collect();
         let unseen = |t: &Self, ident: &Ident| {
             !t.live.contains_key(&ident.uniqueid)
                 && !t.known.contains(&ident.uniqueid)
@@ -1068,18 +1107,7 @@ impl Tracker {
             let Some(record) = records.get(&ident.pid).copied() else {
                 continue;
             };
-            // An orphan that exec'd after it was reparented names launchd
-            // as its parent, as launchd's own jobs do; those lead a session
-            // of their own, and an orphan that did not call setsid after its
-            // parent died does not.
-            let exec_after_reparent = ident.puniqueid == LAUNCHD_UNIQUEID
-                && !matches!(sys::session_lookup(ident.pid), sys::SessionLookup::In(s) if s == ident.pid);
-            let suspect = !record.zombie()
-                && record.ppid == 1
-                && record.ruid == self.my_uid
-                && (ident.puniqueid != LAUNCHD_UNIQUEID || exec_after_reparent)
-                && !self.provably_foreign(ident.pid, record.pgid);
-            if !suspect {
+            if !self.is_suspect(ident, record, &seen_alive) {
                 continue;
             }
             match self.take(ident.pid, None, false, &mut queue) {
@@ -1558,6 +1586,54 @@ mod tests {
         assert_eq!(t.group_signals, 0);
         assert_eq!(report.hole, Some("released"), "{report:?}");
         assert!(!report.complete || report.read_failures > 0, "{report:?}");
+    }
+
+    #[test]
+    fn a_candidate_read_while_its_parent_lived_is_read_again_once_the_parent_is_gone() {
+        use crate::test_spawn::Guarded;
+        // It leaves an orphan behind for a moment.
+        crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+        let t = tracker();
+        // perl forks a child in a session of its own that sleeps, prints its
+        // pid, and waits for its standard input to close before it exits.
+        let mut parent = std::process::Command::new("/usr/bin/perl")
+            .args([
+                "-e",
+                "use POSIX; $| = 1; my $c = fork(); if ($c == 0) { POSIX::setsid(); \
+                 close STDOUT; sleep 5; exit 0 } print qq($c\n); <STDIN>; exit 0",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .guarded_spawn()
+            .expect("start perl");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(parent.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        let child: i32 = line.trim().parse().unwrap();
+        let ident = darwin::identity(child).unwrap().unwrap();
+        let stale = darwin::kern_proc(child).unwrap().unwrap();
+        // The parent is alive in the stale record; then it exits.
+        assert_ne!(stale.ppid, 1);
+        drop(parent.stdin.take());
+        let _ = parent.wait();
+        let until = Instant::now() + Duration::from_secs(5);
+        while darwin::kern_proc(child)
+            .unwrap()
+            .is_some_and(|k| k.ppid != 1)
+            && Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The scan saw no parent alive: the stale record is read again.
+        let suspect = t.is_suspect(&ident, stale, &HashSet::new());
+        // With the parent among those seen alive, the stale record stands.
+        let kept_stale = t.is_suspect(&ident, stale, &HashSet::from([ident.puniqueid]));
+        let _ = darwin::signal(&ident, Signal::KILL);
+        assert!(suspect);
+        assert!(!kept_stale);
     }
 
     #[test]
