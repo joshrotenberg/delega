@@ -106,5 +106,11 @@ in force. See [Limits and defaults](../supervisor.md#limits-and-defaults).
 Set `permissions.on_request` to `ask` for a Claude Code run. When `wait`
 returns a pending interaction, inspect its tool and input summary. Call
 `respond` with its `id` as `interaction` and choose `allow` or `deny`.
+
+Whoever started the worker answers. Through the plugin that is the supervising
+agent, not the person: the plugin's delegate skill tells the agent to show each
+request to the person it works for and to allow only with their answer. Give
+the person time with `permissions.ask_timeout` (120 seconds by default, up to
+600).
 Pass the wait cursor back to observe resolution or completion. If the worker
 ends its turn with a question in the result text, use `follow_up` to answer.

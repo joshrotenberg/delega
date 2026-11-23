@@ -61,8 +61,10 @@ directories;
 `permissions.commands` must be empty) or `full`. Add `permissions.commands` for
 exact commands the worker may run and `permissions.directories` for extra
 directories it may read. A request
-the worker makes that was not granted is answered no and listed in
-`permissions.denied` in the result. Turn on `permissions.strict` to refuse
+the worker makes that was not granted is answered no; see `permissions.denied`
+in the result. A run can ask you instead
+([Answer a permission request](#answer-a-permission-request)); see
+`permissions.asked`. Turn on `permissions.strict` to refuse
 the run before it starts when the provider cannot enforce the permissions as
 stated (Codex `read` and `write` cannot confine reads or commands, and `build`
 on either provider cannot confine what commands read); the run is
@@ -85,8 +87,9 @@ Give each its own working directory.
 2. Do your own work.
 3. Call `wait` with the `runs` or `workers` you are waiting on and a short
    `timeout_secs`. It returns when any of them finishes, or on timeout, with
-   their current states and a `cursor`. Pass the returned cursor as `after` on
-   the next call and it tells you only of what finished since.
+   their current states and a `cursor`. In an ask run, a `wait` without `after`
+   also returns while a permission request is pending. Pass the returned cursor as `after` on the
+   next call and it tells you only of what changed since.
 4. Call `read` with the `run` to get its result.
 
 Prefer short waits and the cursor to one long wait. A timeout costs nothing: the
@@ -106,14 +109,26 @@ need process diagnostics, activity history or every field of the result.
 ## Answer a permission request
 
 For Claude Code, set `permissions.on_request` to `ask` to receive eligible
-tool requests. Inspect the tool and redacted input summary in
-`pending_interactions`. Pass the entry's ID as `interaction` to `respond` and
-choose `allow` or `deny`. Deny a Bash request if its summary has
-`truncated: true` because the full command may be hidden. The request is denied
-if `permissions.ask_timeout`
-expires. Read `permissions.asked` in the final result for the decision and
-whether the response reached the provider pipe. Use `follow_up` for a question
-in the worker's final answer.
+tool requests. A pending request appears in `pending_interactions` with its tool
+and a redacted input summary.
+
+The person you work for decides what a worker may do. For each pending request:
+
+1. Show the person the tool and what the summary says it would do: the command,
+   the file path, the URL or the search.
+2. Answer with their decision: pass the entry's ID as `interaction` to `respond`
+   with `allow` or `deny`.
+
+You may deny a request on your own, for example one that is clearly outside the
+assignment, and tell the person you did. Never allow a request without the
+person's answer. Deny a Bash request whose summary has `truncated: true`,
+because part of the command may be hidden from both of you.
+
+A request nobody answers is denied, at the latest when `permissions.ask_timeout`
+expires (120 seconds by default). A person may need longer, so set it when you
+start the run, up to 600. Read `permissions.asked` in the final result for each
+decision and whether it was written to the provider. Use `follow_up` for a question in the
+worker's final answer.
 
 ## Read a long answer
 
@@ -189,7 +204,7 @@ a new session; `stale_server.what_to_do` says the same.
 
 | Outcome | What to do |
 | --- | --- |
-| `completed` | The provider finished. It can still contain denied requests, so check `permissions.denied` and `provider_notes`, then check the work yourself. |
+| `completed` | The provider finished. It can still contain denied requests, so check `permissions.denied`, `permissions.asked` in an ask run, and `provider_notes`, then check the work yourself. |
 | `failed` | Read `error.kind` and `error.message`. Retry only if the cause is fixed. |
 | `timed_out` | The time limit passed. The result states the limit applied. Retry with a larger `timeout_secs` or a smaller assignment. |
 | `interrupted` | You or the connection stopped it, or `close` discarded it. |
