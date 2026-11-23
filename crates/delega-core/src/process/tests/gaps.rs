@@ -444,7 +444,21 @@ pub(super) fn heartbeat_age(scratch: &Scratch) -> Duration {
 /// What one interrupted kept run of the long relay came to: whether a relay
 /// process was alive when the report arrived, the verdict, and how long the
 /// stop took from the interrupt to the report.
+/// What one interrupted kept run of the long relay came to, with the report's
+/// diagnostics for a failure message.
+struct RelayRun {
+    alive: bool,
+    cleanup: Cleanup,
+    took: Duration,
+    diagnostics: String,
+}
+
 async fn relay_run() -> (bool, Cleanup, Duration) {
+    let run = relay_run_with_diagnostics().await;
+    (run.alive, run.cleanup, run.took)
+}
+
+async fn relay_run_with_diagnostics() -> RelayRun {
     let s = Scratch::new();
     let mut spec = kept(sh(&s, &long_relay(), LONG));
     spec.stop_grace = Duration::from_millis(100);
@@ -457,16 +471,27 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
     let asked = std::time::Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
+    let reported = std::time::SystemTime::now();
     let took = asked.elapsed();
-    // Every generation writes its pid to the heartbeat, so a heartbeat that
-    // changes over 300 ms, or is fresh at either reading, means a relay
-    // process is alive, however short each one lives and however late the
-    // readings are under load.
+    // Every generation writes its pid to the heartbeat about every 5 ms, so a
+    // relay process alive after the report writes it after the report: a
+    // heartbeat written since then, or one that changes over 300 ms, means a
+    // relay process is alive. A fresh heartbeat at the report alone does not:
+    // a relay killed just before the report left it fresh.
     let first = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-    let fresh_first = heartbeat_age(&s) < Duration::from_millis(150);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let second = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-    let alive = first != second || fresh_first || heartbeat_age(&s) < Duration::from_millis(150);
+    let written_after = std::fs::metadata(s.path("beat"))
+        .and_then(|m| m.modified())
+        .is_ok_and(|modified| modified > reported);
+    let alive = first != second || written_after;
+    let diagnostics = format!(
+        "cleanup {:?}; keeper {:?}; warnings {:?}; signals {:?}",
+        report.cleanup,
+        report.diagnostics.keeper,
+        report.diagnostics.warnings,
+        report.diagnostics.signals
+    );
     // A relay that survived is ended here, so nothing is left: the last
     // writer of the heartbeat is the live generation, and the relay is
     // killed generation by generation until the heartbeat goes stale.
@@ -481,7 +506,12 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    (alive, report.cleanup, took)
+    RelayRun {
+        alive,
+        cleanup: report.cleanup,
+        took,
+        diagnostics,
+    }
 }
 
 /// Gap 2. On Linux the keeper's own walk of its tree stops the relay: every
@@ -496,12 +526,13 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
 )]
 async fn a_fork_relay_is_stopped_in_a_kept_run() {
     require_perl!();
-    let (alive, cleanup, _) = relay_run().await;
+    let run = relay_run_with_diagnostics().await;
     assert!(
-        !alive,
-        "a relay process was alive after the report: {cleanup:?}"
+        !run.alive,
+        "a relay process was alive after the report: {}",
+        run.diagnostics
     );
-    assert_eq!(cleanup, Cleanup::Confirmed);
+    assert_eq!(run.cleanup, Cleanup::Confirmed, "{}", run.diagnostics);
 }
 
 /// Whatever the platform, a kept run of the relay never claims `Confirmed`
@@ -512,17 +543,23 @@ async fn a_fork_relay_is_stopped_in_a_kept_run() {
 #[tokio::test]
 async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
     require_perl!();
-    let (alive, cleanup, _) = relay_run().await;
+    let run = relay_run_with_diagnostics().await;
     assert!(
-        !(alive && cleanup == Cleanup::Confirmed),
-        "a relay process was alive but cleanup says Confirmed"
+        !(run.alive && run.cleanup == Cleanup::Confirmed),
+        "a relay process was alive but cleanup says Confirmed: {}",
+        run.diagnostics
     );
-    if alive && !super::fixtures::marker_visible_for_system_programs() {
-        match &cleanup {
+    if run.alive && !super::fixtures::marker_visible_for_system_programs() {
+        match &run.cleanup {
             Cleanup::Unconfirmed { reason, .. } => {
-                assert_eq!(reason, crate::process::PIPES_HELD_REASON);
+                assert_eq!(
+                    reason,
+                    crate::process::PIPES_HELD_REASON,
+                    "{}",
+                    run.diagnostics
+                );
             }
-            other => panic!("{other:?}"),
+            other => panic!("{other:?}: {}", run.diagnostics),
         }
     }
 }
