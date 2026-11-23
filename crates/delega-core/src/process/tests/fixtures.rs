@@ -329,7 +329,7 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
     };
     let dir = std::fs::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
     let uid = rustix::process::getuid().as_raw();
-    let own_start = std::fs::read_to_string("/proc/self/stat")
+    let own_start = std::fs::read("/proc/self/stat")
         .ok()
         .and_then(|stat| stat_state_and_start(&stat))
         .map(|(_, started)| started)
@@ -355,7 +355,7 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
         // The stat needs no ptrace rights, unlike the working directory. A
         // process older than this test process cannot be one of its own, so
         // it is skipped before its working directory is read.
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
             Err(e) if gone(&e) => continue,
             Err(e) => return Err(format!("read /proc/{pid}/stat: {e}")),
@@ -381,12 +381,25 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
 }
 
 /// The state letter and the start time in clock ticks (field 22) of one
-/// `/proc/<pid>/stat` line, counted from the last `)`.
-#[cfg(target_os = "linux")]
-fn stat_state_and_start(stat: &str) -> Option<(String, u64)> {
-    let (_, rest) = stat.rsplit_once(')')?;
+/// `/proc/<pid>/stat` line, counted from the last `)`. The line is bytes: the
+/// kernel writes the task name as it is, which need not be UTF-8 and can hold
+/// `)`; only the fields after the last `)` are read as text.
+#[cfg(any(target_os = "linux", test))]
+fn stat_state_and_start(stat: &[u8]) -> Option<(String, u64)> {
+    let end = stat.iter().rposition(|&byte| byte == b')')?;
+    let rest = std::str::from_utf8(&stat[end + 1..]).ok()?;
     let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
     Some((fields.first()?.to_string(), fields.get(19)?.parse().ok()?))
+}
+
+#[test]
+fn a_stat_line_with_a_name_that_is_not_utf8_and_holds_a_parenthesis_is_read() {
+    // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt
+    // majflt cmajflt utime stime cutime cstime priority nice threads
+    // itrealvalue starttime ...
+    let line = b"4242 (a\xff) b\xfe) S 1 4242 4242 0 -1 0 1 2 3 4 5 6 7 8 20 0 1 0 987654 9";
+    assert_eq!(stat_state_and_start(line), Some(("S".to_string(), 987_654)));
+    assert_eq!(stat_state_and_start(b"4242 (a\xff"), None);
 }
 
 /// End what a relay case left in `dir`, without signalling a foreign process:
