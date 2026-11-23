@@ -35,4 +35,5 @@
 
 - [Guarantees and how they are tested](acceptance.md)
 - [Status and limits](project/status.md)
+- [Decisions](project/decisions.md)
 - [Contributing](project/contributing.md)
