@@ -85,6 +85,9 @@ const CENSUS_BUDGET: Duration = Duration::from_secs(1);
 const FREEZE_BUDGET: Duration = Duration::from_secs(2);
 /// How long the tracker may spend on one batch of events between requests.
 const BATCH_BUDGET: Duration = Duration::from_millis(250);
+/// launchd's unique id: the parent macOS records for its jobs, and for an
+/// orphan that exec'd after it was reparented.
+const LAUNCHD_UNIQUEID: u64 = 1;
 /// How deep recovery scans may nest before the tracker counts a hole.
 const MAX_DEPTH: u32 = 32;
 /// How long a process being created is waited for before it counts as a
@@ -378,6 +381,8 @@ struct Tracker {
     /// tracker stops listing and scanning and counts a hole once.
     until: Option<Instant>,
     expired: bool,
+    #[cfg(test)]
+    fork_dropped: bool,
     /// How old each process was when it was taken, in microseconds, for the
     /// measurement in the tests.
     #[cfg(test)]
@@ -413,6 +418,8 @@ impl Tracker {
             registry: None,
             until: None,
             expired: false,
+            #[cfg(test)]
+            fork_dropped: false,
             #[cfg(test)]
             ages: Vec::new(),
             refused: 0,
@@ -501,6 +508,16 @@ impl Tracker {
             self.budget(BATCH_BUDGET);
         }
         for event in events.drain(..) {
+            // Test seam: the first fork reported is not handled, as if the
+            // event had been lost, so nothing marks the time as suspect.
+            #[cfg(test)]
+            if event.forked
+                && !self.fork_dropped
+                && std::env::var_os(super::DROP_FORK_ENV).is_some()
+            {
+                self.fork_dropped = true;
+                continue;
+            }
             if event.forked {
                 self.forked(event.pid, waited_from);
             }
@@ -859,6 +876,19 @@ impl Tracker {
         self.windows.len() - 1
     }
 
+    /// Whether a process not held may come from a fork the tracker missed:
+    /// its parent was created during the run and never taken, or it was
+    /// itself created during the run and names launchd as its parent (an
+    /// orphan that exec'd after it was reparented: macOS then records
+    /// launchd as the parent).
+    fn may_be_lost(&self, ident: &Ident) -> bool {
+        let parent_unknown =
+            !self.known.contains(&ident.puniqueid) && !self.suspected.contains(&ident.puniqueid);
+        parent_unknown
+            && (ident.puniqueid > self.floor
+                || (ident.puniqueid == LAUNCHD_UNIQUEID && ident.uniqueid > self.floor))
+    }
+
     /// Whether a process cannot be the tree's by its group or session. A
     /// process of the tree is in a group and a session that a process of the
     /// tree created, so each id is the pid of a process that started after
@@ -913,10 +943,7 @@ impl Tracker {
                 }
                 match read_new(pid) {
                     Ok(Some(ident)) => {
-                        if ident.puniqueid > self.floor
-                            && !self.known.contains(&ident.puniqueid)
-                            && !self.suspected.contains(&ident.puniqueid)
-                        {
+                        if self.may_be_lost(&ident) {
                             match darwin::kern_proc(pid) {
                                 Ok(Some(record)) => {
                                     records.insert(pid, record);
@@ -1040,9 +1067,16 @@ impl Tracker {
             let Some(record) = records.get(&ident.pid).copied() else {
                 continue;
             };
+            // An orphan that exec'd after it was reparented names launchd
+            // as its parent, as launchd's own jobs do; those lead a session
+            // of their own, and an orphan that did not call setsid after its
+            // parent died does not.
+            let exec_after_reparent = ident.puniqueid == LAUNCHD_UNIQUEID
+                && !matches!(sys::session_lookup(ident.pid), sys::SessionLookup::In(s) if s == ident.pid);
             let suspect = !record.zombie()
                 && record.ppid == 1
                 && record.ruid == self.my_uid
+                && (ident.puniqueid != LAUNCHD_UNIQUEID || exec_after_reparent)
                 && !self.provably_foreign(ident.pid, record.pgid);
             if !suspect {
                 continue;

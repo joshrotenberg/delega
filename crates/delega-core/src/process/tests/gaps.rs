@@ -504,6 +504,15 @@ async fn relay_run_of(script: impl FnOnce(&std::path::Path) -> String) -> RelayR
     // relay process is alive. A fresh heartbeat at the report alone does not:
     // a relay killed just before the report left it fresh.
     let first = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
+    // On macOS the generation the heartbeat names at the report is also
+    // checked by identity: the same unique id still there later is alive,
+    // stopped or not scheduled, whatever the heartbeat says.
+    #[cfg(target_os = "macos")]
+    let named = first
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .and_then(|pid| crate::process::sys::darwin::identity(pid).ok().flatten());
     tokio::time::sleep(Duration::from_millis(300)).await;
     let second = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
     let written_after = std::fs::metadata(s.path("beat"))
@@ -515,7 +524,17 @@ async fn relay_run_of(script: impl FnOnce(&std::path::Path) -> String) -> RelayR
     #[cfg(target_os = "linux")]
     let survivors = super::fixtures::case_processes(&s.dir())
         .unwrap_or_else(|e| panic!("survivors unknown: {e}"));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let survivors: Vec<i32> = named
+        .filter(|was| {
+            crate::process::sys::darwin::identity(was.pid)
+                .ok()
+                .flatten()
+                .is_some_and(|now| now.uniqueid == was.uniqueid)
+        })
+        .map(|was| vec![was.pid])
+        .unwrap_or_default();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let survivors: Vec<i32> = Vec::new();
     let alive = first != second || written_after || !survivors.is_empty();
     let diagnostics = format!(
@@ -665,6 +684,48 @@ async fn a_session_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_
         !(run.alive && run.cleanup == Cleanup::Confirmed),
         "a relay process was alive but cleanup says Confirmed: {}",
         run.diagnostics
+    );
+}
+
+/// A fork the macOS tracker never saw (the test seam drops the event): the
+/// program's first child is a short-lived intermediate that starts a
+/// detached grandchild in a session of its own, holding no pipe, and exits at
+/// once. No loss, no listing and no window records it, so only the check of
+/// orphans whose parent was created during the run and never taken can keep
+/// the verdict from `Confirmed` while the grandchild runs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_detached_survivor_of_a_fork_the_tracker_never_saw_is_never_confirmed() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+    require_perl!();
+    let s = Scratch::new();
+    // The program is perl itself: it waits half a second without forking, so
+    // the tracker has started, and its first fork, the one whose event is
+    // dropped, is the intermediate.
+    let script = "use POSIX; select(undef, undef, undef, 0.5); \
+         if (fork() == 0) { POSIX::setsid(); open STDIN, q(<), q(/dev/null); \
+         open STDOUT, q(>), q(/dev/null); open STDERR, q(>), q(/dev/null); \
+         if (fork() == 0) { open F, q(>), q(gc.tmp); print F $$; close F; \
+         rename q(gc.tmp), q(gc); exec q(/bin/sleep), q(60) } POSIX::_exit(0) } \
+         wait; select(undef, undef, undef, 0.01) until -s q(gc); exit 0";
+    let mut spec = sh(&s, "", LONG);
+    spec.program = "/usr/bin/perl".into();
+    spec.args = vec!["-e".into(), script.into()];
+    spec.keeper =
+        Some(super::keeper::test_keeper().env(crate::process::keeper::DROP_FORK_ENV, "1"));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    let alive = is_running_async(pids[0]).await;
+    assert!(
+        !(alive && report.cleanup == Cleanup::Confirmed),
+        "the detached grandchild is alive but cleanup says Confirmed: {report:#?}"
+    );
+    // The grandchild was a suspect: never signalled, so alive, and the
+    // verdict says the keeper could not prove its tree empty.
+    assert!(alive, "{report:#?}");
+    assert!(
+        matches!(&report.cleanup, Cleanup::Unconfirmed { reason, .. }
+            if reason == crate::process::KEEPER_UNPROVEN_REASON),
+        "{report:#?}"
     );
 }
 

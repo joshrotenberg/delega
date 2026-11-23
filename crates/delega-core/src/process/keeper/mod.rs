@@ -70,6 +70,11 @@ pub(crate) use link::{KeeperLink, LaunchSpec, LinkHandle, StartError, start};
 #[cfg(test)]
 pub(crate) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
 
+/// Test seam: a macOS keeper started by the tests with this variable does not
+/// handle the first fork its queue reports, as if the event had been lost.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) const DROP_FORK_ENV: &str = "DELEGA_TEST_KEEPER_DROP_FORK";
+
 /// Test seam: a macOS keeper started by the tests with this variable reports
 /// its final census before the reap as having met one process it could not
 /// prove either way, as when an orphan is first seen there.
