@@ -17,6 +17,33 @@
 //! The report means that the file changed, not that a newer build is installed:
 //! `delega plugin uninstall` removes the file, and an install of identical
 //! bytes replaces it.
+//!
+//! `IDENTITY.json` is looked for in the directory above the executable's
+//! (`plugin/delega/IDENTITY.json`), opened without blocking, read only when it
+//! is a regular file of at most 64 KiB, and ignored when it has no `revision`.
+//! At most four checks may wait on a filesystem that does not answer; further
+//! calls answer without the field until one returns.
+//!
+//! Limits of the check:
+//!
+//! - A file renamed over the executable after the process started and before
+//!   [`Executable::current`] recorded it is taken as the running one, so that
+//!   replacement is not reported. The window is the start of the process,
+//!   before the configuration file is read.
+//! - A server that could not find its executable's path, or that file's
+//!   status, at start never reports stale.
+//! - A later `stat` that fails for a reason other than the path being gone, or
+//!   a check that does not finish within [`CHECK_LIMIT`], leaves the field out
+//!   of that call only.
+//! - A rewrite in place that keeps the size and the modification time is not
+//!   seen.
+//! - `delega plugin install` run from the managed executable itself skips
+//!   writing it, so nothing is reported.
+//! - A library caller's server reports only when it is given the executable
+//!   (`router_with_executable`).
+//!
+//! `delega version --output json` never carries the field, and nothing else in
+//! `list` or the identity changes when it is present.
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Read};

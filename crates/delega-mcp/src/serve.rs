@@ -1,4 +1,24 @@
 //! Serving the router on standard input and output, and stopping.
+//!
+//! Shutdown wakes every blocked `wait`, whatever its cursor, and answers it
+//! with the current states, so no waiting call is held to the transport's
+//! drain limit; a `wait` that arrives after shutdown began answers at once.
+//! Those answers carry `released_by_shutdown: true` (an additive field), except
+//! one that a finished run released on its own account. The server then waits
+//! for the transport at most [`DRAIN`] plus [`TRANSPORT_GRACE`] (15 s) and
+//! gives up on it. The workers are stopped before that wait, never after it.
+//!
+//! A client that keeps the pipe open and stops reading standard output until
+//! it is full blocks the transport's read loop, so end of file on standard
+//! input is not noticed and does not stop the workers; a signal does. There is
+//! no independent watch for end of file: the transport owns standard input,
+//! and a second reader would take bytes from it.
+//!
+//! For the exit status, the supervisor records an unconfirmed cleanup when the
+//! run settles (it remembers the 256 most recent), not from the results
+//! retention still keeps, so a run that a later run on its worker replaced as
+//! the latest still counts. A transport given up on after a signal does not
+//! change status 130.
 
 use std::future::Future;
 use std::time::Duration;

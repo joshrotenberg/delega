@@ -1,4 +1,17 @@
 //! From a profile file and the command line flags to one validated request.
+//!
+//! The configuration file is read first, so a file that cannot be used is the
+//! first refusal, whatever else is wrong. Its refused result carries the
+//! provider and mode the flags named, and the `--timeout` limit when it is in
+//! range (600 otherwise), because the file is what could not be read. A result
+//! refused before a run exists has no `worker`, no `started_at` and a
+//! confirmed `cleanup`, and its run id is made here. The profile and schema
+//! file must be regular files (a device or pipe is refused) within their size
+//! limits (5.25 MiB, enough for the largest prompt and instructions; 1 MiB).
+//! Relative paths are made absolute against the caller's directory before the
+//! provider layer sees them, which would otherwise resolve an extra directory
+//! against the worker's own `cwd`. `-p -text` is a usage error so that `-p`
+//! never swallows the flag after it.
 
 use std::io::Read;
 use std::path::Path;

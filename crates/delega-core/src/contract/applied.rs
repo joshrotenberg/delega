@@ -3,7 +3,36 @@
 //!
 //! Every value here is a name, a count, a path or a digest. An environment
 //! variable's value and the text of a deny rule are never part of it.
-//! `docs/api.md` ("`applied`") says when each part can be absent.
+//! `docs/api.md` ("`applied`") describes the parts for a caller.
+//!
+//! # When each part is present
+//!
+//! `env`, `deny_rules` and `context` are filled in together once the run has
+//! been prepared: the request validated, the working directory and executable
+//! found, the settings files read, the permissions mapped and the environment
+//! resolved. A refusal before that point (an invalid request, an unusable
+//! working directory, a rejected native argument, a missing provider
+//! executable, unusable settings files, a permission `strict` cannot enforce,
+//! an invalid or forbidden `--env` name) has `config` and `sources` only. So
+//! does a refusal from the supervisor (a name in use, the worker limit) and a
+//! run stopped in the queue before it started. A run that was prepared and
+//! then ended without finishing (a failure, a time limit, an interrupt, or a
+//! refusal at start such as an unsupported provider version) has every part
+//! that applies. A refusal for a configuration file that cannot be used has no
+//! `applied`, because no usable file was read and no request was built. Two
+//! internal-error endings carry `config` and `sources` only, even for a
+//! prepared run: a run whose task in the supervisor panicked, and a result the
+//! supervisor replaced because it failed validation. `applied` is absent when
+//! nothing is known.
+//!
+//! `sources` is recorded where the layers are merged (`crate::profile`, called
+//! by `delega run` and MCP `start`), not worked out afterwards from the
+//! values. A field a merge clears loses the layer that set it: an explicit
+//! `ephemeral` removes a lower layer's `resume`, so `session.resume` is
+//! absent; an explicit `resume` removes a lower layer's `ephemeral`, so
+//! `session.ephemeral` is `default`. On a refusal after the merge, `sources`
+//! holds the fields known so far. `config.sha256` is 64 lowercase hex digits;
+//! a refused configuration file is not reported.
 
 use std::collections::BTreeMap;
 

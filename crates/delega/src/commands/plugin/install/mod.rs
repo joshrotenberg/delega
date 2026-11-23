@@ -6,6 +6,16 @@
 //! manifests, the skills and a local marketplace. Each host is then asked,
 //! through its own CLI, to register that marketplace and install the plugin.
 //! Nothing here edits a host's configuration, starts a server or calls a model.
+//!
+//! The whole host sequence runs every time. Claude Code's `plugin update`
+//! refreshes its cached copy, which a repeated `plugin install` alone leaves
+//! stale; Codex's `plugin add` copies the plugin into its cache each time. If a
+//! command fails, the rest of that host's sequence is skipped, the other host
+//! is still installed and the files stay in place. No host cache is deleted.
+//! `files` and `hosts` in the marker accumulate across repeated installs.
+//!
+//! When the running executable is itself the managed copy, writing it is
+//! skipped, so a server started from it does not see a replaced file.
 //! Exit status: 0 on success and on a dry run, 1 when a host command failed or
 //! something was refused, 2 for a usage error.
 

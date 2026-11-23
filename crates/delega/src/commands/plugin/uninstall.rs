@@ -4,7 +4,26 @@
 //! Every selected host's registrations are read through its JSON listing
 //! commands before any is changed, and removal proceeds only when they point
 //! at this managed directory. A refusal or a failed host command keeps the
-//! files. Exit status: 0 on success and on a dry run, 1 when a host command
+//! files.
+//!
+//! Removal stops, keeping every file, on any of: an unmanaged directory, an
+//! invalid marker, `delega-local` registered from another directory, a
+//! `delega@delega-local` registration that is not this directory's, another
+//! plugin installed from `delega-local`, a listing that failed, wrote
+//! diagnostics, was not the expected JSON or was ambiguous, or a recorded host
+//! whose CLI cannot be found. Listings run from `/` with a 30 s limit. Claude
+//! Code removal is limited to user scope. A plugin or marketplace the host no
+//! longer has is not removed again. A failed removal command keeps the files
+//! and keeps that host in the marker. The directory is removed only when no
+//! host remains in the marker, and only the files the marker lists are
+//! deleted, so anything else in it keeps the directory; an empty directory is
+//! removed, including one chosen with `--install-dir`. A directory that does
+//! not exist is nothing to do and runs no host command, because without the
+//! marker it cannot tell whose registration it would remove. A dry run skips
+//! the listings and the ownership checks. There is no lock: concurrent runs on
+//! one directory are not supported.
+//!
+//! Exit status: 0 on success and on a dry run, 1 when a host command
 //! failed or something was refused, 2 for a usage error.
 
 use std::path::{Path, PathBuf};
