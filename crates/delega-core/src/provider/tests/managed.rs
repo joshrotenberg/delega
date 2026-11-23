@@ -235,6 +235,28 @@ fn the_sandbox_keys_that_limit_added_directories_and_domains_are_named() {
 }
 
 #[test]
+fn the_sandbox_keys_that_can_loosen_build_are_named_without_their_values() {
+    let names = claude_names(&format!(
+        r#"{{"sandbox":{{"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":true,
+            "failIfUnavailable":false,"excludedCommands":["{SECRET}"],
+            "filesystem":{{"allowWrite":["/{SECRET}"]}},
+            "network":{{"allowedDomains":["{SECRET}"]}}}}}}"#
+    ));
+    assert_eq!(
+        names,
+        [
+            "sandbox.autoAllowBashIfSandboxed",
+            "sandbox.allowUnsandboxedCommands",
+            "sandbox.failIfUnavailable",
+            "sandbox.excludedCommands",
+            "sandbox.filesystem.allowWrite",
+            "sandbox.network.allowedDomains"
+        ]
+    );
+    assert!(!names.iter().any(|n| n.contains(SECRET)));
+}
+
+#[test]
 fn the_authentication_keys_are_named() {
     assert_eq!(
         claude_names(&format!(
@@ -296,7 +318,7 @@ fn a_key_that_does_not_change_what_delega_passes_is_not_listed() {
         claude_names(&format!(
             r#"{{"model":"{SECRET}","cleanupPeriodDays":7,"companyAnnouncements":["{SECRET}"],
                 "permissions":{{"disableBypassPermissionsMode":"disable"}},
-                "sandbox":{{"network":{{"allowedDomains":["{SECRET}"]}}}}}}"#
+                "sandbox":{{"network":{{"allowLocalBinding":true}}}}}}"#
         )),
         Vec::<String>::new()
     );
@@ -948,8 +970,10 @@ fn every_claude_key(value: &str) -> String {
             "permissions":{{"allow":{v},"deny":{v},"ask":{v},"additionalDirectories":{v},
               "blockReadsOutsideWorkingDirectories":{v},
               "blockWritesOutsideWorkingDirectories":{v}}},
-            "sandbox":{{"enabled":{v},"filesystem":{{"allowManagedReadPathsOnly":{v}}},
-              "network":{{"allowManagedDomainsOnly":{v}}}}},
+            "sandbox":{{"enabled":{v},"autoAllowBashIfSandboxed":{v},
+              "allowUnsandboxedCommands":{v},"failIfUnavailable":{v},"excludedCommands":{v},
+              "filesystem":{{"allowManagedReadPathsOnly":{v},"allowWrite":{v}}},
+              "network":{{"allowManagedDomainsOnly":{v},"allowedDomains":{v}}}}},
             "forceLoginMethod":{v},"forceLoginOrgUUID":{v},"enforceAnthropicSignIn":{v},
             "allowedProviders":{v},"apiKeyHelper":{v},"env":{v},"availableModels":{v},
             "deniedModels":{v},"modelOverrides":{v},"requiredMinimumVersion":{v},
@@ -963,7 +987,7 @@ fn a_key_that_is_present_is_listed_whatever_its_value() {
     // doctor does not decide whether a key is on: how Claude Code reads a
     // value is not reproduced, so the same keys are listed for every value.
     let with_true = claude_names(&every_claude_key("true"));
-    assert_eq!(with_true.len(), 29, "{with_true:?}");
+    assert_eq!(with_true.len(), 35, "{with_true:?}");
     for value in ["false", r#""false""#, "null", "[]", "{}", "0", r#""x""#] {
         assert_eq!(claude_names(&every_claude_key(value)), with_true, "{value}");
     }
@@ -1074,6 +1098,12 @@ fn every_listed_key_has_the_category_of_its_table() {
                 Permissions
             ),
             ("sandbox.enabled", Sandbox),
+            ("sandbox.autoAllowBashIfSandboxed", Sandbox),
+            ("sandbox.allowUnsandboxedCommands", Sandbox),
+            ("sandbox.failIfUnavailable", Sandbox),
+            ("sandbox.excludedCommands", Sandbox),
+            ("sandbox.filesystem.allowWrite", Sandbox),
+            ("sandbox.network.allowedDomains", Sandbox),
             ("sandbox.filesystem.allowManagedReadPathsOnly", Sandbox),
             ("sandbox.network.allowManagedDomainsOnly", Sandbox),
             ("forceLoginMethod", Authentication),

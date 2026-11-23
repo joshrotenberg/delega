@@ -429,6 +429,13 @@ const CLAUDE_KEYS: &[ClaudeKey] = {
             Permissions,
         ),
         (&["sandbox", "enabled"], Sandbox),
+        // Each of these can loosen the sandbox delega passes in `build`.
+        (&["sandbox", "autoAllowBashIfSandboxed"], Sandbox),
+        (&["sandbox", "allowUnsandboxedCommands"], Sandbox),
+        (&["sandbox", "failIfUnavailable"], Sandbox),
+        (&["sandbox", "excludedCommands"], Sandbox),
+        (&["sandbox", "filesystem", "allowWrite"], Sandbox),
+        (&["sandbox", "network", "allowedDomains"], Sandbox),
         (
             &["sandbox", "filesystem", "allowManagedReadPathsOnly"],
             Sandbox,
