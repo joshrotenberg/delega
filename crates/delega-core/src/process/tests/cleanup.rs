@@ -390,12 +390,14 @@ both!(
         // sweep nor a scan can know it. It keeps the pipes open: the report still
         // comes back within the drain bound and says the owner closed the pipes,
         // and the verdict is Unconfirmed, because something still held the
-        // output that no sweep found. On Linux a kept run finds it anyway (it
-        // becomes the keeper's child), kills it, and the pipes close by
-        // themselves. On macOS the same holds where `ps -E` shows the run marker
-        // of `sleep`; where the system hides the environment of its own
-        // programs (System Integrity Protection) it is the gap, and the held
-        // pipe makes it Unconfirmed. Never Confirmed with the orphan alive.
+        // output that no sweep found. A kept run finds it anyway, kills it, and
+        // the pipes close by themselves: on Linux it becomes the keeper's
+        // child, on macOS the keeper's fork tracker took it at its fork. A
+        // macOS keeper without fork tracking finds it only where `ps -E` shows
+        // the run marker of `sleep`; where the system hides the environment of
+        // its own programs (System Integrity Protection) it is the gap, and
+        // the held pipe makes it Unconfirmed. Never Confirmed with the orphan
+        // alive.
         // It starts after the first scan, and the leader exits before the next, so
         // no scan can have seen it with its parent alive.
         let script = format!(
@@ -420,7 +422,12 @@ both!(
             !(report.cleanup == Cleanup::Confirmed && is_running(pids[0])),
             "Confirmed with the orphan alive: {report:#?}"
         );
-        if kept && cfg!(target_os = "linux") {
+        let keeper_holds_tree = report
+            .diagnostics
+            .keeper
+            .as_ref()
+            .is_some_and(|k| k.subreaper || k.fork_tracking);
+        if kept && keeper_holds_tree {
             assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
             assert!(!report.diagnostics.pipes_closed_by_owner, "{report:#?}");
             super::fixtures::assert_gone("the orphan holding the pipes", &pids).await;

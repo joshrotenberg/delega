@@ -12,15 +12,17 @@
 //! What remains are descendants no process table can follow: one whose parent
 //! exits before any listing saw it (its parent was the leader itself, or a
 //! member that exited at once), and a fast fork relay, which is never in a
-//! listing for long enough to be signalled. Three tests state the wanted
-//! behaviour and are ignored because they fail. The first two of them start
-//! their descendant after the early listings (`CAPTURE_RAMP`), which see a
-//! descendant started sooner, and end the leader before the first periodic
-//! listing. Two regression tests cover what the ramp closed: a `setsid`
-//! descendant started just after spawn whose leader crashes before the first
-//! periodic listing, and the schedule of the ramp itself. Run them with
-//! `cargo test -- --ignored`. They leave one process running when they fail,
-//! so each stops it itself.
+//! listing for long enough to be signalled. Without a keeper they stay open;
+//! the tests here state what a kept run does about them. The first two of
+//! the kept tests start their descendant after the early listings
+//! (`CAPTURE_RAMP`), which see a descendant started sooner, and end the leader
+//! before the first periodic listing. Two regression tests cover what the ramp
+//! closed: a `setsid` descendant started just after spawn whose leader crashes
+//! before the first periodic listing, and the schedule of the ramp itself. A
+//! kept run closes the rest through the keeper's own view of its tree: the
+//! subreaper and its `/proc` walk on Linux, the fork tracker on macOS. The
+//! tests that need one of them are ignored on other systems. They leave one
+//! process running when they fail, so each stops it itself.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,13 +231,14 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped
     assert_gone("orphaned setsid descendant", &pids).await;
 }
 
-/// Gap 1 when the descendant also clears its environment: on Linux the keeper
-/// is its reaper and it is stopped; on macOS it carries no marker and no
-/// listing ties it to the run, the documented residual, so only the absence of
-/// a false confirmation could be asked there, and even that is not promised.
-#[cfg(target_os = "linux")]
+/// Gap 1 when the descendant also clears its environment and runs an Apple
+/// program (`/bin/sleep`, whose environment `ps -E` does not show under SIP):
+/// no listing and no marker ties it to the run. On Linux the keeper is its
+/// reaper; on macOS the keeper's fork tracker took it when its parent forked
+/// it. Either way it is stopped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
-async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux() {
+async fn an_orphan_that_clears_its_environment_and_runs_sleep_is_stopped_by_the_keeper() {
     require_perl!();
     let s = Scratch::new();
     let detach =
@@ -245,8 +248,9 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
     );
     // The owner's listings never show it: once the leader is known they hide
     // every group leader but the leader, which the orphan is from its
-    // `setsid` on. Only the keeper's own walk of its tree can find it, so a
-    // broken walk ends Confirmed with the orphan alive and fails here.
+    // `setsid` on. Only the keeper's own view of its tree (the walk on Linux,
+    // the fork tracker on macOS) can find it, so a broken one ends Confirmed
+    // with the orphan alive and fails here.
     let marker = s.path("scanned");
     let leader_file = s.path("leader");
     let hiding: Lister = Arc::new(move || {
@@ -465,8 +469,12 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
 }
 
 async fn relay_run_with_diagnostics() -> RelayRun {
+    relay_run_of(long_relay).await
+}
+
+async fn relay_run_of(script: impl FnOnce(&std::path::Path) -> String) -> RelayRun {
     let s = Scratch::new();
-    let mut spec = kept(sh(&s, &long_relay(&s.dir()), LONG));
+    let mut spec = kept(sh(&s, &script(&s.dir()), LONG));
     spec.stop_grace = Duration::from_millis(100);
     // The relay holds the output pipes; the owner closes them a second after
     // the kill.
@@ -517,32 +525,49 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     }
 }
 
-/// Gap 2. On Linux the keeper's own walk of its tree stops the relay: every
-/// generation becomes the keeper's child as its parent exits, and the walk
-/// stops it before it reads its children. On macOS a freeze of listings does
-/// not reliably catch it (see the measurement below and the module
-/// documentation), so the test is ignored there.
-#[tokio::test]
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "macOS residual: in 50 interrupted kept runs on macOS 27.2 the freeze stopped the relay in 0 (all 50 ended Unconfirmed because the relay held the output); see process/mod.rs"
-)]
-async fn a_fork_relay_is_stopped_in_a_kept_run() {
-    require_perl!();
-    let run = relay_run_with_diagnostics().await;
+/// The relay is stopped, and the verdict is `Confirmed`. On macOS the verdict
+/// may also be `Unconfirmed` because the keeper reported a hole: a process
+/// beside the run that its fork tracker could neither prove the tree's nor
+/// rule out (another test's orphan made while a generation was being
+/// recovered), or a scan that met a read it could not complete under load.
+/// The relay itself must be stopped either way.
+fn assert_relay_stopped(run: &RelayRun) {
     assert!(
         !run.alive,
         "a relay process was alive after the report: {}",
         run.diagnostics
     );
+    if cfg!(target_os = "macos")
+        && matches!(&run.cleanup, Cleanup::Unconfirmed { reason, .. }
+            if reason == crate::process::KEEPER_UNPROVEN_REASON)
+    {
+        return;
+    }
     assert_eq!(run.cleanup, Cleanup::Confirmed, "{}", run.diagnostics);
 }
 
+/// Gap 2. On Linux the keeper's own walk of its tree stops the relay: every
+/// generation becomes the keeper's child as its parent exits, and the walk
+/// stops it before it reads its children. On macOS the keeper's fork tracker
+/// took every generation at its fork (or, when the parent exited first, by
+/// the unique id of the parent that forked it), and its freeze stops the one
+/// alive.
+#[tokio::test]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    ignore = "needs the keeper's walk (Linux) or its fork tracker (macOS)"
+)]
+async fn a_fork_relay_is_stopped_in_a_kept_run() {
+    require_perl!();
+    assert_relay_stopped(&relay_run_with_diagnostics().await);
+}
+
 /// Whatever the platform, a kept run of the relay never claims `Confirmed`
-/// while a relay process is alive. On Linux the keeper stops it; on macOS it
-/// is not stopped, but it holds the output pipes past the drain bound, and a
-/// held pipe makes the verdict `Unconfirmed` (or, where `ps -E` shows the
-/// marker of perl, a freeze that keeps finding new generations does).
+/// while a relay process is alive. On Linux and macOS the keeper stops it;
+/// a keeper that does not (a macOS keeper whose fork tracker is off) leaves a
+/// relay that holds the output pipes past the drain bound, and a held pipe
+/// makes the verdict `Unconfirmed` (or, where `ps -E` shows the marker of
+/// perl, a freeze that keeps finding new generations does).
 #[tokio::test]
 async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
     require_perl!();
@@ -565,6 +590,69 @@ async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
             other => panic!("{other:?}: {}", run.diagnostics),
         }
     }
+}
+
+/// The relay of [`RELAY`] with a new session each generation instead of a
+/// new group: nothing ties a generation to the run's session.
+fn session_relay(dir: &std::path::Path) -> String {
+    long_relay(dir).replace("setpgid(0,0);", "POSIX::setsid();")
+}
+
+/// Gap 2 with a relay that leaves its session each generation. On Linux the
+/// subreaper holds it; on macOS the fork tracker follows the unique ids, which
+/// a new session does not change.
+#[tokio::test]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    ignore = "needs the keeper's walk (Linux) or its fork tracker (macOS)"
+)]
+async fn a_fork_relay_that_changes_session_each_generation_is_stopped_in_a_kept_run() {
+    require_perl!();
+    assert_relay_stopped(&relay_run_of(session_relay).await);
+}
+
+/// A double fork as fast as perl can do it: the program's child forks a
+/// child that calls `setsid`, forks the grandchild and exits at once, and is
+/// reaped. Where the macOS tracker took the middle process, the grandchild is
+/// stopped; where it did not, the fork it saw unexplained makes the
+/// grandchild ambiguous. Either way the verdict is never `Confirmed` while the
+/// grandchild runs.
+#[tokio::test]
+async fn a_fast_double_fork_is_never_confirmed_while_its_grandchild_runs_in_a_kept_run() {
+    require_perl!();
+    let s = Scratch::new();
+    let script = "perl -e 'use POSIX; my $c = fork(); if ($c == 0) { POSIX::setsid(); \
+         my $g = fork(); if ($g == 0) { open F, q(>), q(gc.tmp); print F $$; close F; \
+         rename q(gc.tmp), q(gc); exec q(/bin/sleep), q(60) } POSIX::_exit(0) } \
+         waitpid($c, 0); sleep 1'";
+    let spec = kept(sh(&s, script, LONG));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_no_false_confirmation(pids[0], &report.cleanup);
+    if report.cleanup == Cleanup::Confirmed {
+        assert_gone("double-forked grandchild", &pids).await;
+    }
+}
+
+/// An orphan the test makes beside a kept run, while it runs: its parent was
+/// created after the keeper and has exited, as a lost descendant's would be.
+/// It is never signalled, whatever the verdict.
+#[tokio::test]
+async fn an_orphan_made_beside_a_kept_run_while_it_runs_is_never_signalled() {
+    let s = Scratch::new();
+    let spec = kept(sh(
+        &s,
+        "echo $$ > leader; sleep 0.3; /bin/sleep 0.1; exit 0",
+        LONG,
+    ));
+    let handle = crate::process::ProcessHandle::start(spec);
+    let _ = s.pid("leader").await;
+    let orphan = foreign("(sleep 60 </dev/null >/dev/null 2>&1 & echo $!)");
+    let _foreign_reaper = Reaper(vec![orphan]);
+    let report = handle.wait().await;
+    assert!(
+        is_running(orphan),
+        "the foreign orphan {orphan} was signalled: {report:#?}"
+    );
 }
 
 /// The measurement behind the macOS residual: 50 interrupted kept runs of the
