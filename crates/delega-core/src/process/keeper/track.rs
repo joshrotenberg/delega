@@ -490,6 +490,19 @@ impl Tracker {
         proven: bool,
         queue: &mut Vec<(i32, u64)>,
     ) -> Taken {
+        self.take_exact(pid, parent, proven, None, queue)
+    }
+
+    /// [`Tracker::take`], refusing a process whose unique id is not `exact`
+    /// when it is given (the pid may have been reused since it was read).
+    fn take_exact(
+        &mut self,
+        pid: i32,
+        parent: Option<u64>,
+        proven: bool,
+        exact: Option<u64>,
+        queue: &mut Vec<(i32, u64)>,
+    ) -> Taken {
         let ident = match read_new(pid) {
             Ok(Some(ident)) => ident,
             Ok(None) => return Taken::Gone,
@@ -498,13 +511,21 @@ impl Tracker {
                 return Taken::No;
             }
         };
-        if parent.is_some_and(|p| p != ident.puniqueid) {
+        if parent.is_some_and(|p| p != ident.puniqueid)
+            || exact.is_some_and(|u| u != ident.uniqueid)
+        {
             return Taken::No;
         }
         if self.live.contains_key(&ident.uniqueid) {
             return Taken::Already;
         }
-        let proven = proven || self.in_program_session(pid);
+        // The session is looked up by pid, so it proves this process only if
+        // the pid named it before and after the lookup: a unique id is never
+        // reused, so the same one on both sides means the same process
+        // throughout.
+        let proven = proven
+            || (self.in_program_session(pid)
+                && matches!(darwin::identity(pid), Ok(Some(again)) if again.uniqueid == ident.uniqueid));
         if proven {
             self.known.insert(ident.uniqueid);
         } else {
@@ -879,7 +900,11 @@ impl Tracker {
         for ident in &table {
             if !self.live.contains_key(&ident.uniqueid)
                 && self.in_program_session(ident.pid)
-                && matches!(self.take(ident.pid, None, true, &mut queue), Taken::New)
+                && matches!(
+                    self.take_exact(ident.pid, None, false, Some(ident.uniqueid), &mut queue),
+                    Taken::New
+                )
+                && self.live.get(&ident.uniqueid).is_some_and(|e| e.proven)
             {
                 scanned.proven += 1;
                 self.recovered += 1;
