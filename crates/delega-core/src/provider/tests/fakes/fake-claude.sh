@@ -341,7 +341,8 @@ EOF
 }
 
 # path_allowed TOOL PATH: a bare tool or a scoped allow rule covers PATH.
-# Edit rules cover all file-editing tools.
+# A scoped Edit(path) rule covers Edit, Write and NotebookEdit, as Claude Code
+# applies it; a bare tool name covers only that tool.
 path_allowed() {
   denied "$1" "$2" && return 1
   case "$1" in
