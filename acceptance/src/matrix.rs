@@ -500,10 +500,35 @@ struct Gap {
     timing_dependent: bool,
     /// Only on this operating system (`std::env::consts::OS`); `None` on all.
     os: Option<&'static str>,
+    /// Only on a system that hides the environment of its own programs from
+    /// `ps -E` (see [`Machine`]).
+    hidden_env_only: bool,
+}
+
+/// What the expectations depend on besides the matrix: the operating system,
+/// and on macOS whether it hides the environment of its own programs from
+/// `ps -E` (System Integrity Protection does, for Apple's programs). The run
+/// marker finds an orphan of the fakes, which run `sh`, `sleep` and `perl`,
+/// only when it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Machine {
+    pub os: &'static str,
+    pub hides_system_env: bool,
+}
+
+impl Machine {
+    /// This machine, probed once (see
+    /// [`system_programs_hide_environment`](crate::procs::system_programs_hide_environment)).
+    pub fn current() -> Self {
+        Self {
+            os: std::env::consts::OS,
+            hides_system_env: crate::procs::system_programs_hide_environment(),
+        }
+    }
 }
 
 const KEEPER_KILLED_REASON: &str = "SIGKILL of delega and of its keeper together: no code of either runs, so nothing stops the worker or enforces its time limit. The accepted residual on every platform (process module docs, \"What remains possible\").";
-const MACOS_PLATFORM_REASON: &str = "macOS residual: the process left the provider's session and its parent is gone, so no listing ties it to the run, and macOS has no subreaper. The run marker would find it, but `ps -E` shows no environment for Apple's own programs (these fakes run sh, sleep and perl), measured on macOS 27.2 with SIP enabled. Linux closes this through the keeper (process module docs, \"What remains possible\").";
+const MACOS_PLATFORM_REASON: &str = "macOS residual on a system that hides the environment of its own programs from `ps -E` (System Integrity Protection does): the process left the provider's session and its parent is gone, so no listing ties it to the run, macOS has no subreaper, and the run marker is not visible because these fakes run sh, sleep and perl. Where the environment is visible the marker finds it and the row is expected to pass. Linux closes this through the keeper (process module docs, \"What remains possible\").";
 const MACOS_RELAY_REASON: &str = "macOS residual: a fast fork relay is never in a process listing for long enough to be stopped, and the freeze of listings stopped the process-layer relay in 0 of 50 runs on macOS 27.2. Linux closes this through the keeper's own walk of its tree (process module docs, \"What remains possible\").";
 
 const GAPS: &[Gap] = &[
@@ -515,6 +540,7 @@ const GAPS: &[Gap] = &[
         reason: KEEPER_KILLED_REASON,
         timing_dependent: false,
         os: None,
+        hidden_env_only: false,
     },
     Gap {
         cases: &[],
@@ -524,6 +550,7 @@ const GAPS: &[Gap] = &[
         reason: MACOS_RELAY_REASON,
         timing_dependent: true,
         os: Some("macos"),
+        hidden_env_only: false,
     },
     Gap {
         cases: &[],
@@ -533,6 +560,7 @@ const GAPS: &[Gap] = &[
         reason: MACOS_PLATFORM_REASON,
         timing_dependent: true,
         os: Some("macos"),
+        hidden_env_only: true,
     },
     Gap {
         cases: &["a"],
@@ -542,6 +570,7 @@ const GAPS: &[Gap] = &[
         reason: MACOS_PLATFORM_REASON,
         timing_dependent: true,
         os: Some("macos"),
+        hidden_env_only: true,
     },
 ];
 
@@ -561,13 +590,14 @@ fn unlisted_survivors(variant: &str, os: &str) -> Vec<&'static str> {
     }
 }
 
-/// The expectation of one row on this operating system.
+/// The expectation of one row on this machine.
 pub fn expect_for(case: &Case, variant: &str) -> Expect {
-    expect_for_os(case, variant, std::env::consts::OS)
+    expect_for_machine(case, variant, Machine::current())
 }
 
-/// The expectation of one row on `os` (as `std::env::consts::OS` names it).
-pub fn expect_for_os(case: &Case, variant: &str, os: &str) -> Expect {
+/// The expectation of one row on `machine`.
+pub fn expect_for_machine(case: &Case, variant: &str, machine: Machine) -> Expect {
+    let os = machine.os;
     let mut expect = Expect {
         outcome: case.expect.outcome,
         exit: case.expect.exit,
@@ -586,7 +616,8 @@ pub fn expect_for_os(case: &Case, variant: &str, os: &str) -> Expect {
     for gap in GAPS {
         let hit = (gap.cases.is_empty() || gap.cases.contains(&case.id))
             && (gap.variants.is_empty() || gap.variants.contains(&variant))
-            && gap.os.is_none_or(|only| only == os);
+            && gap.os.is_none_or(|only| only == os)
+            && (!gap.hidden_env_only || machine.hides_system_env);
         if hit {
             expect.leak = gap.class;
             expect.survivors = gap.survivors.to_vec();
@@ -609,12 +640,12 @@ pub struct Row {
 }
 
 pub fn all() -> Vec<Row> {
-    all_for(std::env::consts::OS)
+    all_for(Machine::current())
 }
 
-/// Every row with its expectation on `os`, so results recorded on one system
-/// can be checked on another.
-pub fn all_for(os: &str) -> Vec<Row> {
+/// Every row with its expectation on `machine`, so results recorded on one
+/// system can be checked on another.
+pub fn all_for(machine: Machine) -> Vec<Row> {
     let mut rows = Vec::new();
     for provider in PROVIDERS {
         for case in CASES {
@@ -624,7 +655,7 @@ pub fn all_for(os: &str) -> Vec<Row> {
                     provider,
                     case,
                     variant,
-                    expect: expect_for_os(case, variant, os),
+                    expect: expect_for_machine(case, variant, machine),
                 });
             }
         }
@@ -687,7 +718,28 @@ mod timing_gap_tests {
 
     #[test]
     fn timing_gap_selection_is_exactly_the_timing_dependent_gap_rows() {
-        let rows = all();
+        // macOS with its programs' environment hidden has the most gap rows;
+        // Linux has none.
+        let linux = all_for(Machine {
+            os: "linux",
+            hides_system_env: false,
+        });
+        assert!(linux.iter().all(|r| !is_timing_gap(r)));
+        let rows = all_for(Machine {
+            os: "macos",
+            hides_system_env: true,
+        });
+        let visible = all_for(Machine {
+            os: "macos",
+            hides_system_env: false,
+        });
+        let count = |rows: &[Row]| rows.iter().filter(|r| is_timing_gap(r)).count();
+        assert!(count(&visible) < count(&rows));
+        assert!(
+            visible
+                .iter()
+                .all(|r| !is_timing_gap(r) || r.variant == "relay")
+        );
         let expected = rows.iter().filter(|r| r.expect.timing_dependent).count();
         let selected: Vec<&Row> = rows.iter().filter(|r| is_timing_gap(r)).collect();
         assert!(expected > 0, "the matrix has timing-dependent gap rows");

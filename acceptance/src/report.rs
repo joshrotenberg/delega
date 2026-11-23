@@ -255,6 +255,15 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     if let Some(meta) = meta {
         let text = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
         let _ = writeln!(out, "- Machine: {}.", text(&meta["os"]));
+        if let Some(hidden) = meta["system_programs_hide_environment"].as_bool() {
+            let _ = writeln!(
+                out,
+                "- The system hides the environment of its own programs from `ps -E`: {}. On \
+                 macOS the orphan rows are expected failures when it does and passes when it \
+                 does not (process module docs, \"What remains possible\").",
+                if hidden { "yes" } else { "no" }
+            );
+        }
         let _ = writeln!(
             out,
             "- delega: {}.",

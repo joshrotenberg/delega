@@ -479,7 +479,12 @@ with a class, a reason and exactly which roles may survive:
   `bare`: the fakes run `sh`, `sleep` and `perl`, Apple's own programs), and a
   fast fork relay (the `relay` rows); on every platform a SIGKILL of `delega`
   together with its keeper (`kk`). A gap may apply to one system only; on Linux
-  only `kk` is listed. After a SIGKILL of `delega` (`k`) the harness waits up to
+  only `kk` is listed. The macOS `orphan` and `a`-with-`bare` gaps apply only on
+  a system that hides the environment of its own programs from `ps -E` (System
+  Integrity Protection does); the harness probes this once per run (it starts
+  `/bin/sleep` with a marker value and looks for it in `ps -E`), records it in
+  the results metadata as `system_programs_hide_environment`, and expects those
+  rows to pass where the environment is visible. After a SIGKILL of `delega` (`k`) the harness waits up to
   5 s more for the keeper to stop the tree before it counts survivors.
 - **undocumented gap**: a failure this harness found that the docs do not
   describe. None is listed now.

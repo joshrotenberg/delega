@@ -384,6 +384,7 @@ fn meta(
         .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "os": run("uname", &["-srm"]),
+        "system_programs_hide_environment": delega_acceptance::procs::system_programs_hide_environment(),
         "jobs": jobs,
         "repeat": repeat,
         "rows": rows,

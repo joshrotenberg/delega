@@ -83,7 +83,16 @@ fn the_committed_results_cover_exactly_the_matrix_rows_with_their_current_expect
     } else {
         std::env::consts::OS
     };
-    let matrix: BTreeMap<String, matrix::Row> = matrix::all_for(os)
+    // On macOS, whether the system hid the environment of its own programs
+    // when the results were recorded; a run that did not say counts as hidden.
+    let hides_system_env = meta["system_programs_hide_environment"]
+        .as_bool()
+        .unwrap_or(os == "macos");
+    let machine = matrix::Machine {
+        os: if os == "linux" { "linux" } else { "macos" },
+        hides_system_env,
+    };
+    let matrix: BTreeMap<String, matrix::Row> = matrix::all_for(machine)
         .into_iter()
         .map(|r| (r.id.clone(), r))
         .collect();
