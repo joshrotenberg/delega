@@ -6,15 +6,18 @@
 //! kernel built without that file, from the parent field of every
 //! `/proc/<pid>/stat`.
 //!
-//! Every process is held by a pidfd once found, checked to be a live child of
-//! the parent it was found under (a pid reused between the read and the pidfd
-//! has another parent), and signalled through the pidfd, so a reused pid is
-//! never signalled. A freeze reads a process's children only once its SIGSTOP
-//! has taken effect, and ends only when a pass starting again from the
-//! keeper's own children finds nothing new and every process stopped.
+//! Nothing is signalled by pid number: a process is signalled only through a
+//! pidfd opened after it was found and checked to be a live child of the
+//! parent it was found under (a pid reused between the read and the pidfd has
+//! another parent), with its start time kept so the pid can be checked again
+//! before its children are read. A process that cannot be held is not
+//! signalled and nothing below it is walked. A zero is trusted only when it is
+//! proven (see [`Walked::complete`]), with a full scan of `/proc` as a second
+//! source.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::os::fd::OwnedFd;
+
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -77,7 +80,7 @@ fn alive(pid: i32) -> bool {
     stat(pid).is_some_and(|(state, _)| state != 'Z' && state != 'X')
 }
 
-/// Every descendant of `root` in one pass, by parent links.
+/// Every descendant of `root` in one pass, by parent links (no signals).
 pub(super) fn descendants(root: i32) -> Vec<i32> {
     let mut seen = HashSet::new();
     let mut queue: VecDeque<i32> = children(root).into();
@@ -92,6 +95,38 @@ pub(super) fn descendants(root: i32) -> Vec<i32> {
     out
 }
 
+/// Every live process, with its parent, from a full scan of `/proc/*/stat`.
+/// This source does not depend on the children files, which can omit a live
+/// child while another child of the same parent exits during the read.
+fn scan() -> HashMap<i32, i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return HashMap::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter_map(|pid| match stat(pid) {
+            Some((state, parent)) if state != 'Z' && state != 'X' => Some((pid, parent)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The live descendants of `root` by the full scan.
+fn scanned_descendants(root: i32) -> BTreeSet<i32> {
+    let table = scan();
+    let mut out = BTreeSet::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (pid, _) in table.iter().filter(|(_, p)| **p == parent) {
+            if *pid != root && out.insert(*pid) {
+                frontier.push(*pid);
+            }
+        }
+    }
+    out
+}
+
 /// What a census or a freeze found, for the answer and the diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Walked {
@@ -99,14 +134,14 @@ pub(super) struct Walked {
     pub live: usize,
     /// Passes walked.
     pub passes: u32,
-    /// Whether the last pass was complete: (census) it agreed with the one
-    /// before and the tree was not in flux; (freeze) it found nothing new,
-    /// every process stopped, no live process refused and no exited child of
-    /// the keeper left to reap.
+    /// Whether the result is proven: (census) two passes in a row agreed, the
+    /// full scan agreed with the walk, and the tree was not in flux; (freeze)
+    /// besides that, a pass found nothing new, held and stopped everything it
+    /// found, and refused nothing. A result that is not complete is never
+    /// taken as an empty tree.
     pub complete: bool,
-    /// Live processes a freeze could not hold because their parent had changed
-    /// since they were found (reparented to the keeper); a later pass holds
-    /// them under the keeper.
+    /// Live processes a freeze could not hold: no pidfd, or a parent that had
+    /// changed since they were found. They were not signalled.
     pub refused: u32,
 }
 
@@ -117,113 +152,149 @@ impl Walked {
             self.passes, self.complete, self.refused
         )
     }
+
+    /// The count to act on: an unproven result is never zero.
+    pub(super) fn effective_live(&self) -> usize {
+        if self.complete {
+            self.live
+        } else {
+            self.live.max(1)
+        }
+    }
 }
 
 /// Whether the tree is in flux: a direct child of `root` other than `keep`
 /// has exited and is not reaped. A process exits as the keeper's child only
 /// after it was reparented to it, and its own children are reparented at that
 /// moment too, so a pass that read the tree around it can have missed them.
-/// Zombies that can be reaped are reaped first, so only an exit since then
-/// counts.
+/// The check comes before the reap, so an exit since the last check counts;
+/// the reap then clears it for the next one.
 fn in_flux(root: i32, keep: i32) -> bool {
-    reap_children(root, keep);
-    children(root)
+    let flux = children(root)
         .into_iter()
-        .any(|c| c != keep && stat(c).is_some_and(|(state, _)| state == 'Z' || state == 'X'))
+        .any(|c| c != keep && stat(c).is_some_and(|(state, _)| state == 'Z' || state == 'X'));
+    reap_children(root, keep);
+    flux
 }
 
-/// How many descendants of `root` are alive (not zombies), `keep` (the
-/// program, which the keeper holds unreaped) not counted when it has exited.
-/// One pass reads the keeper's children once, and a process reparented to
-/// the keeper after that read is missed, so a count is accepted only when two
-/// passes in a row find the same live set and the tree was not in flux around
-/// either (see [`in_flux`]). A tree that keeps changing (a relay) never meets
-/// that, and is reported with the last pass's count, at least 1.
+/// How many descendants of `root` are alive. A count is complete only when
+/// two passes in a row find the same live set by the children files, the full
+/// scan of `/proc` finds the same set, and the tree was not in flux around
+/// either. A tree that keeps changing (a relay) never meets that.
 pub(super) fn census(root: i32, keep: i32) -> Walked {
     let mut previous: Option<BTreeSet<i32>> = None;
     let mut passes = 0;
+    let mut last = 0;
     for _ in 0..KEEPER_FREEZE_PASSES {
         passes += 1;
         let flux_before = in_flux(root, keep);
-        let live: BTreeSet<i32> = descendants(root)
+        let walked: BTreeSet<i32> = descendants(root)
             .into_iter()
             .filter(|p| alive(*p))
             .collect();
+        let scanned = scanned_descendants(root);
         let flux_after = in_flux(root, keep);
-        if !flux_before && !flux_after {
-            if previous.as_ref() == Some(&live) {
+        last = walked.len().max(scanned.len());
+        if !flux_before && !flux_after && walked == scanned {
+            if previous.as_ref() == Some(&walked) {
                 return Walked {
-                    live: live.len(),
+                    live: walked.len(),
                     passes,
                     complete: true,
                     refused: 0,
                 };
             }
-            previous = Some(live);
+            previous = Some(walked);
         } else {
             previous = None;
         }
         std::thread::sleep(Duration::from_millis(2));
     }
     Walked {
-        live: previous.map_or(1, |live| live.len().max(1)),
+        live: last.max(1),
         passes,
         complete: false,
         refused: 0,
     }
 }
 
-/// A process held for signalling: a pidfd when the kernel has them, so the
-/// signal reaches this process or none, never one that took its pid.
+/// Why a process could not be held.
+enum NotHeld {
+    /// It is gone.
+    Gone,
+    /// It is alive and could not be verified (no pidfd, or a parent other than
+    /// the one it was found under): it is not signalled, and nothing below it
+    /// is walked.
+    Refused,
+}
+
+/// A process held for signalling: a pidfd, so the signal reaches this
+/// process or none, and its start time, so the pid can be checked to still
+/// name it before its children are read.
 struct Held {
     pid: i32,
-    fd: Option<OwnedFd>,
+    fd: OwnedFd,
+    ticks: u64,
 }
 
 impl Held {
     /// Hold `pid` if it is still a live child of `parent`. The check comes
     /// after the pidfd is open: a pid reused between the children read and
-    /// here has another parent and is not held.
-    fn take(pid: i32, parent: i32) -> Option<Self> {
-        let fd = Pid::from_raw(pid).and_then(|p| pidfd_open(p, PidfdFlags::empty()).ok());
-        let (state, actual) = stat(pid)?;
-        (actual == parent && state != 'Z' && state != 'X').then_some(Self { pid, fd })
+    /// here has another parent and is not held. Without a pidfd nothing is
+    /// held: no process is ever signalled by number.
+    fn take(pid: i32, parent: i32) -> Result<Self, NotHeld> {
+        let raw = Pid::from_raw(pid).ok_or(NotHeld::Gone)?;
+        let fd = match pidfd_open(raw, PidfdFlags::empty()) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::SRCH) => return Err(NotHeld::Gone),
+            Err(_) => return Err(NotHeld::Refused),
+        };
+        let stat = sys::proc_stat(pid).ok_or(NotHeld::Gone)?;
+        if stat.state == 'Z' || stat.state == 'X' {
+            return Err(NotHeld::Gone);
+        }
+        if stat.parent != parent {
+            return Err(NotHeld::Refused);
+        }
+        Ok(Self {
+            pid,
+            fd,
+            ticks: stat.start_ticks,
+        })
+    }
+
+    /// The process's stat if the pid still names it.
+    fn current(&self) -> Option<sys::ProcStat> {
+        sys::proc_stat(self.pid).filter(|stat| stat.start_ticks == self.ticks)
     }
 
     fn send(&self, signal: Signal) {
-        match &self.fd {
-            Some(fd) => {
-                let _ = pidfd_send_signal(fd, signal);
-            }
-            // Before Linux 5.3: by pid, right after the parent check.
-            None => {
-                let _ = sys::signal_process(self.pid, signal);
-            }
-        }
+        let _ = pidfd_send_signal(&self.fd, signal);
     }
 }
 
-/// Wait up to `bound` for a SIGSTOP to take effect: a stopped process forks
+/// Wait until `until` for a SIGSTOP to take effect: a stopped process forks
 /// nothing more and reaps none of its children, so its children list is then
-/// complete and theirs pids stay theirs. `false` if it is still running (an
-/// uninterruptible wait, for example).
-fn wait_stopped(pid: i32, bound: Duration) -> bool {
-    let until = Instant::now() + bound;
+/// complete and their pids stay theirs. `Some(true)` stopped, `Some(false)`
+/// still running, `None` gone.
+fn wait_stopped(held: &Held, until: Instant) -> Option<bool> {
     loop {
-        match stat(pid) {
-            None => return true,
-            Some(('T' | 't' | 'Z' | 'X', _)) => return true,
+        match held.current() {
+            None => return None,
+            Some(stat) if matches!(stat.state, 'T' | 't') => return Some(true),
+            Some(stat) if matches!(stat.state, 'Z' | 'X') => return None,
             Some(_) => {}
         }
         if Instant::now() >= until {
-            return false;
+            return Some(false);
         }
         std::thread::sleep(Duration::from_millis(1));
     }
 }
 
 /// Send `signal` (then SIGCONT, so a stopped process receives it) to every
-/// descendant of `root` one pass finds, each held and checked as in a freeze.
+/// descendant of `root` one pass finds and can hold; a process that cannot be
+/// held is not signalled and nothing below it is walked.
 pub(super) fn signal_tree(root: i32, signal: Signal) {
     let mut seen = HashSet::new();
     let mut queue: VecDeque<(i32, i32)> = children(root).into_iter().map(|c| (c, root)).collect();
@@ -231,67 +302,93 @@ pub(super) fn signal_tree(root: i32, signal: Signal) {
         if pid == root || !seen.insert(pid) {
             continue;
         }
-        if let Some(held) = Held::take(pid, parent) {
+        if let Ok(held) = Held::take(pid, parent) {
             held.send(signal);
             held.send(Signal::CONT);
+            queue.extend(children(pid).into_iter().map(|c| (c, pid)));
         }
-        queue.extend(children(pid).into_iter().map(|c| (c, pid)));
     }
 }
 
+/// Whether the full scan finds no live process outside the held set whose
+/// parent is the keeper or a held process. With everything held stopped
+/// nothing can fork or exit, so this second source confirms that the walk
+/// missed nothing.
+fn scan_confirms(root: i32, keep: i32, held: &HashMap<i32, Held>) -> bool {
+    scan().iter().all(|(pid, parent)| {
+        *pid == root
+            || *pid == keep && !alive(keep)
+            || !(*parent == root || held.contains_key(parent))
+            || held.get(pid).is_some_and(|h| {
+                h.current()
+                    .is_some_and(|stat| matches!(stat.state, 'T' | 't'))
+            })
+    })
+}
+
 /// Stop every descendant of `root` (SIGSTOP), walking again from the keeper's
-/// own children until a pass is complete: it found nothing new, every process
-/// it found has stopped, it refused no live process (one reparented to the
-/// keeper since it was found, held by a later pass), and no exited child of
-/// the keeper was left to reap (see [`in_flux`]). Then SIGKILL and SIGCONT go
-/// to all of them through their pidfds, and the census says what is still
-/// alive; not zero when the freeze could not complete within its bound.
+/// own children until a pass proves the tree frozen: it found nothing new,
+/// held and stopped everything it found, refused nothing, the tree was not in
+/// flux, and the full scan of `/proc` confirms nothing outside the held set
+/// hangs below the keeper or a held process. Then SIGKILL and SIGCONT go to
+/// everything held, through the pidfds, and a complete census must find the
+/// tree empty. Bounded by `KEEPER_FREEZE_PASSES` passes and one second,
+/// checked for every process; a freeze that runs out is not complete, and its
+/// count is never zero.
 pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
-    let started = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(1);
     let mut held: HashMap<i32, Held> = HashMap::new();
     let mut passes = 0;
-    let mut complete = false;
+    let mut frozen = false;
     let mut refused_total = 0;
     for _ in 0..KEEPER_FREEZE_PASSES {
         passes += 1;
+        let mut sound = !in_flux(root, keep);
         let mut new = 0;
-        let mut all_stopped = true;
-        let mut refused = 0;
-        let flux_before = in_flux(root, keep);
         let mut queue: VecDeque<(i32, i32)> =
             children(root).into_iter().map(|c| (c, root)).collect();
         let mut seen = HashSet::new();
         while let Some((pid, parent)) = queue.pop_front() {
+            if Instant::now() >= deadline {
+                sound = false;
+                break;
+            }
             if pid == root || !seen.insert(pid) {
                 continue;
             }
             if let std::collections::hash_map::Entry::Vacant(slot) = held.entry(pid) {
-                let Some(process) = Held::take(pid, parent) else {
-                    // Gone, or no longer the child of `parent`: when it is
-                    // alive it was reparented (to the keeper) and the next
-                    // pass, starting from the keeper's children, holds it.
-                    if alive(pid) {
-                        refused += 1;
+                match Held::take(pid, parent) {
+                    Ok(process) => {
+                        process.send(Signal::STOP);
+                        slot.insert(process);
+                        new += 1;
                     }
-                    continue;
-                };
-                process.send(Signal::STOP);
-                slot.insert(process);
-                new += 1;
+                    Err(NotHeld::Gone) => continue,
+                    Err(NotHeld::Refused) => {
+                        refused_total += 1;
+                        sound = false;
+                        continue;
+                    }
+                }
             }
-            // Read the children only once the stop has taken effect.
-            if !wait_stopped(pid, Duration::from_millis(50)) {
-                all_stopped = false;
+            let Some(process) = held.get(&pid) else {
+                continue;
+            };
+            // Read the children only of a process that is still the one held
+            // and whose stop has taken effect.
+            let until = (Instant::now() + Duration::from_millis(50)).min(deadline);
+            match wait_stopped(process, until) {
+                Some(true) => queue.extend(children(pid).into_iter().map(|c| (c, pid))),
+                Some(false) => sound = false,
+                None => {}
             }
-            queue.extend(children(pid).into_iter().map(|c| (c, pid)));
         }
-        refused_total += refused;
-        let flux_after = in_flux(root, keep);
-        if new == 0 && all_stopped && refused == 0 && !flux_before && !flux_after {
-            complete = true;
+        sound = sound && !in_flux(root, keep);
+        if new == 0 && sound && scan_confirms(root, keep, &held) {
+            frozen = true;
             break;
         }
-        if started.elapsed() > Duration::from_secs(1) {
+        if Instant::now() >= deadline {
             break;
         }
     }
@@ -302,11 +399,12 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
     let until = Instant::now() + Duration::from_millis(500);
     loop {
         let counted = census(root, keep);
-        if counted.live == 0 || Instant::now() >= until {
+        let complete = frozen && counted.complete;
+        if (complete && counted.live == 0) || Instant::now() >= until {
             return Walked {
                 live: counted.live,
                 passes,
-                complete: complete && counted.live == 0,
+                complete,
                 refused: refused_total,
             };
         }

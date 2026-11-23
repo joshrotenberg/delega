@@ -362,7 +362,7 @@ fn census_report(_pid: i32) -> (usize, String) {
     #[cfg(target_os = "linux")]
     {
         let walked = super::walk::census(rustix::process::getpid().as_raw_nonzero().get(), _pid);
-        (walked.live, walked.detail())
+        (walked.effective_live(), walked.detail())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -384,7 +384,7 @@ async fn freeze_report(pid: i32) -> (usize, String) {
         tokio::task::spawn_blocking(move || {
             let walked =
                 super::walk::freeze_kill(rustix::process::getpid().as_raw_nonzero().get(), pid);
-            (walked.live, walked.detail())
+            (walked.effective_live(), walked.detail())
         })
         .await
         .unwrap_or((usize::MAX, "the freeze panicked".into()))
@@ -417,11 +417,13 @@ async fn stop_alone(hello: &Hello, pid: i32, owner: Option<&mut mpsc::UnboundedR
     #[cfg(not(target_os = "linux"))]
     stop_alone_listed(hello, pid, deadline).await;
     // An owner that may still be there must stop relying on the program's
-    // pid before the reap frees it: say so and wait for its answer, its end
-    // closing, or a bound.
+    // pid before the reap frees it: say so and wait for its answer or its end
+    // closing. Without either within the bound the program is left unreaped:
+    // the keeper exits, and the program goes to the reaper above it (init or
+    // another subreaper), which frees its pid only when it reaps it.
     if let Some(rx) = owner {
         say(&FromKeeper::Releasing);
-        let _ = tokio::time::timeout(KEEPER_RELEASE_WAIT, async {
+        let acknowledged = tokio::time::timeout(KEEPER_RELEASE_WAIT, async {
             loop {
                 match rx.recv().await {
                     Some(Event::Command(ToKeeper::Released) | Event::Closed) | None => break,
@@ -429,7 +431,11 @@ async fn stop_alone(hello: &Hello, pid: i32, owner: Option<&mut mpsc::UnboundedR
                 }
             }
         })
-        .await;
+        .await
+        .is_ok();
+        if !acknowledged {
+            return;
+        }
     }
     let _ = tokio::task::spawn_blocking(move || {
         let until = std::time::Instant::now() + Duration::from_secs(2);
