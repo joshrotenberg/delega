@@ -939,21 +939,62 @@ impl Tracker {
 
     /// Whether a process cannot be the tree's by its group or session. A
     /// process of the tree is in a group and a session that a process of the
-    /// tree created, so each id is the pid of a process that started after
-    /// the keeper. If a process alive or a zombie now, which started before
-    /// the keeper, has that pid, the two would have held one pid at the same
-    /// time, so the group or session is someone else's, and so is the
-    /// process.
+    /// tree created, and every live (or zombie) process of the tree descends
+    /// from this keeper. So the group or session is someone else's, and so is
+    /// the process, when its leader (alive or a zombie, other than the
+    /// process itself) started before the keeper (the two would have held
+    /// one pid at the same time), or when the leader's chain of parents
+    /// reaches a process that started before the keeper without passing
+    /// through this keeper: the leader of another run's session is that run's
+    /// program, alive or held unreaped by its own keeper, whose parents lead
+    /// to that run's owner and further up, never to this keeper. A chain that
+    /// reaches launchd (an orphaned ancestor) proves nothing.
     fn provably_foreign(&self, pid: i32, pgid: i32) -> bool {
         let session = match sys::session_lookup(pid) {
             sys::SessionLookup::In(session) => session,
             sys::SessionLookup::Gone | sys::SessionLookup::Unknown => 0,
         };
-        [pgid, session].into_iter().any(|id| {
-            id > 0
-                && id != pid
-                && matches!(darwin::start_of(id), Ok(Some(start)) if start < self.keeper_start_us)
-        })
+        (pgid > 0 && pgid != pid && self.leader_is_foreign(pgid, false))
+            || (session > 0 && session != pid && self.leader_is_foreign(session, true))
+    }
+
+    /// See [`Tracker::provably_foreign`]: the walk up from a group or session
+    /// leader, bounded.
+    fn leader_is_foreign(&self, leader: i32, session: bool) -> bool {
+        let Ok(Some(first)) = darwin::kern_proc(leader) else {
+            return false;
+        };
+        if first.start_us < self.keeper_start_us {
+            return true;
+        }
+        // Walk only from the process that still leads this group or session:
+        // a pid freed by its leader and reused names someone unrelated.
+        let leads = if session {
+            matches!(sys::session_lookup(leader), sys::SessionLookup::In(s) if s == leader)
+        } else {
+            first.pgid == leader
+        };
+        if !leads {
+            return false;
+        }
+        let keeper = rustix::process::getpid().as_raw_nonzero().get();
+        let mut current = leader;
+        for _ in 0..64 {
+            if current == keeper {
+                return false;
+            }
+            let Ok(Some(record)) = darwin::kern_proc(current) else {
+                return false;
+            };
+            if record.start_us < self.keeper_start_us {
+                return true;
+            }
+            if record.ppid <= 1 {
+                return false;
+            }
+            current = record.ppid;
+        }
+        false
     }
 
     /// Read the processes in `pids` that are not held. Take every one forked
