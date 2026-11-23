@@ -30,8 +30,9 @@ stands. This page lists the limits a user meets.
   Codex confines neither reads nor commands, so a `read`, `write` or `build`
   Codex run is wider than requested and says so in `provider_notes`; with `--strict` it is
   refused ([Wider than requested](../providers.md#wider-than-requested)).
-- **Asking permission live** is not built. A request not granted is answered
-  no.
+- **Asking permission live** works for Claude Code runs over MCP or the Rust
+  supervisor (`permissions.on_request: ask`). Codex runs and `delega run` refuse
+  it before start ([#164](https://github.com/joshrotenberg/delega/issues/164)).
 - **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
   descendant called `setsid` and was orphaned before any process listing saw it,
   or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`

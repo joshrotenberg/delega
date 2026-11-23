@@ -45,9 +45,10 @@ surfaces ([The request](api.md#the-request), [The result](api.md#the-result)).
 ## When another tool fits better
 
 - **Windows.** delega supports macOS and Linux only.
-- **Asking permission live.** A worker's permissions are stated up front, and a
-  request not granted is answered no. Asking the caller during a run is not
-  built ([Deferred](api.md#deferred)).
+- **Asking permission live with Codex.** Claude Code runs started over MCP or
+  the Rust supervisor can ask the caller (`permissions.on_request: ask`). Codex
+  runs and `delega run` cannot
+  ([#164](https://github.com/joshrotenberg/delega/issues/164)).
 - **Enforced independent review** of a worker's change, and work loops, are
   planned as later layers and are not built.
 - **Session history.** That is [trovador](https://github.com/joshrotenberg/trovador).
