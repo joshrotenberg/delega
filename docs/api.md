@@ -749,7 +749,7 @@ Options, for both commands: `--host claude|codex` (repeatable),
   | `.delega-install.json` | The ownership marker. |
 
 - **Plugin version.** The delega version, a `+` and the lowercase hexadecimal SHA-256
-  digest of the copied executable, for example `0.1.0+3f9c...`. The digest is semver build
+  digest of the copied executable, for example `0.1.0-dev+3f9c...`. The digest is semver build
   metadata, so the version stays valid semver at a release. A host caches a plugin by version,
   so a changed executable, even another build of the same source revision, gets
   a new version and a refreshed cache. Running `delega plugin install` again

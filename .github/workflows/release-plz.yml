@@ -28,6 +28,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # release-plz releases an unpublished version unchanged, so a -dev version
+      # on main would be published as is. Set the release version first.
+      - name: Refuse a development version
+        run: |
+          if grep -Eq '^version = "[^"]*-dev"' Cargo.toml; then
+            echo "::error::The workspace version ends in -dev. Set the release version in Cargo.toml before releasing."
+            exit 1
+          fi
+
       - name: Run release-plz
         uses: release-plz/action@v0.5
         env:
