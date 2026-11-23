@@ -360,8 +360,8 @@ fn build_grants(
     notes.extend([
         "build runs Bash inside Claude Code's sandbox, which approves sandboxed commands; \
          commands can write to the working directory and Claude Code's per-user temporary \
-         directory except its per-project session folders (in a git worktree, git commit also \
-         writes the main checkout's .git), \
+         directory except its per-project session folders (observed on macOS; in a git worktree, \
+         git commit also writes the main checkout's .git), \
          permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
          not added to the sandbox, so delega does not make it writable, though one inside a \
          location commands can write stays writable; the network is refused"

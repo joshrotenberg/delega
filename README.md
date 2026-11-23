@@ -44,7 +44,7 @@ explains the result and the other cases.
 
 In Claude Code build mode, sandboxed commands can write in the working
 directory and in Claude Code's per-user temporary directory, except its
-per-project session folders. See [Build permissions](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#build).
+per-project session folders (observed on macOS). See [Build permissions](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#build).
 
 ## Acceptance criteria
 

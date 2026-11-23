@@ -264,13 +264,14 @@ In `write` and `build`, the scoped `Edit` rule covers both the `Edit` and
 | `failIfUnavailable: true` | Startup fails if the sandbox is unavailable. macOS has it built in; Linux requires `bubblewrap` (`bwrap`) and `socat`. `delega doctor` reports `sandbox_unavailable` when they are not found on the worker's `PATH`; it does not check other causes ([Doctor](api.md#doctor)). |
 | `allowUnsandboxedCommands: false` | Failed commands stay inside the sandbox. |
 | `autoAllowBashIfSandboxed: true` | Claude Code approves sandboxed commands without a Bash allow rule. Some commands, including `eval` and the probed `git -c … commit`, can still be denied. |
-| `filesystem.denyWrite` | Blocks writes in per-project session folders with `//tmp/claude-<uid>/-*` and, on macOS, `//private/tmp/claude-<uid>/-*`. The UID is delega's effective UID. |
+| `filesystem.denyWrite` | Blocks writes in per-project session folders with `//tmp/claude-<uid>/-*` and, on macOS, `//private/tmp/claude-<uid>/-*`. The UID is delega's effective UID. Observed on macOS (#176); the Linux form has not been run live. |
 
 Commands can read outside the working directory and listed directories, so
 the run carries a `wider than requested` note. Commands can write in the
 working directory and Claude Code's per-user `TMPDIR` (`/tmp/claude-<uid>`,
 shared with that user's Claude Code sessions), except for per-project session
-folders. Files directly in the temporary directory remain writable.
+folders (observed on macOS). Files directly in the temporary directory remain
+writable.
 `git add` and `git commit` can write to the main checkout's Git metadata from a worktree.
 
 Listed directories get a scoped Read rule without `--add-dir`. A directory
@@ -718,12 +719,16 @@ See `crates/delega-core/src/provider/env.rs`.
 ### 2026-11-22, Claude Code 2.1.330 on macOS (#176)
 
 - With delega's build launch flags, setting `CLAUDE_CODE_TMPDIR` to a per-run
-  directory moved the folders Claude Code created, but sandboxed commands
-  still received `TMPDIR=/tmp/claude-501` and could write there.
+  directory made Claude Code create its own folders there (`claude-501`,
+  `claude-host-501`, `cc-socks`), but sandboxed commands still received
+  `TMPDIR=/tmp/claude-501` and could write there.
 - Adding `//tmp/claude-501/-*` and `//private/tmp/claude-501/-*` to
   `filesystem.denyWrite` blocked a write to
   `/tmp/claude-501/-delega-probe-session/x` with `Operation not permitted`.
   Writing `"$TMPDIR/p3"` and writing in the working directory still succeeded.
+- With the branch binary for #176 (model haiku), a write three levels deep in a
+  session folder, a `mkdir` inside it, and a write through the
+  `/private/tmp/claude-501/` path were all denied.
 
 ### Claude Code 2.1.330, date unrecorded
 
