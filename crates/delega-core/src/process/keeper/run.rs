@@ -391,21 +391,15 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
         let _ = wait_exit(pid, Duration::from_secs(5)).await;
     }
     // The final census, taken once the program has exited and before it is
-    // reaped. An earlier refusal does not stop it from being a proof; a read
-    // of `/proc` that failed at any point since the keeper started does,
-    // whichever walk met it (the census above and any pass discarded as in
-    // flux included).
+    // reaped.
     #[cfg(target_os = "linux")]
-    let proven = subreaper && {
+    let last = if subreaper {
         let me = rustix::process::getpid().as_raw_nonzero().get();
-        tokio::task::spawn_blocking(move || super::walk::final_census_proves_empty(me, pid))
+        tokio::task::spawn_blocking(move || super::walk::census(me, pid))
             .await
-            .unwrap_or(false)
-    };
-    #[cfg(not(target_os = "linux"))]
-    let proven = {
-        let _ = subreaper;
-        false
+            .ok()
+    } else {
+        None
     };
     let reaped = tokio::task::spawn_blocking(move || {
         consume_reap(pid, sys::reap_if_exited, Duration::from_secs(5))
@@ -413,6 +407,16 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
     .await
     .unwrap_or_else(|_| Err("the reap panicked".into()));
     reap_orphans(pid);
+    // Decided after the reap of orphans, the last walk that can meet a failed
+    // read: a read of `/proc` that failed at any point since the keeper
+    // started withholds the proof.
+    #[cfg(target_os = "linux")]
+    let proven = last.is_some_and(|walked| super::walk::proof_holds(&walked));
+    #[cfg(not(target_os = "linux"))]
+    let proven = {
+        let _ = subreaper;
+        false
+    };
     reaped.map(|()| Finished { live, proven })
 }
 

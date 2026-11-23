@@ -87,6 +87,9 @@ thread_local! {
     /// Test seam: make the stat of this pid read as missing on this thread,
     /// as `hidepid` would for a process listed in a children file.
     static MISSING_STAT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// Test seam: make the stat read of a held process with this pid fail on
+    /// this thread (not as missing).
+    static FAILED_HELD_STAT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 fn forced_failure() -> bool {
@@ -407,16 +410,33 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
     }
 }
 
-/// The final census at the reap, and whether it proves the keeper's tree
+/// Whether the final census at the reap, `walked`, proves the keeper's tree
 /// empty: the census itself proves it ([`Walked::proves_empty`]), and no read
-/// of `/proc` failed in this process at any point since it started, in this
-/// census (a pass discarded as in flux included) or in any walk before it.
-/// Coarser than counting the failures of one census, and enough: a keeper
-/// that never met a failed read can prove its tree empty, one that met any
-/// cannot.
-pub(super) fn final_census_proves_empty(root: i32, keep: i32) -> bool {
-    let walked = census(root, keep);
+/// of `/proc` has failed in this process since it started, in that census (a
+/// pass discarded as in flux included) or in any walk before or after it.
+/// Asked after the last walk that can fail. Coarser than counting the
+/// failures of one census, and enough: a keeper that never met a failed read
+/// can prove its tree empty, one that met any cannot.
+pub(super) fn proof_holds(walked: &Walked) -> bool {
     walked.proves_empty() && !any_read_failed()
+}
+
+/// A census of `root` and [`proof_holds`] right after it, for a caller with
+/// no walk to come.
+#[cfg(test)]
+fn final_census_proves_empty(root: i32, keep: i32) -> bool {
+    proof_holds(&census(root, keep))
+}
+
+/// The stat of a process being held or held already: `Ok(None)` only when it
+/// is gone; a read that failed for another reason is a counted read failure,
+/// never absence.
+fn held_stat(pid: i32) -> Result<Option<sys::ProcStat>, ReadFailed> {
+    #[cfg(test)]
+    if FAILED_HELD_STAT.with(std::cell::Cell::get) == pid {
+        return Err(read_failed());
+    }
+    sys::proc_stat_read(pid).map_err(|_| read_failed())
 }
 
 /// Why a process could not be held.
@@ -450,12 +470,18 @@ impl Held {
             Err(rustix::io::Errno::SRCH) => return Err(NotHeld::Gone),
             Err(_) => return Err(NotHeld::Refused),
         };
-        let Some(stat) = sys::proc_stat(pid) else {
-            return Err(if sys::pidfd_exited(&fd) {
-                NotHeld::Gone
-            } else {
-                NotHeld::Refused
-            });
+        let stat = match held_stat(pid) {
+            Ok(Some(stat)) => stat,
+            // Gone by its stat: gone only if its pidfd agrees.
+            Ok(None) => {
+                return Err(if sys::pidfd_exited(&fd) {
+                    NotHeld::Gone
+                } else {
+                    NotHeld::Refused
+                });
+            }
+            // A failed read is never absence.
+            Err(ReadFailed) => return Err(NotHeld::Refused),
         };
         if stat.state == 'Z' || stat.state == 'X' {
             return Err(NotHeld::Gone);
@@ -470,9 +496,10 @@ impl Held {
         })
     }
 
-    /// The process's stat if the pid still names it.
-    fn current(&self) -> Option<sys::ProcStat> {
-        sys::proc_stat(self.pid).filter(|stat| stat.start_ticks == self.ticks)
+    /// The process's stat if the pid still names it; `Ok(None)` when its
+    /// stat is gone or names another process, an error when the read failed.
+    fn current(&self) -> Result<Option<sys::ProcStat>, ReadFailed> {
+        Ok(held_stat(self.pid)?.filter(|stat| stat.start_ticks == self.ticks))
     }
 
     fn send(&self, signal: Signal) {
@@ -521,11 +548,14 @@ fn take_queued(
 fn wait_stopped(held: &Held, until: Instant) -> Option<bool> {
     loop {
         match held.current() {
-            None if sys::pidfd_exited(&held.fd) => return None,
-            None => {}
-            Some(stat) if matches!(stat.state, 'T' | 't') => return Some(true),
-            Some(stat) if matches!(stat.state, 'Z' | 'X') => return None,
-            Some(_) => {}
+            // A failed read is never taken as gone: it is waited out, and
+            // counts as not stopped when the time is up.
+            Err(ReadFailed) => {}
+            Ok(None) if sys::pidfd_exited(&held.fd) => return None,
+            Ok(None) => {}
+            Ok(Some(stat)) if matches!(stat.state, 'T' | 't') => return Some(true),
+            Ok(Some(stat)) if matches!(stat.state, 'Z' | 'X') => return None,
+            Ok(Some(_)) => {}
         }
         if Instant::now() >= until {
             return Some(false);
@@ -575,6 +605,8 @@ fn scan_confirms(root: i32, held: &HashMap<i32, Held>) -> bool {
             || !(*parent == root || held.contains_key(parent))
             || held.get(pid).is_some_and(|h| {
                 h.current()
+                    .ok()
+                    .flatten()
                     .is_some_and(|stat| matches!(stat.state, 'T' | 't'))
             })
     })
@@ -882,6 +914,53 @@ mod tests {
         let walked = census(me, 0);
         FAIL_READS.with(|fail| fail.set(false));
         assert!(!walked.proves_empty(), "{walked:?}");
+    }
+
+    /// A process whose stat read fails is never taken as gone, before it is
+    /// held (it is refused) or after (it is not stopped, so the freeze is not
+    /// proven), not even once it has exited.
+    #[test]
+    fn a_held_process_whose_stat_read_fails_is_never_gone() {
+        use crate::test_spawn::Guarded;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .guarded_spawn()
+            .expect("start a child");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        FAILED_HELD_STAT.with(|failed| failed.set(pid));
+        let unheld = Held::take(pid, me);
+        FAILED_HELD_STAT.with(|failed| failed.set(0));
+        let held = Held::take(pid, me);
+        FAILED_HELD_STAT.with(|failed| failed.set(pid));
+        let mut running = None;
+        let mut exited = None;
+        if let Ok(held) = &held {
+            running = Some((
+                held.current().is_err(),
+                wait_stopped(held, Instant::now() + Duration::from_millis(20)),
+            ));
+            let _ = child.kill();
+            let until = Instant::now() + Duration::from_secs(10);
+            while !sys::pidfd_exited(&held.fd) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            exited = Some(wait_stopped(
+                held,
+                Instant::now() + Duration::from_millis(20),
+            ));
+        }
+        FAILED_HELD_STAT.with(|failed| failed.set(0));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            matches!(unheld, Err(NotHeld::Refused)),
+            "taken as gone or held"
+        );
+        assert!(held.is_ok(), "the child could not be held");
+        assert_eq!(running, Some((true, Some(false))));
+        // Exited, but its stat could not be read: still not gone.
+        assert_eq!(exited, Some(Some(false)));
     }
 
     #[test]

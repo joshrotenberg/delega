@@ -159,14 +159,36 @@ pub(super) struct ProcStat {
 }
 
 /// Read `/proc/<pid>/stat` (Linux). `None` when the process is gone or the
-/// line cannot be read.
+/// line cannot be read; [`proc_stat_read`] tells the two apart.
 #[cfg(target_os = "linux")]
 pub(super) fn proc_stat(pid: i32) -> Option<ProcStat> {
+    proc_stat_read(pid).ok().flatten()
+}
+
+/// A read of `/proc/<pid>/stat` that failed for a reason other than the
+/// process being gone, or a line that could not be parsed.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StatUnreadable;
+
+/// Read `/proc/<pid>/stat` (Linux): `Ok(None)` only when the process is gone
+/// (ENOENT or ESRCH), an error when the read failed for any other reason or
+/// the line could not be parsed.
+#[cfg(target_os = "linux")]
+pub(super) fn proc_stat_read(pid: i32) -> Result<Option<ProcStat>, StatUnreadable> {
     if pid <= 0 {
-        return None;
+        return Ok(None);
     }
-    let bytes = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
-    parse_proc_stat(&bytes)
+    match std::fs::read(format!("/proc/{pid}/stat")) {
+        Ok(bytes) => parse_proc_stat(&bytes).map(Some).ok_or(StatUnreadable),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(Errno::SRCH.raw_os_error()) =>
+        {
+            Ok(None)
+        }
+        Err(_) => Err(StatUnreadable),
+    }
 }
 
 /// Fields after the command name, counted from the last `)`: state (3), ppid
