@@ -91,10 +91,16 @@ jobs:
         with:
           name: acceptance-k-relay-repeats
           path: acceptance-k-relay.jsonl
-      # Every relay row (each provider and case) must end Confirmed with no
-      # survivor on Linux, where the keeper stops the relay. Whether an owner
-      # or keeper refusal is superseded depends on timing, so every relay row
-      # runs five more times; any failure fails the job.
+      # The 12 relay rows (both providers; cases a, c, d, e, fd and k) run five
+      # more times on Linux, where the keeper stops the relay. A row fails
+      # when what it measured differs from what the matrix expects for it
+      # (acceptance/README.md); on Linux that includes no survivor, and for
+      # the 10 rows that report a result, cleanup Confirmed. The two k-relay
+      # rows (SIGKILL of delega) report no result and so no cleanup verdict;
+      # they are checked for exit status and survivors. As in every acceptance
+      # step, the harness reruns a row (up to 5 runs in all) when its only
+      # problem is the verdict for a late listing before the first signal, so
+      # that verdict alone does not fail the job. Any other failure does.
       - name: Every relay row, five repeats (Linux)
         if: runner.os == 'Linux'
         run: cargo run --release --locked -p delega-acceptance -- --filter=-relay --repeat 5 --out acceptance-relay.jsonl
