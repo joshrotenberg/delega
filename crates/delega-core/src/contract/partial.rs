@@ -34,6 +34,10 @@ pub struct PartialPermissions {
     /// See [`Permissions::on_request`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_request: Option<OnRequest>,
+    /// See [`Permissions::ask_timeout`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 600))]
+    pub ask_timeout: Option<u64>,
     /// See [`Permissions::strict`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
@@ -153,6 +157,10 @@ impl PartialRequest {
             p.is_some_and(|p| p.on_request.is_some()),
             "permissions.on_request",
         );
+        add(
+            p.is_some_and(|p| p.ask_timeout.is_some()),
+            "permissions.ask_timeout",
+        );
         add(p.is_some_and(|p| p.strict.is_some()), "permissions.strict");
         let s = self.session.as_ref();
         add(
@@ -188,6 +196,7 @@ impl PartialRequest {
                     commands: pick(b.commands, a.commands),
                     directories: pick(b.directories, a.directories),
                     on_request: pick(b.on_request, a.on_request),
+                    ask_timeout: pick(b.ask_timeout, a.ask_timeout),
                     strict: pick(b.strict, a.strict),
                 })
             }
@@ -291,6 +300,7 @@ impl PartialRequest {
                 commands: p.commands.unwrap_or(defaults.commands),
                 directories: p.directories.unwrap_or(defaults.directories),
                 on_request: p.on_request.unwrap_or(defaults.on_request),
+                ask_timeout: p.ask_timeout,
                 strict: p.strict.unwrap_or(defaults.strict),
             };
         }

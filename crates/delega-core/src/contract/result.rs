@@ -133,6 +133,41 @@ pub struct DeniedRequest {
     pub request: String,
 }
 
+/// An action Claude Code asked the caller to authorize.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PermissionInteraction {
+    /// Opaque ID to pass to respond.
+    pub id: String,
+    /// Tool requesting permission.
+    pub tool: String,
+    /// Bounded and redacted input details.
+    pub summary: serde_json::Value,
+}
+
+/// A one-use answer to a live permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    /// Permit this use.
+    Allow,
+    /// Refuse this use.
+    Deny,
+}
+
+/// The recorded disposition of an interaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AskedPermission {
+    /// Public interaction details.
+    #[serde(flatten)]
+    pub interaction: PermissionInteraction,
+    /// The answer delega committed.
+    pub decision: PermissionDecision,
+    /// Who or what resolved the interaction.
+    pub decided_by: String,
+    /// Whether the response was written to the provider pipe.
+    pub written: bool,
+}
+
 /// The permissions that applied and what was refused under them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AppliedPermissions {
@@ -142,6 +177,9 @@ pub struct AppliedPermissions {
     /// Requests answered no.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied: Vec<DeniedRequest>,
+    /// Resolved live permission requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<AskedPermission>,
 }
 
 /// Token counts and cost, where the provider reports them.

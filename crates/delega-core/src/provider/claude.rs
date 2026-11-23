@@ -20,7 +20,7 @@ use super::stream::{Parsed, Terminal, cost, count, for_each_event, non_empty, st
 
 /// The built-in tools `full` grants. Anything else a Claude Code install offers
 /// (sub-agents, MCP tools, background tasks) stays off.
-const BUILTINS: [&str; 9] = [
+pub(super) const BUILTINS: [&str; 9] = [
     "Read",
     "Glob",
     "Grep",
@@ -165,11 +165,12 @@ fn rule_path(dir: &Path, kind: &str) -> Result<String, Refusal> {
 /// the `--allowedTools` value is built from delega's own data alone. A string in
 /// a deny list is a deny pattern whatever it contains, so a rule that is not
 /// well formed matches less and never allows anything.
-fn settings_json(guard: Option<&HookCommand>, deny: &[String], sandbox: Option<&Value>) -> Value {
-    crate::canonical::sorted(settings_value(guard, deny, sandbox))
-}
-
-fn settings_value(guard: Option<&HookCommand>, deny: &[String], sandbox: Option<&Value>) -> Value {
+fn settings_json(
+    guard: Option<&HookCommand>,
+    deny: &[String],
+    ask: &[&str],
+    sandbox: Option<&Value>,
+) -> Value {
     let mut settings = match guard {
         Some(hook) => json!({
             "disableAllHooks": false,
@@ -186,10 +187,13 @@ fn settings_value(guard: Option<&HookCommand>, deny: &[String], sandbox: Option<
     if !deny.is_empty() {
         settings["permissions"] = json!({ "deny": deny });
     }
+    if !ask.is_empty() {
+        settings["permissions"]["ask"] = json!(ask);
+    }
     if let Some(sandbox) = sandbox {
         settings["sandbox"] = sandbox.clone();
     }
-    settings
+    crate::canonical::sorted(settings)
 }
 
 /// The `sandbox` settings for `build`. Commands run inside Claude Code's OS
@@ -246,7 +250,7 @@ struct Grants {
     unenforceable: Vec<String>,
 }
 
-fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
+fn grants(inputs: &Inputs<'_>, ask: bool) -> Result<Grants, Refusal> {
     let scope = inputs.scope;
     let mut notes = Vec::new();
     if scope.mode == Mode::Full {
@@ -277,14 +281,18 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
         tools.extend(["Edit", "Write"]);
         allowed.push(format!("Edit({})", rule_path(&scope.cwd, "cwd_unusable")?));
         allowed.push(format!("Write({})", rule_path(&scope.cwd, "cwd_unusable")?));
-        notes.push(format!(
-            "NotebookEdit is not granted in {} mode",
-            if scope.mode == Mode::Build {
-                "build"
-            } else {
-                "write"
-            }
-        ));
+        if ask {
+            notes.push("NotebookEdit is offered: the working directory Edit allow rule covers notebook edits there, and edits elsewhere ask unless denied".into());
+        } else {
+            notes.push(format!(
+                "NotebookEdit is not granted in {} mode",
+                if scope.mode == Mode::Build {
+                    "build"
+                } else {
+                    "write"
+                }
+            ));
+        }
     }
     if scope.mode == Mode::Build {
         return Ok(build_grants(tools, allowed, notes));
@@ -396,9 +404,24 @@ pub(super) const OWNED_ENV: [(&str, &str); 3] = [
 pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let request = inputs.request;
     let scope = inputs.scope;
-    let g = grants(inputs)?;
-    let settings =
-        settings_json(g.guard.as_ref(), &inputs.deny.rules, g.sandbox.as_ref()).to_string();
+    let ask = request.permissions.on_request == crate::contract::permissions::OnRequest::Ask;
+    let mut g = grants(inputs, ask)?;
+    if ask {
+        g.tools = BUILTINS.to_vec();
+    }
+    let mode = if ask { "manual" } else { "dontAsk" };
+    let ask_rules: &[&str] = match (ask, scope.mode, g.guard.is_some()) {
+        (false, _, _) | (_, Mode::Full, _) => &[],
+        (true, Mode::Read | Mode::Write, false) => &["Bash", "WebFetch", "WebSearch"],
+        (true, _, _) => &["WebFetch", "WebSearch"],
+    };
+    let settings = settings_json(
+        g.guard.as_ref(),
+        &inputs.deny.rules,
+        ask_rules,
+        g.sandbox.as_ref(),
+    )
+    .to_string();
     if settings.len() > SETTINGS_ARGUMENT_LIMIT {
         let kind = if inputs.deny.rules.is_empty() {
             "unsupported_command"
@@ -421,9 +444,9 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         "stream-json",
         "--verbose",
         "--permission-mode",
-        "dontAsk",
+        mode,
         "--permission-prompts",
-        "none",
+        if ask { "host" } else { "none" },
         "--strict-mcp-config",
         "--mcp-config",
         "{\"mcpServers\":{}}",
@@ -434,6 +457,17 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     .map(String::from)
     .to_vec();
     args.push(settings);
+    if ask {
+        args.extend(
+            [
+                "--input-format",
+                "stream-json",
+                "--permission-prompt-tool",
+                "stdio",
+            ]
+            .map(String::from),
+        );
+    }
     let cwd = scope.cwd.to_string_lossy().into_owned();
     args.extend(["--add-dir".to_string(), cwd]);
     // In `build` the extra directories are reached through their `Read` rules
@@ -493,7 +527,7 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
             .to_string(),
     );
     let mut mapping = vec![
-        "permission-mode=dontAsk".to_string(),
+        format!("permission-mode={mode}"),
         format!("tools={}", g.tools.join(",")),
         format!("allowedTools={}", g.allowed.join(",")),
         format!("denyRules={}", inputs.deny.rules.len()),

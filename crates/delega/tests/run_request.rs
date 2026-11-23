@@ -1673,3 +1673,33 @@ fn dry_run_refuses_claude_with_managed_mcp_before_starting_the_provider() {
         assert!(rig.record.read_dir().expect("records").next().is_none());
     }
 }
+
+#[test]
+fn the_run_cli_refuses_live_asking_before_start_even_for_dry_run() {
+    for provider in PROVIDERS {
+        for dry_run in [false, true] {
+            let rig = Rig::new();
+            let file = profile(
+                &rig,
+                &format!(
+                    r#"{{"schema_version":1,"provider":"{provider}","prompt":"success","permissions":{{"on_request":"ask"}}}}"#,
+                ),
+            );
+            let mut command = rig.command();
+            command
+                .args(["run", "--request", &file, "-C"])
+                .arg(&rig.work)
+                .args(["--output", "json"]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let out = command.guarded_output().expect("run delega");
+            assert_eq!(out.status.code(), Some(2));
+            let result = result_of(&out);
+            assert_eq!(result.outcome, Outcome::Refused);
+            assert_eq!(result.error.unwrap().kind, "permissions_not_supported");
+            assert!(result.timing.started_at.is_none());
+            rig.assert_nothing_left();
+        }
+    }
+}

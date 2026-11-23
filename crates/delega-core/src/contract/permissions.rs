@@ -29,10 +29,11 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OnRequest {
-    /// Answer no at once and record the request in the result. The only
-    /// choice in this version; asking the caller comes later.
+    /// Answer no at once and record the request in the result.
     #[default]
     Deny,
+    /// Ask the supervising caller for a one-use decision.
+    Ask,
 }
 
 /// The permissions part of a request.
@@ -53,6 +54,10 @@ pub struct Permissions {
     /// What happens to a request that was not granted. Defaults to `deny`.
     #[serde(default)]
     pub on_request: OnRequest,
+    /// Seconds allowed for each live permission request. Defaults to 120.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 600))]
+    pub ask_timeout: Option<u64>,
     /// Refuse the run before it starts when the provider cannot enforce part
     /// of these permissions as stated. Defaults to `false`, where the run goes
     /// ahead and a provider note says what is wider than requested.

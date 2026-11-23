@@ -151,7 +151,19 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
     let mut facts = Facts::new(&request, &options, queued_at);
     let progress = Progress::new(options.progress.clone(), options.progress_text);
     let cancel = CancellationToken::new();
-    match plan::build(&request, &options) {
+    let plan = if request.provider == Provider::Claude
+        && request.permissions.on_request == crate::contract::permissions::OnRequest::Ask
+        && options.asks.0.is_none()
+        && request.validate().is_ok()
+    {
+        Err(Refusal::new(
+            "permissions_not_supported",
+            "This run cannot answer live permission requests. Use delega mcp or the Rust supervisor API, or set permissions.on_request to deny.",
+        ))
+    } else {
+        plan::build(&request, &options)
+    };
+    match plan {
         Err(refusal) => {
             let mut result = RunResult::refused_before_start(
                 facts.refusal_context(),
@@ -396,6 +408,10 @@ async fn execute_steps(
         .env(plan.env.to_policy())
         .cwd(plan.scope.cwd.clone())
         .stdin(plan.stdin.clone());
+    if let Some(asks) = &plan.asks {
+        asks.redact_with(plan.redactor.clone());
+        spec.dialogue = Some(asks.clone());
+    }
     spec.stdout = CaptureSpec {
         limit: plan.max_output_bytes,
         keep: Keep::Head,
@@ -417,14 +433,43 @@ async fn execute_steps(
         provider: plan.provider,
         program: plan.program.display().to_string(),
     });
-    let report = drive(spec, &cancel).await;
+    let mut report = drive(spec, &cancel).await;
+    if let Some(asks) = &plan.asks {
+        if asks.failed() {
+            report.ending = Ending::WaitFailed {
+                message: "Claude Code permission protocol failed".into(),
+            };
+        } else {
+            // The child can finish on the denial or EOF before the process
+            // loop observes a stop that had already closed the dialogue.
+            match asks.closed_by() {
+                Some("interrupt" | "close" | "shutdown" | "connection_closed") => {
+                    report.ending = Ending::Interrupted;
+                }
+                Some("run_timeout") => {
+                    report.ending = Ending::TimedOut { limit: remaining };
+                }
+                _ => {}
+            }
+        }
+    }
 
-    let parsed = match plan.provider {
+    let mut parsed = match plan.provider {
         Provider::Claude => claude::parse(&report.stdout.bytes),
         Provider::Codex => codex::parse(&report.stdout.bytes),
     };
+    if plan.asks.is_some() {
+        for denial in &mut parsed.denied {
+            let tool = denial.request.split([':', ' ']).next().unwrap_or_default();
+            denial.request = if super::claude::BUILTINS.contains(&tool) {
+                tool.to_owned()
+            } else {
+                "unknown tool".to_owned()
+            };
+        }
+    }
     let cleanup = merge_cleanup(cleanup, report.cleanup.clone());
-    settle(
+    let mut result = settle(
         Settle {
             facts: &facts,
             validator: plan.validator.as_ref(),
@@ -437,5 +482,9 @@ async fn execute_steps(
         &report,
         &parsed,
         cleanup,
-    )
+    );
+    if let Some(asks) = plan.asks {
+        result.permissions.asked = asks.audit();
+    }
+    result
 }

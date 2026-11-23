@@ -159,6 +159,14 @@ pub(super) fn refine_permissions(schema: &mut Schema) {
         "maxItems",
         json!(MAX_DIRECTORIES),
     );
+    schema.insert(
+        "if".to_string(),
+        json!({"required": ["ask_timeout"], "properties": {"ask_timeout": {"type": "integer"}}}),
+    );
+    schema.insert(
+        "then".to_string(),
+        json!({"required": ["on_request"], "properties": {"on_request": {"const": "ask"}}}),
+    );
     // `build` runs every command inside the sandbox, so it takes no command list.
     schema.insert(
         "not".to_string(),
@@ -575,7 +583,7 @@ mod tests {
             (
                 "on_request ask",
                 request_with(json!({"permissions": {"on_request": "ask"}})),
-                false,
+                true,
             ),
             (
                 "unknown permissions field",

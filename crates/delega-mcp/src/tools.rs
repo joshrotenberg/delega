@@ -1,4 +1,4 @@
-//! The seven tools. Each is one call into the supervisor and returns what the
+//! The eight tools. Each is one call into the supervisor and returns what the
 //! supervisor returns, as structured content and as the same JSON in a text
 //! block. The adapter keeps no state of its own beyond the supervisor handle.
 
@@ -22,7 +22,7 @@ use crate::stale::{StaleServer, Staleness};
 use crate::start;
 
 /// The tool names. The server lists them sorted by name.
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 8] = [
     "start",
     "follow_up",
     "wait",
@@ -30,6 +30,7 @@ pub const TOOL_NAMES: [&str; 7] = [
     "list",
     "interrupt",
     "close",
+    "respond",
 ];
 
 const START: &str = "Start a worker on a new assignment and return at once with the worker id, \
@@ -44,8 +45,8 @@ const FOLLOW_UP: &str = "Give an existing worker another assignment that continu
     read as for start. Refused as a run, not an error, when the worker is closed, its queue is \
     full, it has no session to continue or the prompt is invalid.";
 
-const WAIT: &str = "Wait until any named run finishes, or the current run of any named worker \
-    does, or the time passes (default 30 s unless the server's configuration file sets another, \
+const WAIT: &str = "Wait for a named run or worker to finish a run or need a permission decision, \
+    or for the time to pass (default 30 s unless the server's configuration file sets another, \
     capped by the server; list reports both). A timeout is not an error: \
     timed_out is true and the states are current. A wait that the server's shutdown released \
     answers released_by_shutdown true, and a run it names can still be running. The server lets \
@@ -54,10 +55,10 @@ const WAIT: &str = "Wait until any named run finishes, or the current run of any
     \"max_waits_in_flight\", timeout_secs 0 and the current states: let an open wait return, \
     or call again later with the cursor; a wait with timeout_secs 0 only checks and is never \
     turned away. Pass the cursor back as after to be told only \
-    of what finishes later, instead of waiting long. Next, read a run that finished.";
+    of later completions and permission changes. Use respond for a pending_interactions entry.";
 
 const READ: &str = "Read a run, or a worker's current run: the result if it has finished, \
-    otherwise the state, the partial text and recent activity. Returns at once. Compact by \
+    otherwise the state, pending interactions, partial text and recent activity. Returns at once. Compact by \
     default; detail full adds the activity history, diagnostics and every field of the result. \
     A long answer is cut: page it with text_offset, using the run id and not the worker id, \
     because a worker's latest run can change between pages. The window says where it sits and \
@@ -105,7 +106,7 @@ pub struct ToolSchemas {
     pub output: Value,
 }
 
-/// The schemas of the seven tools, built from the same definitions the server
+/// The schemas of the eight tools, built from the same definitions the server
 /// lists, without a supervisor or a runtime.
 pub fn tool_schemas() -> Vec<ToolSchemas> {
     tools(
@@ -196,6 +197,7 @@ pub(crate) fn tools(
         list_tool(&adapter),
         interrupt_tool(&adapter),
         close_tool(&adapter),
+        respond_tool(&adapter),
     ]
 }
 
@@ -349,6 +351,36 @@ fn close_tool(adapter: &Arc<Adapter>) -> Tool {
             async move {
                 Ok(adapter
                     .with(|s| async move { s.close(&args.worker).await })
+                    .await)
+            }
+        })
+        .build()
+}
+
+#[derive(serde::Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RespondArgs {
+    interaction: String,
+    decision: delega_core::contract::result::PermissionDecision,
+    #[schemars(length(max = 256))]
+    note: Option<String>,
+}
+
+fn respond_tool(adapter: &Arc<Adapter>) -> Tool {
+    let adapter = adapter.clone();
+    ToolBuilder::new("respond")
+        .description("Answer one pending permission interaction with allow or deny.")
+        .output_schema_for::<delega_core::supervisor::RespondResponse>()
+        .handler(move |args: RespondArgs| {
+            let adapter = adapter.clone();
+            async move {
+                if args.note.is_some_and(|note| note.len() > 256) {
+                    return Ok(CallToolResult::error(
+                        "note must be at most 256 UTF-8 bytes",
+                    ));
+                }
+                Ok(adapter
+                    .with(|s| async move { s.respond(args.interaction, args.decision).await })
                     .await)
             }
         })

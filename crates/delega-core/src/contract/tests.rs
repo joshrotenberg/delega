@@ -28,6 +28,7 @@ fn full_request() -> Request {
             commands: vec!["cargo test".into()],
             directories: vec![PathBuf::from("/work/other")],
             on_request: OnRequest::Deny,
+            ask_timeout: None,
             strict: true,
         },
         answer_schema: Some(json!({"type": "object"})),
@@ -110,6 +111,7 @@ fn full_result() -> RunResult {
             reason: "permission denied".into(),
         },
         permissions: AppliedPermissions {
+            asked: Vec::new(),
             mode: Mode::Read,
             denied: vec![DeniedRequest {
                 request: "run ls".into(),

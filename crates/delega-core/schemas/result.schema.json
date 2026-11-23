@@ -378,6 +378,13 @@
       "description": "The permissions that applied and what was refused under them.",
       "type": "object",
       "properties": {
+        "asked": {
+          "description": "Resolved live permission requests.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AskedPermission"
+          }
+        },
         "denied": {
           "description": "Requests answered no.",
           "type": "array",
@@ -391,6 +398,43 @@
           "default": "read"
         }
       }
+    },
+    "AskedPermission": {
+      "description": "The recorded disposition of an interaction.",
+      "type": "object",
+      "properties": {
+        "decided_by": {
+          "description": "Who or what resolved the interaction.",
+          "type": "string"
+        },
+        "decision": {
+          "description": "The answer delega committed.",
+          "$ref": "#/$defs/PermissionDecision"
+        },
+        "id": {
+          "description": "Opaque ID to pass to respond.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Bounded and redacted input details."
+        },
+        "tool": {
+          "description": "Tool requesting permission.",
+          "type": "string"
+        },
+        "written": {
+          "description": "Whether the response was written to the provider pipe.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "tool",
+        "summary",
+        "decision",
+        "decided_by",
+        "written"
+      ]
     },
     "Cleanup": {
       "description": "Whether the provider process and its descendants are gone.\n\nSerialized as `{\"confirmed\": true}`, or as `{\"confirmed\": false, \"pids\":\n[...], \"process_groups\": [...], \"reason\": \"...\"}`. A confirmed cleanup with\nleftovers cannot be expressed, and reading one is an error.",
@@ -690,6 +734,21 @@
           "description": "The run did not go ahead: invalid request, a limit, or a denied\npermission that stopped it.",
           "type": "string",
           "const": "refused"
+        }
+      ]
+    },
+    "PermissionDecision": {
+      "description": "A one-use answer to a live permission request.",
+      "oneOf": [
+        {
+          "description": "Permit this use.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Refuse this use.",
+          "type": "string",
+          "const": "deny"
         }
       ]
     },

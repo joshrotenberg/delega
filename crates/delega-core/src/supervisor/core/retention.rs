@@ -54,6 +54,7 @@ pub(super) fn weigh(result: &RunResult, activity: &Activity) -> usize {
         + error
         + notes
         + denied
+        + serde_json::to_vec(&result.permissions.asked).map_or(0, |bytes| bytes.len())
         + applied
         + activity.text().len()
 }

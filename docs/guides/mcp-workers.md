@@ -100,3 +100,11 @@ in force. See [Limits and defaults](../supervisor.md#limits-and-defaults).
   the reason.
 - `cleanup.confirmed` on every result.
 - `permissions.denied` and `provider_notes`.
+
+## Answer a permission request
+
+Set `permissions.on_request` to `ask` for a Claude Code run. When `wait`
+returns a pending interaction, inspect its tool and input summary. Call
+`respond` with its `id` as `interaction` and choose `allow` or `deny`.
+Pass the wait cursor back to observe resolution or completion. If the worker
+ends its turn with a question in the result text, use `follow_up` to answer.

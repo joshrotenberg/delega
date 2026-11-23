@@ -64,6 +64,7 @@ const CODEX: &[Rule] = &[Rule {
 const SENSITIVE: &[&str] = &[
     "--permission-mode",
     "--permission-prompts",
+    "--permission-prompt-tool",
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
     "--allowedTools",

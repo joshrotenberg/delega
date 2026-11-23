@@ -191,8 +191,11 @@ impl Core {
             Command::Settled { run, reply } => {
                 let _ = reply.send(self.settled(&run));
             }
-            Command::Shutdown { reply } => {
-                let _ = reply.send(self.shutdown());
+            Command::Shutdown {
+                connection_closed,
+                reply,
+            } => {
+                let _ = reply.send(self.shutdown(connection_closed));
             }
             Command::Unconfirmed { reply } => {
                 let _ = reply.send(self.unconfirmed());
@@ -200,10 +203,28 @@ impl Core {
             Command::Unsettled { reply } => {
                 let _ = reply.send(self.unsettled());
             }
+            Command::InteractionChanged => self.wake_waiters(),
+            Command::Respond {
+                interaction,
+                decision,
+                reply,
+            } => {
+                let (status, answer) = interaction
+                    .rsplit_once(':')
+                    .and_then(|(run, _)| self.runs.get(run))
+                    .map_or(("unknown_interaction", None), |run| {
+                        run.respond(&interaction, decision)
+                    });
+                let _ = reply.send(super::RespondResponse {
+                    interaction,
+                    status,
+                    answer,
+                });
+            }
             Command::Finished { run, result } => self.run_finished(&run, *result),
             Command::Crashed { run, reason } => self.run_crashed(&run, &reason),
             Command::Quit => {
-                let _ = self.shutdown();
+                let _ = self.shutdown(false);
             }
             #[cfg(test)]
             Command::AdvanceRetentionClock(by) => {

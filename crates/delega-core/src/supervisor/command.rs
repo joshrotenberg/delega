@@ -88,6 +88,12 @@ pub(super) struct ShutdownStart {
 }
 
 pub(super) enum Command {
+    InteractionChanged,
+    Respond {
+        interaction: String,
+        decision: crate::contract::result::PermissionDecision,
+        reply: oneshot::Sender<super::RespondResponse>,
+    },
     Start {
         request: Box<Request>,
         /// The refusal found by the filesystem checks done off this task, as
@@ -146,6 +152,7 @@ pub(super) enum Command {
         reply: oneshot::Sender<Option<ResultView>>,
     },
     Shutdown {
+        connection_closed: bool,
         reply: oneshot::Sender<ShutdownStart>,
     },
     /// The runs that are still running.

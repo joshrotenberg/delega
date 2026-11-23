@@ -144,7 +144,7 @@ impl Core {
         let queued: Vec<String> = worker.queue.drain(..).collect();
         let running = worker.current.clone();
         let by = match reason {
-            StopReason::Shutdown => "shutdown",
+            StopReason::Shutdown | StopReason::ConnectionClosed => "shutdown",
             _ => "close",
         };
         for id in &queued {
@@ -170,7 +170,10 @@ impl Core {
     /// nothing.
     fn request_stop(&mut self, run_id: &str, reason: StopReason) {
         if let Some(run) = self.runs.get_mut(run_id) {
-            run.stop_reason.get_or_insert(reason);
+            let reason = *run.stop_reason.get_or_insert(reason);
+            if let Some(asks) = &run.asks {
+                asks.close(reason.word());
+            }
             if let Some(stop) = &run.stop {
                 stop.cancel();
             }
@@ -178,7 +181,7 @@ impl Core {
     }
 
     /// Close every live worker and refuse new work from now on.
-    pub(super) fn shutdown(&mut self) -> ShutdownStart {
+    pub(super) fn shutdown(&mut self, connection_closed: bool) -> ShutdownStart {
         if self.mode == Mode::Active {
             self.mode = Mode::ShuttingDown;
         }
@@ -194,8 +197,13 @@ impl Core {
             runs_discarded: 0,
             rx: None,
         };
+        let reason = if connection_closed {
+            StopReason::ConnectionClosed
+        } else {
+            StopReason::Shutdown
+        };
         for id in live {
-            let (discarded, running) = self.close_worker(&id, StopReason::Shutdown);
+            let (discarded, running) = self.close_worker(&id, reason);
             start.runs_discarded += discarded.len();
             start.runs_stopped += usize::from(running.is_some());
         }

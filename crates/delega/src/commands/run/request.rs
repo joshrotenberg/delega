@@ -242,6 +242,7 @@ fn permissions(args: &Args) -> Option<PartialPermissions> {
         commands,
         directories,
         on_request: None,
+        ask_timeout: None,
         strict,
     })
 }

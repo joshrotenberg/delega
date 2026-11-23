@@ -11,7 +11,7 @@ use super::{Rig, assert_honest_cleanup};
 const CODEX: &str = "codex";
 
 #[tokio::test]
-async fn the_server_lists_seven_tools_each_with_input_and_output_schemas() {
+async fn the_server_lists_eight_tools_each_with_input_and_output_schemas() {
     let mut rig = Rig::new(Provider::Codex).await;
     let listed = rig.client.list_tools().await;
     let mut names: Vec<&str> = listed
@@ -47,7 +47,6 @@ async fn the_server_lists_seven_tools_each_with_input_and_output_schemas() {
             schema.name
         );
     }
-    assert!(!names.contains(&"respond"));
     rig.finish().await;
 }
 
@@ -910,4 +909,36 @@ async fn no_router_is_built_for_a_supervisor_whose_waits_could_fill_the_request_
     };
     assert!(error.contains("65 waits in flight"), "{error}");
     assert!(error.contains("at most 64"), "{error}");
+}
+
+#[tokio::test]
+async fn respond_denies_the_permission_reported_by_a_worker_wait() {
+    let mut rig = Rig::new(Provider::Claude).await;
+    let mut args = rig.start_args("claude", "ask");
+    args["permissions"] = json!({"on_request":"ask"});
+    let started = rig.call("start", args).await;
+    let run = started["run"].as_str().unwrap();
+    let worker = started["worker"].as_str().unwrap();
+    let pending = rig
+        .call("wait", json!({"workers":[worker],"timeout_secs":5}))
+        .await;
+    assert_eq!(pending["workers"][0]["state"], "waiting_for_answer");
+    let id = &pending["workers"][0]["pending_interactions"][0]["id"];
+    assert!(id.is_string());
+    let answer = rig
+        .call(
+            "respond",
+            json!({"interaction":id,"decision":"deny","note":"fixture note"}),
+        )
+        .await;
+    assert_eq!(answer["status"], "accepted");
+    rig.finished(run).await;
+    let finished = rig.read_full(run).await;
+    assert_eq!(finished["result"]["text"], "denied");
+    assert_eq!(
+        finished["result"]["permissions"]["asked"][0]["decided_by"],
+        "caller"
+    );
+    assert!(!finished.to_string().contains("fixture note"));
+    rig.finish().await;
 }

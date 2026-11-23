@@ -142,18 +142,27 @@ impl Core {
             // Gone: it finished and its result has aged out.
             None => true,
             Some(run) => match waiter.after {
-                Some(after) => run.finished_seq.is_some_and(|seq| seq > after),
-                None => run.state == RunState::Finished,
+                Some(after) => {
+                    run.ask_changed(after) || run.finished_seq.is_some_and(|seq| seq > after)
+                }
+                None => run.state == RunState::Finished || !run.pending().is_empty(),
             },
         };
         let worker_ready = |(id, baseline): &(String, Option<String>)| match self.workers.get(id) {
             None => true,
             Some(worker) => match waiter.after {
-                Some(after) => worker.last_finish_seq > after,
+                Some(after) => {
+                    worker.last_finish_seq > after
+                        || worker
+                            .current
+                            .as_ref()
+                            .and_then(|id| self.runs.get(id))
+                            .is_some_and(|run| run.ask_changed(after))
+                }
                 None => baseline.as_ref().is_none_or(|r| {
                     self.runs
                         .get(r)
-                        .is_none_or(|r| r.state == RunState::Finished)
+                        .is_none_or(|r| r.state == RunState::Finished || !r.pending().is_empty())
                 }),
             },
         };
@@ -210,16 +219,19 @@ impl Core {
             Some(w) => self.waiter_ready(&w),
             None => true,
         });
+        let cursor = self.current_cursor();
         let mut unknown = Vec::new();
         let mut runs = Vec::new();
         for id in &targets.runs {
             match self.runs.get(id) {
                 Some(run) => runs.push(RunBrief {
+                    pending_interactions: run.pending(),
                     run: id.clone(),
                     worker: run.worker.clone(),
                     state: run.state,
                     outcome: run.result.as_ref().map(|r| r.outcome),
-                    changed: after.map(|a| run.finished_seq.is_some_and(|seq| seq > a)),
+                    changed: after
+                        .map(|a| run.ask_changed(a) || run.finished_seq.is_some_and(|seq| seq > a)),
                 }),
                 None => unknown.push(id.clone()),
             }
@@ -229,14 +241,21 @@ impl Core {
             match self.workers.get(id) {
                 Some(worker) => {
                     let mut brief = self.worker_brief(worker);
-                    brief.changed = after.map(|a| worker.last_finish_seq > a);
+                    brief.changed = after.map(|a| {
+                        worker.last_finish_seq > a
+                            || worker
+                                .current
+                                .as_ref()
+                                .and_then(|id| self.runs.get(id))
+                                .is_some_and(|run| run.ask_changed(a))
+                    });
                     workers.push(brief);
                 }
                 None => unknown.push(id.clone()),
             }
         }
         WaitResponse {
-            cursor: self.current_cursor(),
+            cursor,
             timed_out: timed_out && !ready_now,
             released_by_shutdown: released,
             limit_reached: None,

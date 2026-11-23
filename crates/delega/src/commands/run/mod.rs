@@ -161,7 +161,19 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     config.apply_to_options(&mut options);
     super::apply_env(&mut options, &args.env);
     if args.dry_run {
-        return match dry_run(&request, &options) {
+        use delega_core::contract::{permissions::OnRequest, request::Provider};
+        let plan = if request.provider == Provider::Claude
+            && request.permissions.on_request == OnRequest::Ask
+            && request.validate().is_ok()
+        {
+            Err(delega_core::provider::Refusal {
+                kind: "permissions_not_supported".into(),
+                message: "delega run cannot answer live permission requests. Use delega mcp or set permissions.on_request to deny.".into(),
+            })
+        } else {
+            dry_run(&request, &options)
+        };
+        return match plan {
             Ok(plan) => output::dry_run(format, &plan, log),
             Err(refusal) => output::refuse_dry_run(format, &facts, &refusal, log),
         };

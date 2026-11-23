@@ -220,6 +220,16 @@
               }
             ]
           },
+          "ask_timeout": {
+            "description": "See [`Permissions::ask_timeout`].",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 1,
+            "maximum": 600
+          },
           "strict": {
             "description": "See [`Permissions::strict`].",
             "type": [
@@ -229,6 +239,26 @@
           }
         },
         "additionalProperties": false,
+        "if": {
+          "properties": {
+            "ask_timeout": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ask_timeout"
+          ]
+        },
+        "then": {
+          "properties": {
+            "on_request": {
+              "const": "ask"
+            }
+          },
+          "required": [
+            "on_request"
+          ]
+        },
         "not": {
           "properties": {
             "mode": {
@@ -274,9 +304,14 @@
         "description": "What happens when the provider asks for something that was not granted.",
         "oneOf": [
           {
-            "description": "Answer no at once and record the request in the result. The only\nchoice in this version; asking the caller comes later.",
+            "description": "Answer no at once and record the request in the result.",
             "type": "string",
             "const": "deny"
+          },
+          {
+            "description": "Ask the supervising caller for a one-use decision.",
+            "type": "string",
+            "const": "ask"
           }
         ]
       },

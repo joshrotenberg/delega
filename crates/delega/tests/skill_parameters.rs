@@ -781,8 +781,8 @@ fn the_scan_finds_the_things_it_claims_to_check_in_the_real_skills() {
         .expect("delegate")
         .content();
     assert_eq!(table_column(delegate, "Tool", 0).len(), known.tools.len());
-    assert_eq!(known.tools.len(), 7);
-    assert!(table_rows(delegate, "Tool", "Arguments").len() == 7);
+    assert_eq!(known.tools.len(), 8);
+    assert!(table_rows(delegate, "Tool", "Arguments").len() == 8);
     assert!(request_field_lists(delegate).len() >= 10);
 }
 
@@ -979,10 +979,9 @@ fn an_argument_the_tool_does_not_have_is_reported() {
 
 #[test]
 fn a_tool_the_server_does_not_offer_is_reported_as_a_bare_word_too() {
-    // `respond` is a later tool: not built, so a skill may not name it.
-    let all = found("Call `respond` to answer.");
+    let all = found("Call `release_run` to free the run.");
     assert_eq!(all.len(), 1, "{all:#?}");
-    assert!(all[0].contains("respond"), "{all:#?}");
+    assert!(all[0].contains("release_run"), "{all:#?}");
 }
 
 #[test]
