@@ -127,7 +127,10 @@ fn kinfo(pid: i32, buf: &mut [u8]) -> Result<usize, Errno> {
     if result != 0 {
         return Err(last_errno());
     }
-    Ok(len.min(buf.len()))
+    if len > buf.len() {
+        return Err(Errno::IO);
+    }
+    Ok(len)
 }
 
 /// `proc_listpids(kind, arg, ...)`: the pids the kernel lists, grown until
@@ -145,9 +148,17 @@ fn list_pids(kind: u32, arg: u32) -> Result<Vec<i32>, Errno> {
         // bytes, writable for the duration of the call; the kernel writes at
         // most `buffersize` bytes and returns how many it wrote. Any bytes
         // are a valid `i32`. Only the returned count is read afterwards.
-        let filled = unsafe { libc::proc_listpids(kind, arg, pids.as_mut_ptr().cast(), len) };
-        if filled < 0 {
-            return Err(last_errno());
+        // `__error()` returns this thread's errno, a valid `c_int` for the
+        // thread's life; it is cleared first because libproc answers a failed
+        // call with 0 (not -1) and leaves errno set, the same 0 it answers for
+        // an empty filtered list.
+        let (filled, errno) = unsafe {
+            *libc::__error() = 0;
+            let filled = libc::proc_listpids(kind, arg, pids.as_mut_ptr().cast(), len);
+            (filled, *libc::__error())
+        };
+        if filled < 0 || (filled == 0 && errno != 0) {
+            return Err(Errno::from_raw_os_error(if errno != 0 { errno } else { libc::EIO }));
         }
         let filled = usize::try_from(filled).unwrap_or(0);
         if filled >= bytes {
@@ -340,9 +351,14 @@ pub(in crate::process) fn user_pids(uid: u32) -> Result<Vec<i32>, Errno> {
     list_pids(PROC_UID_ONLY, uid)
 }
 
-/// Every pid on the system.
+/// Every pid on the system. An empty answer is a failure: this process is
+/// on the system.
 pub(in crate::process) fn all_pids() -> Result<Vec<i32>, Errno> {
-    list_pids(PROC_ALL_PIDS, 0)
+    let pids = list_pids(PROC_ALL_PIDS, 0)?;
+    if pids.is_empty() {
+        return Err(Errno::IO);
+    }
+    Ok(pids)
 }
 
 /// What became of a signal sent by identity.
