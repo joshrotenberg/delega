@@ -108,7 +108,9 @@ need process diagnostics, activity history or every field of the result.
 For Claude Code, set `permissions.on_request` to `ask` to receive eligible
 tool requests. Inspect the tool and redacted input summary in
 `pending_interactions`. Pass the entry's ID as `interaction` to `respond` and
-choose `allow` or `deny`. The request is denied if `permissions.ask_timeout`
+choose `allow` or `deny`. Deny a Bash request if its summary has
+`truncated: true` because the full command may be hidden. The request is denied
+if `permissions.ask_timeout`
 expires. Read `permissions.asked` in the final result for the decision and
 whether the response reached the provider pipe. Use `follow_up` for a question
 in the worker's final answer.

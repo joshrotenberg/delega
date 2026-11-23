@@ -435,8 +435,9 @@ With Claude Code and `on_request: ask`, `wait` and `read` show
 `running` and keeps its slot. Opening or resolving a request changes the cursor
 for that run and worker. Call `respond` with the interaction ID and a decision.
 The first decision wins. A permission timeout sends a deny and the run can
-continue. Interrupt, close, shutdown and transport closure deny pending requests
-and stop the worker. The run deadline includes time spent waiting.
+continue. Interrupt denies pending requests and stops the run. The worker stays
+available. Close, shutdown and transport closure deny pending requests and
+close the worker. The run deadline includes time spent waiting.
 
 ## Not built
 

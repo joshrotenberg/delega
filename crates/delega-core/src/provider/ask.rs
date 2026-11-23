@@ -69,7 +69,9 @@ impl<'a> PermissionRequest<'a> {
 
     pub fn summary(&self, redactor: &Redactor) -> Value {
         let mut summary = serde_json::Map::new();
+        let mut truncated = false;
         let (text, sizes): (&[&str], &[&str]) = match self.tool {
+            "Read" | "Glob" | "Grep" => (&["file_path", "path", "pattern"], &[]),
             "Bash" => (&["command", "description"], &[]),
             "Write" => (&["file_path"], &["content"]),
             "Edit" => (&["file_path"], &["old_string", "new_string"]),
@@ -77,12 +79,21 @@ impl<'a> PermissionRequest<'a> {
             "WebFetch" => (&["url"], &[]),
             "WebSearch" => (&["query"], &[]),
             _ => {
-                let keys = self
+                let mut keys = self
                     .input
                     .as_object()
                     .into_iter()
                     .flat_map(|input| input.keys());
-                return json!({"keys": keys.take(16).map(|key| field(key, redactor)).collect::<Vec<_>>()});
+                let fields: Vec<_> = keys
+                    .by_ref()
+                    .take(16)
+                    .map(|key| field(key, redactor, &mut truncated))
+                    .collect();
+                let mut summary = json!({"keys": fields});
+                if truncated || keys.next().is_some() {
+                    summary["truncated"] = json!(true);
+                }
+                return summary;
             }
         };
         for key in text {
@@ -91,7 +102,7 @@ impl<'a> PermissionRequest<'a> {
                     .then_some(self.description)
                     .flatten()
             }) {
-                summary.insert((*key).into(), json!(field(value, redactor)));
+                summary.insert((*key).into(), json!(field(value, redactor, &mut truncated)));
             }
         }
         for key in sizes {
@@ -99,13 +110,17 @@ impl<'a> PermissionRequest<'a> {
                 summary.insert(format!("{key}_bytes"), json!(value.len()));
             }
         }
+        if truncated {
+            summary.insert("truncated".into(), json!(true));
+        }
         Value::Object(summary)
     }
 }
 
-fn field(value: &str, redactor: &Redactor) -> String {
+fn field(value: &str, redactor: &Redactor, truncated: &mut bool) -> String {
     let mut value = redactor.apply(value);
     if value.len() > FIELD_BYTES {
+        *truncated = true;
         let mut end = FIELD_BYTES - " [truncated]".len();
         while !value.is_char_boundary(end) {
             end -= 1;
@@ -250,6 +265,7 @@ impl Asks {
         let deny = (decision == PermissionDecision::Deny).then_some(match reason {
             "caller" => "Permission denied by the caller.",
             "timeout" => "Permission request timed out.",
+            "request_too_large" => "Permission request exceeded the size limit.",
             _ => "Permission denied because the run is stopping.",
         });
         state.responses.push((index, request.response(deny)));
@@ -293,8 +309,7 @@ impl Dialogue for Asks {
             return true;
         }
         let Ok(frame) = serde_json::from_slice::<Value>(line) else {
-            self.fail();
-            return false;
+            return true;
         };
         match frame.get("type").and_then(Value::as_str) {
             Some("result") if frame.get("parent_tool_use_id").is_none_or(Value::is_null) => {
@@ -305,10 +320,7 @@ impl Dialogue for Asks {
                 if self.state.lock().unwrap().closed_by.is_some() {
                     return false;
                 }
-                if line.len() > MAX_CONTROL_FRAME_BYTES {
-                    self.fail();
-                    return false;
-                }
+                let oversized = line.len() > MAX_CONTROL_FRAME_BYTES;
                 let Some(request) = PermissionRequest::parse(&frame) else {
                     self.fail();
                     return false;
@@ -337,7 +349,11 @@ impl Dialogue for Asks {
                     } else {
                         "unknown".into()
                     },
-                    summary: request.summary(&self.redactor.lock().unwrap()),
+                    summary: if oversized {
+                        json!({"truncated": true})
+                    } else {
+                        request.summary(&self.redactor.lock().unwrap())
+                    },
                 };
                 let blocked = !known
                     || (request.tool == "Bash"
@@ -362,17 +378,17 @@ impl Dialogue for Asks {
                     native: Some(frame),
                     answered: None,
                 });
-                if blocked || full {
-                    self.resolve(
-                        &mut state,
-                        index,
-                        PermissionDecision::Deny,
-                        if full {
-                            "pending_limit"
-                        } else {
-                            "tool_restricted"
-                        },
-                    );
+                let reason = if oversized {
+                    Some("request_too_large")
+                } else if blocked {
+                    Some("tool_restricted")
+                } else if full {
+                    Some("pending_limit")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    self.resolve(&mut state, index, PermissionDecision::Deny, reason);
                 } else {
                     (self.changed)();
                     let weak = self.weak.clone();
@@ -474,6 +490,7 @@ mod tests {
         });
         let view = PermissionRequest::parse(&bash).unwrap().summary(&redactor);
         assert_eq!(view["description"], "[redacted]");
+        assert_eq!(view["truncated"], true);
         let command = view["command"].as_str().unwrap();
         assert!(command.len() <= FIELD_BYTES && command.ends_with(" [truncated]"));
         assert!(!view.to_string().contains("fixture-private-token"));
@@ -521,5 +538,128 @@ mod tests {
         assert_eq!(responses[0]["response"]["behavior"], "allow");
         assert_eq!(responses[1]["request_id"], "native-one");
         assert_eq!(responses[1]["response"]["behavior"], "deny");
+    }
+
+    fn permission_frame(id: &str, tool: &str, input: Value) -> Vec<u8> {
+        line(&json!({
+            "type":"control_request", "request_id":id,
+            "request":{"subtype":"can_use_tool", "tool_name":tool, "input":input}
+        }))
+    }
+
+    #[test]
+    fn read_and_search_summaries_show_redacted_paths_and_patterns() {
+        let redactor = Redactor::new(["fixture-private-token".to_owned()]);
+        for (tool, input, expected) in [
+            (
+                "Read",
+                json!({"file_path":"/fixture/fixture-private-token"}),
+                json!({"file_path":"/fixture/[redacted]"}),
+            ),
+            (
+                "Glob",
+                json!({"path":"/fixture","pattern":"*.rs"}),
+                json!({"path":"/fixture","pattern":"*.rs"}),
+            ),
+            (
+                "Grep",
+                json!({"path":"/fixture","pattern":"fixture-private-token"}),
+                json!({"path":"/fixture","pattern":"[redacted]"}),
+            ),
+        ] {
+            let bytes = permission_frame("native", tool, input);
+            let frame = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                PermissionRequest::parse(&frame).unwrap().summary(&redactor),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn background_sandbox_bypass_and_unknown_tools_are_denied_without_a_pending_interaction()
+    {
+        let asks = Asks::new("run".into(), 120, CancellationToken::new(), || {});
+        for (id, tool, input) in [
+            (
+                "background",
+                "Bash",
+                json!({"command":"ls","run_in_background":true}),
+            ),
+            (
+                "bypass",
+                "Bash",
+                json!({"command":"ls","dangerouslyDisableSandbox":true}),
+            ),
+            ("unknown", "UnknownTool", json!({})),
+        ] {
+            assert!(!asks.line(&permission_frame(id, tool, input)));
+            assert!(asks.pending().is_empty());
+            let (replies, closed) = asks.responses();
+            assert!(!closed);
+            assert_eq!(replies.len(), 1);
+            let reply: Value = serde_json::from_slice(&replies[0].1).unwrap();
+            assert_eq!(reply["response"]["request_id"], id);
+            assert_eq!(reply["response"]["response"]["behavior"], "deny");
+        }
+        assert_eq!(asks.audit().len(), 3);
+        assert!(
+            asks.audit()
+                .iter()
+                .all(|entry| entry.decided_by == "tool_restricted")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pending_cap_denies_overflow_and_the_lifetime_cap_closes_the_dialogue() {
+        let cancel = CancellationToken::new();
+        let asks = Asks::new("run".into(), 120, cancel.clone(), || {});
+        for i in 0..MAX_REQUESTS {
+            assert!(!asks.line(&permission_frame(&i.to_string(), "Read", json!({}))));
+        }
+        assert_eq!(asks.pending().len(), MAX_PENDING);
+        assert_eq!(asks.audit().len(), MAX_REQUESTS - MAX_PENDING);
+        assert!(
+            asks.audit()
+                .iter()
+                .all(|entry| entry.decided_by == "pending_limit")
+        );
+        assert!(!cancel.is_cancelled());
+
+        assert!(!asks.line(&permission_frame("overflow", "Read", json!({}))));
+        assert!(cancel.is_cancelled());
+        assert!(asks.failed());
+        assert!(asks.pending().is_empty());
+        assert_eq!(asks.audit().len(), MAX_REQUESTS);
+        let (responses, closed) = asks.responses();
+        assert!(closed);
+        assert_eq!(responses.len(), MAX_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn provider_cancel_retires_the_request_without_writing_a_reply() {
+        let asks = Asks::new("run".into(), 120, CancellationToken::new(), || {});
+        assert!(!asks.line(&permission_frame("native", "Read", json!({}))));
+        let pending = asks.pending().pop().unwrap();
+        assert!(!asks.line(&line(
+            &json!({"type":"control_cancel_request","request_id":"native"})
+        )));
+        assert!(asks.pending().is_empty());
+        assert_eq!(
+            asks.respond(&pending.id, PermissionDecision::Allow).0,
+            "closed"
+        );
+        assert!(asks.responses().0.is_empty());
+        let answer = asks.audit().pop().unwrap();
+        assert_eq!(answer.decided_by, "provider_cancelled");
+        assert!(!answer.written);
+    }
+
+    #[test]
+    fn non_json_stdout_is_kept_for_the_ordinary_diagnostics() {
+        let asks = Asks::new("run".into(), 120, CancellationToken::new(), || {});
+        assert!(asks.line(b"{ broken JSON\n"));
+        assert!(asks.line(b"not JSON\n"));
+        assert!(!asks.failed());
     }
 }

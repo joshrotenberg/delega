@@ -233,7 +233,27 @@ if [ "$input_format" = stream-json ]; then
   case "$mode" in *'"type":"user"'*) ;; *) exit 72 ;; esac
   case "$mode" in *'"role":"user"'*) ;; *) exit 72 ;; esac
   case ",$tools," in *,Write,*) ;; *) exit 73 ;; esac
-  printf '%s\n' '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Write","tool_use_id":"tool-1","input":{"file_path":"example.txt","content":"fixture-private-content"}}}'
+  case "$mode" in
+    *ask-invalid-json*) printf '%s\n' 'not JSON' ;;
+    *ask-stream-too-large*)
+      awk 'BEGIN { printf "%4194305s\n", "" }'
+      exit 0
+      ;;
+    *ask-no-read*|*ask-oversized*)
+      size=240000
+      case "$mode" in *ask-oversized*) size=270000 ;; esac
+      awk -v size="$size" 'BEGIN {
+        printf "{\"type\":\"control_request\",\"request_id\":\"large\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Write\",\"input\":{\"file_path\":\"large.txt\",\"content\":\"%*s\"}}}\n", size, ""
+      }'
+      case "$mode" in *ask-no-read*) sleep 60; exit 78 ;; esac
+      IFS= read -r response || exit 74
+      case "$response" in
+        *'"behavior":"deny"'*'"request_id":"large"'*|*'"request_id":"large"'*'"behavior":"deny"'*) ;;
+        *) exit 76 ;;
+      esac
+      ;;
+  esac
+  printf '%s\n' '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Write","tool_use_id":"tool-1","description":"Write the fixture file","display_name":"Write file","permission_suggestions":[],"input":{"file_path":"example.txt","content":"fixture-private-content"}}}'
   IFS= read -r response || exit 74
   case "$response" in *'"type":"control_response"'*'"request_id":"permission-1"'*|*'"request_id":"permission-1"'*'"type":"control_response"'*) ;; *) exit 75 ;; esac
   case "$response" in

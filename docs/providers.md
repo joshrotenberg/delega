@@ -782,15 +782,22 @@ flag to send `can_use_tool` control requests.
 
 The nine built-in tools are available for requests. Mode grants still apply
 automatically. Explicit denies, the exact-command guard and build's sandbox
-still apply. Use `Edit(path)` for path-specific file edit denies, including
+still apply. In read and write mode, delega adds a Bash ask rule to prevent
+Claude Code from automatically approving read-only shell commands. When an
+exact-command guard is active, its exact grants and denials apply and delega
+leaves out the Bash ask rule. Build also leaves it out so sandboxed commands
+can run automatically. Read, write and build ask before WebFetch and WebSearch.
+Use `Edit(path)` for path-specific file edit denies, including
 writes. Claude Code 2.1.330 did not apply `Write(path)` to the probed write
 ([#157](https://github.com/joshrotenberg/delega/issues/157)).
 
 The host sends the assembled prompt as one JSON user message, then answers
 permission requests over stdin. stdin closes on the first result or during
 teardown. Each run can have up to 32 pending requests and process at most 256.
-A permission frame over 256 KiB, any stream frame over 4 MiB, or a request
-beyond the lifetime limit ends the run with a protocol failure. Pending overflow is denied.
+A permission frame over 256 KiB with a valid request is denied individually.
+A stream frame over 4 MiB or a request beyond the lifetime limit ends the run
+with a protocol failure. Pending overflow is denied. Non-JSON stdout lines are
+counted in diagnostics.
 
 ## Codex CLI
 

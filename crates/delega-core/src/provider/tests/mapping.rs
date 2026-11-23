@@ -638,3 +638,87 @@ fn codex_effort_model_resume_and_ephemeral_follow_the_documented_order() {
         .unwrap();
     assert_eq!(args[at + 1], "--ephemeral");
 }
+
+#[test]
+fn ask_rules_keep_read_only_bash_from_bypassing_the_host_without_overriding_the_guard_or_sandbox() {
+    use crate::contract::permissions::OnRequest;
+    use crate::provider::{hook::HookCommand, plan};
+
+    let rig = Rig::new();
+    for (mode, guard, asks, bash_asks) in [
+        (Mode::Read, false, true, true),
+        (Mode::Write, false, true, true),
+        (Mode::Read, true, true, false),
+        (Mode::Write, true, true, false),
+        (Mode::Build, false, true, false),
+        (Mode::Full, false, true, false),
+        (Mode::Write, false, false, false),
+        (Mode::Build, false, false, false),
+    ] {
+        let mut request = rig.request(Provider::Claude, "fixture");
+        request.permissions.mode = mode;
+        if asks {
+            request.permissions.on_request = OnRequest::Ask;
+        }
+        let mut options = rig.options(Provider::Claude);
+        if guard {
+            options.hook = Some(HookCommand::new("/bin/false", Vec::<String>::new()));
+            request.permissions.commands.push("ls".into());
+        }
+        std::fs::write(
+            rig.config.join("settings.json"),
+            r#"{"permissions":{"deny":["WebSearch"],"ask":["ImportedRule"]}}"#,
+        )
+        .unwrap();
+
+        let plan = plan::build(&request, &options).unwrap();
+        let at = plan
+            .args
+            .iter()
+            .position(|arg| arg == "--settings")
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&plan.args[at + 1]).unwrap();
+        let expected = if bash_asks {
+            serde_json::json!(["Bash", "WebFetch", "WebSearch"])
+        } else if asks && mode != Mode::Full {
+            serde_json::json!(["WebFetch", "WebSearch"])
+        } else {
+            serde_json::Value::Null
+        };
+        assert_eq!(
+            settings["permissions"]["ask"], expected,
+            "{mode:?}, guard={guard}"
+        );
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(["WebSearch"])
+        );
+        assert_eq!(settings["hooks"].is_object(), guard);
+        assert_eq!(settings["sandbox"].is_object(), mode == Mode::Build);
+        if matches!(mode, Mode::Write | Mode::Build) {
+            assert!(plan.notes.iter().any(|note| if asks {
+                note.contains("NotebookEdit is offered") && note.contains("Edit allow rule")
+            } else {
+                note.contains("NotebookEdit is not granted")
+            }));
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_ask_is_refused_before_executable_lookup_or_start() {
+    use crate::contract::permissions::OnRequest;
+
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Codex, "fixture");
+    request.permissions.on_request = OnRequest::Ask;
+    let mut options = rig.options(Provider::Codex);
+    options.executable = Some(rig.work.join("absent"));
+    let result = crate::provider::run(request, options).await;
+    assert_eq!(result.outcome, crate::contract::outcome::Outcome::Refused);
+    let error = result.error.unwrap();
+    assert_eq!(error.kind, "permissions_not_supported");
+    assert!(error.message.contains("codex exec"));
+    assert!(result.timing.started_at.is_none());
+    assert!(rig.argv().is_empty());
+}
