@@ -347,10 +347,13 @@ For `claude` and `codex` each it reports:
   `DELEGA_CODEX_BIN`, `config`, `PATH`, or `option` for a library caller);
 - the version, and for Claude Code whether the command hook interface is there
   (2.1.325 or later, needed by `--allow-command`);
-- for Claude Code, `sandbox`: whether the sandbox [`build`](providers.md#build)
-  runs need can start. `system` (`macos`, `linux`, ...), `available`,
-  `requires` (`bwrap` and `socat` on Linux, none on macOS) and `missing`
-  (those not found on the worker's `PATH`);
+- for Claude Code, `sandbox`: the platform and `PATH` dependencies of the
+  sandbox [`build`](providers.md#build) runs need. `system` (`macos`, `linux`,
+  ...), `requirements_met`, `requires` (`bwrap` and `socat` on Linux, none on
+  macOS) and `missing` (those not found on the worker's `PATH`; relative and
+  empty entries count from the working directory). Finding the tools does not
+  prove the sandbox starts: other causes, such as a system that blocks user
+  namespaces, are not checked;
 - environment variable counts by reason, and how many would be withheld;
 - for Claude Code, the deny rules: files read with counts, files skipped and
   why, rules applied;
@@ -381,7 +384,7 @@ A problem blocks `run` only where a run would be refused or fail for it.
 | `version_probe_failed` | `command_grants` (Claude), `nothing` (Codex) | `--version` failed or was killed. Only a Claude run that grants commands is refused. |
 | `version_probe_timed_out` | `command_grants` (Claude), `nothing` (Codex) | `--version` did not answer in 5 s. |
 | `unsupported_provider_version` | `command_grants` | Claude Code older than 2.1.325, or unreadable version: `--allow-command` runs are refused. |
-| `sandbox_unavailable` | `build` | Claude Code's sandbox cannot start: on Linux `bwrap` or `socat` is not on the worker's `PATH`; on a system other than macOS and Linux there is none. Every Claude `build` run would fail at startup. The message names what is missing. |
+| `sandbox_unavailable` | `build` | On Linux, `bwrap` or `socat` was not found on the worker's `PATH`, so Claude `build` runs usually fail at startup; on a system other than macOS and Linux, Claude Code has no sandbox. The message names what is missing. |
 | `settings_unreadable` | `run` | A Claude Code settings file read for deny rules cannot be used. The message names it. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound. |
 | `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`; Claude runs are refused. Other managed settings are informational. |

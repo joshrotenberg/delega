@@ -23,7 +23,7 @@ Code deny rules are read from is in [Deny rules](../providers.md#deny-rules).
 For each provider: the executable a run would use and where it came from, its
 version, counts of the environment a worker would get, the files a Claude run
 would read deny rules from, with their rule counts (not the rules), and managed settings found.
-For Claude Code it also says whether the sandbox `build` runs need can start. Also the configuration file, the
+For Claude Code it also says whether the tools its sandbox needs for `build` runs were found. Also the configuration file, the
 limits in force, the built-in skills, and whether process inspection works. It
 never prints an environment value, a deny rule or a file's content. See
 [Doctor](../api.md#doctor) for each field.
@@ -69,19 +69,22 @@ are in [Managed settings](../providers.md#managed-settings).
 ## Before using build with Claude Code
 
 Claude Code's `build` runs need its sandbox. On macOS it is built in. On Linux
-it needs `bwrap` and `socat` on the `PATH` the worker gets. When one is
-missing, doctor shows:
+it needs `bwrap` and `socat` on the `PATH` the worker gets. Doctor looks for
+those two files; it does not start the sandbox, so other causes of a failed
+start, such as a system that blocks user namespaces, are not checked. When one
+is missing, doctor shows:
 
 ```text
 claude: ready
   ...
-  sandbox for build runs: not available, missing socat
+  sandbox for build runs: socat not found on PATH
   ...
 problems:
-  claude: sandbox_unavailable (stops build runs): Claude Code's sandbox needs bwrap and socat on PATH and socat was not found, so every build run with Claude would fail at startup; install socat
+  claude: sandbox_unavailable (stops build runs): socat not found on PATH; Claude Code's sandbox needs bwrap and socat on Linux, so build runs with Claude usually fail at startup. Install socat. Doctor does not check other causes, such as blocked user namespaces
 ```
 
-Claude stays `ready` for other modes and the exit status does not change.
+With both found, the line reads `bwrap and socat found on PATH; not otherwise
+checked`. Claude stays `ready` for other modes and the exit status does not change.
 Install the `bubblewrap` and `socat` packages with the system's package
 manager, then run doctor again. In JSON, read `providers[].sandbox.missing`
 or look for a problem with `blocks: "build"`.
