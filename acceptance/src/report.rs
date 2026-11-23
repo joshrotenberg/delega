@@ -45,8 +45,7 @@ pub fn regenerate(dir: &Path, results: &Path) -> Result<(), String> {
     let spike: Vec<SpikeRow> = read_rows(&dir.join("spike-numbers.jsonl")).unwrap_or_default();
     let live_path = dir.join("live.jsonl");
     let live = if live_path.exists() {
-        let text = std::fs::read_to_string(&live_path)
-            .map_err(|e| format!("read {}: {e}", live_path.display()))?;
+        let text = crate::live::read_regular_file(&live_path, 16 * 1024 * 1024)?;
         Some(crate::live::read_live(&text).map_err(|e| format!("{}: {e}", live_path.display()))?)
     } else {
         None
@@ -514,8 +513,13 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
             text(&meta["harness_commit"])
         );
         for provider in crate::live::PROVIDERS {
-            if let Some(v) = meta["providers"][provider].as_str() {
-                let _ = writeln!(out, "- {provider}: {v}.");
+            let versions = crate::live::versions_of(rows, provider);
+            if rows.iter().any(|r| r.provider == provider) {
+                let _ = writeln!(
+                    out,
+                    "- {provider}: {}.",
+                    crate::live::version_label(provider, &versions)
+                );
             }
         }
         let _ = writeln!(
@@ -535,7 +539,7 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
         count("fail"),
         count("not_shown")
     );
-    out.push_str("| Provider | Case | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems | Not shown and notes |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| Provider | Case | Version | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems | Not shown and notes |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     let cell = |items: Vec<String>| {
         if items.is_empty() {
             "none".to_string()
@@ -552,9 +556,10 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
             .collect();
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             r.provider,
             r.case,
+            r.provider_version.as_deref().unwrap_or("-"),
             r.verdict,
             r.outcome.as_deref().unwrap_or("-"),
             yes(r.cleanup_confirmed),
@@ -965,7 +970,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "| claude | plain-answer | pass | completed | yes | 0 | 1 | $0.0010 | none | none |"
+                "| claude | plain-answer | claude 2.1.400 | pass | completed | yes | 0 | 1 | $0.0010 | none | none |"
             ),
             "{text}"
         );

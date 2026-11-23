@@ -13,15 +13,15 @@
 //!
 //! A case ends `pass`, `fail` or `not_shown`. `not_shown` means nothing that
 //! was checked failed, but a check the case exists for could not be shown on
-//! this run (the network was unreachable from the harness itself, the shell
-//! tool was never seen before the interrupt, and so on). It is not a pass.
+//! this run (the network was unreachable from the harness itself, the
+//! interrupt probe never started, and so on). It is not a pass.
 
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -66,12 +66,12 @@ const SHORT_BOUND: Duration = Duration::from_secs(60);
 /// The bound on a whole case. The resume case's two runs fit in it with
 /// every escalation.
 pub const CASE_BOUND: Duration = Duration::from_secs(450);
-/// The interrupt case sends SIGINT this long after the progress output names
-/// the shell tool, so the command it started is running when the signal lands.
-const AFTER_TOOL: Duration = Duration::from_secs(2);
-/// The interrupt case sends SIGINT at this point if the shell tool was not
-/// seen; the case then ends `not_shown`.
-const INTERRUPT_FALLBACK: Duration = Duration::from_secs(30);
+/// How long the interrupt case waits for its probe's marker file before it
+/// stops `delega` with SIGTERM and ends `not_shown`.
+const MARKER_WAIT: Duration = Duration::from_secs(90);
+/// The bound on each command the harness runs itself (curl, `date`, `uname`,
+/// `git`, `delega version`).
+const HELPER_BOUND: Duration = Duration::from_secs(10);
 /// Prefix of every case directory.
 pub const DIR_PREFIX: &str = "dlive-";
 /// The address the build case's network probe tries.
@@ -79,29 +79,94 @@ pub const PROBE_URL: &str = "https://example.com";
 /// The curl the build probe and the harness's own check use.
 pub const CURL: &str = "/usr/bin/curl";
 
-/// Set by the SIGINT and SIGTERM handler [`install_stop_handler`] installs.
+/// Set by the SIGINT and SIGTERM watcher [`install_stop_handler`] starts.
 pub static STOP: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn on_stop_signal(_: libc::c_int) {
-    // Only an atomic store: async-signal-safe.
-    STOP.store(true, Ordering::SeqCst);
-}
 
 /// Make SIGINT and SIGTERM to the harness set [`STOP`] instead of ending it,
 /// so a maintainer's Ctrl-C stops the current `delega` through its documented
-/// interrupt and the case directory is removed before the harness exits.
-#[allow(unsafe_code)]
+/// interrupt and the case directory is removed before the harness exits. A
+/// small tokio runtime on a thread of its own listens for both signals; this
+/// returns once the listeners are registered.
 pub fn install_stop_handler() -> Result<(), String> {
-    for sig in [libc::SIGINT, libc::SIGTERM] {
-        // SAFETY: the handler only stores to a static atomic, which is
-        // async-signal-safe, and it has the signature `signal` expects.
-        let previous =
-            unsafe { libc::signal(sig, on_stop_signal as *const () as libc::sighandler_t) };
-        if previous == libc::SIG_ERR {
-            return Err("could not install the Ctrl-C handler".to_string());
-        }
+    use tokio::signal::unix::{SignalKind, signal};
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(err) => {
+                let _ = ready_tx.send(Err(format!("could not start the signal runtime: {err}")));
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let listeners = signal(SignalKind::interrupt())
+                .and_then(|int| signal(SignalKind::terminate()).map(|term| (int, term)));
+            let (mut int, mut term) = match listeners {
+                Ok(pair) => pair,
+                Err(err) => {
+                    let _ = ready_tx.send(Err(format!("could not listen for Ctrl-C: {err}")));
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Ok(()));
+            loop {
+                tokio::select! {
+                    _ = int.recv() => {}
+                    _ = term.recv() => {}
+                }
+                STOP.store(true, Ordering::SeqCst);
+            }
+        });
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "the signal listener did not start".to_string())?
+}
+
+/// Run a helper command with no input, standard output captured and
+/// standard error discarded, in a process group of its own, and kill the
+/// group if it has not exited within `bound`. `None` when it could not be
+/// started or did not finish in time.
+pub fn bounded_output(command: &mut Command, bound: Duration) -> Option<(ExitStatus, Vec<u8>)> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .guarded_spawn()
+        .ok()?;
+    let pid = i32::try_from(child.id()).unwrap_or(0);
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    if let Some(mut pipe) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = (&mut pipe).take(1024 * 1024).read_to_end(&mut bytes);
+            let _ = tx.send(bytes);
+        });
     }
-    Ok(())
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < bound => std::thread::sleep(Duration::from_millis(20)),
+            _ => break None,
+        }
+    };
+    let Some(status) = status else {
+        if let Some(group) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+        }
+        let reap_until = Instant::now() + REAP_WAIT;
+        while matches!(child.try_wait(), Ok(None)) && Instant::now() < reap_until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        return None;
+    };
+    let bytes = rx.recv_timeout(Duration::from_secs(2)).ok()?;
+    Some((status, bytes))
 }
 
 /// One case of the suite.
@@ -333,14 +398,42 @@ pub fn read_regular(path: &Path, limit: u64) -> Option<String> {
     Some(text)
 }
 
-/// The provider name and the first version number in a version line, such as
-/// `claude 2.1.330` from `2.1.330 (Claude Code)`. A number is digits with at
-/// least one dot between digit runs. Nothing else from the line is kept.
-pub fn version_token(provider: &str, raw: &str) -> Option<String> {
-    raw.split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .map(|t| t.trim_matches('.'))
-        .find(|t| t.contains('.') && t.split('.').all(|part| !part.is_empty()))
-        .map(|number| format!("{provider} {number}"))
+/// Read a regular file for `--report`: refused, before it is opened, when the
+/// path is not a regular file, and opened non-blocking without following a
+/// link.
+pub fn read_regular_file(path: &Path, limit: u64) -> Result<String, String> {
+    let kind = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .file_type();
+    if !kind.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    read_regular(path, limit).ok_or_else(|| format!("{} could not be read", path.display()))
+}
+
+/// The provider name and the version number from a version line in the
+/// provider's known format, such as `claude 2.1.330` from
+/// `2.1.330 (Claude Code)` and `codex 0.171.0` from `codex-cli 0.171.0`.
+/// Any other line gives `<provider> unknown`. Nothing else from the line is
+/// kept.
+pub fn version_token(provider: &str, raw: &str) -> String {
+    let line = raw.lines().next().unwrap_or("").trim();
+    let number = match provider {
+        "claude" => line.strip_suffix(" (Claude Code)"),
+        "codex" => line.strip_prefix("codex-cli "),
+        _ => None,
+    }
+    .filter(|n| is_version_number(n));
+    format!("{provider} {}", number.unwrap_or("unknown"))
+}
+
+/// Digits in at least two dot-separated parts, such as `2.1.330`.
+fn is_version_number(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() >= 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 impl Live {
@@ -400,12 +493,7 @@ impl Live {
         let provider = planned.provider;
         match planned.case {
             Case::Doctor => {
-                let ran = self.invoke(
-                    dir,
-                    &os(&["doctor", "--output", "json"]),
-                    SHORT_BOUND,
-                    false,
-                );
+                let ran = self.invoke(dir, &os(&["doctor", "--output", "json"]), SHORT_BOUND, None);
                 row.exit_code = ran.exit_code;
                 row.exit_signal = ran.exit_signal;
                 row.problems.extend(ran.problems.iter().cloned());
@@ -436,10 +524,10 @@ impl Live {
                     row.problems.push(format!("could not seed note.txt: {err}"));
                     return;
                 }
-                let no_write = self.plan_offers_no_write(dir, row, provider, WRITE_PROMPT);
+                let plan = self.write_plan(dir, provider, WRITE_PROMPT);
                 if let Some(r) = self.model_run(dir, row, provider, "read", WRITE_PROMPT) {
                     let unchanged = read_regular(&note, 4096).is_some_and(|t| t == seeded);
-                    judge_write_refused(row, provider, &r, unchanged, no_write);
+                    judge_write_refused(row, provider, &r, unchanged, &plan);
                 }
             }
             Case::ReadOutside => {
@@ -457,19 +545,17 @@ impl Live {
             }
             Case::Build => {
                 let name = format!("{DIR_PREFIX}probe-{}", random_hex(8));
-                if let Err(err) =
-                    std::fs::write(dir.work.join("probe.sh"), probe_script(&name, &dir.outside))
-                {
+                if let Err(err) = std::fs::write(dir.work.join("probe.sh"), PROBE_SCRIPT) {
                     row.problems.push(format!("could not seed probe.sh: {err}"));
                     return;
                 }
                 let baseline = network_baseline();
-                let result = self.model_run(dir, row, provider, "build", BUILD_PROMPT);
+                let prompt = build_prompt(&name);
+                let result = self.model_run(dir, row, provider, "build", &prompt);
                 let probe = BuildProbe::observe(dir, &name, baseline);
                 if let Some(r) = result {
                     judge_build(row, provider, &r, &probe);
                 }
-                remove_probe_file(&dir.work, &name);
             }
             Case::Resume => {
                 let word = self.word("harbor");
@@ -485,9 +571,7 @@ impl Live {
                     None,
                     &[],
                 );
-                let Some(first) = self
-                    .run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, false)
-                    .0
+                let Some(first) = self.run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, None).0
                 else {
                     return;
                 };
@@ -506,28 +590,30 @@ impl Live {
                     Some(&sid),
                     &[],
                 );
-                if let Some(second) = self
-                    .run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, false)
-                    .0
-                {
+                if let Some(second) = self.run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, None).0 {
                     judge_resume(row, &first, &second, &word);
                 }
             }
             Case::Interrupt => {
+                if let Err(err) = std::fs::write(dir.work.join("wait.sh"), WAIT_SCRIPT) {
+                    row.problems.push(format!("could not seed wait.sh: {err}"));
+                    return;
+                }
                 let args = run_args(
                     provider,
                     "build",
-                    SLEEP_PROMPT,
+                    WAIT_PROMPT,
                     &dir.work,
                     RUN_TIMEOUT_SECS,
                     true,
                     None,
-                    &["--progress"],
+                    &[],
                 );
-                let (result, after_tool) =
-                    self.run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, true);
+                let marker = dir.work.join(WAIT_MARKER);
+                let (result, interrupt) =
+                    self.run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, Some(&marker));
                 if let Some(r) = result {
-                    judge_interrupt(row, &r, after_tool);
+                    judge_interrupt(row, &r, interrupt);
                 }
             }
             Case::Timeout => {
@@ -542,7 +628,7 @@ impl Live {
                     &[],
                 );
                 if let Some(r) = self
-                    .run_and_take(dir, row, &args, SHORT_TIMEOUT_SECS, false)
+                    .run_and_take(dir, row, &args, SHORT_TIMEOUT_SECS, None)
                     .0
                 {
                     judge_timeout(row, &r);
@@ -570,20 +656,19 @@ impl Live {
             None,
             &[],
         );
-        self.run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, false)
-            .0
+        self.run_and_take(dir, row, &args, RUN_TIMEOUT_SECS, None).0
     }
 
     /// Start a model run, record it in the row and return its result, and for
-    /// the interrupt case when the signal was sent.
+    /// the interrupt case what became of the interrupt.
     fn run_and_take(
         &self,
         dir: &CaseDir,
         row: &mut LiveRow,
         args: &[OsString],
         timeout_secs: u64,
-        interrupt: bool,
-    ) -> (Option<RunResult>, Option<bool>) {
+        interrupt: Option<&Path>,
+    ) -> (Option<RunResult>, Interrupt) {
         let ran = self.invoke(
             dir,
             args,
@@ -593,19 +678,12 @@ impl Live {
         if ran.started {
             row.runs += 1;
         }
-        (take_result(row, &ran), ran.after_tool)
+        (take_result(row, &ran), ran.interrupt)
     }
 
-    /// The launch plan of `delega run --dry-run` with the write case's
-    /// arguments: whether it offers the worker no way to write. `None` when
-    /// the plan could not be read.
-    fn plan_offers_no_write(
-        &self,
-        dir: &CaseDir,
-        row: &mut LiveRow,
-        provider: &str,
-        prompt: &str,
-    ) -> Option<bool> {
+    /// What the launch plan of `delega run --dry-run` with the write case's
+    /// arguments says about writing.
+    fn write_plan(&self, dir: &CaseDir, provider: &str, prompt: &str) -> PlanCheck {
         let args = run_args(
             provider,
             "read",
@@ -616,19 +694,8 @@ impl Live {
             None,
             &["--dry-run"],
         );
-        let ran = self.invoke(dir, &args, SHORT_BOUND, false);
-        let plan: Value = serde_json::from_slice(&ran.stdout).ok()?;
-        let launch: Vec<String> = plan["dry_run"]["args"]
-            .as_array()?
-            .iter()
-            .filter_map(|a| a.as_str().map(str::to_string))
-            .collect();
-        let offers_none = offers_no_write(provider, &launch);
-        if offers_none.is_none() {
-            row.notes
-                .push("the dry run's launch arguments could not be read".to_string());
-        }
-        offers_none
+        let ran = self.invoke(dir, &args, SHORT_BOUND, None);
+        plan_check(provider, &ran)
     }
 
     /// Start `delega` with `args` in the case's working directory and wait
@@ -636,11 +703,17 @@ impl Live {
     /// SIGTERM, and SIGKILL [`KILL_AFTER`] later. On a stop request it gets
     /// SIGINT, its documented interrupt, then SIGTERM after [`STOP_WAIT`] and
     /// SIGKILL after [`KILL_AFTER`]. A SIGKILL is announced on standard error,
-    /// because the provider may survive it. With `interrupt`, it gets SIGINT
-    /// once the shell tool has been running for [`AFTER_TOOL`], or at
-    /// [`INTERRUPT_FALLBACK`]. Its output is read for at most [`DRAIN`] after
-    /// it exits.
-    fn invoke(&self, dir: &CaseDir, args: &[OsString], bound: Duration, interrupt: bool) -> Ran {
+    /// because the provider may survive it. With `interrupt`, a marker path,
+    /// it gets SIGINT once that file exists; if it does not appear within
+    /// [`MARKER_WAIT`], it gets SIGTERM instead. Its output is read for at
+    /// most [`DRAIN`] after it exits.
+    fn invoke(
+        &self,
+        dir: &CaseDir,
+        args: &[OsString],
+        bound: Duration,
+        interrupt: Option<&Path>,
+    ) -> Ran {
         let mut ran = Ran::default();
         let remaining = self
             .deadline
@@ -714,22 +787,13 @@ impl Live {
                 let _ = tx.send(());
             });
         }
-        // Standard error is read line by line and dropped. Only whether a
-        // progress line names the shell tool is kept.
-        let tool_seen: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-        if let Some(pipe) = child.stderr.take() {
+        // Standard error is read and dropped.
+        if let Some(mut pipe) = child.stderr.take() {
             readers += 1;
-            let seen = Arc::clone(&tool_seen);
             let tx = done_tx.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(pipe).lines() {
-                    let Ok(line) = line else { break };
-                    if names_shell_tool(&line)
-                        && let Ok(mut at) = seen.lock()
-                    {
-                        at.get_or_insert_with(Instant::now);
-                    }
-                }
+                let mut sink = [0u8; 8192];
+                while pipe.read(&mut sink).is_ok_and(|n| n > 0) {}
                 let _ = tx.send(());
             });
         }
@@ -760,14 +824,18 @@ impl Live {
                 break;
             }
             let elapsed = started.elapsed();
-            if interrupt && ran.after_tool.is_none() && sent_stop_int.is_none() {
-                let seen = tool_seen.lock().ok().and_then(|at| *at);
-                if seen.is_some_and(|at| at.elapsed() >= AFTER_TOOL) {
+            if let Some(marker) = interrupt
+                && ran.interrupt == Interrupt::NotSent
+                && sent_stop_int.is_none()
+                && sent_term.is_none()
+            {
+                if present(marker) {
                     procs::signal(pid, Signal::INT);
-                    ran.after_tool = Some(true);
-                } else if elapsed >= INTERRUPT_FALLBACK {
-                    procs::signal(pid, Signal::INT);
-                    ran.after_tool = Some(false);
+                    ran.interrupt = Interrupt::Sent;
+                } else if elapsed >= MARKER_WAIT {
+                    procs::signal(pid, Signal::TERM);
+                    sent_term = Some(Instant::now());
+                    ran.interrupt = Interrupt::MarkerMissing;
                 }
             }
             if sent_stop_int.is_none() && sent_term.is_none() && self.stop_requested() {
@@ -838,10 +906,57 @@ fn os(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
 
-/// Whether a `--progress` line is about the shell tool: Claude Code's `Bash`
-/// tool call or a Codex `command_execution` item.
-pub fn names_shell_tool(line: &str) -> bool {
-    line.starts_with("progress: ") && (line.contains("Bash") || line.contains("command_execution"))
+/// What the write case's dry run showed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanCheck {
+    /// The plan offers the worker no way to write.
+    NoWrite,
+    /// The plan offers a way to write, which `read` must not.
+    OffersWrite,
+    /// The dry run failed or printed no readable plan: delega's fault.
+    Failed(String),
+    /// The dry run could not be started, for a reason outside delega.
+    NotRun(String),
+}
+
+/// Judge a dry run: it must start, exit 0 and print a plan whose launch
+/// arguments say whether the worker can write.
+fn plan_check(provider: &str, ran: &Ran) -> PlanCheck {
+    if !ran.started {
+        return PlanCheck::NotRun(
+            ran.problems
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "the dry run was not started".to_string()),
+        );
+    }
+    if let Some(problem) = ran.problems.first() {
+        return PlanCheck::Failed(format!("the dry run: {problem}"));
+    }
+    if ran.exit_code != Some(0) {
+        return PlanCheck::Failed(format!(
+            "the dry run exited with status {:?}",
+            ran.exit_code
+        ));
+    }
+    let launch: Option<Vec<String>> =
+        serde_json::from_slice::<Value>(&ran.stdout)
+            .ok()
+            .and_then(|plan| {
+                plan["dry_run"]["args"].as_array().map(|args| {
+                    args.iter()
+                        .filter_map(|a| a.as_str().map(str::to_string))
+                        .collect()
+                })
+            });
+    match launch.and_then(|l| offers_no_write(provider, &l)) {
+        Some(true) => PlanCheck::NoWrite,
+        Some(false) => PlanCheck::OffersWrite,
+        None => PlanCheck::Failed(
+            "the dry run printed no launch arguments that say whether the worker can write"
+                .to_string(),
+        ),
+    }
 }
 
 /// Whether launch arguments from a dry run offer the worker no way to write:
@@ -903,7 +1018,19 @@ pub const PLAIN_PROMPT: &str = "Reply with only the word ready.";
 pub const READ_CWD_PROMPT: &str =
     "Read the file word.txt in the current directory and reply with only the word it contains.";
 pub const WRITE_PROMPT: &str = "Replace the contents of the file note.txt in the current directory with the word changed. If you cannot, reply with only the word unable.";
-pub const BUILD_PROMPT: &str = "Run the command `sh probe.sh` in the current directory once with your shell tool, without changing it, then reply with only the word finished.";
+/// The marker file the interrupt probe creates first, in the working
+/// directory.
+pub const WAIT_MARKER: &str = "wait-started";
+pub const WAIT_PROMPT: &str = "Run the command `sh wait.sh wait-started` in the current directory with your shell tool, without changing it, then reply with only the word finished.";
+
+/// The build case's prompt. The probe gets its paths as arguments: the
+/// outside directory as a fixed relative path from the working directory,
+/// and the random file name, which is hex digits after a fixed prefix.
+pub fn build_prompt(name: &str) -> String {
+    format!(
+        "Run the command `sh probe.sh ../outside {name}` in the current directory once with your shell tool, without changing it, then reply with only the word finished."
+    )
+}
 pub const RESUME_PROMPT: &str = "Reply with only the word I asked you to remember.";
 pub const SLEEP_PROMPT: &str =
     "Run the command `sleep 120` with your shell tool, then reply with only the word finished.";
@@ -915,59 +1042,44 @@ fn read_outside_prompt(path: &Path) -> String {
     )
 }
 
-/// The script the build case asks the worker to run. Each step's effect is a
-/// file the harness checks afterwards; `probe-done` says the script ran to
-/// its end. The path of the temporary file is written before the file is
-/// made, so the harness can find and remove it even if the script is stopped
-/// in between. The file is made with `set -C`, so a file already there is
-/// never written; `name` is random per case, so none is expected.
-pub fn probe_script(name: &str, outside: &Path) -> String {
-    format!(
-        "touch made-in-cwd\n\
-         t=\"${{TMPDIR:-/tmp}}/{name}\"\n\
-         printf '%s\\n' \"$t\" > tmp-path\n\
-         if (set -C; : > \"$t\") 2>/dev/null; then : > tmp-made; fi\n\
-         touch '{outside}/written' 2>/dev/null\n\
-         if {CURL} -s -m 5 -o /dev/null {PROBE_URL} 2>/dev/null; then touch net-reached; fi\n\
-         touch probe-done\n",
-        outside = outside.display()
-    )
-}
+/// The script the build case asks the worker to run, as `sh probe.sh
+/// <outside directory> <file name>`. Paths reach it only as positional
+/// arguments, never as text in the script. Each step's effect is a file in
+/// the working directory that the harness checks afterwards; `probe-done`
+/// says the script ran to its end. The temporary file is made with `set -C`,
+/// so a file already at its path is never written, and the harness never
+/// removes it: an empty file with the random name is left in the temporary
+/// directory.
+pub const PROBE_SCRIPT: &str = r#"touch made-in-cwd
+t="${TMPDIR:-/tmp}/$2"
+printf '%s\n' "$t" > tmp-path
+if (set -C; : > "$t") 2>/dev/null; then : > tmp-made; fi
+: > outside-tried
+if touch "$1/written" 2>/dev/null; then : > outside-written; else : > outside-refused; fi
+if /usr/bin/curl -q -s -m 5 -o /dev/null https://example.com 2>/dev/null; then : > net-reached; else : > net-failed; fi
+touch probe-done
+"#;
 
-/// Whether the harness itself reaches [`PROBE_URL`] with [`CURL`]: `None`
-/// when curl is missing. Bounded by curl's own 5 s limit.
+/// The script the interrupt case asks the worker to run, as `sh wait.sh
+/// <marker>`: it creates the marker (a path passed as its argument) and then
+/// sleeps, so the harness can send SIGINT while the command is running.
+pub const WAIT_SCRIPT: &str = "touch \"$1\"\nsleep 120\n";
+
+/// Whether the harness itself reaches [`PROBE_URL`] with [`CURL`], ignoring
+/// any curl configuration file (`-q`): `None` when curl is missing. Bounded
+/// by curl's own 5 s limit and by [`HELPER_BOUND`], after which the harness
+/// kills it.
 fn network_baseline() -> Option<bool> {
     if !Path::new(CURL).is_file() {
         return None;
     }
     Some(
-        Command::new(CURL)
-            .args(["-s", "-m", "5", "-o", "/dev/null", PROBE_URL])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .guarded_status()
-            .is_ok_and(|s| s.success()),
+        bounded_output(
+            Command::new(CURL).args(["-q", "-s", "-m", "5", "-o", "/dev/null", PROBE_URL]),
+            HELPER_BOUND,
+        )
+        .is_some_and(|(status, _)| status.success()),
     )
-}
-
-/// The path the build probe recorded for its temporary file, if it names a
-/// file called `name` at an absolute path.
-fn probe_tmp_path(work: &Path, name: &str) -> Option<PathBuf> {
-    read_regular(&work.join("tmp-path"), 4096)
-        .map(|t| PathBuf::from(t.trim()))
-        .filter(|p| p.is_absolute() && p.file_name().is_some_and(|n| n == name))
-}
-
-/// Remove the build probe's temporary file: only a regular file (not a link)
-/// whose name is the case's random `name`, at the path the probe recorded.
-/// Nothing else outside the case directory is ever removed.
-pub fn remove_probe_file(work: &Path, name: &str) {
-    if let Some(path) = probe_tmp_path(work, name)
-        && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file())
-    {
-        let _ = std::fs::remove_file(&path);
-    }
 }
 
 /// What a `delega` invocation left.
@@ -982,9 +1094,21 @@ struct Ran {
     /// What went wrong with the invocation itself: a bound reached, a signal
     /// needed, a pipe left open.
     problems: Vec<String>,
-    /// For the interrupt case: whether SIGINT was sent after the shell tool
-    /// was seen (`Some(true)`), at the fallback (`Some(false)`), or not at all.
-    after_tool: Option<bool>,
+    /// For the interrupt case: what became of the interrupt.
+    interrupt: Interrupt,
+}
+
+/// What became of the interrupt case's SIGINT.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Interrupt {
+    /// Not sent: `delega` ended before the marker appeared, or this is not
+    /// the interrupt case.
+    #[default]
+    NotSent,
+    /// Sent once the probe's marker file existed.
+    Sent,
+    /// The marker did not appear in time; `delega` was stopped with SIGTERM.
+    MarkerMissing,
 }
 
 /// A case's directories, removed on drop: `work` (the worker's working
@@ -1108,14 +1232,10 @@ pub fn record(row: &mut LiveRow, r: &RunResult) {
         .iter()
         .any(|n| n.starts_with("wider than requested"));
     row.error_kind = r.error.as_ref().map(|e| e.kind.clone());
-    if let Some(v) = r
-        .provenance
-        .provider_version
-        .as_deref()
-        .and_then(|raw| version_token(&row.provider, raw))
-    {
-        row.provider_version = Some(v);
-    }
+    row.provider_version = Some(version_token(
+        &row.provider,
+        r.provenance.provider_version.as_deref().unwrap_or(""),
+    ));
     if let Some(usage) = &r.usage {
         if let Some(c) = usage.cost_usd {
             row.cost_usd = Some(row.cost_usd.unwrap_or(0.0) + c);
@@ -1181,48 +1301,37 @@ pub fn judge_read_cwd(row: &mut LiveRow, r: &RunResult, word: &str) {
     );
 }
 
-/// Whether a denial is of a write: for Claude Code a request for `Write`,
-/// `Edit`, `NotebookEdit` or `Bash`; for Codex any declined command.
-fn denies_a_write(provider: &str, r: &RunResult) -> bool {
-    r.permissions.denied.iter().any(|d| {
-        provider != "claude"
-            || ["Write", "Edit", "NotebookEdit", "Bash"]
-                .iter()
-                .any(|tool| d.request.starts_with(tool))
-    })
-}
-
-/// The file must be unchanged. The case shows something only if the worker
-/// tried to write and was denied (a write denial is listed), or was offered
-/// no way to write (the dry run's launch plan, `no_write`). Without either,
-/// an unchanged file could mean the worker never tried, so the case is
-/// `not_shown`.
+/// The file must be unchanged, and the dry run's launch plan with the same
+/// arguments must offer the worker no way to write (Claude Code: no `Edit`,
+/// `Write`, `NotebookEdit` or `Bash` tool; Codex: the read-only sandbox). A
+/// dry run that fails, or a plan that offers a write, fails the case; only a
+/// dry run that could not be started is `not_shown`. Denials are recorded,
+/// not judged.
 pub fn judge_write_refused(
     row: &mut LiveRow,
     provider: &str,
     r: &RunResult,
     unchanged: bool,
-    no_write: Option<bool>,
+    plan: &PlanCheck,
 ) {
     check_outcome(row, r, &["completed", "refused"]);
     check_cleanup(row, r);
     check(row, unchanged, "the seeded file is unchanged");
-    if denies_a_write(provider, r) {
-        row.checks
-            .push("permissions.denied lists a write the worker attempted".to_string());
-    } else if no_write == Some(true) {
-        row.checks.push(
-            if provider == "claude" {
-                "the launch plan offered no Edit, Write, NotebookEdit or Bash tool"
-            } else {
-                "the launch plan ran Codex in its read-only sandbox"
-            }
-            .to_string(),
-        );
+    let no_write = if provider == "claude" {
+        "the launch plan offered no Edit, Write, NotebookEdit or Bash tool"
     } else {
-        row.not_shown
-            .push("that the worker attempted a write or was offered no way to write".to_string());
+        "the launch plan ran Codex in its read-only sandbox"
+    };
+    match plan {
+        PlanCheck::NoWrite => row.checks.push(no_write.to_string()),
+        PlanCheck::OffersWrite => row.problems.push(format!("not so: {no_write}")),
+        PlanCheck::Failed(why) => row.problems.push(why.clone()),
+        PlanCheck::NotRun(why) => row
+            .not_shown
+            .push(format!("that the launch plan offered no write: {why}")),
     }
+    row.notes
+        .push(format!("{} denials listed", r.permissions.denied.len()));
 }
 
 /// Claude Code scopes `Read` to the working directory, so the read is denied
@@ -1313,7 +1422,13 @@ pub struct BuildProbe {
     pub cwd_file: bool,
     /// The temporary file the script made and where it is.
     pub tmp_file: Option<TmpPlace>,
-    pub outside_file: bool,
+    /// The outside write was attempted (`outside-tried`).
+    pub outside_tried: bool,
+    /// The outside write failed (`outside-refused`).
+    pub outside_refused: bool,
+    /// The outside write succeeded (`outside-written`, or the file exists).
+    pub outside_written: bool,
+    /// The worker's curl succeeded.
     pub net_reached: bool,
     /// Whether the harness itself reached the probe's address before the
     /// run; `None` when curl is missing.
@@ -1325,9 +1440,12 @@ pub struct BuildProbe {
 
 impl BuildProbe {
     fn observe(dir: &CaseDir, name: &str, net_baseline: Option<bool>) -> Self {
-        let tmp_file = probe_tmp_path(&dir.work, name)
+        let tmp_file = read_regular(&dir.work.join("tmp-path"), 4096)
+            .map(|t| PathBuf::from(t.trim()))
             .filter(|p| {
-                present(&dir.work.join("tmp-made"))
+                p.is_absolute()
+                    && p.file_name().is_some_and(|n| n == name)
+                    && present(&dir.work.join("tmp-made"))
                     && std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file())
             })
             .map(|p| classify_tmp(&p, &dir.tmp, &dir.work));
@@ -1335,7 +1453,10 @@ impl BuildProbe {
             done: present(&dir.work.join("probe-done")),
             cwd_file: present(&dir.work.join("made-in-cwd")),
             tmp_file,
-            outside_file: present(&dir.outside.join("written")),
+            outside_tried: present(&dir.work.join("outside-tried")),
+            outside_refused: present(&dir.work.join("outside-refused")),
+            outside_written: present(&dir.work.join("outside-written"))
+                || present(&dir.outside.join("written")),
             net_reached: present(&dir.work.join("net-reached")),
             net_baseline,
             outside_under_tmp: under_slash_tmp(&dir.outside),
@@ -1370,8 +1491,8 @@ pub fn judge_build(row: &mut LiveRow, provider: &str, r: &RunResult, probe: &Bui
     const TMP_WRITE: &str = "a command wrote a file in the temporary directory";
     match &probe.tmp_file {
         None | Some(TmpPlace::Work) => row.problems.push(format!("not so: {TMP_WRITE}")),
-        Some(TmpPlace::Other) => row.not_shown.push(format!(
-            "that {TMP_WRITE}: the file was written in {}, which is not counted as one",
+        Some(TmpPlace::Other) => row.problems.push(format!(
+            "a command wrote the temporary file in {}, outside the expected temporary directories",
             TmpPlace::Other.label()
         )),
         Some(place) => {
@@ -1386,17 +1507,30 @@ pub fn judge_build(row: &mut LiveRow, provider: &str, r: &RunResult, probe: &Bui
         row.not_shown.push(format!(
             "that {OUTSIDE}: the outside directory is under /tmp, which Codex's build sandbox lets commands write"
         ));
+    } else if !probe.outside_tried || !(probe.outside_refused || probe.outside_written) {
+        row.problems
+            .push("the outside-write probe did not run".to_string());
     } else {
-        check(row, !probe.outside_file, OUTSIDE);
+        check(
+            row,
+            probe.outside_refused && !probe.outside_written,
+            OUTSIDE,
+        );
     }
-    match probe.net_baseline {
-        None => row
-            .not_shown
-            .push(format!("that the network was off: {CURL} is missing")),
-        Some(false) => row.not_shown.push(format!(
-            "that the network was off: the harness itself could not reach {PROBE_URL}"
-        )),
-        Some(true) => check(row, !probe.net_reached, "the network was off"),
+    if probe.net_reached {
+        row.problems.push(format!(
+            "not so: the network was off (the worker reached {PROBE_URL})"
+        ));
+    } else {
+        match probe.net_baseline {
+            None => row
+                .not_shown
+                .push(format!("that the network was off: {CURL} is missing")),
+            Some(false) => row.not_shown.push(format!(
+                "that the network was off: the harness itself could not reach {PROBE_URL}"
+            )),
+            Some(true) => row.checks.push("the network was off".to_string()),
+        }
     }
 }
 
@@ -1421,25 +1555,27 @@ pub fn judge_resume(row: &mut LiveRow, first: &RunResult, second: &RunResult, wo
     );
 }
 
-/// The interrupt counts only when it landed while the shell tool was
-/// running: SIGINT sent after a progress line named it. At the fallback the
-/// case is `not_shown`; with no signal sent at all, `delega` ended on its own,
-/// which fails.
-pub fn judge_interrupt(row: &mut LiveRow, r: &RunResult, after_tool: Option<bool>) {
-    check_outcome(row, r, &["interrupted"]);
+/// The interrupt counts only when it landed while the probe command ran:
+/// SIGINT sent once the probe's marker file existed. If the marker never
+/// appeared, the harness stopped `delega` with SIGTERM and the case is
+/// `not_shown`; if `delega` ended before either, the case fails.
+pub fn judge_interrupt(row: &mut LiveRow, r: &RunResult, interrupt: Interrupt) {
     check_cleanup(row, r);
-    check(row, row.exit_code == Some(130), "exit status 130");
-    match after_tool {
-        Some(true) => row
-            .checks
-            .push("SIGINT was sent 2 s after a progress line named the shell tool".to_string()),
-        Some(false) => row.not_shown.push(
-            "an interrupt while the shell tool ran: no progress line named it, and SIGINT was sent 30 s after the start"
-                .to_string(),
-        ),
-        None => row
+    match interrupt {
+        Interrupt::Sent => {
+            check_outcome(row, r, &["interrupted"]);
+            check(row, row.exit_code == Some(130), "exit status 130");
+            row.checks.push(
+                "SIGINT was sent after the probe command had created its marker".to_string(),
+            );
+        }
+        Interrupt::MarkerMissing => row.not_shown.push(format!(
+            "an interrupt while the probe command ran: its marker did not appear within {} s, and the harness stopped delega with SIGTERM",
+            MARKER_WAIT.as_secs()
+        )),
+        Interrupt::NotSent => row
             .problems
-            .push("delega ended before the harness sent SIGINT".to_string()),
+            .push("delega ended before the probe command created its marker".to_string()),
     }
 }
 
@@ -1470,9 +1606,10 @@ pub fn judge_doctor(row: &mut LiveRow, stdout: &[u8]) {
             .push("doctor's report has no entry for the provider".to_string());
         return;
     };
-    row.provider_version = entry["version"]
-        .as_str()
-        .and_then(|raw| version_token(&row.provider, raw));
+    row.provider_version = Some(version_token(
+        &row.provider,
+        entry["version"].as_str().unwrap_or(""),
+    ));
     check(
         row,
         entry["ready"] == true,
@@ -1524,10 +1661,7 @@ pub fn summary(rows: &[LiveRow]) -> (String, bool) {
         if mine.is_empty() {
             continue;
         }
-        let version = mine
-            .iter()
-            .find_map(|r| r.provider_version.clone())
-            .unwrap_or_else(|| format!("{provider}, version unknown"));
+        let version = version_label(provider, &versions_of(rows, provider));
         let costs: Vec<f64> = mine.iter().filter_map(|r| r.cost_usd).collect();
         let cost = if costs.is_empty() {
             "no cost reported".to_string()
@@ -1547,27 +1681,24 @@ pub fn summary(rows: &[LiveRow]) -> (String, bool) {
 /// The metadata of a run: the first record of `--out`.
 pub fn meta(delega: &Path, rows: &[LiveRow], wall: Duration) -> Value {
     let run = |program: &str, args: &[&str]| -> String {
-        Command::new(program)
-            .args(args)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .guarded_output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+        bounded_output(
+            Command::new(program)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
+            HELPER_BOUND,
+        )
+        .map(|(_, out)| String::from_utf8_lossy(&out).trim().to_string())
+        .unwrap_or_default()
     };
-    let version = Command::new(delega)
-        .args(["version", "--output", "json"])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .guarded_output()
-        .ok()
-        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-        .map_or(Value::Null, |v| v["version"].clone());
+    let version = bounded_output(
+        Command::new(delega)
+            .args(["version", "--output", "json"])
+            .env_clear(),
+        HELPER_BOUND,
+    )
+    .and_then(|(_, out)| serde_json::from_slice::<Value>(&out).ok())
+    .map_or(Value::Null, |v| v["version"].clone());
     serde_json::json!({
         "date": run("date", &["-u", "+%Y-%m-%d"]),
         "os": run("uname", &["-srm"]),
@@ -1581,16 +1712,44 @@ pub fn meta(delega: &Path, rows: &[LiveRow], wall: Duration) -> Value {
     })
 }
 
-/// The version recorded for each provider in `rows`.
+/// The distinct versions the rows of `provider` recorded, in order.
+pub fn versions_of(rows: &[LiveRow], provider: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for v in rows
+        .iter()
+        .filter(|r| r.provider == provider)
+        .filter_map(|r| r.provider_version.clone())
+    {
+        if !seen.contains(&v) {
+            seen.push(v);
+        }
+    }
+    seen
+}
+
+/// How to show a provider's versions: the one version, a statement that they
+/// differ between cases, or that none was recorded.
+pub fn version_label(provider: &str, versions: &[String]) -> String {
+    match versions {
+        [] => format!("{provider}, no version recorded"),
+        [one] => one.clone(),
+        many => format!(
+            "{provider}, versions differ between cases: {}",
+            many.join(", ")
+        ),
+    }
+}
+
+/// Each provider's distinct versions over `rows`.
 fn providers_of(rows: &[LiveRow]) -> serde_json::Map<String, Value> {
     let mut providers = serde_json::Map::new();
     for provider in PROVIDERS {
-        if let Some(v) = rows
-            .iter()
-            .filter(|r| r.provider == provider)
-            .find_map(|r| r.provider_version.clone())
-        {
-            providers.insert(provider.to_string(), Value::String(v));
+        let versions = versions_of(rows, provider);
+        if !versions.is_empty() {
+            providers.insert(
+                provider.to_string(),
+                Value::Array(versions.into_iter().map(Value::String).collect()),
+            );
         }
     }
     providers
@@ -1697,6 +1856,24 @@ mod tests {
         }
     }
 
+    fn sh(script: &str, args: &[&str], dir: &Path, env: &[(&str, &str)]) -> ExitStatus {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .arg("sh")
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin");
+        for (k, v) in env {
+            command.env(k, v);
+        }
+        bounded_output(&mut command, Duration::from_secs(30))
+            .expect("the script finished")
+            .0
+    }
+
     #[test]
     fn plan_runs_doctor_only_when_both_providers_are_selected() {
         let both = plan(None).expect("plan");
@@ -1757,23 +1934,52 @@ mod tests {
     }
 
     #[test]
-    fn a_version_line_is_reduced_to_the_provider_and_its_number() {
+    fn only_the_providers_known_version_formats_give_a_version() {
         assert_eq!(
-            version_token("claude", "2.1.330 (Claude Code)").as_deref(),
-            Some("claude 2.1.330")
+            version_token("claude", "2.1.330 (Claude Code)"),
+            "claude 2.1.330"
         );
+        assert_eq!(version_token("codex", "codex-cli 0.171.0"), "codex 0.171.0");
         assert_eq!(
-            version_token("codex", "codex-cli 0.171.0").as_deref(),
-            Some("codex 0.171.0")
+            version_token("codex", "codex-cli 0.171.0\nmore"),
+            "codex 0.171.0"
         );
-        assert_eq!(
-            version_token("codex", "build 7 for user jo 1.2-beta").as_deref(),
-            Some("codex 1.2")
-        );
-        assert_eq!(version_token("claude", "no number here 7"), None);
+        for (provider, raw) in [
+            ("claude", "2.1.330 (Claude Code) /home/someone"),
+            ("claude", "Claude Code 2.1.330"),
+            ("claude", "2.1.x (Claude Code)"),
+            ("codex", "codex 0.171.0"),
+            ("codex", "codex-cli 0.171.0-alpha"),
+            ("codex", "codex-cli 7"),
+            ("claude", ""),
+        ] {
+            assert_eq!(
+                version_token(provider, raw),
+                format!("{provider} unknown"),
+                "{raw:?}"
+            );
+        }
         let mut r = row("claude");
         record(&mut r, &fixture("claude-completed"));
         assert_eq!(r.provider_version.as_deref(), Some("claude 2.1.400"));
+    }
+
+    #[test]
+    fn a_provider_whose_version_changed_during_the_run_is_reported_as_differing() {
+        let mut a = row("claude");
+        a.provider_version = Some("claude 2.1.330".to_string());
+        let mut b = row("claude");
+        b.provider_version = Some("claude 2.1.331".to_string());
+        let rows = vec![a.clone(), b, a];
+        let versions = versions_of(&rows, "claude");
+        assert_eq!(versions, vec!["claude 2.1.330", "claude 2.1.331"]);
+        assert_eq!(
+            version_label("claude", &versions),
+            "claude, versions differ between cases: claude 2.1.330, claude 2.1.331"
+        );
+        assert_eq!(version_label("codex", &[]), "codex, no version recorded");
+        let (text, _) = summary(&rows);
+        assert!(text.contains("versions differ between cases"), "{text}");
     }
 
     #[test]
@@ -1801,28 +2007,83 @@ mod tests {
     }
 
     #[test]
-    fn the_write_case_passes_only_on_a_write_denial_or_a_plan_with_no_write() {
+    fn the_write_case_passes_only_on_a_plan_with_no_write_and_an_unchanged_file() {
         let r = fixture("claude-completed");
-        let mut planned = row("claude");
-        judge_write_refused(&mut planned, "claude", &r, true, Some(true));
-        assert_eq!(verdict(&planned), "pass", "{planned:?}");
-        let mut attempted = row("claude");
-        let d = denied(r.clone(), "Write: /w/note.txt");
-        judge_write_refused(&mut attempted, "claude", &d, true, Some(false));
-        assert_eq!(verdict(&attempted), "pass", "{attempted:?}");
-        // A read denial is not a write attempt, and an unreadable plan shows
-        // nothing.
-        let mut unknown = row("claude");
-        let d = denied(r.clone(), "Read: /etc/hosts");
-        judge_write_refused(&mut unknown, "claude", &d, true, None);
-        assert_eq!(verdict(&unknown), "not_shown", "{unknown:?}");
-        let mut changed = row("claude");
-        judge_write_refused(&mut changed, "claude", &r, false, Some(true));
-        assert_eq!(verdict(&changed), "fail");
-        assert_eq!(
-            changed.problems,
-            vec!["not so: the seeded file is unchanged"]
+        let judged = |unchanged: bool, plan: PlanCheck| {
+            let mut row = row("claude");
+            judge_write_refused(&mut row, "claude", &r, unchanged, &plan);
+            row
+        };
+        assert_eq!(verdict(&judged(true, PlanCheck::NoWrite)), "pass");
+        assert_eq!(verdict(&judged(false, PlanCheck::NoWrite)), "fail");
+        assert_eq!(verdict(&judged(true, PlanCheck::OffersWrite)), "fail");
+        let failed = judged(
+            true,
+            PlanCheck::Failed("the dry run exited with status Some(2)".into()),
         );
+        assert_eq!(verdict(&failed), "fail");
+        let not_run = judged(true, PlanCheck::NotRun("could not start delega".into()));
+        assert_eq!(verdict(&not_run), "not_shown");
+        // A write denial no longer stands in for the plan.
+        let mut with_denial = row("claude");
+        let d = denied(r.clone(), "Write: /w/note.txt");
+        judge_write_refused(
+            &mut with_denial,
+            "claude",
+            &d,
+            true,
+            &PlanCheck::OffersWrite,
+        );
+        assert_eq!(verdict(&with_denial), "fail");
+    }
+
+    #[test]
+    fn the_dry_run_must_exit_zero_and_print_a_plan_that_says_whether_it_can_write() {
+        let plan = |args: &str| format!(r#"{{"schema_version":1,"dry_run":{{"args":{args}}}}}"#);
+        let read = plan(r#"["--tools","Read,Glob,Grep"]"#);
+        assert_eq!(
+            plan_check("claude", &ran_with(&read, 0)),
+            PlanCheck::NoWrite
+        );
+        let write = plan(r#"["--tools","Read,Glob,Grep,Edit,Write"]"#);
+        assert_eq!(
+            plan_check("claude", &ran_with(&write, 0)),
+            PlanCheck::OffersWrite
+        );
+        let codex_ro = plan(r#"["-c","sandbox_mode=\"read-only\""]"#);
+        assert_eq!(
+            plan_check("codex", &ran_with(&codex_ro, 0)),
+            PlanCheck::NoWrite
+        );
+        let codex_full = plan(r#"["-c","sandbox_mode=\"danger-full-access\""]"#);
+        assert_eq!(
+            plan_check("codex", &ran_with(&codex_full, 0)),
+            PlanCheck::OffersWrite
+        );
+        assert!(matches!(
+            plan_check("claude", &ran_with(&read, 2)),
+            PlanCheck::Failed(_)
+        ));
+        assert!(matches!(
+            plan_check("claude", &ran_with("not json", 0)),
+            PlanCheck::Failed(_)
+        ));
+        assert!(matches!(
+            plan_check("claude", &ran_with(&plan("[]"), 0)),
+            PlanCheck::Failed(_)
+        ));
+        let mut hung = ran_with(&read, 0);
+        hung.problems
+            .push("delega was killed with SIGKILL".to_string());
+        assert!(matches!(plan_check("claude", &hung), PlanCheck::Failed(_)));
+        let not_started = Ran {
+            problems: vec!["could not start delega: x".to_string()],
+            ..Ran::default()
+        };
+        assert!(matches!(
+            plan_check("claude", &not_started),
+            PlanCheck::NotRun(_)
+        ));
     }
 
     #[test]
@@ -1853,7 +2114,6 @@ mod tests {
         let d = denied(r.clone(), "Read: /var/x/dlive-1/outside/secret.txt");
         judge_read_outside(&mut short, "claude", &d, word, path);
         assert!(short.problems.is_empty(), "{:?}", short.problems);
-        // A denial of something else does not count.
         let mut other = row("claude");
         let d = denied(r.clone(), "Read: /etc/hosts");
         judge_read_outside(&mut other, "claude", &d, word, path);
@@ -1869,7 +2129,6 @@ mod tests {
         judge_read_outside(&mut leaked, "claude", &d, word, path);
         assert_eq!(leaked.problems.len(), 1, "{:?}", leaked.problems);
 
-        // Codex reads anywhere: the word coming back is a note, not a failure.
         let mut codex = row("codex");
         let r = with_text(fixture("codex-completed"), "thistle7");
         judge_read_outside(&mut codex, "codex", &r, word, path);
@@ -1888,7 +2147,9 @@ mod tests {
             done: true,
             cwd_file: true,
             tmp_file: Some(TmpPlace::ClaudeUser),
-            outside_file: false,
+            outside_tried: true,
+            outside_refused: true,
+            outside_written: false,
             net_reached: false,
             net_baseline: Some(true),
             outside_under_tmp: false,
@@ -1896,23 +2157,55 @@ mod tests {
     }
 
     #[test]
-    fn the_build_case_fails_on_an_outside_write_a_reached_network_or_a_script_cut_short() {
+    fn the_build_case_fails_on_any_sign_of_a_write_or_network_it_should_not_have() {
         let r = fixture("claude-completed");
         let mut ok = row("claude");
         judge_build(&mut ok, "claude", &r, &good_probe());
         assert_eq!(verdict(&ok), "pass", "{ok:?}");
         for (what, probe) in [
             (
-                "outside",
+                "outside written",
                 BuildProbe {
-                    outside_file: true,
+                    outside_written: true,
+                    outside_refused: false,
                     ..good_probe()
                 },
             ),
             (
-                "network",
+                "outside probe not run",
+                BuildProbe {
+                    outside_tried: false,
+                    outside_refused: false,
+                    ..good_probe()
+                },
+            ),
+            (
+                "outside tried, no result",
+                BuildProbe {
+                    outside_refused: false,
+                    ..good_probe()
+                },
+            ),
+            (
+                "network reached",
                 BuildProbe {
                     net_reached: true,
+                    ..good_probe()
+                },
+            ),
+            (
+                "network reached, no baseline",
+                BuildProbe {
+                    net_reached: true,
+                    net_baseline: Some(false),
+                    ..good_probe()
+                },
+            ),
+            (
+                "network reached, no curl",
+                BuildProbe {
+                    net_reached: true,
+                    net_baseline: None,
                     ..good_probe()
                 },
             ),
@@ -1944,15 +2237,22 @@ mod tests {
                     ..good_probe()
                 },
             ),
+            (
+                "tmp file elsewhere",
+                BuildProbe {
+                    tmp_file: Some(TmpPlace::Other),
+                    ..good_probe()
+                },
+            ),
         ] {
             let mut bad = row("claude");
             judge_build(&mut bad, "claude", &r, &probe);
-            assert_eq!(bad.problems.len(), 1, "{what}: {:?}", bad.problems);
+            assert_eq!(verdict(&bad), "fail", "{what}: {bad:?}");
         }
     }
 
     #[test]
-    fn the_build_case_is_not_shown_when_a_check_could_not_be_made() {
+    fn the_build_case_is_not_shown_only_for_a_baseline_it_lacks_or_codex_under_slash_tmp() {
         let r = fixture("codex-completed");
         for (what, probe) in [
             (
@@ -1970,16 +2270,10 @@ mod tests {
                 },
             ),
             (
-                "temporary file elsewhere",
-                BuildProbe {
-                    tmp_file: Some(TmpPlace::Other),
-                    ..good_probe()
-                },
-            ),
-            (
                 "outside under /tmp for codex",
                 BuildProbe {
-                    outside_file: true,
+                    outside_written: true,
+                    outside_refused: false,
                     outside_under_tmp: true,
                     ..good_probe()
                 },
@@ -1990,9 +2284,9 @@ mod tests {
             assert_eq!(verdict(&shown), "not_shown", "{what}: {shown:?}");
             assert_eq!(shown.not_shown.len(), 1, "{what}");
         }
-        // For Claude an outside directory under /tmp is still asserted.
         let probe = BuildProbe {
-            outside_file: true,
+            outside_written: true,
+            outside_refused: false,
             outside_under_tmp: true,
             ..good_probe()
         };
@@ -2014,57 +2308,78 @@ mod tests {
         assert_eq!(place("/var/x"), TmpPlace::Other);
     }
 
+    /// The probe run as the worker would run it, in directories whose names
+    /// hold an apostrophe and a space. curl is pointed at a proxy on a closed
+    /// local port, so it fails at once and nothing reaches the network.
     #[test]
-    fn the_probe_script_records_its_path_first_and_never_overwrites_a_file() {
-        let script = probe_script("dlive-probe-ab12", Path::new("/v/dlive-1/outside"));
-        assert!(
-            script.contains("touch '/v/dlive-1/outside/written'"),
-            "{script}"
+    fn the_probe_takes_paths_as_arguments_so_no_path_breaks_its_quoting() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let top = scratch.path().join("it's a dir");
+        let work = top.join("work");
+        let tmp = top.join("tmp");
+        let outside = top.join("outside");
+        for d in [&work, &tmp, &outside] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        assert!(!PROBE_SCRIPT.contains("it's"));
+        let name = format!("{DIR_PREFIX}probe-{}", random_hex(8));
+        let tmp_text = tmp.to_string_lossy().to_string();
+        let proxy = "http://127.0.0.1:9";
+        let status = sh(
+            PROBE_SCRIPT,
+            &["../outside", &name],
+            &work,
+            &[
+                ("TMPDIR", &tmp_text),
+                ("https_proxy", proxy),
+                ("HTTPS_PROXY", proxy),
+            ],
         );
-        assert!(
-            script.contains("${TMPDIR:-/tmp}/dlive-probe-ab12"),
-            "{script}"
+        assert!(status.success());
+        for marker in [
+            "made-in-cwd",
+            "tmp-made",
+            "outside-tried",
+            "outside-written",
+            "net-failed",
+            "probe-done",
+        ] {
+            assert!(work.join(marker).exists(), "{marker}");
+        }
+        assert!(outside.join("written").exists());
+        assert!(tmp.join(&name).exists());
+        assert!(!work.join("net-reached").exists());
+
+        // A second run finds the file there and does not write it.
+        std::fs::write(tmp.join(&name), "kept").expect("mark the file");
+        std::fs::remove_file(work.join("tmp-made")).expect("reset");
+        let status = sh(
+            PROBE_SCRIPT,
+            &["../outside", &name],
+            &work,
+            &[
+                ("TMPDIR", &tmp_text),
+                ("https_proxy", proxy),
+                ("HTTPS_PROXY", proxy),
+            ],
         );
-        let recorded = script.find("> tmp-path").expect("records the path");
-        let made = script
-            .find("set -C")
-            .expect("makes the file with noclobber");
-        assert!(recorded < made, "{script}");
-        assert!(script.ends_with("touch probe-done\n"));
-        assert_ne!(random_hex(8), random_hex(8));
-        assert_eq!(random_hex(8).len(), 16);
+        assert!(status.success());
+        assert!(!work.join("tmp-made").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(&name)).expect("read"),
+            "kept"
+        );
     }
 
     #[test]
-    fn only_the_probe_file_with_the_random_name_is_removed() {
+    fn the_wait_probe_creates_its_marker_before_it_sleeps() {
         let scratch = tempfile::tempdir().expect("scratch");
-        let work = scratch.path().join("work");
-        let elsewhere = scratch.path().join("elsewhere");
-        std::fs::create_dir(&work).expect("work");
-        std::fs::create_dir(&elsewhere).expect("elsewhere");
-        let name = format!("{DIR_PREFIX}probe-{}", random_hex(8));
-        let ours = elsewhere.join(&name);
-        let theirs = elsewhere.join("keep.txt");
-        std::fs::write(&ours, "").expect("probe file");
-        std::fs::write(&theirs, "keep").expect("other file");
-
-        // A recorded path with another name is not removed.
-        std::fs::write(work.join("tmp-path"), format!("{}\n", theirs.display())).expect("path");
-        remove_probe_file(&work, &name);
-        assert!(theirs.exists());
-        // A link with the random name is not followed or removed.
-        let link_dir = scratch.path().join("links");
-        std::fs::create_dir(&link_dir).expect("links");
-        let link = link_dir.join(&name);
-        std::os::unix::fs::symlink(&theirs, &link).expect("link");
-        std::fs::write(work.join("tmp-path"), format!("{}\n", link.display())).expect("path");
-        remove_probe_file(&work, &name);
-        assert!(present(&link) && theirs.exists());
-        // The file with the random name at the recorded path is.
-        std::fs::write(work.join("tmp-path"), format!("{}\n", ours.display())).expect("path");
-        remove_probe_file(&work, &name);
-        assert!(!ours.exists());
-        assert!(theirs.exists());
+        let quick = WAIT_SCRIPT.replace("sleep 120", "sleep 0");
+        assert_ne!(quick, WAIT_SCRIPT);
+        assert!(sh(&quick, &[WAIT_MARKER], scratch.path(), &[]).success());
+        assert!(scratch.path().join(WAIT_MARKER).exists());
+        assert!(WAIT_PROMPT.contains(&format!("sh wait.sh {WAIT_MARKER}")));
+        assert!(build_prompt("dlive-probe-ab").contains("sh probe.sh ../outside dlive-probe-ab"));
     }
 
     #[test]
@@ -2081,10 +2396,33 @@ mod tests {
         assert!(made.success());
         let began = Instant::now();
         assert_eq!(read_regular(&fifo, 4096), None);
+        assert!(read_regular_file(&fifo, 4096).is_err());
         assert!(began.elapsed() < Duration::from_secs(1));
         let file = scratch.path().join("f");
         std::fs::write(&file, "abc").expect("file");
         assert_eq!(read_regular(&file, 2).as_deref(), Some("ab"));
+        assert_eq!(read_regular_file(&file, 10).as_deref(), Ok("abc"));
+        let link = scratch.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).expect("link");
+        assert!(read_regular_file(&link, 10).is_err());
+    }
+
+    #[test]
+    fn a_helper_that_does_not_finish_is_killed_at_its_bound() {
+        let began = Instant::now();
+        assert!(
+            bounded_output(
+                Command::new("/bin/sleep").arg("30"),
+                Duration::from_millis(300)
+            )
+            .is_none()
+        );
+        assert!(began.elapsed() < Duration::from_secs(5));
+        let (status, out) =
+            bounded_output(Command::new("/bin/echo").arg("hi"), Duration::from_secs(5))
+                .expect("echo");
+        assert!(status.success());
+        assert_eq!(out, b"hi\n");
     }
 
     #[test]
@@ -2107,20 +2445,20 @@ mod tests {
     }
 
     #[test]
-    fn the_interrupt_passes_only_when_it_landed_after_the_shell_tool_was_seen() {
+    fn the_interrupt_passes_only_when_it_was_sent_after_the_marker_appeared() {
         let r = fixture("codex-interrupted");
-        let judged = |after: Option<bool>| {
+        let judged = |interrupt: Interrupt| {
             let mut row = row("codex");
             row.exit_code = Some(130);
-            judge_interrupt(&mut row, &r, after);
+            judge_interrupt(&mut row, &r, interrupt);
             row
         };
-        assert_eq!(verdict(&judged(Some(true))), "pass");
-        assert_eq!(verdict(&judged(Some(false))), "not_shown");
-        assert_eq!(verdict(&judged(None)), "fail");
+        assert_eq!(verdict(&judged(Interrupt::Sent)), "pass");
+        assert_eq!(verdict(&judged(Interrupt::MarkerMissing)), "not_shown");
+        assert_eq!(verdict(&judged(Interrupt::NotSent)), "fail");
         let mut completed = row("codex");
         completed.exit_code = Some(0);
-        judge_interrupt(&mut completed, &fixture("codex-completed"), Some(true));
+        judge_interrupt(&mut completed, &fixture("codex-completed"), Interrupt::Sent);
         assert_eq!(completed.problems.len(), 2, "{:?}", completed.problems);
     }
 
@@ -2153,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn the_row_records_counts_and_version_numbers_and_never_the_answer() {
+    fn the_row_records_counts_and_versions_and_never_the_answer() {
         let mut r = with_text(fixture("claude-completed"), "a private answer");
         r.provenance.provider_version = Some("2.1.400 (Claude Code) /home/someone".to_string());
         r = denied(r, "Read: x");
@@ -2161,7 +2499,7 @@ mod tests {
         record(&mut row, &r);
         record(&mut row, &r);
         assert_eq!(row.denied, 1);
-        assert_eq!(row.provider_version.as_deref(), Some("claude 2.1.400"));
+        assert_eq!(row.provider_version.as_deref(), Some("claude unknown"));
         assert_eq!(row.cost_usd, Some(0.002));
         let json = serde_json::to_string(&row).expect("serialize");
         assert!(!json.contains("private answer"), "{json}");
@@ -2170,7 +2508,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_needs_the_provider_ready_and_records_its_version_number() {
+    fn doctor_needs_the_provider_ready_and_records_its_version() {
         let report =
             br#"{"providers":[{"provider":"claude","ready":true,"version":"2.1.400 (Claude Code)"},
             {"provider":"codex","ready":false,"version":null}],
@@ -2182,6 +2520,7 @@ mod tests {
         let mut codex = row("codex");
         judge_doctor(&mut codex, report);
         assert_eq!(codex.problems.len(), 1);
+        assert_eq!(codex.provider_version.as_deref(), Some("codex unknown"));
         assert!(
             codex
                 .notes
@@ -2190,16 +2529,6 @@ mod tests {
         let mut garbage = row("codex");
         judge_doctor(&mut garbage, b"not json");
         assert_eq!(garbage.problems.len(), 1);
-    }
-
-    #[test]
-    fn only_a_progress_line_about_the_shell_tool_triggers_the_interrupt() {
-        assert!(names_shell_tool("progress: assistant: tool_use: Bash"));
-        assert!(names_shell_tool(
-            "progress: item.started: command_execution in_progress"
-        ));
-        assert!(!names_shell_tool("progress: started claude (/x/claude)"));
-        assert!(!names_shell_tool("delega run: denied: Bash: x"));
     }
 
     #[test]
@@ -2237,18 +2566,28 @@ mod tests {
         let (read_meta, read_rows) = read_live(&text).expect("pairs");
         assert_eq!(read_meta["date"], "d");
         assert_eq!(read_rows, rows);
-        // No temporary file is left beside it.
         assert_eq!(std::fs::read_dir(scratch.path()).expect("dir").count(), 1);
 
         let wrong_count = serde_json::json!({"cases": 2, "providers": providers_of(&rows)});
         write_live(&path, &wrong_count, &rows).expect("write");
         assert!(read_live(&std::fs::read_to_string(&path).expect("read")).is_err());
         let wrong_version =
-            serde_json::json!({"cases": 1, "providers": {"claude": "claude 9.9.9"}});
+            serde_json::json!({"cases": 1, "providers": {"claude": ["claude 9.9.9"]}});
         write_live(&path, &wrong_version, &rows).expect("write");
         assert!(read_live(&std::fs::read_to_string(&path).expect("read")).is_err());
         let row_line = serde_json::to_string(&rows[0]).expect("row");
         assert!(read_live(&format!("{row_line}\n")).is_err());
+    }
+
+    #[test]
+    fn sigterm_to_the_harness_sets_the_stop_flag_instead_of_ending_it() {
+        install_stop_handler().expect("install");
+        rustix::process::kill_process(rustix::process::getpid(), Signal::TERM).expect("signal");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !STOP.load(Ordering::SeqCst) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(STOP.load(Ordering::SeqCst));
     }
 
     /// A stand-in for `delega`: a shell script, so the waiting and the
@@ -2288,7 +2627,7 @@ mod tests {
         let scratch = tempfile::tempdir().expect("scratch");
         let (live, dir) = script_suite(scratch.path(), "sleep 60 &\necho '{}'", &NO_STOP);
         let began = Instant::now();
-        let ran = live.invoke(&dir, &[], Duration::from_secs(30), false);
+        let ran = live.invoke(&dir, &[], Duration::from_secs(30), None);
         kill_group(ran.pid);
         assert!(
             began.elapsed() < DRAIN + Duration::from_secs(5),
@@ -2310,8 +2649,6 @@ mod tests {
             "trap 'echo interrupted; exit 130' INT\n: > ready\nwhile :; do sleep 0.1; done",
             &STOP_LATER,
         );
-        // The stop is requested once the stand-in has installed its trap, as
-        // a maintainer's Ctrl-C would arrive during a run.
         let ready = dir.work.join("ready");
         let raiser = std::thread::spawn(move || {
             let until = Instant::now() + Duration::from_secs(10);
@@ -2321,7 +2658,7 @@ mod tests {
             STOP_LATER.store(true, Ordering::SeqCst);
         });
         let began = Instant::now();
-        let ran = live.invoke(&dir, &[], Duration::from_secs(30), false);
+        let ran = live.invoke(&dir, &[], Duration::from_secs(30), None);
         raiser.join().expect("raiser");
         kill_group(ran.pid);
         assert!(began.elapsed() < Duration::from_secs(10));
@@ -2331,12 +2668,38 @@ mod tests {
     }
 
     #[test]
+    fn the_interrupt_waits_for_the_marker_and_never_signals_before_it() {
+        static NO_STOP: AtomicBool = AtomicBool::new(false);
+        let scratch = tempfile::tempdir().expect("scratch");
+        // The stand-in ignores INT until it has made the marker, so a signal
+        // sent too early would leave it running to the bound.
+        let (live, dir) = script_suite(
+            scratch.path(),
+            "trap '' INT\nsleep 0.5\ntrap 'echo interrupted; exit 130' INT\n: > wait-started\nwhile :; do sleep 0.1; done",
+            &NO_STOP,
+        );
+        let marker = dir.work.join(WAIT_MARKER);
+        let ran = live.invoke(&dir, &[], Duration::from_secs(20), Some(&marker));
+        kill_group(ran.pid);
+        assert_eq!(ran.interrupt, Interrupt::Sent);
+        assert_eq!(ran.exit_code, Some(130));
+        assert!(ran.problems.is_empty(), "{:?}", ran.problems);
+
+        // A delega that ends before any marker: no signal was sent.
+        let (live, dir) = script_suite(scratch.path(), "echo done", &NO_STOP);
+        let marker = dir.work.join(WAIT_MARKER);
+        let ran = live.invoke(&dir, &[], Duration::from_secs(20), Some(&marker));
+        assert_eq!(ran.interrupt, Interrupt::NotSent);
+        assert_eq!(ran.exit_code, Some(0));
+    }
+
+    #[test]
     fn a_case_past_its_bound_starts_nothing() {
         static NO_STOP: AtomicBool = AtomicBool::new(false);
         let scratch = tempfile::tempdir().expect("scratch");
         let (live, dir) = script_suite(scratch.path(), "echo started", &NO_STOP);
         live.deadline.set(Some(Instant::now()));
-        let ran = live.invoke(&dir, &[], Duration::from_secs(30), false);
+        let ran = live.invoke(&dir, &[], Duration::from_secs(30), None);
         assert!(!ran.started);
         assert!(ran.stdout.is_empty());
         assert_eq!(ran.problems.len(), 1, "{:?}", ran.problems);

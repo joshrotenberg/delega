@@ -318,6 +318,12 @@ fn run_live(args: &Args) -> ExitCode {
     let wall = began.elapsed();
     if let Some(path) = &args.out {
         let meta = live::meta(&delega, &rows, wall);
+        // A Ctrl-C while the metadata was gathered still stops the suite
+        // before anything is published.
+        if live::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("delega-acceptance: stopped by the maintainer; no results were written");
+            return ExitCode::from(130);
+        }
         if let Err(err) = live::write_live(path, &meta, &rows) {
             eprintln!("delega-acceptance: write {}: {err}", path.display());
             return ExitCode::FAILURE;
