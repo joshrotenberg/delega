@@ -492,6 +492,13 @@ pub const PIPES_HELD_REASON: &str = "a process still held the program's output p
 pub const NO_REAP_ACK_REASON: &str = "the keeper did not acknowledge that it reaped the program, \
      so what it last found in its tree is unknown";
 
+/// The reason of an `Unconfirmed` verdict when an answer of the keeper during
+/// the run was unproven in a way no later answer repairs: a refused hold, a
+/// failed read of `/proc`, or a freeze that did not complete.
+pub const KEEPER_UNPROVEN_REASON: &str = "the keeper could not prove its tree empty at some point \
+     of the run (a process it could not verify, a failed read, or a freeze that did not \
+     complete), so a later empty answer does not confirm cleanup";
+
 /// The reason of an `Unconfirmed` verdict when a process that had to be
 /// signalled could not be verified (Linux: no pidfd, or no recorded start
 /// time to check), so it was not signalled.
@@ -1017,6 +1024,8 @@ impl OwnedProcess {
                     unconfirmed(KEEPER_LOST_REASON)
                 } else if kept && !self.reap_acknowledged {
                     unconfirmed(NO_REAP_ACK_REASON)
+                } else if shared.keeper.as_ref().is_some_and(|k| k.unproven()) {
+                    unconfirmed(KEEPER_UNPROVEN_REASON)
                 } else if unverified {
                     unconfirmed(UNVERIFIED_SIGNAL_REASON)
                 } else if self.reap_leftover > 0 {

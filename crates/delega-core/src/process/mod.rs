@@ -132,8 +132,18 @@
 //!   complete census must find nothing. Its budget is checked for every
 //!   process. An answer that is not complete is never zero, so neither the
 //!   owner's verdict nor the keeper's own cleanup ends on an unproven empty
-//!   tree. A read of `/proc` that fails for any reason but the process being
-//!   gone (ENOENT, ESRCH) makes the pass incomplete, never counts as absence;
+//!   tree. Once any answer of a run was unproven in a way a later one cannot
+//!   repair (a refused hold, a failed read, a freeze that did not complete),
+//!   the verdict stays `Unconfirmed` ([`KEEPER_UNPROVEN_REASON`]); a census
+//!   that is incomplete only because the tree keeps changing never claimed
+//!   zero and does not count. A process listed in a children file whose stat
+//!   reads as missing is gone only if its pidfd says so (`hidepid` can hide a
+//!   live one). A queued child is taken under its parent only while the
+//!   parent's pidfd shows it alive, and otherwise only as the keeper's own
+//!   child. The owner reads a start time while holding the pin's lock, so
+//!   the child cannot be reaped mid-read. A read of `/proc` that fails for any
+//!   reason but the process being gone (ENOENT, ESRCH) makes the pass
+//!   incomplete, never counts as absence;
 //!   a children read is kept only if the parent's pidfd shows it had not
 //!   exited by the end of the read; a refused hold anywhere in a freeze leaves
 //!   it unproven whatever later passes find; and the freeze releases its
@@ -360,6 +370,18 @@
 //!   (it was stopped) and has not seen the keeper's end close could still send
 //!   a group signal by the child's pid; once the child is reaped that pid can
 //!   name another group.
+//! - In one line each, the residuals the keeper accepts:
+//!   - a stalled `exec` of the keeper at spawn holds the owner's start without
+//!     a bound;
+//!   - a keeper that is lost, or that exits without the owner's `released`,
+//!     leaves the child unreaped to the reaper above it, and the verdict is
+//!     `Unconfirmed`;
+//!   - on macOS, a detached orphan whose environment the system hides from
+//!     `ps -E` (Apple's programs under SIP), and a fast fork relay, can be
+//!     missed;
+//!   - a process the kernel prevents inspecting or signalling (`hidepid`,
+//!     another user's, no pidfd) leaves the verdict `Unconfirmed`, and the
+//!     keeper's own cleanup keeps going until its deadline and then exits.
 //! - SIGKILL aimed at the keeper itself, on every platform. The owner notices
 //!   (the keeper's end of the socket closes before `reaped`) and reports
 //!   `Unconfirmed`; if the owner is killed with the keeper, nothing stops the
@@ -528,9 +550,9 @@ pub use handle::{Interrupter, ProcessHandle, run};
 pub use keeper::{KeeperCommand, keeper_main};
 pub use marker::MARKER_ENV;
 pub use owner::{
-    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, LATE_LISTING_REASON, NO_REAP_ACK_REASON,
-    NO_SUBREAPER_REASON, PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON, UNVERIFIED_SIGNAL_REASON,
-    is_late_listing_only,
+    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON,
+    NO_REAP_ACK_REASON, NO_SUBREAPER_REASON, PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON,
+    UNVERIFIED_SIGNAL_REASON, is_late_listing_only,
 };
 pub use report::{
     Diagnostics, Ending, KeeperDiagnostics, LeaderExit, ProcessReport, ProcessTiming, SignalRecord,

@@ -577,13 +577,19 @@ impl ProcessTree {
 
     #[cfg(target_os = "linux")]
     fn verified_ticks(&self, row: &ProcessRow) -> Option<u64> {
+        // The pin's lock is held across the read: the keeper reaps the child
+        // only after the owner answered `released`, which takes this lock, so
+        // the child's pid cannot be freed (and its session or group reused)
+        // between the check and the read.
+        let held = self.pin.as_ref().map(|pin| pin.lock());
+        let pinned = self.pinned && held.as_ref().is_none_or(|pinned| **pinned);
         let stat = sys::proc_stat(row.pid)?;
         // A member of the child's session or group is ours by that alone
         // while the child's pid pins them; this covers a member first seen
         // after the child exited and it was reparented.
-        let member = self.pinned && (stat.session == self.pid || stat.group == self.pid);
+        let member = pinned && (stat.session == self.pid || stat.group == self.pid);
         let parent_is_ours = Some(stat.parent) == self.keeper
-            || (stat.parent == self.pid && self.pinned)
+            || (stat.parent == self.pid && pinned)
             || (stat.parent == row.parent
                 && self
                     .ticks
@@ -1241,6 +1247,43 @@ mod tests {
         };
         assert_eq!(tree.verified_ticks(&row), sys::start_ticks(own));
         assert!(tree.verified_ticks(&row).is_some());
+    }
+
+    /// Not run on macOS; runs in the Linux CI job. Once the pin shared with
+    /// the keeper is released, membership no longer proves identity: a
+    /// session member with an unverified parent gets no start time. And a
+    /// release waits for a verification that holds the pin's lock.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_released_pin_stops_membership_from_proving_identity() {
+        let own = i32::try_from(std::process::id()).expect("a pid");
+        let Some(session) = sys::session_of(own).filter(|s| *s > 1 && *s != own) else {
+            eprintln!("this process leads its own session or it cannot be read; skipped");
+            return;
+        };
+        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let pin = Arc::new(GroupPin::default());
+        let tree = ProcessTree::new(session, lister, true).with_pin(pin.clone());
+        let row = ProcessRow {
+            pid: own,
+            parent: 1,
+            started: "now".into(),
+            group: own,
+            zombie: false,
+            stopped: false,
+        };
+        assert!(tree.verified_ticks(&row).is_some());
+        // A release while a verification holds the lock waits for it.
+        let held = pin.lock();
+        let releasing = {
+            let pin = pin.clone();
+            std::thread::spawn(move || pin.release())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(*held, "the release went through while the lock was held");
+        drop(held);
+        releasing.join().expect("the release finished");
+        assert!(tree.verified_ticks(&row).is_none());
     }
 
     #[test]
