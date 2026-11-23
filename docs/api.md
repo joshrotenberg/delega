@@ -690,7 +690,7 @@ over its bound, is reported under its own kind and blocks `run`. A provider is
 **Output.** Text is the default; control characters anywhere in the text report (a provider's version line, paths, messages) are shown as `?`. `--output json` prints one versioned object
 (`schema_version` 1) with `ready`, `version`, `cwd`, `providers`,
 `process_inspection`, `config`, `limits`, `problems` and `skills`; its JSON Schema is
-`schemas/doctor.schema.json`, generated from the types, checked by a test and
+`crates/delega-core/schemas/doctor.schema.json`, generated from the types, checked by a test and
 updated like the other schemas with `DELEGA_UPDATE_SCHEMAS=1`. Keys are in
 alphabetical order. `env` and `deny_rules` are null when the launch could not be
 built, and `deny_rules` and `command_hook` are null for Codex. `managed_settings`
@@ -847,8 +847,8 @@ and `delega://identity` carry `stale_server` ([Stale server](#stale-server)).
 `operation` field is `install` or `uninstall`. Both documents have `ok`,
 `dry_run`, `install_dir`, `hosts` (each with its `status`, the `commands` run
 and the `reload` step) and `error`. Tests validate the documents against
-[`schemas/plugin-install.schema.json`](https://github.com/joshrotenberg/delega/blob/main/schemas/plugin-install.schema.json) and
-[`schemas/plugin-uninstall.schema.json`](https://github.com/joshrotenberg/delega/blob/main/schemas/plugin-uninstall.schema.json).
+[`crates/delega/schemas/plugin-install.schema.json`](https://github.com/joshrotenberg/delega/blob/main/crates/delega/schemas/plugin-install.schema.json) and
+[`crates/delega/schemas/plugin-uninstall.schema.json`](https://github.com/joshrotenberg/delega/blob/main/crates/delega/schemas/plugin-uninstall.schema.json).
 
 Exit status: 0 on success, including a dry run; 1 when a host command failed or
 something was refused (a host not found, a foreign directory, an invalid marker,
@@ -860,7 +860,7 @@ what was refused.
 
 One optional TOML file holds what a person wants every `delega run`, `delega
 mcp` and `delega doctor` to start from. With no file, behaviour is exactly what
-it is without this section. Its schema is `schemas/config.schema.json`,
+it is without this section. Its schema is `crates/delega-core/schemas/config.schema.json`,
 generated from the Rust types, checked by a test and updated like the other
 schemas with `DELEGA_UPDATE_SCHEMAS=1`.
 
@@ -1126,7 +1126,7 @@ Rules that hold for every tool:
   caller.
 - **Results.** Every tool returns its result as structured content and as the
   same JSON in a text block, and has an input schema and an output schema
-  (committed under `schemas/mcp/`, one `<tool>.schema.json` per tool, each
+  (committed under `crates/delega-mcp/schemas/mcp/`, one `<tool>.schema.json` per tool, each
   holding the tool's `name`, `inputSchema` and `outputSchema`; a test
   regenerates them with `DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-mcp
   committed_tool_schemas` and fails when they are stale). An argument a tool
@@ -1305,7 +1305,7 @@ the behavior installed, with no source checkout or network.
 
 There is one source and three doors.
 
-- **Source.** Each skill is a directory in the repository, `skills/<name>/`,
+- **Source.** Each skill is a directory under `crates/delega-core/skills/<name>/`,
   holding a `SKILL.md` with name and description frontmatter. The build embeds
   every `SKILL.md` as one catalog and refuses a skill that does not parse.
   Nothing is read from disk at run time. Supporting files are not embedded yet.

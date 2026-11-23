@@ -6,7 +6,7 @@ machine must have the provider installed and signed in. [`delega doctor`](doctor
 checks the executable and the local prerequisites; it does not check that the
 provider is signed in. The full reference is
 [Command line](../api.md#command-line) and the
-[`run` skill](https://github.com/joshrotenberg/delega/blob/main/skills/run/SKILL.md).
+[`run` skill](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/skills/run/SKILL.md).
 
 ## Exit statuses
 

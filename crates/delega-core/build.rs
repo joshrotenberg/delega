@@ -1,5 +1,5 @@
 //! Generates the list of embedded skills from the `skills/` directory at the
-//! repository root, so adding a skill is one step: add `skills/<name>/SKILL.md`.
+//! crate root, so adding a skill is one step: add `skills/<name>/SKILL.md`.
 //!
 //! Each skill is validated here with the same parser the crate uses, so a skill
 //! that fails strict parsing stops the build. Entries whose name starts with
@@ -15,7 +15,7 @@ mod frontmatter;
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let skills = manifest.join("../../skills");
+    let skills = manifest.join("skills");
     println!("cargo:rerun-if-changed={}", skills.display());
     println!("cargo:rerun-if-changed=src/skills/frontmatter.rs");
 

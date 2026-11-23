@@ -69,7 +69,7 @@ Where each stands:
 | 2 | Partly met. The result reports the cleanup problems delega detects; the documented gaps ([Status and limits](https://github.com/joshrotenberg/delega/blob/main/docs/project/status.md)) can leave a process running while cleanup is reported as confirmed. | `process`; tested by `process/tests` and the acceptance matrix. |
 | 3 | Partly met. Permissions are stated up front, and a request not granted is answered no. Asking the caller live is not built. | `contract/permissions.rs`, `provider`; tested by `provider/tests` against fakes that honour the permission arguments. |
 | 4 | Met for the differences delega can identify, which it reports in `provider_notes`. With `permissions.strict`, a run with a permission that delega identifies as one the provider cannot enforce is refused with `permissions_not_enforceable`. | `provider/claude.rs`, `provider/codex.rs`; tested against a fake of each CLI. |
-| 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](https://github.com/joshrotenberg/delega/tree/main/schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
+| 5 | Met. Request and result carry `schema_version` 1; the schemas in [`schemas`](https://github.com/joshrotenberg/delega/tree/main/crates/delega-core/schemas) are generated from the types. | `contract`; a test fails when a committed schema is stale. |
 | 6 | Partly met. The fake-provider tests run in CI; the live suite is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)). | `crates/delega-core/src/provider/tests/fakes`. |
 
 The committed acceptance run ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),

@@ -1,9 +1,8 @@
 //! Shared by the `delega run` tests.
 //!
 //! Every test runs the built `delega` binary against the fake providers that
-//! the core crate keeps for its own tests (`crates/delega-core/src/provider/
-//! tests/fakes`), referenced by path so there is one copy. The binary starts
-//! with an empty environment plus the few variables set here: a temporary
+//! the core crate keeps for its own tests, linked into `tests/fakes`. The binary
+//! starts with an empty environment plus the few variables set here: a temporary
 //! HOME, the fakes as the provider executables, and a record directory the
 //! fakes write into. Nothing reads real provider state, the real home
 //! directory or the network, and no real provider CLI is ever started.
@@ -108,7 +107,7 @@ pub const SYSTEM_ROOT_ENV: &str = "DELEGA_TEST_SYSTEM_ROOT";
 
 fn fake(provider: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../delega-core/src/provider/tests/fakes")
+        .join("tests/fakes")
         .join(format!("fake-{provider}.sh"))
 }
 

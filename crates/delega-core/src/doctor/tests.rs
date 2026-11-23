@@ -13,8 +13,8 @@ fn committed_schemas_doctor_matches_the_generated_schema() {
         return;
     }
     if std::env::var_os("DELEGA_UPDATE_SCHEMAS").is_some() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../schemas/doctor.schema.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/doctor.schema.json");
         std::fs::write(path, &generated).expect("write schema file");
         return;
     }

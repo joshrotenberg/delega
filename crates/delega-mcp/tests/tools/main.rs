@@ -171,8 +171,7 @@ impl Rig {
             path
         };
         let fakes = make("fakes");
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../delega-core/src/provider/tests/fakes");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes");
         for name in [
             "fake-claude.sh",
             "fake-codex.sh",

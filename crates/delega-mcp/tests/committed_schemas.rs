@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 fn directory() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../schemas/mcp")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/mcp")
 }
 
 /// The text of the file for a tool: pretty JSON ending in a newline.

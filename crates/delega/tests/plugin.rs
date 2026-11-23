@@ -107,9 +107,9 @@ impl Rig {
         let doc: Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("not JSON ({e}): {}", text(&out.stdout)));
         let schema = if args[1] == "install" {
-            include_str!("../../../schemas/plugin-install.schema.json")
+            include_str!("../schemas/plugin-install.schema.json")
         } else {
-            include_str!("../../../schemas/plugin-uninstall.schema.json")
+            include_str!("../schemas/plugin-uninstall.schema.json")
         };
         let schema: Value = serde_json::from_str(schema).expect("schema");
         let validator = jsonschema::validator_for(&schema).expect("compile schema");

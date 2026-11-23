@@ -55,7 +55,7 @@ fi
 ```
 
 The document's JSON Schema is
-[`schemas/doctor.schema.json`](https://github.com/joshrotenberg/delega/blob/main/schemas/doctor.schema.json).
+[`crates/delega-core/schemas/doctor.schema.json`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/schemas/doctor.schema.json).
 
 ## Reading problems
 

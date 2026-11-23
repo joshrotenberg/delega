@@ -8,11 +8,11 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/joshrotenberg/delega"
-publish = false
+homepage = "https://joshrotenberg.com/delega/"
 
 [workspace.dependencies]
-delega-core = { path = "crates/delega-core" }
-delega-mcp = { path = "crates/delega-mcp" }
+delega-core = { path = "crates/delega-core", version = "0.1.0-dev" }
+delega-mcp = { path = "crates/delega-mcp", version = "0.1.0-dev" }
 clap = { version = "4.6", features = ["derive"] }
 jsonschema = { version = "0.61", default-features = false }
 libc = "0.2"
@@ -40,3 +40,6 @@ unused_must_use = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+[profile.dist]
+inherits = "release"

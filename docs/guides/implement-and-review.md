@@ -8,7 +8,7 @@ practice.
 
 The supervisor uses the MCP tools (`start`, `follow_up`, `wait`, `read`,
 `close`), described in [MCP](../api.md#mcp) and the
-[`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/skills/delegate/SKILL.md).
+[`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/skills/delegate/SKILL.md).
 
 ## 1. Make a worktree for the implementer
 
