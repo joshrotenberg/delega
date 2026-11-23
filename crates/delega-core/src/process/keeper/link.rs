@@ -88,8 +88,6 @@ struct State {
     pin: Arc<GroupPin>,
     /// See [`LinkHandle::unproven`].
     unproven: AtomicBool,
-    /// See [`LinkHandle::refused`].
-    refused: AtomicBool,
 }
 
 /// What the keeper said when it reaped the program.
@@ -130,18 +128,11 @@ impl LinkHandle {
         self.state.subreaper.load(Ordering::SeqCst)
     }
 
-    /// Whether any census or freeze answer of this run was unproven in a way
-    /// no later answer repairs, a refused hold apart (see [`reply_holes`]).
-    /// Sticky.
+    /// Whether any census or freeze answer of this run was unproven in a way a
+    /// later answer cannot repair (see [`reply_unproven`]). Sticky, and no
+    /// final census supersedes it.
     pub(crate) fn unproven(&self) -> bool {
         self.state.unproven.load(Ordering::SeqCst)
-    }
-
-    /// Whether any census or freeze answer of this run refused a hold. Sticky;
-    /// on Linux with a subreaper a final census that proves the tree empty
-    /// supersedes it in the verdict (see `process/mod.rs`).
-    pub(crate) fn refused(&self) -> bool {
-        self.state.refused.load(Ordering::SeqCst)
     }
 
     /// The lock that says whether the program's pid still pins its group
@@ -171,11 +162,7 @@ impl LinkHandle {
         }
         match tokio::time::timeout(KEEPER_REPLY_TIMEOUT, rx).await {
             Ok(Ok((live, detail))) => {
-                let holes = reply_holes(verb, &detail);
-                if holes.refused {
-                    self.state.refused.store(true, Ordering::SeqCst);
-                }
-                if holes.unproven {
+                if reply_unproven(verb, &detail) {
                     self.state.unproven.store(true, Ordering::SeqCst);
                 }
                 self.log(
@@ -265,36 +252,22 @@ impl KeeperLink {
     }
 }
 
-/// The holes one census or freeze answer leaves.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Holes {
-    /// A refused hold: a process that was not signalled because it could not
-    /// be verified. A final census that proves the tree empty supersedes it
-    /// (Linux, with a subreaper).
-    pub refused: bool,
-    /// A hole nothing supersedes: a failed read of `/proc`, or a freeze that
-    /// did not complete for a reason other than a refused hold (or that does
-    /// not say).
-    pub unproven: bool,
-}
-
-/// The holes a census or freeze answer leaves. A census that is incomplete
+/// Whether a census or freeze answer leaves a hole no later answer repairs:
+/// a refused hold (a process that was never signalled), a failed read of
+/// `/proc`, or a freeze that did not complete. A census that is incomplete
 /// because the tree keeps changing reports a nonzero count and never claimed
-/// an empty tree, so it leaves none. An answer without details (no walk)
-/// leaves none.
-pub(crate) fn reply_holes(verb: &str, detail: &str) -> Holes {
+/// an empty tree, so it is not one. An answer without details (no walk) is
+/// not one.
+pub(crate) fn reply_unproven(verb: &str, detail: &str) -> bool {
     let field = |name: &str| -> Option<&str> {
         detail
             .split_ascii_whitespace()
             .find_map(|word| word.strip_prefix(name)?.strip_prefix('='))
     };
     let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
-    let incomplete_freeze = verb == "freeze" && field("complete") == Some("false");
-    Holes {
-        refused: nonzero("refused"),
-        unproven: nonzero("read_failures")
-            || (incomplete_freeze && field("complete_apart_from_refusals") != Some("true")),
-    }
+    nonzero("refused")
+        || nonzero("read_failures")
+        || (verb == "freeze" && field("complete") == Some("false"))
 }
 
 /// Wait up to `bound` for the keeper, the owner's own child, to exit; kill it
@@ -664,116 +637,49 @@ mod tests {
     use super::*;
 
     /// A refused hold in one answer is not repaired by a later clean one: the
-    /// flag the owner keeps is sticky for the run (only a final census at the
-    /// reap can supersede it, in the verdict).
+    /// flag the owner keeps is sticky for the run.
     #[test]
-    fn a_keeper_refusal_followed_by_a_clean_retry_stays_refused() {
-        let refused = AtomicBool::new(false);
-        let unproven = AtomicBool::new(false);
+    fn a_keeper_refusal_followed_by_a_clean_retry_stays_unproven() {
+        let flag = AtomicBool::new(false);
         let answers = [
             (
                 "freeze",
-                "passes=2 complete=false refused=1 read_failures=0 \
-                 complete_apart_from_refusals=true",
+                "passes=2 complete=false refused=1 read_failures=0",
             ),
-            (
-                "freeze",
-                "passes=1 complete=true refused=0 read_failures=0 \
-                 complete_apart_from_refusals=true",
-            ),
-            (
-                "census",
-                "passes=2 complete=true refused=0 read_failures=0 \
-                 complete_apart_from_refusals=true",
-            ),
+            ("freeze", "passes=1 complete=true refused=0 read_failures=0"),
+            ("census", "passes=2 complete=true refused=0 read_failures=0"),
         ];
         for (verb, detail) in answers {
-            let holes = reply_holes(verb, detail);
-            if holes.refused {
-                refused.store(true, Ordering::SeqCst);
-            }
-            if holes.unproven {
-                unproven.store(true, Ordering::SeqCst);
+            if reply_unproven(verb, detail) {
+                flag.store(true, Ordering::SeqCst);
             }
         }
-        assert!(refused.load(Ordering::SeqCst));
-        assert!(!unproven.load(Ordering::SeqCst));
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn which_answers_leave_which_holes() {
-        let holes = |verb, detail| reply_holes(verb, detail);
-        // A failed read is a hole nothing supersedes.
-        assert_eq!(
-            holes(
-                "census",
-                "passes=3 complete=true refused=0 read_failures=1 complete_apart_from_refusals=true"
-            ),
-            Holes {
-                refused: false,
-                unproven: true
-            }
-        );
-        // A freeze that ran out without refusing anything.
-        assert_eq!(
-            holes(
-                "freeze",
-                "passes=64 complete=false refused=0 read_failures=0 \
-                 complete_apart_from_refusals=false"
-            ),
-            Holes {
-                refused: false,
-                unproven: true
-            }
-        );
-        // A freeze incomplete only because it refused a hold.
-        assert_eq!(
-            holes(
-                "freeze",
-                "passes=2 complete=false refused=1 read_failures=0 \
-                 complete_apart_from_refusals=true"
-            ),
-            Holes {
-                refused: true,
-                unproven: false
-            }
-        );
-        // A freeze that refused a hold and also did not freeze the tree.
-        assert_eq!(
-            holes(
-                "freeze",
-                "passes=64 complete=false refused=1 read_failures=0 \
-                 complete_apart_from_refusals=false"
-            ),
-            Holes {
-                refused: true,
-                unproven: true
-            }
-        );
-        // An incomplete freeze that does not say why counts as unproven.
-        assert!(
-            holes(
-                "freeze",
-                "passes=2 complete=false refused=1 read_failures=0"
-            )
-            .unproven
-        );
+    fn which_answers_are_unproven() {
+        assert!(reply_unproven(
+            "census",
+            "passes=3 complete=true refused=0 read_failures=1"
+        ));
+        assert!(reply_unproven(
+            "freeze",
+            "passes=64 complete=false refused=0 read_failures=0"
+        ));
+        assert!(reply_unproven(
+            "freeze",
+            "passes=2 complete=false refused=1 read_failures=0"
+        ));
         // A census of a tree that keeps changing never claimed zero.
-        assert_eq!(
-            holes(
-                "census",
-                "passes=64 complete=false refused=0 read_failures=0 \
-                 complete_apart_from_refusals=false"
-            ),
-            Holes::default()
-        );
-        assert_eq!(
-            holes(
-                "freeze",
-                "passes=1 complete=true refused=0 read_failures=0 complete_apart_from_refusals=true"
-            ),
-            Holes::default()
-        );
-        assert_eq!(holes("census", ""), Holes::default());
+        assert!(!reply_unproven(
+            "census",
+            "passes=64 complete=false refused=0 read_failures=0"
+        ));
+        assert!(!reply_unproven(
+            "freeze",
+            "passes=1 complete=true refused=0 read_failures=0"
+        ));
+        assert!(!reply_unproven("census", ""));
     }
 }

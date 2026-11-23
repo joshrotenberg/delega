@@ -54,6 +54,8 @@ mod walk;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub(crate) use link::reply_unproven as link_reply_unproven;
 pub(crate) use link::{KeeperLink, LaunchSpec, LinkHandle, StartError, start};
 
 /// Test seam: a keeper started by the tests with this variable makes that many

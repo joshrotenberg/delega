@@ -563,6 +563,37 @@ fn only_late_listing_reasons(reason: &str) -> bool {
     }
 }
 
+/// What the verdict needs to know about refusals and the keeper's proof.
+#[derive(Debug, Clone, Copy, Default)]
+struct Refusals {
+    /// The keeper reported a refused hold, a failed read, or a freeze that did
+    /// not complete, in any answer of the run.
+    keeper_unproven: bool,
+    /// Signals the owner did not send because their process could not be
+    /// verified.
+    owner_refused: u64,
+    /// Of those, the ones meant for a process found only by the run marker.
+    owner_refused_marked: u64,
+    /// The keeper's final census at the reap proved its tree empty (Linux,
+    /// with a subreaper, the reap acknowledged, nothing left).
+    tree_proven_empty: bool,
+}
+
+/// The reason refusals leave the verdict `Unconfirmed`, if they do. The
+/// narrower Rule A: the keeper's proof supersedes the owner's refusals of
+/// group and session members and tracked processes, and nothing else. A hole
+/// the keeper reported (a refused hold included) and a refusal meant for a
+/// marker-only process always stand.
+fn refusal_reason(r: Refusals) -> Option<&'static str> {
+    if r.keeper_unproven {
+        Some(KEEPER_UNPROVEN_REASON)
+    } else if r.owner_refused_marked > 0 || (r.owner_refused > 0 && !r.tree_proven_empty) {
+        Some(UNVERIFIED_SIGNAL_REASON)
+    } else {
+        None
+    }
+}
+
 /// What cleanup concluded.
 pub(super) struct Settled {
     /// How the leader ended, or why that is unknown.
@@ -1028,12 +1059,7 @@ impl OwnedProcess {
                     (obs.stats.unverified_signals, obs.unverified_marked)
                 };
                 // The narrower Rule A (see "What `Confirmed` means" in the
-                // module documentation): on Linux, with the keeper a child
-                // subreaper, every live descendant is in its tree, so its
-                // final census at the reap, when it proves the tree empty,
-                // supersedes earlier refusals by this owner and by the keeper.
-                // A refusal meant for a process found only by the marker is
-                // not covered: such a process need not be in the tree.
+                // module documentation).
                 let tree_proven_empty = cfg!(target_os = "linux")
                     && self.reap_acknowledged
                     && self.reap_proven
@@ -1042,17 +1068,18 @@ impl OwnedProcess {
                         .keeper
                         .as_ref()
                         .is_some_and(|k| k.subreaper() && !k.lost());
-                let keeper = shared.keeper.as_ref();
+                let refusal = refusal_reason(Refusals {
+                    keeper_unproven: shared.keeper.as_ref().is_some_and(|k| k.unproven()),
+                    owner_refused: unverified,
+                    owner_refused_marked: unverified_marked,
+                    tree_proven_empty,
+                });
                 let cleanup = if shared.keeper_lost() {
                     unconfirmed(KEEPER_LOST_REASON)
                 } else if kept && !self.reap_acknowledged {
                     unconfirmed(NO_REAP_ACK_REASON)
-                } else if keeper.is_some_and(|k| k.unproven())
-                    || (keeper.is_some_and(|k| k.refused()) && !tree_proven_empty)
-                {
-                    unconfirmed(KEEPER_UNPROVEN_REASON)
-                } else if unverified_marked > 0 || (unverified > 0 && !tree_proven_empty) {
-                    unconfirmed(UNVERIFIED_SIGNAL_REASON)
+                } else if let Some(reason) = refusal {
+                    unconfirmed(reason)
                 } else if self.reap_leftover > 0 {
                     unconfirmed(&format!(
                         "{} {}",
@@ -1297,4 +1324,50 @@ fn watch_exit(
             let _ = tx.send(result);
         })?;
     Ok(rx)
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    fn with(keeper_unproven: bool, owner: u64, marked: u64, proven: bool) -> Option<&'static str> {
+        refusal_reason(Refusals {
+            keeper_unproven,
+            owner_refused: owner,
+            owner_refused_marked: marked,
+            tree_proven_empty: proven,
+        })
+    }
+
+    #[test]
+    fn the_keepers_proof_supersedes_an_owner_refusal() {
+        assert_eq!(with(false, 3, 0, true), None);
+    }
+
+    #[test]
+    fn an_owner_refusal_stands_without_the_proof() {
+        assert_eq!(with(false, 1, 0, false), Some(UNVERIFIED_SIGNAL_REASON));
+    }
+
+    #[test]
+    fn an_owner_refusal_of_a_marker_only_process_stands_with_the_proof() {
+        assert_eq!(with(false, 2, 1, true), Some(UNVERIFIED_SIGNAL_REASON));
+    }
+
+    #[test]
+    fn a_keeper_refused_hold_is_not_superseded_by_a_proof() {
+        // A freeze answer that refused a hold makes the keeper's flag sticky.
+        assert!(super::super::keeper::link_reply_unproven(
+            "freeze",
+            "passes=2 complete=false refused=1 read_failures=0"
+        ));
+        assert_eq!(with(true, 0, 0, true), Some(KEEPER_UNPROVEN_REASON));
+        assert_eq!(with(true, 1, 0, true), Some(KEEPER_UNPROVEN_REASON));
+    }
+
+    #[test]
+    fn nothing_refused_leaves_the_verdict_to_the_other_checks() {
+        assert_eq!(with(false, 0, 0, false), None);
+        assert_eq!(with(false, 0, 0, true), None);
+    }
 }
