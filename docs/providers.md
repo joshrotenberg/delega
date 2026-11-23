@@ -137,7 +137,8 @@ See `crates/delega-core/src/provider/settle.rs`.
 
 `invalid_request`, `invalid_answer_schema`, `native_arg_rejected`,
 `cwd_unusable`, `directory_unusable`, `unsupported_command`,
-`permissions_not_enforceable`, `provider_not_found`, `unsupported_provider_version`, `invalid_env_name`,
+`permissions_not_enforceable`, `permissions_not_supported`, `provider_not_found`,
+`unsupported_provider_version`, `invalid_env_name`,
 `forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit`,
 `managed_mcp_exclusive` (all refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
@@ -378,7 +379,7 @@ guard when it can resolve an absolute path.
 - A working directory of `/` or the user's home grants access below it and
   adds a warning.
 - `full` keeps sub-agents, MCP and background tasks disabled and notes this.
-  `write` and `build` omit `NotebookEdit`.
+  Without `on_request: ask`, `write` and `build` omit `NotebookEdit`.
 - Claude Code skips automatic `CLAUDE.md` and auto-memory loading and notes
   this. A worker can read repository instructions with its tools.
 - Managed policy can override the launch settings.
@@ -657,11 +658,17 @@ See `crates/delega-core/src/provider/env.rs`.
   `no rollout found for thread id` (code -32600) on stderr.
   delega returned `session_not_found`.
 - Claude with an unknown model reported `model_not_found` and HTTP 404 in an
-  assistant event and a failed result, then exited 1. delega returned
+  assistant event, then emitted a result with subtype `success`,
+  `is_error: true` and no `errors`, and exited 1. delega returned
   `provider_model_unavailable` (#116).
 - Claude with an invalid key reported `authentication_failed` and HTTP 401 in
   the same event shape. delega returned `provider_auth`. The executable listed
-  additional assistant error values that were untested (#116).
+  these assistant `error` values (#116): `authentication_failed`,
+  `oauth_org_not_allowed`, `account_on_hold`, `verification_required`,
+  `billing_error`, `rate_limit`, `overloaded`, `invalid_request`,
+  `model_not_found`, `server_error`, `unknown`, `max_output_tokens` and
+  `cloud_credential_error`. The two probes exercised
+  `model_not_found` and `authentication_failed`.
 - Across a fresh run and two resumes, Claude reported per-run output tokens
   (601, 4, 3) and cumulative cost (USD 0.0283, 0.0374, 0.0388). A separate
   sample reported fresh and resumed session cost of USD 0.01142 and 0.0173514
@@ -677,16 +684,18 @@ See `crates/delega-core/src/provider/env.rs`.
 
 ### 2026-11-22, Claude Code 2.1.330 and codex-cli 0.171.0 (#98)
 
-- Raw Claude in the build sandbox ran `cargo test` under `dontAsk` without
-  a Bash allow rule. Its per-user `TMPDIR` was writable, the rest of `/tmp`
+- Raw Claude with delega's launch flags plus the [Build](#build) sandbox
+  settings ran `cargo test` under `dontAsk` without a Bash allow rule. Its
+  per-user `TMPDIR` was writable, the rest of `/tmp`
   and `$HOME` were blocked, and the network was denied. An `--add-dir`
   directory was writable unless covered by `filesystem.denyWrite`.
-- Raw Codex with both temporary-directory exclusions set to `true` failed
-  `cargo test` with `PermissionDenied`. With both set to `false`, tests
-  passed, `$TMPDIR` and `/tmp` were writable, and `$HOME` and the network
-  were blocked. The network result also matches the sandbox default.
-- Both build workers on macOS passed `cargo test` and were denied writes
-  to `$HOME` and network access.
+- Raw Codex with `network_access=false` and both temporary-directory exclusions
+  set to `true` failed `cargo test` with `PermissionDenied`. With both exclusions
+  set to `false`, tests passed, `$TMPDIR` and `/tmp` were writable, and
+  `$HOME` and the network were blocked. The network result also matches the
+  sandbox default.
+- With the branch binary for #98 on macOS (Claude model haiku), both build
+  workers passed `cargo test` and were denied writes to `$HOME` and network access.
 - The Codex build worker could write a listed directory under `/tmp`.
   Git index locking and writing `.git/hooks/x` failed, blocking commits in
   both a regular checkout and a linked worktree.
