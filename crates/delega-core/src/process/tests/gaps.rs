@@ -620,17 +620,52 @@ async fn a_fork_relay_that_changes_session_each_generation_is_stopped_in_a_kept_
 #[tokio::test]
 async fn a_fast_double_fork_is_never_confirmed_while_its_grandchild_runs_in_a_kept_run() {
     require_perl!();
+    let (cleanup, alive) = double_fork_run().await;
+    assert!(
+        !(alive && cleanup == Cleanup::Confirmed),
+        "the grandchild is still running but cleanup says Confirmed"
+    );
+}
+
+const DOUBLE_FORK: &str = "perl -e 'use POSIX; my $c = fork(); if ($c == 0) { POSIX::setsid(); \
+     my $g = fork(); if ($g == 0) { open F, q(>), q(gc.tmp); print F $$; close F; \
+     rename q(gc.tmp), q(gc); exec q(/bin/sleep), q(60) } POSIX::_exit(0) } \
+     waitpid($c, 0); sleep 1'";
+
+/// One kept run of [`DOUBLE_FORK`]: its verdict, and whether the grandchild
+/// was alive a moment after the report (it is stopped here either way).
+async fn double_fork_run() -> (Cleanup, bool) {
     let s = Scratch::new();
-    let script = "perl -e 'use POSIX; my $c = fork(); if ($c == 0) { POSIX::setsid(); \
-         my $g = fork(); if ($g == 0) { open F, q(>), q(gc.tmp); print F $$; close F; \
-         rename q(gc.tmp), q(gc); exec q(/bin/sleep), q(60) } POSIX::_exit(0) } \
-         waitpid($c, 0); sleep 1'";
-    let spec = kept(sh(&s, script, LONG));
+    let spec = kept(sh(&s, DOUBLE_FORK, LONG));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
-    assert_no_false_confirmation(pids[0], &report.cleanup);
-    if report.cleanup == Cleanup::Confirmed {
-        assert_gone("double-forked grandchild", &pids).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    (report.cleanup, is_running_async(pids[0]).await)
+}
+
+/// How the verdicts of 50 kept runs of the fast double fork fell. Run with
+/// `cargo test --release -- --ignored measure_the_fast_double_fork
+/// --nocapture`.
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn measure_the_fast_double_fork() {
+    if !super::fixtures::perl_available() {
+        return;
     }
+    let (mut stopped_confirmed, mut alive_unconfirmed, mut stopped_unconfirmed, mut false_ok) =
+        (0, 0, 0, 0);
+    for _ in 0..50 {
+        match double_fork_run().await {
+            (Cleanup::Confirmed, false) => stopped_confirmed += 1,
+            (Cleanup::Confirmed, true) => false_ok += 1,
+            (_, true) => alive_unconfirmed += 1,
+            (_, false) => stopped_unconfirmed += 1,
+        }
+    }
+    eprintln!(
+        "double fork: stopped and Confirmed {stopped_confirmed}, stopped and Unconfirmed \
+         {stopped_unconfirmed}, alive and Unconfirmed {alive_unconfirmed}, alive and Confirmed \
+         {false_ok} (of 50)"
+    );
 }
 
 /// An orphan the test makes beside a kept run, while it runs: its parent was
@@ -655,9 +690,9 @@ async fn an_orphan_made_beside_a_kept_run_while_it_runs_is_never_signalled() {
     );
 }
 
-/// The measurement behind the macOS residual: 50 interrupted kept runs of the
-/// relay, counting those that stopped it and those that claimed `Confirmed`
-/// with a relay process alive. Run with `cargo test -- --ignored
+/// 50 interrupted kept runs of the relay, counting those that stopped it,
+/// those that claimed `Confirmed` with a relay process alive, and why the
+/// others were `Unconfirmed`. Run with `cargo test -- --ignored
 /// measure_the_relay_freeze --nocapture`.
 #[tokio::test]
 #[ignore = "a measurement, not a check"]
@@ -669,9 +704,14 @@ async fn measure_the_relay_freeze() {
     let mut false_confirmations = 0;
     let mut unconfirmed = 0;
     let mut pipes_held = 0;
+    let mut keeper_holes = 0;
     let mut took = Vec::new();
     for _ in 0..50 {
         let (alive, cleanup, stop) = relay_run().await;
+        if matches!(&cleanup, Cleanup::Unconfirmed { reason, .. } if reason == crate::process::KEEPER_UNPROVEN_REASON)
+        {
+            keeper_holes += 1;
+        }
         took.push(stop);
         if !alive {
             stopped += 1;
@@ -691,7 +731,8 @@ async fn measure_the_relay_freeze() {
     eprintln!(
         "relay: stopped in {stopped} of 50 runs; Confirmed with a relay alive in \
          {false_confirmations}; Unconfirmed in {unconfirmed} ({pipes_held} because a process \
-         held the output); interrupt to report median {:?}, max {:?}",
+         held the output, {keeper_holes} because the keeper reported a hole); interrupt to \
+         report median {:?}, max {:?}",
         took[25], took[49]
     );
 }

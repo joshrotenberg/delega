@@ -50,6 +50,8 @@ mod protocol;
 mod run;
 #[cfg(target_os = "macos")]
 mod track;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use track::NO_TRACKING_ENV;
 #[cfg(target_os = "linux")]
 mod walk;
 

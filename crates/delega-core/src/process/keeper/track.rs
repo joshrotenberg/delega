@@ -185,10 +185,18 @@ pub(super) fn get() -> Option<&'static Handle> {
     TRACKER.get()
 }
 
+/// A test-only seam: when the keeper's environment has this variable,
+/// whatever its value, the keeper does not track forks, as when its
+/// self-test fails. It can only make cleanup weaker.
+pub(crate) const NO_TRACKING_ENV: &str = "DELEGA_TEST_NO_FORK_TRACKING";
+
 /// Check the calls the tracker relies on, open its queue and start its
 /// thread, which waits for [`Handle::start`]. The keeper says `tracker on`
 /// only when this succeeds.
 pub(super) fn prepare() -> Result<(), String> {
+    if std::env::var_os(NO_TRACKING_ENV).is_some() {
+        return Err(format!("{NO_TRACKING_ENV} is set"));
+    }
     darwin::self_test()?;
     let queue = Arc::new(ProcQueue::new().map_err(|e| format!("kqueue failed: {e}"))?);
     let me = darwin::identity(rustix::process::getpid().as_raw_nonzero().get())
@@ -323,6 +331,10 @@ struct Tracker {
     /// How deep recovery scans are nested (a loss met during a recovery
     /// starts another).
     depth: u32,
+    /// How old each process was when it was taken, in microseconds, for the
+    /// measurement in the tests.
+    #[cfg(test)]
+    ages: Vec<u64>,
     refused: u32,
     read_failures: u32,
     losses: u32,
@@ -350,6 +362,8 @@ impl Tracker {
             failed: false,
             saturated: false,
             depth: 0,
+            #[cfg(test)]
+            ages: Vec::new(),
             refused: 0,
             read_failures: 0,
             losses: 0,
@@ -539,6 +553,10 @@ impl Tracker {
             },
         );
         self.by_pid.insert(pid, ident.uniqueid);
+        #[cfg(test)]
+        if start_us > 0 {
+            self.ages.push(now_us().saturating_sub(start_us));
+        }
         if self.freezing && proven {
             let _ = self.send(ident.uniqueid, Signal::STOP);
         }
@@ -1190,6 +1208,66 @@ mod tests {
         assert!(t.by_pid.contains_key(&pid));
         assert!(t.live.values().all(|e| e.proven));
         assert!(matches!(launchd, Taken::No));
+    }
+
+    /// How old each generation of a fork relay is when the tracker takes
+    /// it, and what the recovery and second-source scans cost, with the
+    /// tracker driven on this thread. Run with `cargo test --release --
+    /// --ignored measure_the_tracker --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn measure_the_tracker() {
+        use crate::test_spawn::Guarded;
+        let mut t = tracker();
+        let script = "use POSIX; my $p = fork(); if ($p == 0) { \
+            for (1..300) { setpgid(0,0); select(undef, undef, undef, 0.005); \
+            my $q = fork(); if ($q) { exit 0 } } exit 0 } sleep 3";
+        let mut child = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", script])
+            .guarded_spawn()
+            .expect("start perl");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        let ident = darwin::identity(pid).ok().flatten();
+        let watched = t.queue.watch(pid);
+        t.start(pid, ident, watched);
+        let until = Instant::now() + Duration::from_secs(3);
+        let mut events = Vec::new();
+        while Instant::now() < until {
+            t.collect(Duration::from_millis(10), &mut events);
+        }
+        let losses = t.losses;
+        let mut scans = Vec::new();
+        for _ in 0..20 {
+            let began = Instant::now();
+            let _ = t.scan();
+            scans.push(began.elapsed());
+        }
+        let mut recoveries = Vec::new();
+        for _ in 0..20 {
+            let began = Instant::now();
+            let pids = darwin::user_pids(t.my_uid).expect("listed");
+            let _ = t.classify(pids);
+            recoveries.push(began.elapsed());
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let mut ages = t.ages.clone();
+        ages.sort_unstable();
+        scans.sort();
+        recoveries.sort();
+        let at = |q: usize| ages[(ages.len() * q / 100).min(ages.len() - 1)];
+        let processes = darwin::all_pids().map(|p| p.len()).unwrap_or(0);
+        eprintln!(
+            "taken {}, losses {losses}; age at take p50 {} us, p90 {} us, p99 {} us, max {} us; \
+             second-source scan median {:?}, recovery scan median {:?}, at {processes} processes",
+            ages.len(),
+            at(50),
+            at(90),
+            at(99),
+            ages[ages.len() - 1],
+            scans[10],
+            recoveries[10]
+        );
     }
 
     #[test]

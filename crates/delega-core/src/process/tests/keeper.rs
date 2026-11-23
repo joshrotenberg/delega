@@ -416,6 +416,102 @@ async fn measure_the_keepers_cost() {
     }
 }
 
+/// A macOS keeper whose fork tracking is off (its self-test failed; here the
+/// test seam) says so: the report has `fork_tracking` false and a warning, and
+/// the run is cleaned up by listings and the marker as before the tracker.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_keeper_without_fork_tracking_says_so_and_still_cleans_up() {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "echo out; exit 0", LONG);
+    spec.keeper = Some(test_keeper().env(crate::process::keeper::NO_TRACKING_ENV, "1"));
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    let keeper = report.diagnostics.keeper.clone().expect("a keeper");
+    assert!(!keeper.fork_tracking, "{keeper:?}");
+    assert!(
+        report
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|w| w.contains("does not track forks")),
+        "{:?}",
+        report.diagnostics.warnings
+    );
+    assert_confirmed(&report);
+}
+
+/// What fork tracking costs a kept run on macOS: a script that runs
+/// `/usr/bin/true` 2000 times, and a run of `/usr/bin/true` alone, each kept
+/// with the tracker on and off (the test seam), alternating, the median of
+/// each. Also, over 200 kept runs of a small script with a few forks, how
+/// many ended `Unconfirmed`. Run with `cargo test --release -- --ignored
+/// measure_the_fork_trackers_cost --nocapture`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn measure_the_fork_trackers_cost() {
+    let loop_script = "i=0; while [ $i -lt 2000 ]; do /usr/bin/true; i=$((i+1)); done";
+    let mut times: [Vec<Duration>; 4] = Default::default();
+    for round in 0..10 {
+        for (slot, (script, tracked)) in [
+            (loop_script, true),
+            (loop_script, false),
+            ("exec /usr/bin/true", true),
+            ("exec /usr/bin/true", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let s = Scratch::new();
+            let mut spec = sh(&s, script, LONG);
+            let mut keeper = test_keeper();
+            if !tracked {
+                keeper = keeper.env(crate::process::keeper::NO_TRACKING_ENV, "1");
+            }
+            spec.keeper = Some(keeper);
+            let began = std::time::Instant::now();
+            let report = ProcessHandle::start(spec).wait().await;
+            let took = began.elapsed();
+            assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+            // The first round warms the caches.
+            if round > 0 {
+                times[slot].push(took);
+            }
+        }
+    }
+    for t in &mut times {
+        t.sort();
+    }
+    let median = |t: &Vec<Duration>| t[t.len() / 2];
+    eprintln!(
+        "2000 forks: tracker on median {:?}, off {:?}; /usr/bin/true: on {:?}, off {:?} ({} runs each)",
+        median(&times[0]),
+        median(&times[1]),
+        median(&times[2]),
+        median(&times[3]),
+        times[0].len()
+    );
+    let mut unconfirmed = Vec::new();
+    for _ in 0..200 {
+        let s = Scratch::new();
+        let spec = kept(sh(
+            &s,
+            "ls >/dev/null; date >/dev/null; x=$(echo a); sh -c 'sleep 0.01 &' ; exit 0",
+            LONG,
+        ));
+        let report = ProcessHandle::start(spec).wait().await;
+        if let Cleanup::Unconfirmed { reason, .. } = &report.cleanup {
+            unconfirmed.push(reason.clone());
+        }
+    }
+    eprintln!(
+        "200 small kept runs: {} Unconfirmed {:?}",
+        unconfirmed.len(),
+        unconfirmed
+    );
+}
+
 /// A keeper that ends without saying whether it started the program may have
 /// started it: the run fails to start, and its cleanup is not confirmed.
 #[tokio::test]
