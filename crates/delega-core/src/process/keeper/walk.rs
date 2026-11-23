@@ -19,6 +19,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::os::fd::OwnedFd;
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, PidfdFlags, pidfd_open, pidfd_send_signal};
@@ -41,8 +42,47 @@ fn parse_pids(text: &str) -> impl Iterator<Item = i32> + '_ {
 
 /// A read of `/proc` that failed for a reason other than the process being
 /// gone. It is never taken as absence: the pass that met it is incomplete.
+/// Every one is made by [`read_failed`], which counts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ReadFailed;
+
+/// Reads of `/proc` that failed in this process since it started, whatever
+/// walk met them (a census, a pass discarded as in flux, a freeze, a reap of
+/// orphans). Any one withholds the final proof (see [`final_census_proves_empty`]).
+static READ_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Test seam: make this many of the next reads in this process fail, on any
+/// thread. Set in the keeper from [`INJECT_READ_FAILURES_ENV`], and in a
+/// helper process of the walk tests.
+#[cfg(test)]
+static INJECTED_READ_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Test seam: the keeper started by the tests injects this many read failures
+/// (see [`INJECTED_READ_FAILURES`]).
+#[cfg(test)]
+pub(super) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
+
+/// Set the test seam [`INJECTED_READ_FAILURES`] from the environment.
+#[cfg(test)]
+pub(super) fn inject_read_failures_from_env() {
+    if let Some(n) = std::env::var(INJECT_READ_FAILURES_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        INJECTED_READ_FAILURES.store(n, Ordering::SeqCst);
+    }
+}
+
+/// A read failure, counted.
+fn read_failed() -> ReadFailed {
+    READ_FAILURES.fetch_add(1, Ordering::SeqCst);
+    ReadFailed
+}
+
+/// Whether any read of `/proc` failed in this process since it started.
+fn any_read_failed() -> bool {
+    READ_FAILURES.load(Ordering::SeqCst) > 0
+}
 
 #[cfg(test)]
 thread_local! {
@@ -57,7 +97,22 @@ thread_local! {
 fn forced_failure() -> bool {
     #[cfg(test)]
     {
-        FAIL_READS.with(std::cell::Cell::get)
+        let mut left = INJECTED_READ_FAILURES.load(Ordering::SeqCst);
+        let injected = loop {
+            if left == 0 {
+                break false;
+            }
+            match INJECTED_READ_FAILURES.compare_exchange(
+                left,
+                left - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break true,
+                Err(now) => left = now,
+            }
+        };
+        injected || FAIL_READS.with(std::cell::Cell::get)
     }
     #[cfg(not(test))]
     {
@@ -81,7 +136,7 @@ fn stat_read(pid: i32) -> Result<Option<(char, i32)>, ReadFailed> {
     let bytes = match std::fs::read(format!("/proc/{pid}/stat")) {
         Ok(bytes) => bytes,
         Err(error) if is_gone(&error) => return Ok(None),
-        Err(_) => return Err(ReadFailed),
+        Err(_) => return Err(read_failed()),
     };
     let parse = || -> Option<(char, i32)> {
         let end = bytes.iter().rposition(|&b| b == b')')?;
@@ -91,7 +146,7 @@ fn stat_read(pid: i32) -> Result<Option<(char, i32)>, ReadFailed> {
         let parent = fields.next()?.parse().ok()?;
         Some((state, parent))
     };
-    parse().map(Some).ok_or(ReadFailed)
+    parse().map(Some).ok_or_else(read_failed)
 }
 
 /// [`stat_read`] where a failure needs no distinction from absence (the
@@ -104,21 +159,26 @@ fn stat(pid: i32) -> Option<(char, i32)> {
 /// failed for another reason.
 pub(super) fn children(pid: i32) -> Result<Vec<i32>, ReadFailed> {
     if forced_failure() {
-        return Err(ReadFailed);
+        return Err(read_failed());
     }
     if children_file() {
         let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
             Ok(tasks) => tasks,
             Err(error) if is_gone(&error) => return Ok(Vec::new()),
-            Err(_) => return Err(ReadFailed),
+            Err(_) => return Err(read_failed()),
         };
         let mut out = Vec::new();
         for task in tasks {
-            let task = task.map_err(|_| ReadFailed)?;
+            let task = match task {
+                Ok(task) => task,
+                // A task that ends during the listing is gone, not a failure.
+                Err(error) if is_gone(&error) => continue,
+                Err(_) => return Err(read_failed()),
+            };
             match std::fs::read_to_string(task.path().join("children")) {
                 Ok(text) => out.extend(parse_pids(&text)),
                 Err(error) if is_gone(&error) => {}
-                Err(_) => return Err(ReadFailed),
+                Err(_) => return Err(read_failed()),
             }
         }
         out.sort_unstable();
@@ -152,12 +212,17 @@ pub(super) fn descendants(root: i32) -> Result<Vec<i32>, ReadFailed> {
 /// child while another child of the same parent exits during the read.
 fn scan() -> Result<HashMap<i32, i32>, ReadFailed> {
     if forced_failure() {
-        return Err(ReadFailed);
+        return Err(read_failed());
     }
-    let entries = std::fs::read_dir("/proc").map_err(|_| ReadFailed)?;
+    let entries = std::fs::read_dir("/proc").map_err(|_| read_failed())?;
     let mut table = HashMap::new();
     for entry in entries {
-        let entry = entry.map_err(|_| ReadFailed)?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            // A process that ends during the listing is gone, not a failure.
+            Err(error) if is_gone(&error) => continue,
+            Err(_) => return Err(read_failed()),
+        };
         let Some(pid) = entry
             .file_name()
             .to_str()
@@ -198,7 +263,7 @@ fn alive_listed(pid: i32) -> Result<bool, ReadFailed> {
     match stat_read(pid)? {
         Some((state, _)) => Ok(state != 'Z' && state != 'X'),
         None if gone_by_pidfd(pid) => Ok(false),
-        None => Err(ReadFailed),
+        None => Err(read_failed()),
     }
 }
 
@@ -358,6 +423,18 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
         read_failures,
         complete_apart_from_refusals: false,
     }
+}
+
+/// The final census at the reap, and whether it proves the keeper's tree
+/// empty: the census itself proves it ([`Walked::proves_empty`]), and no read
+/// of `/proc` failed in this process at any point since it started, in this
+/// census (a pass discarded as in flux included) or in any walk before it.
+/// Coarser than counting the failures of one census, and enough: a keeper
+/// that never met a failed read can prove its tree empty, one that met any
+/// cannot.
+pub(super) fn final_census_proves_empty(root: i32, keep: i32) -> bool {
+    let walked = census(root, keep);
+    walked.proves_empty() && !any_read_failed()
 }
 
 /// Why a process could not be held.
@@ -702,6 +779,80 @@ mod tests {
         );
     }
 
+    /// Set to a mode to make [`census_helper_entry`] run one census as a
+    /// process of its own (see [`in_a_helper`]).
+    const HELPER_ENV: &str = "DELEGA_TEST_CENSUS_HELPER";
+    /// The file the helper writes its findings to.
+    const HELPER_OUT_ENV: &str = "DELEGA_TEST_CENSUS_OUT";
+
+    /// Not a test: when this binary is started as a helper, run the census
+    /// the mode names with this process as the root, write what it found, and
+    /// exit. A census reaps the root's exited children and counts all its live
+    /// ones, so in the shared test process it would take other tests'
+    /// children; here the root has only what the mode starts.
+    #[test]
+    fn census_helper_entry() {
+        let (Some(mode), Some(out)) = (
+            std::env::var_os(HELPER_ENV),
+            std::env::var_os(HELPER_OUT_ENV),
+        ) else {
+            return;
+        };
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let found = match mode.to_str() {
+            Some("empty") => format!("proven={}", final_census_proves_empty(me, 0)),
+            Some("transient") => {
+                // One read fails: the first of the census, in its check for
+                // flux, so that pass is discarded and is not counted in the
+                // census's own read failures.
+                INJECTED_READ_FAILURES.store(1, Ordering::SeqCst);
+                let walked = census(me, 0);
+                let proven = final_census_proves_empty(me, 0);
+                format!(
+                    "census_alone_proves={} injected_left={} proven={proven}",
+                    walked.proves_empty(),
+                    INJECTED_READ_FAILURES.load(Ordering::SeqCst)
+                )
+            }
+            _ => "unknown mode".to_string(),
+        };
+        std::fs::write(out, found).expect("write the findings");
+        std::process::exit(0);
+    }
+
+    /// Run [`census_helper_entry`] in `mode` as a process of its own and
+    /// return what it wrote.
+    fn in_a_helper(mode: &str) -> String {
+        use crate::test_spawn::Guarded;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let out = dir.path().join("found");
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "process::keeper::walk::tests::census_helper_entry",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env(HELPER_ENV, mode)
+            .env(HELPER_OUT_ENV, &out)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .guarded_output()
+            .expect("run the census helper")
+            .status;
+        assert!(status.success(), "the census helper failed: {status:?}");
+        std::fs::read_to_string(out).expect("the helper's findings")
+    }
+
+    /// A root with nothing below it proves its tree empty, so the cases below
+    /// fail for what they change, not for the helper.
+    #[test]
+    fn an_empty_tree_with_no_failed_read_is_proven_empty() {
+        assert_eq!(in_a_helper("empty"), "proven=true");
+    }
+
     /// A live process in the tree, here a child of this test process standing
     /// in for the keeper, keeps the census from proving the tree empty,
     /// whether or not anything ever held or refused it.
@@ -721,6 +872,17 @@ mod tests {
         assert!(alive, "the child ended during the census");
         assert!(!walked.proves_empty(), "{walked:?}");
         assert!(walked.effective_live() >= 1, "{walked:?}");
+    }
+
+    /// A read that fails once, in a pass the census then discards as in flux,
+    /// followed by two clean passes that agree on an empty tree: the census
+    /// alone would prove the tree empty, and the final census does not.
+    #[test]
+    fn a_transient_read_failure_followed_by_two_clean_passes_does_not_prove_the_tree_empty() {
+        assert_eq!(
+            in_a_helper("transient"),
+            "census_alone_proves=true injected_left=0 proven=false"
+        );
     }
 
     /// A census that met a failed read is no proof, even with nothing alive.

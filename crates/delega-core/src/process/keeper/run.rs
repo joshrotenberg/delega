@@ -96,6 +96,8 @@ fn read_hello() -> Result<(Hello, Vec<OwnedFd>), String> {
 /// Standard input must be the keeper's end of the socket pair the owner made;
 /// standard output and standard error are not used.
 pub fn keeper_main() -> i32 {
+    #[cfg(all(test, target_os = "linux"))]
+    super::walk::inject_read_failures_from_env();
     let (hello, fds) = match read_hello() {
         Ok(read) => read,
         Err(why) => {
@@ -389,12 +391,14 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
         let _ = wait_exit(pid, Duration::from_secs(5)).await;
     }
     // The final census, taken once the program has exited and before it is
-    // reaped. Only its own result counts: an earlier refusal or failed read
-    // does not make it a proof, and does not stop it from being one.
+    // reaped. An earlier refusal does not stop it from being a proof; a read
+    // of `/proc` that failed at any point since the keeper started does,
+    // whichever walk met it (the census above and any pass discarded as in
+    // flux included).
     #[cfg(target_os = "linux")]
     let proven = subreaper && {
         let me = rustix::process::getpid().as_raw_nonzero().get();
-        tokio::task::spawn_blocking(move || super::walk::census(me, pid).proves_empty())
+        tokio::task::spawn_blocking(move || super::walk::final_census_proves_empty(me, pid))
             .await
             .unwrap_or(false)
     };
