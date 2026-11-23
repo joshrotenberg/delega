@@ -283,6 +283,10 @@ fn run_live(args: &Args) -> ExitCode {
         }
     };
     let suite = live::Live::new(delega.clone(), root, live::Env::Inherit);
+    if let Err(err) = live::install_stop_handler() {
+        eprintln!("delega-acceptance: {err}");
+        return ExitCode::FAILURE;
+    }
     let runs: u32 = planned.iter().map(|p| p.case.runs()).sum();
     eprintln!(
         "live suite: {} cases, {runs} model runs, against the installed providers (Claude --model {}, Codex --effort {})",
@@ -290,6 +294,11 @@ fn run_live(args: &Args) -> ExitCode {
         live::CLAUDE_MODEL,
         live::CODEX_EFFORT
     );
+    if args.provider.is_some() {
+        eprintln!(
+            "live suite: doctor is skipped; it checks both providers and has no option to check one"
+        );
+    }
     let began = std::time::Instant::now();
     let mut rows = Vec::new();
     for p in planned {
@@ -298,33 +307,33 @@ fn run_live(args: &Args) -> ExitCode {
             println!("{}", live::line(&row));
         }
         rows.push(row);
+        if live::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!(
+                "delega-acceptance: stopped by the maintainer after {}; its directory was removed and no results were written",
+                p.id()
+            );
+            return ExitCode::from(130);
+        }
     }
     let wall = began.elapsed();
     if let Some(path) = &args.out {
-        if let Err(err) = write_results(path, &rows) {
+        let meta = live::meta(&delega, &rows, wall);
+        if let Err(err) = live::write_live(path, &meta, &rows) {
             eprintln!("delega-acceptance: write {}: {err}", path.display());
             return ExitCode::FAILURE;
         }
-        let meta = live::meta(&delega, &rows, wall);
-        if let Err(err) = std::fs::write(
-            path.with_extension("meta.json"),
-            serde_json::to_string_pretty(&meta).unwrap_or_default() + "\n",
-        ) {
-            eprintln!("delega-acceptance: write the meta file: {err}");
-            return ExitCode::FAILURE;
-        }
     }
-    let (text, all_passed) = live::summary(&rows);
+    let (text, no_failure) = live::summary(&rows);
     print!("{text}");
     println!("finished in {:.0} s", wall.as_secs_f64());
-    if all_passed {
+    if no_failure {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
 }
 
-fn write_results<T: serde::Serialize>(path: &PathBuf, rows: &[T]) -> std::io::Result<()> {
+fn write_results(path: &PathBuf, rows: &[Measured]) -> std::io::Result<()> {
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
     for row in rows {
         let line = serde_json::to_string(row).map_err(std::io::Error::other)?;

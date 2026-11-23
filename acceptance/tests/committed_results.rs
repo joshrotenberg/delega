@@ -18,7 +18,7 @@ const COMMITTED: &[&str] = &[
 ];
 
 /// Inputs of `--report` that exist only after a recorded live run.
-const OPTIONAL: &[&str] = &["live.jsonl", "live.meta.json"];
+const OPTIONAL: &[&str] = &["live.jsonl"];
 
 fn acceptance_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

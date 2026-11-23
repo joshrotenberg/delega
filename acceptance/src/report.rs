@@ -4,8 +4,8 @@
 //! (and, when present, `results.meta.json`, `repeats.jsonl` and
 //! `spike-numbers.jsonl`) and writes both documents, so a fresh full run can
 //! be turned into documents with one command. When `live.jsonl` is present
-//! (a recorded `--live` run, with `live.meta.json`), RESULTS.md ends with a
-//! "Live suite" section made from it.
+//! (a recorded `--live` run: its metadata, then its rows), RESULTS.md ends
+//! with a "Live suite" section made from it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -44,16 +44,18 @@ pub fn regenerate(dir: &Path, results: &Path) -> Result<(), String> {
     let repeats: Vec<Measured> = read_rows(&dir.join("repeats.jsonl")).unwrap_or_default();
     let spike: Vec<SpikeRow> = read_rows(&dir.join("spike-numbers.jsonl")).unwrap_or_default();
     let live_path = dir.join("live.jsonl");
-    let live: Vec<LiveRow> = if live_path.exists() {
-        read_rows(&live_path)?
+    let live = if live_path.exists() {
+        let text = std::fs::read_to_string(&live_path)
+            .map_err(|e| format!("read {}: {e}", live_path.display()))?;
+        Some(crate::live::read_live(&text).map_err(|e| format!("{}: {e}", live_path.display()))?)
     } else {
-        Vec::new()
+        None
     };
-    let live_meta: Option<serde_json::Value> = std::fs::read_to_string(dir.join("live.meta.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok());
     let mut results = results_md(&rows, meta.as_ref(), &repeats);
-    results.push_str(&live_section(&live, live_meta.as_ref()));
+    results.push_str(&match &live {
+        Some((meta, rows)) => live_section(rows, Some(meta)),
+        None => live_section(&[], None),
+    });
     std::fs::write(dir.join("RESULTS.md"), results)
         .map_err(|e| format!("write RESULTS.md: {e}"))?;
     std::fs::write(dir.join("COMPARISON.md"), comparison_md(&rows, &spike))
@@ -495,7 +497,7 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
     out.push_str(
         "Acceptance criterion 6 asks for a small live suite per provider. `--live` runs it against the\n\
          installed `claude` and `codex` (README.md, \"Live suite\"); this section is generated from the\n\
-         recorded run in `live.jsonl` and `live.meta.json`.\n\n",
+         recorded run in `live.jsonl`, whose first line is the run's metadata.\n\n",
     );
     if rows.is_empty() {
         out.push_str("No live run is recorded.\n");
@@ -524,13 +526,33 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
         );
         out.push('\n');
     }
-    let passed = rows.iter().filter(|r| r.verdict == "pass").count();
-    let _ = writeln!(out, "{passed} of {} cases passed.\n", rows.len());
-    out.push_str("| Provider | Case | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    let count = |v: &str| rows.iter().filter(|r| r.verdict == v).count();
+    let _ = writeln!(
+        out,
+        "{} cases: {} pass, {} fail, {} not shown.\n",
+        rows.len(),
+        count("pass"),
+        count("fail"),
+        count("not_shown")
+    );
+    out.push_str("| Provider | Case | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems | Not shown and notes |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    let cell = |items: Vec<String>| {
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join("; ").replace('|', "/")
+        }
+    };
     for r in rows {
+        let notes: Vec<String> = r
+            .not_shown
+            .iter()
+            .map(|n| format!("not shown: {n}"))
+            .chain(r.notes.iter().cloned())
+            .collect();
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             r.provider,
             r.case,
             r.verdict,
@@ -539,11 +561,8 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
             r.denied,
             r.runs,
             r.cost_usd.map_or("-".to_string(), |c| format!("${c:.4}")),
-            if r.problems.is_empty() {
-                "none".to_string()
-            } else {
-                r.problems.join("; ").replace('|', "/")
-            },
+            cell(r.problems.clone()),
+            cell(notes),
         );
     }
     out
@@ -932,26 +951,42 @@ mod tests {
     }
 
     #[test]
-    fn the_live_section_lists_each_case_with_versions_and_date_from_a_recorded_run() {
-        let rows: Vec<super::LiveRow> = include_str!("../tests/fixtures/live/live.jsonl")
-            .lines()
-            .map(|l| serde_json::from_str(l).expect("a recorded row"))
-            .collect();
-        let meta: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/live/live.meta.json"))
-                .expect("recorded meta");
+    fn the_live_section_lists_each_case_with_versions_date_and_notes() {
+        let (meta, rows) =
+            crate::live::read_live(include_str!("../tests/fixtures/live/live.jsonl"))
+                .expect("the sample live results");
         let text = super::live_section(&rows, Some(&meta));
         assert!(text.contains("- Date: 2026-11-22."), "{text}");
-        assert!(text.contains("- claude: 2.1.400 (Claude Code)."), "{text}");
-        assert!(text.contains("- codex: codex-cli 0.99.0."), "{text}");
-        assert!(text.contains("1 of 2 cases passed."), "{text}");
+        assert!(text.contains("- claude: claude 2.1.400."), "{text}");
+        assert!(text.contains("- codex: codex 0.99.0."), "{text}");
+        assert!(
+            text.contains("3 cases: 1 pass, 1 fail, 1 not shown."),
+            "{text}"
+        );
         assert!(
             text.contains(
-                "| claude | plain-answer | pass | completed | yes | 0 | 1 | $0.0010 | none |"
+                "| claude | plain-answer | pass | completed | yes | 0 | 1 | $0.0010 | none | none |"
             ),
             "{text}"
         );
         assert!(text.contains("not so: cleanup confirmed"), "{text}");
+        assert!(
+            text.contains("not shown: that the network was off: the harness itself could not reach https://example.com; the temporary file was in /tmp"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn regenerate_refuses_live_results_whose_metadata_does_not_match() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let fixture = include_str!("../tests/fixtures/live/live.jsonl");
+        let broken = fixture.replacen("\"cases\":3", "\"cases\":4", 1);
+        assert_ne!(broken, fixture);
+        std::fs::write(dir.path().join("live.jsonl"), broken).expect("write");
+        let results = concat!(env!("CARGO_MANIFEST_DIR"), "/results.jsonl");
+        let error =
+            super::regenerate(dir.path(), std::path::Path::new(results)).expect_err("refused");
+        assert!(error.contains("cases"), "{error}");
     }
 
     #[test]

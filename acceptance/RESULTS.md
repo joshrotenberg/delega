@@ -410,6 +410,6 @@ No row changed verdict, outcome, exit status, survivors or cleanup report betwee
 
 Acceptance criterion 6 asks for a small live suite per provider. `--live` runs it against the
 installed `claude` and `codex` (README.md, "Live suite"); this section is generated from the
-recorded run in `live.jsonl` and `live.meta.json`.
+recorded run in `live.jsonl`, whose first line is the run's metadata.
 
 No live run is recorded.
