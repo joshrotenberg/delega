@@ -235,17 +235,19 @@ if [ "$input_format" = stream-json ]; then
   case ",$tools," in *,Write,*) ;; *) exit 73 ;; esac
   case "$mode" in
     *ask-invalid-json*) printf '%s\n' 'not JSON' ;;
-    *ask-stream-too-large*)
-      awk 'BEGIN { printf "%4194305s\n", "" }'
-      exit 0
-      ;;
-    *ask-no-read*|*ask-oversized*)
-      size=240000
-      case "$mode" in *ask-oversized*) size=270000 ;; esac
+    *ask-stream-too-large*|*ask-no-read*|*ask-oversized*)
+      case "$mode" in
+        *ask-stream-too-large*) size=4194305 ;;
+        *ask-oversized*) size=270000 ;;
+        *) size=240000 ;;
+      esac
       awk -v size="$size" 'BEGIN {
         printf "{\"type\":\"control_request\",\"request_id\":\"large\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Write\",\"input\":{\"file_path\":\"large.txt\",\"content\":\"%*s\"}}}\n", size, ""
       }'
-      case "$mode" in *ask-no-read*) sleep 60; exit 78 ;; esac
+      case "$mode" in
+        *ask-stream-too-large*) exit 0 ;;
+        *ask-no-read*) sleep 60; exit 78 ;;
+      esac
       IFS= read -r response || exit 74
       case "$response" in
         *'"behavior":"deny"'*'"request_id":"large"'*|*'"request_id":"large"'*'"behavior":"deny"'*) ;;

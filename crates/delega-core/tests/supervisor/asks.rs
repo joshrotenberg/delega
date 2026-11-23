@@ -257,6 +257,21 @@ async fn a_stream_frame_over_the_hard_limit_fails_the_run_without_publishing_a_r
     request.permissions.on_request = OnRequest::Ask;
     request.timeout_secs = 5;
     let start = supervisor.start(request).await.unwrap();
+    let first = supervisor
+        .wait(
+            WaitTargets {
+                workers: vec![],
+                runs: vec![start.run.clone()],
+            },
+            Some(8),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!first.timed_out);
+    assert!(first.runs[0].pending_interactions.is_empty());
+    assert_eq!(first.runs[0].outcome, Some(Outcome::Failed));
+
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(12),
         result_of(&supervisor, &start.run),
