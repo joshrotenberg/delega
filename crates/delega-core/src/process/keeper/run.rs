@@ -222,11 +222,12 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     }
                 }
                 Some(Event::Command(ToKeeper::Census(id))) => {
-                    say(&FromKeeper::Tree { id, live: census(pid) });
+                    let (live, detail) = census_report(pid);
+                    say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Freeze(id))) => {
-                    let live = freeze(pid).await;
-                    say(&FromKeeper::Tree { id, live });
+                    let (live, detail) = freeze_report(pid).await;
+                    say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Reap)) => {
                     let live = finish(pid, exited).await;
@@ -351,32 +352,46 @@ async fn finish(pid: i32, exited: bool) -> usize {
 }
 
 /// The live processes in the keeper's tree.
-fn census(_pid: i32) -> usize {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn census(pid: i32) -> usize {
+    census_report(pid).0
+}
+
+/// The census with its pass details, for the owner's diagnostics.
+fn census_report(_pid: i32) -> (usize, String) {
     #[cfg(target_os = "linux")]
     {
-        super::walk::live_descendants(rustix::process::getpid().as_raw_nonzero().get())
+        let walked = super::walk::census(rustix::process::getpid().as_raw_nonzero().get(), _pid);
+        (walked.live, walked.detail())
     }
     #[cfg(not(target_os = "linux"))]
     {
-        usize::from(!sys::leader_has_exited(_pid))
+        (usize::from(!sys::leader_has_exited(_pid)), String::new())
     }
 }
 
 /// Stop, kill and count the keeper's tree (Linux). Elsewhere the keeper has no
 /// tree beyond the program and answers with the census.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 async fn freeze(pid: i32) -> usize {
+    freeze_report(pid).await.0
+}
+
+/// The freeze with its pass details, for the owner's diagnostics.
+async fn freeze_report(pid: i32) -> (usize, String) {
     #[cfg(target_os = "linux")]
     {
-        let _ = pid;
-        tokio::task::spawn_blocking(|| {
-            super::walk::freeze_kill(rustix::process::getpid().as_raw_nonzero().get())
+        tokio::task::spawn_blocking(move || {
+            let walked =
+                super::walk::freeze_kill(rustix::process::getpid().as_raw_nonzero().get(), pid);
+            (walked.live, walked.detail())
         })
         .await
-        .unwrap_or(usize::MAX)
+        .unwrap_or((usize::MAX, "the freeze panicked".into()))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        census(pid)
+        census_report(pid)
     }
 }
 

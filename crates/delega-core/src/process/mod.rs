@@ -114,14 +114,21 @@
 //!   `/proc/<pid>/stat` where that file is missing). Every process the walk
 //!   signals is first held by a pidfd and checked to be a live child of the
 //!   parent it was found under, and signalled through the pidfd, so a pid
-//!   reused meanwhile is never signalled. `census` counts the live processes in
-//!   the tree, repeating the walk until two passes in a row agree (a process
-//!   reparented to the keeper after one pass read its children is found by the
-//!   next; a tree that keeps changing is reported nonzero). `freeze` stops each
-//!   process with SIGSTOP and reads its children only once the stop has taken
-//!   effect, walks again from the keeper's own children until a pass finds
-//!   nothing new and every process stopped, then sends SIGKILL and SIGCONT
-//!   through the pidfds, and reports what is still alive. A cleanup sweep that
+//!   reused meanwhile is never signalled. A process exits as the keeper's
+//!   child only after it was reparented to it, and its children are
+//!   reparented at that moment, so an exited, unreaped child of the keeper
+//!   (other than the program) means the tree was in flux around a pass: the
+//!   walk reaps such children first and does not trust a pass that met one.
+//!   `census` counts the live processes in the tree, repeating the walk until
+//!   two passes in a row agree with the tree not in flux (a tree that keeps
+//!   changing, a relay, is reported nonzero). `freeze` stops each process with
+//!   SIGSTOP and reads its children only once the stop has taken effect, and
+//!   walks again from the keeper's own children until a pass finds nothing
+//!   new, every process stopped, no live process refused (one reparented to
+//!   the keeper since it was found, held by the next pass) and the tree not in
+//!   flux; then it sends SIGKILL and SIGCONT through the pidfds and reports what
+//!   is still alive. Each answer carries the walk's passes and whether it
+//!   completed, in `diagnostics.keeper.tree_reports`. A cleanup sweep that
 //!   finds nothing counts only when the keeper's census agrees, and a keeper
 //!   that still finds processes alive when it reaps the child makes the verdict
 //!   `Unconfirmed` ([`TREE_LEFT_AT_REAP_REASON`]). A keeper that could not

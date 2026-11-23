@@ -228,6 +228,10 @@ pub struct KeeperDiagnostics {
     pub freeze_rounds: u64,
     /// Whether a freeze ran out of listings while processes kept appearing.
     pub freeze_incomplete: bool,
+    /// The latest answers of the keeper to the owner's census and freeze
+    /// requests (Linux), oldest first, bounded: the live count and how the
+    /// walk went (`passes`, `complete`, `refused`).
+    pub tree_reports: Vec<String>,
 }
 
 impl KeeperDiagnostics {
@@ -240,6 +244,7 @@ impl KeeperDiagnostics {
             lost: false,
             freeze_rounds: 0,
             freeze_incomplete: false,
+            tree_reports: Vec::new(),
         }
     }
 }

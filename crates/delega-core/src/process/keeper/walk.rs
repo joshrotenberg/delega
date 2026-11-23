@@ -92,26 +92,85 @@ pub(super) fn descendants(root: i32) -> Vec<i32> {
     out
 }
 
-/// How many descendants of `root` are alive (not zombies). One pass reads the
-/// keeper's children once, so a process reparented to the keeper after that
-/// read is missed; the walk is repeated until two passes in a row find the
-/// same live set, within `KEEPER_FREEZE_PASSES`. A tree that keeps changing
-/// (a relay) is reported with the last pass's count, which is not zero while
-/// it lives.
-pub(super) fn live_descendants(root: i32) -> usize {
+/// What a census or a freeze found, for the answer and the diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Walked {
+    /// Live descendants of the keeper at the end.
+    pub live: usize,
+    /// Passes walked.
+    pub passes: u32,
+    /// Whether the last pass was complete: (census) it agreed with the one
+    /// before and the tree was not in flux; (freeze) it found nothing new,
+    /// every process stopped, no live process refused and no exited child of
+    /// the keeper left to reap.
+    pub complete: bool,
+    /// Live processes a freeze could not hold because their parent had changed
+    /// since they were found (reparented to the keeper); a later pass holds
+    /// them under the keeper.
+    pub refused: u32,
+}
+
+impl Walked {
+    pub(super) fn detail(&self) -> String {
+        format!(
+            "passes={} complete={} refused={}",
+            self.passes, self.complete, self.refused
+        )
+    }
+}
+
+/// Whether the tree is in flux: a direct child of `root` other than `keep`
+/// has exited and is not reaped. A process exits as the keeper's child only
+/// after it was reparented to it, and its own children are reparented at that
+/// moment too, so a pass that read the tree around it can have missed them.
+/// Zombies that can be reaped are reaped first, so only an exit since then
+/// counts.
+fn in_flux(root: i32, keep: i32) -> bool {
+    reap_children(root, keep);
+    children(root)
+        .into_iter()
+        .any(|c| c != keep && stat(c).is_some_and(|(state, _)| state == 'Z' || state == 'X'))
+}
+
+/// How many descendants of `root` are alive (not zombies), `keep` (the
+/// program, which the keeper holds unreaped) not counted when it has exited.
+/// One pass reads the keeper's children once, and a process reparented to
+/// the keeper after that read is missed, so a count is accepted only when two
+/// passes in a row find the same live set and the tree was not in flux around
+/// either (see [`in_flux`]). A tree that keeps changing (a relay) never meets
+/// that, and is reported with the last pass's count, at least 1.
+pub(super) fn census(root: i32, keep: i32) -> Walked {
     let mut previous: Option<BTreeSet<i32>> = None;
+    let mut passes = 0;
     for _ in 0..KEEPER_FREEZE_PASSES {
+        passes += 1;
+        let flux_before = in_flux(root, keep);
         let live: BTreeSet<i32> = descendants(root)
             .into_iter()
             .filter(|p| alive(*p))
             .collect();
-        if previous.as_ref() == Some(&live) {
-            return live.len();
+        let flux_after = in_flux(root, keep);
+        if !flux_before && !flux_after {
+            if previous.as_ref() == Some(&live) {
+                return Walked {
+                    live: live.len(),
+                    passes,
+                    complete: true,
+                    refused: 0,
+                };
+            }
+            previous = Some(live);
+        } else {
+            previous = None;
         }
-        previous = Some(live);
         std::thread::sleep(Duration::from_millis(2));
     }
-    previous.map_or(0, |live| live.len().max(1))
+    Walked {
+        live: previous.map_or(1, |live| live.len().max(1)),
+        passes,
+        complete: false,
+        refused: 0,
+    }
 }
 
 /// A process held for signalling: a pidfd when the kernel has them, so the
@@ -181,16 +240,24 @@ pub(super) fn signal_tree(root: i32, signal: Signal) {
 }
 
 /// Stop every descendant of `root` (SIGSTOP), walking again from the keeper's
-/// own children until a pass finds nothing new and every process it found has
-/// stopped, then SIGKILL and SIGCONT them all through their pidfds. Returns how
-/// many are still alive a moment later, by [`live_descendants`]; not zero when
-/// the freeze could not complete within its bound.
-pub(super) fn freeze_kill(root: i32) -> usize {
+/// own children until a pass is complete: it found nothing new, every process
+/// it found has stopped, it refused no live process (one reparented to the
+/// keeper since it was found, held by a later pass), and no exited child of
+/// the keeper was left to reap (see [`in_flux`]). Then SIGKILL and SIGCONT go
+/// to all of them through their pidfds, and the census says what is still
+/// alive; not zero when the freeze could not complete within its bound.
+pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
     let started = Instant::now();
     let mut held: HashMap<i32, Held> = HashMap::new();
+    let mut passes = 0;
+    let mut complete = false;
+    let mut refused_total = 0;
     for _ in 0..KEEPER_FREEZE_PASSES {
+        passes += 1;
         let mut new = 0;
         let mut all_stopped = true;
+        let mut refused = 0;
+        let flux_before = in_flux(root, keep);
         let mut queue: VecDeque<(i32, i32)> =
             children(root).into_iter().map(|c| (c, root)).collect();
         let mut seen = HashSet::new();
@@ -200,6 +267,12 @@ pub(super) fn freeze_kill(root: i32) -> usize {
             }
             if let std::collections::hash_map::Entry::Vacant(slot) = held.entry(pid) {
                 let Some(process) = Held::take(pid, parent) else {
+                    // Gone, or no longer the child of `parent`: when it is
+                    // alive it was reparented (to the keeper) and the next
+                    // pass, starting from the keeper's children, holds it.
+                    if alive(pid) {
+                        refused += 1;
+                    }
                     continue;
                 };
                 process.send(Signal::STOP);
@@ -212,7 +285,10 @@ pub(super) fn freeze_kill(root: i32) -> usize {
             }
             queue.extend(children(pid).into_iter().map(|c| (c, pid)));
         }
-        if new == 0 && all_stopped {
+        refused_total += refused;
+        let flux_after = in_flux(root, keep);
+        if new == 0 && all_stopped && refused == 0 && !flux_before && !flux_after {
+            complete = true;
             break;
         }
         if started.elapsed() > Duration::from_secs(1) {
@@ -225,9 +301,14 @@ pub(super) fn freeze_kill(root: i32) -> usize {
     }
     let until = Instant::now() + Duration::from_millis(500);
     loop {
-        let live = live_descendants(root);
-        if live == 0 || Instant::now() >= until {
-            return live;
+        let counted = census(root, keep);
+        if counted.live == 0 || Instant::now() >= until {
+            return Walked {
+                live: counted.live,
+                passes,
+                complete: complete && counted.live == 0,
+                refused: refused_total,
+            };
         }
         std::thread::sleep(Duration::from_millis(5));
     }

@@ -176,9 +176,12 @@ pub(crate) enum FromKeeper {
     },
     ExitedCode(i32),
     ExitedSignal(i32),
+    /// The answer to a census or a freeze, with the walk's details for the
+    /// diagnostics (empty where there is no walk).
     Tree {
         id: u64,
         live: usize,
+        detail: String,
     },
     /// The program is reaped; how many processes of the tree were still alive
     /// after the last freeze (Linux; 0 elsewhere).
@@ -201,7 +204,12 @@ impl FromKeeper {
             }
             FromKeeper::ExitedCode(code) => format!("exited code {code}"),
             FromKeeper::ExitedSignal(signal) => format!("exited signal {signal}"),
-            FromKeeper::Tree { id, live } => format!("tree {id} {live}"),
+            FromKeeper::Tree { id, live, detail } if detail.is_empty() => {
+                format!("tree {id} {live}")
+            }
+            FromKeeper::Tree { id, live, detail } => {
+                format!("tree {id} {live} {}", one_line(detail))
+            }
             FromKeeper::Reaped(live) => format!("reaped {live}"),
             FromKeeper::Releasing => "releasing".into(),
             FromKeeper::Warn(text) => format!("warn {}", one_line(text)),
@@ -233,6 +241,7 @@ impl FromKeeper {
             "tree" => FromKeeper::Tree {
                 id: words.next()?.parse().ok()?,
                 live: words.next()?.parse().ok()?,
+                detail: words.collect::<Vec<_>>().join(" "),
             },
             "reaped" => FromKeeper::Reaped(if rest.is_empty() {
                 0
@@ -359,7 +368,16 @@ mod tests {
             },
             FromKeeper::ExitedCode(3),
             FromKeeper::ExitedSignal(9),
-            FromKeeper::Tree { id: 7, live: 2 },
+            FromKeeper::Tree {
+                id: 7,
+                live: 2,
+                detail: String::new(),
+            },
+            FromKeeper::Tree {
+                id: 8,
+                live: 0,
+                detail: "passes=3 complete=true refused=1".into(),
+            },
             FromKeeper::Reaped(0),
             FromKeeper::Reaped(3),
             FromKeeper::Releasing,

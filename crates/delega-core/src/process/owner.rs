@@ -436,6 +436,7 @@ impl Shared {
             lost: k.lost(),
             freeze_rounds: self.freeze_rounds.load(Ordering::SeqCst),
             freeze_incomplete: self.freeze_incomplete.load(Ordering::SeqCst),
+            tree_reports: k.tree_log(),
         });
         let mut warnings = lock(&self.warnings).clone();
         if let Some(k) = &self.keeper {

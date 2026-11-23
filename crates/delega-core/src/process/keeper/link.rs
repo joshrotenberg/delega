@@ -22,6 +22,9 @@ use crate::process::limits::{KEEPER_ABANDON_WAIT, KEEPER_REPLY_TIMEOUT, KEEPER_S
 use crate::process::sys::{self, ExitSummary};
 use crate::process::tree::GroupPin;
 
+/// How many census and freeze answers the diagnostics keep.
+const TREE_LOG_ENTRIES: usize = 32;
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
@@ -75,7 +78,9 @@ struct State {
     lost: AtomicBool,
     closed: AtomicBool,
     subreaper: AtomicBool,
-    pending: Mutex<HashMap<u64, oneshot::Sender<usize>>>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<(usize, String)>>>,
+    /// The latest answers to census and freeze requests, for the diagnostics.
+    tree_log: Mutex<Vec<String>>,
     warnings: Mutex<Vec<String>>,
     /// Whether the program's pid still names its group and session: until
     /// the keeper says `releasing` or its end closes. Group and member signals
@@ -127,32 +132,54 @@ impl LinkHandle {
         (&self.stream).write_all(line.as_bytes()).is_ok()
     }
 
-    async fn request(&self, make: fn(u64) -> ToKeeper) -> Option<usize> {
+    async fn request(&self, make: fn(u64) -> ToKeeper, verb: &str) -> Option<usize> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         lock(&self.state.pending).insert(id, tx);
         if self.state.closed.load(Ordering::SeqCst) || !self.send(make(id)) {
             lock(&self.state.pending).remove(&id);
+            self.log(format!("{verb}: not sent"));
             return None;
         }
         match tokio::time::timeout(KEEPER_REPLY_TIMEOUT, rx).await {
-            Ok(Ok(live)) => Some(live),
+            Ok(Ok((live, detail))) => {
+                self.log(
+                    format!("{verb}: live={live} {detail}")
+                        .trim_end()
+                        .to_string(),
+                );
+                Some(live)
+            }
             _ => {
                 lock(&self.state.pending).remove(&id);
+                self.log(format!("{verb}: no answer"));
                 None
             }
         }
     }
 
+    fn log(&self, entry: String) {
+        let mut log = lock(&self.state.tree_log);
+        if log.len() >= TREE_LOG_ENTRIES {
+            log.remove(0);
+        }
+        log.push(entry);
+    }
+
+    /// The latest answers to census and freeze requests, oldest first.
+    pub(crate) fn tree_log(&self) -> Vec<String> {
+        lock(&self.state.tree_log).clone()
+    }
+
     /// How many processes are alive in the keeper's tree (Linux: every
     /// descendant of the keeper, found by walking `/proc`).
     pub(crate) async fn census(&self) -> Option<usize> {
-        self.request(ToKeeper::Census).await
+        self.request(ToKeeper::Census, "census").await
     }
 
     /// Have the keeper stop, kill and count its tree (Linux).
     pub(crate) async fn freeze(&self) -> Option<usize> {
-        self.request(ToKeeper::Freeze).await
+        self.request(ToKeeper::Freeze, "freeze").await
     }
 
     /// Close the owner's end: the keeper stops the tree by itself.
@@ -497,9 +524,9 @@ fn follow(
                         signal: Some(signal),
                     },
                 ),
-                FromKeeper::Tree { id, live } => {
+                FromKeeper::Tree { id, live, detail } => {
                     if let Some(tx) = lock(&state.pending).remove(&id) {
-                        let _ = tx.send(live);
+                        let _ = tx.send((live, detail));
                     }
                 }
                 FromKeeper::Reaped(live) => {
