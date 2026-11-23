@@ -46,7 +46,6 @@ pub(super) struct Plan {
     pub time_limit: Duration,
     pub max_output_bytes: usize,
     pub stop_grace: Option<Duration>,
-    pub keeper: Option<crate::process::KeeperCommand>,
     #[cfg(test)]
     pub tap_queue_chunks: Option<usize>,
 }
@@ -212,7 +211,6 @@ fn build_with(
         time_limit: Duration::from_secs(request.timeout_secs),
         max_output_bytes: options.max_output_bytes.unwrap_or(MAX_OUTPUT_BYTES),
         stop_grace: options.stop_grace,
-        keeper: options.keeper.clone(),
         #[cfg(test)]
         tap_queue_chunks: options.tap_queue_chunks,
     })

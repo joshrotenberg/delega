@@ -37,13 +37,6 @@ pub struct ProviderOptions {
     /// it, `permissions.commands` is not granted to a Claude worker and the
     /// result says so. See [`super::hook`].
     pub hook: Option<HookCommand>,
-    /// The command that runs the keeper (see
-    /// [`KeeperCommand`](crate::process::KeeperCommand)): the process between
-    /// delega and the provider that stops the provider's whole tree when
-    /// delega is gone and, on Linux, adopts every orphaned descendant. Without
-    /// it the provider is delega's own child, the gaps in the process module's
-    /// documentation remain, and the result says so in `provider_notes`.
-    pub keeper: Option<crate::process::KeeperCommand>,
     /// Names of variables of the parent environment to pass although the
     /// allowlist does not cover them, such as a cloud credential or a
     /// toolchain home. A name that is not set in the parent is ignored. A name
@@ -122,7 +115,6 @@ impl fmt::Debug for ProviderOptions {
             .field("claude_executable", &self.claude_executable)
             .field("codex_executable", &self.codex_executable)
             .field("hook", &self.hook)
-            .field("keeper", &self.keeper)
             .field("env_pass", &self.env_pass)
             .field("env_set_names", &set_names)
             .field("parent_env_names", &parent_names)

@@ -17,33 +17,12 @@ macro_rules! require_perl {
     };
 }
 
-/// One test body run twice: once with the child owned directly and once
-/// through the test keeper (`fixtures::sh` reads which). The second test's name
-/// ends in `_kept`.
-macro_rules! both {
-    ($direct:ident, $kept:ident, $body:expr) => {
-        #[tokio::test]
-        async fn $direct() {
-            crate::process::tests::fixtures::KEEP
-                .scope(false, $body)
-                .await
-        }
-        #[tokio::test]
-        async fn $kept() {
-            crate::process::tests::fixtures::KEEP
-                .scope(true, $body)
-                .await
-        }
-    };
-}
-
 mod budgets;
 mod cleanup;
 mod endings;
 mod fixtures;
 mod gaps;
 mod io;
-mod keeper;
 mod ported;
 mod stop;
 mod stop_wait;

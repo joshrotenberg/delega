@@ -36,7 +36,6 @@ pub fn run(args: Args) -> ExitCode {
     let mut options = ProviderOptions {
         system_paths: super::system_paths(),
         hook: super::guard_command(),
-        keeper: super::keeper_command(),
         ..ProviderOptions::default()
     };
     // A configuration file that is in effect shapes what a run would meet, so

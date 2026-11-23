@@ -44,9 +44,7 @@ pub(super) fn signal_group(pgid: i32, signal: Signal) -> Result<(), SignalError>
     rustix::process::kill_process_group(pid(pgid)?, signal).map_err(SignalError::from)
 }
 
-/// `kill(pid, signal)`. Not used on Linux outside tests: nothing is signalled
-/// by number there (see [`signal_checked`]).
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+/// `kill(pid, signal)`.
 pub(super) fn signal_process(target: i32, signal: Signal) -> Result<(), SignalError> {
     rustix::process::kill_process(pid(target)?, signal).map_err(SignalError::from)
 }
@@ -87,214 +85,6 @@ pub(super) fn wait_for_exit(child: i32) -> Result<(), String> {
             Err(Errno::INTR) => {}
             Err(errno) => return Err(std::io::Error::from(errno).to_string()),
         }
-    }
-}
-
-/// How a child ended, as `waitid` reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ExitSummary {
-    /// The exit code, when it exited.
-    pub code: Option<i32>,
-    /// The signal that ended it, when one did.
-    pub signal: Option<i32>,
-}
-
-fn summary(status: &WaitIdStatus) -> ExitSummary {
-    ExitSummary {
-        code: status.exit_status(),
-        signal: status.terminating_signal(),
-    }
-}
-
-/// Block until `child` has exited, without reaping it, and say how it ended.
-/// As [`wait_for_exit`], a stop is not an ending.
-pub(super) fn wait_for_exit_status(child: i32) -> Result<ExitSummary, String> {
-    let Some(child) = Pid::from_raw(child) else {
-        return Err(format!("invalid pid {child}"));
-    };
-    loop {
-        match rustix::process::waitid(
-            WaitId::Pid(child),
-            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
-        ) {
-            Ok(Some(status)) if is_ending(&status) => return Ok(summary(&status)),
-            Ok(_) => std::thread::sleep(EXIT_POLL_INTERVAL),
-            Err(Errno::INTR) => {}
-            Err(errno) => return Err(std::io::Error::from(errno).to_string()),
-        }
-    }
-}
-
-/// Reap `child` if it has exited; `true` when it was reaped.
-pub(super) fn reap_if_exited(child: i32) -> bool {
-    let Some(child) = Pid::from_raw(child) else {
-        return false;
-    };
-    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG;
-    matches!(
-        rustix::process::waitid(WaitId::Pid(child), options),
-        Ok(Some(status)) if is_ending(&status)
-    )
-}
-
-/// Make the calling process the reaper of every orphaned descendant
-/// (`prctl(PR_SET_CHILD_SUBREAPER)`). Linux only.
-#[cfg(target_os = "linux")]
-pub(super) fn become_subreaper() -> Result<(), String> {
-    rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
-        .map_err(|errno| std::io::Error::from(errno).to_string())
-}
-
-/// What `/proc/<pid>/stat` says about one process (Linux).
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ProcStat {
-    pub state: char,
-    pub parent: i32,
-    pub group: i32,
-    pub session: i32,
-    /// Start time in clock ticks after boot: with the pid, an identity that a
-    /// reused pid does not share.
-    pub start_ticks: u64,
-}
-
-/// Read `/proc/<pid>/stat` (Linux). `None` when the process is gone or the
-/// line cannot be read.
-#[cfg(target_os = "linux")]
-pub(super) fn proc_stat(pid: i32) -> Option<ProcStat> {
-    if pid <= 0 {
-        return None;
-    }
-    let bytes = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
-    parse_proc_stat(&bytes)
-}
-
-/// Fields after the command name, counted from the last `)`: state (3), ppid
-/// (4), pgrp (5), session (6), ..., starttime (22).
-#[cfg(any(target_os = "linux", test))]
-fn parse_proc_stat_fields(stat: &[u8]) -> Option<(char, i32, i32, i32, u64)> {
-    let end = stat.iter().rposition(|&byte| byte == b')')?;
-    let rest = std::str::from_utf8(&stat[end + 1..]).ok()?;
-    let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
-    let state = fields.first()?.chars().next()?;
-    let parent = fields.get(1)?.parse().ok()?;
-    let group = fields.get(2)?.parse().ok()?;
-    let session = fields.get(3)?.parse().ok()?;
-    let start_ticks = fields.get(19)?.parse().ok()?;
-    Some((state, parent, group, session, start_ticks))
-}
-
-#[cfg(target_os = "linux")]
-fn parse_proc_stat(stat: &[u8]) -> Option<ProcStat> {
-    let (state, parent, group, session, start_ticks) = parse_proc_stat_fields(stat)?;
-    Some(ProcStat {
-        state,
-        parent,
-        group,
-        session,
-        start_ticks,
-    })
-}
-
-/// Whether the process behind a pidfd has exited (Linux): a pidfd becomes
-/// readable when its process exits. A poll that fails counts as exited, so a
-/// caller that relies on the process being alive does not.
-#[cfg(target_os = "linux")]
-pub(super) fn pidfd_exited(fd: &std::os::fd::OwnedFd) -> bool {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    let mut fds = [PollFd::new(fd, PollFlags::IN)];
-    let now = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    !matches!(poll(&mut fds, Some(&now)), Ok(0))
-}
-
-/// The start time of a process in clock ticks (Linux), for checking at
-/// delivery that a pid still names the process it named when it was found.
-#[cfg(target_os = "linux")]
-pub(super) fn start_ticks(pid: i32) -> Option<u64> {
-    proc_stat(pid).map(|s| s.start_ticks)
-}
-
-/// The start time of a process in clock ticks; only Linux can say.
-#[cfg(not(target_os = "linux"))]
-pub(super) fn start_ticks(_pid: i32) -> Option<u64> {
-    None
-}
-
-/// What became of one checked signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Delivery {
-    /// The signal was sent to the process meant.
-    Sent,
-    /// The process meant is gone: no such process, or the pid now names
-    /// another one (a different start time, group or session than the one
-    /// it was found with).
-    Gone,
-    /// The process could not be verified (Linux: no pidfd, or no identity to
-    /// check against), so it was not signalled. A verdict that depended on
-    /// signalling it cannot be `Confirmed`.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Refused,
-}
-
-/// Signal one process only if it is still the one meant.
-///
-/// On Linux the process is first held by a pidfd (`pidfd_open`), then its
-/// `/proc/<pid>/stat` is read and given to `check`, and the signal goes
-/// through the pidfd (`pidfd_send_signal`): once the pidfd is open its number
-/// can no longer name another process, so a pid reused between the check and
-/// the signal is never signalled. Nothing is ever signalled by pid number on
-/// Linux: without a pidfd (a kernel before 5.3, or a refusal) the process is
-/// [`Delivery::Refused`].
-///
-/// Elsewhere there is nothing to read the identity from at delivery: `check`
-/// is not called and the signal goes by pid, as the callers' own listing-time
-/// checks decided (the residual in the module documentation).
-#[cfg(target_os = "linux")]
-pub(super) fn signal_checked(
-    target: i32,
-    signal: Signal,
-    check: impl FnOnce(&ProcStat) -> bool,
-) -> Result<Delivery, SignalError> {
-    use rustix::process::{PidfdFlags, pidfd_open, pidfd_send_signal};
-    let pid = pid(target)?;
-    let fd = match pidfd_open(pid, PidfdFlags::empty()) {
-        Ok(fd) => fd,
-        Err(Errno::SRCH) => return Ok(Delivery::Gone),
-        Err(_) => return Ok(Delivery::Refused),
-    };
-    // Held but unreadable: gone only if the pidfd says it exited; otherwise
-    // it could not be verified.
-    let Some(stat) = proc_stat(target) else {
-        return Ok(if pidfd_exited(&fd) {
-            Delivery::Gone
-        } else {
-            Delivery::Refused
-        });
-    };
-    if !check(&stat) {
-        return Ok(Delivery::Gone);
-    }
-    match pidfd_send_signal(&fd, signal) {
-        Ok(()) => Ok(Delivery::Sent),
-        Err(Errno::SRCH) => Ok(Delivery::Gone),
-        Err(errno) => Err(SignalError::from(errno)),
-    }
-}
-
-/// See the Linux version: here `check` is not called.
-#[cfg(not(target_os = "linux"))]
-pub(super) fn signal_checked(
-    target: i32,
-    signal: Signal,
-    _check: impl FnOnce(&()) -> bool,
-) -> Result<Delivery, SignalError> {
-    match signal_process(target, signal) {
-        Ok(()) => Ok(Delivery::Sent),
-        Err(SignalError::NoSuchProcess) => Ok(Delivery::Gone),
-        Err(error) => Err(error),
     }
 }
 
@@ -397,17 +187,13 @@ pub(super) fn probe_group(pgid: i32) -> GroupProbe {
 
 /// Make the child lead a new session, so it has no controlling terminal and
 /// every descendant that does not call `setsid` itself shares its session id.
-/// Used for the provider and for the keeper alike.
 ///
-/// This is the only `unsafe` block in production code (the tests of
-/// `delega-mcp` have one more, for `mkfifo`): `Command::pre_exec` is unsafe
+/// This is the only `unsafe` in the workspace: `Command::pre_exec` is unsafe
 /// because the closure runs in the forked child before `exec`.
 #[allow(unsafe_code)]
-pub(super) fn new_session(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
+pub(super) fn new_session(command: &mut tokio::process::Command) {
     // SAFETY: the closure calls only `setsid(2)`, which is async-signal-safe,
-    // through rustix (a direct syscall on Linux, libc's `setsid` wrapper on
-    // macOS and other systems, which is async-signal-safe as POSIX requires). It allocates nothing, takes no locks and
+    // through rustix's direct syscall. It allocates nothing, takes no locks and
     // touches no state of the parent; a failure becomes an `io::Error` built
     // from the raw errno, which does not allocate either. Nothing else of ours
     // runs between fork and exec (std does its own setup there, outside this
@@ -488,19 +274,6 @@ mod tests {
         assert_eq!(parse_stat_session(b"1 (x) S 1 1 abc 0"), None);
         assert_eq!(parse_stat_session(b"1 (x) S 1 1 -4 0"), None);
         assert_eq!(parse_stat_session(b"1 (x\xff) S 1 1 7 0"), Some(7));
-    }
-
-    #[test]
-    fn a_stat_line_gives_state_parent_group_session_and_start_ticks() {
-        // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt
-        // majflt cmajflt utime stime cutime cstime priority nice threads
-        // itrealvalue starttime ...
-        let line = b"77 (a) b (c d) ) S 5 66 88 0 -1 0 1 2 3 4 5 6 7 8 20 0 1 0 123456 9";
-        assert_eq!(
-            parse_proc_stat_fields(line),
-            Some(('S', 5, 66, 88, 123_456))
-        );
-        assert_eq!(parse_proc_stat_fields(b"1 (x) S 1 1 1"), None);
     }
 
     #[test]

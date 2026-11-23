@@ -31,67 +31,58 @@ async fn a_normal_exit_reports_code_zero_its_output_and_confirmed_cleanup() {
     assert_gone("leader", &[s.pid_now("leader")]).await;
 }
 
-both!(
-    a_nonzero_exit_is_a_failure_that_carries_the_code,
-    a_nonzero_exit_is_a_failure_that_carries_the_code_kept,
-    async {
-        let s = Scratch::new();
-        let report = run(sh(&s, "echo $$ > leader; echo boom >&2; exit 7", LONG)).await;
-        assert_eq!(report.ending, Ending::Exited { code: 7 });
-        assert_eq!(report.outcome(), Outcome::Failed);
-        let error = report.error_detail().expect("a failure has an error");
-        assert_eq!(error.provider_exit_code, Some(7));
-        assert_eq!(report.stderr.text(), "boom\n");
-        assert_confirmed(&report);
-        assert_gone("leader", &[s.pid_now("leader")]).await;
-    }
-);
+#[tokio::test]
+async fn a_nonzero_exit_is_a_failure_that_carries_the_code() {
+    let s = Scratch::new();
+    let report = run(sh(&s, "echo $$ > leader; echo boom >&2; exit 7", LONG)).await;
+    assert_eq!(report.ending, Ending::Exited { code: 7 });
+    assert_eq!(report.outcome(), Outcome::Failed);
+    let error = report.error_detail().expect("a failure has an error");
+    assert_eq!(error.provider_exit_code, Some(7));
+    assert_eq!(report.stderr.text(), "boom\n");
+    assert_confirmed(&report);
+    assert_gone("leader", &[s.pid_now("leader")]).await;
+}
 
-both!(
-    a_child_killed_by_a_signal_is_reported_as_signaled,
-    a_child_killed_by_a_signal_is_reported_as_signaled_kept,
-    async {
-        let s = Scratch::new();
-        let report = run(sh(&s, "echo $$ > leader; kill -KILL $$; sleep 5", LONG)).await;
-        assert_eq!(
-            report.ending,
-            Ending::Signaled {
-                signal: 9,
-                name: "SIGKILL".into()
-            }
-        );
-        assert_eq!(report.outcome(), Outcome::Failed);
-        assert_eq!(report.exit.as_ref().and_then(|e| e.signal), Some(9));
-        assert_confirmed(&report);
-        assert_gone("leader", &[s.pid_now("leader")]).await;
-    }
-);
+#[tokio::test]
+async fn a_child_killed_by_a_signal_is_reported_as_signaled() {
+    let s = Scratch::new();
+    let report = run(sh(&s, "echo $$ > leader; kill -KILL $$; sleep 5", LONG)).await;
+    assert_eq!(
+        report.ending,
+        Ending::Signaled {
+            signal: 9,
+            name: "SIGKILL".into()
+        }
+    );
+    assert_eq!(report.outcome(), Outcome::Failed);
+    assert_eq!(report.exit.as_ref().and_then(|e| e.signal), Some(9));
+    assert_confirmed(&report);
+    assert_gone("leader", &[s.pid_now("leader")]).await;
+}
 
-both!(
-    a_time_limit_ends_the_run_as_timed_out_and_stops_the_child,
-    a_time_limit_ends_the_run_as_timed_out_and_stops_the_child_kept,
-    async {
-        let s = Scratch::new();
-        let started = Instant::now();
-        let spec = sh(&s, "echo $$ > leader; sleep 60", Duration::from_millis(400));
-        let report = run(spec).await;
-        assert_eq!(
-            report.ending,
-            Ending::TimedOut {
-                limit: Duration::from_millis(400)
-            }
-        );
-        assert_eq!(report.outcome(), Outcome::TimedOut);
-        assert_eq!(report.error_detail().unwrap().kind, "timed_out");
-        assert!(report.exit.as_ref().is_some_and(|e| e.signal.is_some()));
-        assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
-        assert_confirmed(&report);
-        // The pid comes from the report: the limit can pass before the script has
-        // written its pid file.
-        let leader = i32::try_from(report.pid.expect("it started")).expect("a pid");
-        assert_gone("leader", &[leader]).await;
-    }
-);
+#[tokio::test]
+async fn a_time_limit_ends_the_run_as_timed_out_and_stops_the_child() {
+    let s = Scratch::new();
+    let started = Instant::now();
+    let spec = sh(&s, "echo $$ > leader; sleep 60", Duration::from_millis(400));
+    let report = run(spec).await;
+    assert_eq!(
+        report.ending,
+        Ending::TimedOut {
+            limit: Duration::from_millis(400)
+        }
+    );
+    assert_eq!(report.outcome(), Outcome::TimedOut);
+    assert_eq!(report.error_detail().unwrap().kind, "timed_out");
+    assert!(report.exit.as_ref().is_some_and(|e| e.signal.is_some()));
+    assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
+    assert_confirmed(&report);
+    // The pid comes from the report: the limit can pass before the script has
+    // written its pid file.
+    let leader = i32::try_from(report.pid.expect("it started")).expect("a pid");
+    assert_gone("leader", &[leader]).await;
+}
 
 #[tokio::test]
 async fn a_child_that_ignores_terminate_is_killed_after_the_grace_period() {
@@ -123,24 +114,21 @@ async fn a_child_that_ignores_terminate_is_killed_after_the_grace_period() {
     .await;
 }
 
-both!(
-    interrupting_through_the_handle_ends_the_run_as_interrupted,
-    interrupting_through_the_handle_ends_the_run_as_interrupted_kept,
-    async {
-        let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
-        let leader = s.pid("leader").await;
-        assert_eq!(handle.pid(), Some(leader as u32));
-        handle.interrupt();
-        let started = Instant::now();
-        let report = handle.wait().await;
-        assert_eq!(report.ending, Ending::Interrupted);
-        assert_eq!(report.outcome(), Outcome::Interrupted);
-        assert!(started.elapsed() < BOUND);
-        assert_confirmed(&report);
-        assert_gone("leader", &[leader]).await;
-    }
-);
+#[tokio::test]
+async fn interrupting_through_the_handle_ends_the_run_as_interrupted() {
+    let s = Scratch::new();
+    let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let leader = s.pid("leader").await;
+    assert_eq!(handle.pid(), Some(leader as u32));
+    handle.interrupt();
+    let started = Instant::now();
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted);
+    assert_eq!(report.outcome(), Outcome::Interrupted);
+    assert!(started.elapsed() < BOUND);
+    assert_confirmed(&report);
+    assert_gone("leader", &[leader]).await;
+}
 
 #[tokio::test]
 async fn interrupting_from_another_task_stops_the_child_and_its_descendants() {
@@ -161,43 +149,37 @@ async fn interrupting_from_another_task_stops_the_child_and_its_descendants() {
     assert_gone("child and grandchild", &[leader, gc]).await;
 }
 
-both!(
-    interrupting_from_another_thread_ends_the_run_as_interrupted,
-    interrupting_from_another_thread_ends_the_run_as_interrupted_kept,
-    async {
-        let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
-        let interrupter = handle.interrupter();
-        let leader = s.pid("leader").await;
-        std::thread::spawn(move || interrupter.interrupt())
-            .join()
-            .expect("interrupting thread");
-        let report = handle.wait().await;
-        assert_eq!(report.ending, Ending::Interrupted);
-        assert_confirmed(&report);
+#[tokio::test]
+async fn interrupting_from_another_thread_ends_the_run_as_interrupted() {
+    let s = Scratch::new();
+    let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let interrupter = handle.interrupter();
+    let leader = s.pid("leader").await;
+    std::thread::spawn(move || interrupter.interrupt())
+        .join()
+        .expect("interrupting thread");
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted);
+    assert_confirmed(&report);
+    assert_gone("leader", &[leader]).await;
+}
+
+#[tokio::test]
+async fn interrupting_before_the_child_has_run_still_ends_clean() {
+    let s = Scratch::new();
+    let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert!(
+        matches!(report.ending, Ending::Interrupted | Ending::Exited { .. }),
+        "{report:#?}"
+    );
+    assert_confirmed(&report);
+    if let Ok(text) = std::fs::read_to_string(s.path("leader")) {
+        let leader: i32 = text.trim().parse().expect("pid");
         assert_gone("leader", &[leader]).await;
     }
-);
-
-both!(
-    interrupting_before_the_child_has_run_still_ends_clean,
-    interrupting_before_the_child_has_run_still_ends_clean_kept,
-    async {
-        let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
-        handle.interrupt();
-        let report = handle.wait().await;
-        assert!(
-            matches!(report.ending, Ending::Interrupted | Ending::Exited { .. }),
-            "{report:#?}"
-        );
-        assert_confirmed(&report);
-        if let Ok(text) = std::fs::read_to_string(s.path("leader")) {
-            let leader: i32 = text.trim().parse().expect("pid");
-            assert_gone("leader", &[leader]).await;
-        }
-    }
-);
+}
 
 #[tokio::test]
 async fn dropping_the_handle_stops_the_child_and_its_descendants() {
@@ -218,23 +200,20 @@ async fn dropping_the_handle_stops_the_child_and_its_descendants() {
     .await;
 }
 
-both!(
-    cancelling_the_run_future_stops_the_child,
-    cancelling_the_run_future_stops_the_child_kept,
-    async {
-        let s = Scratch::new();
-        let spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
-        let mut future = Box::pin(run(spec));
-        // Wait for the child to exist, however slow the machine, then cancel.
-        let leader = tokio::select! {
-            _ = &mut future => panic!("the run should still be going"),
-            pid = s.pid("leader") => pid,
-        };
-        let _reaper = Reaper(vec![leader]);
-        drop(future);
-        assert_gone("leader after the run future was dropped", &[leader]).await;
-    }
-);
+#[tokio::test]
+async fn cancelling_the_run_future_stops_the_child() {
+    let s = Scratch::new();
+    let spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+    let mut future = Box::pin(run(spec));
+    // Wait for the child to exist, however slow the machine, then cancel.
+    let leader = tokio::select! {
+        _ = &mut future => panic!("the run should still be going"),
+        pid = s.pid("leader") => pid,
+    };
+    let _reaper = Reaper(vec![leader]);
+    drop(future);
+    assert_gone("leader after the run future was dropped", &[leader]).await;
+}
 
 #[test]
 fn shutting_down_the_runtime_kills_the_group_of_a_running_child() {
@@ -295,16 +274,13 @@ async fn a_working_directory_that_does_not_exist_is_a_failure_to_start() {
     assert_confirmed(&report);
 }
 
-both!(
-    timing_is_ordered_and_names_the_limit,
-    timing_is_ordered_and_names_the_limit_kept,
-    async {
-        let s = Scratch::new();
-        let report = run(sh(&s, "sleep 0.2", LONG)).await;
-        let started = report.timing.started_at.expect("it started");
-        assert!(started <= report.timing.finished_at);
-        assert!(report.timing.duration >= Duration::from_millis(150));
-        assert_eq!(report.timing.time_limit, LONG);
-        assert_eq!(report.timing.time_limit_secs(), 60);
-    }
-);
+#[tokio::test]
+async fn timing_is_ordered_and_names_the_limit() {
+    let s = Scratch::new();
+    let report = run(sh(&s, "sleep 0.2", LONG)).await;
+    let started = report.timing.started_at.expect("it started");
+    assert!(started <= report.timing.finished_at);
+    assert!(report.timing.duration >= Duration::from_millis(150));
+    assert_eq!(report.timing.time_limit, LONG);
+    assert_eq!(report.timing.time_limit_secs(), 60);
+}

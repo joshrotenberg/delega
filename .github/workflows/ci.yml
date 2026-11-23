@@ -69,17 +69,6 @@ jobs:
         with:
           name: acceptance-gap-repeats-${{ matrix.os }}
           path: acceptance-gaps.jsonl
-      # On Linux the keeper alone must stop a fork relay after a SIGKILL of
-      # delega (the k-relay rows). Whether a generation slips past depends on
-      # timing, so those rows run ten more times; any survivor fails the job.
-      - name: SIGKILL with a fork relay, ten repeats (Linux)
-        if: runner.os == 'Linux'
-        run: cargo run --release --locked -p delega-acceptance -- --filter=-k-relay --repeat 10 --out acceptance-k-relay.jsonl
-      - uses: actions/upload-artifact@v4
-        if: always() && runner.os == 'Linux'
-        with:
-          name: acceptance-k-relay-repeats
-          path: acceptance-k-relay.jsonl
 
   msrv:
     name: build on the minimum supported Rust

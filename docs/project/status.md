@@ -33,26 +33,10 @@ stands. This page lists the limits a user meets.
 - **Asking permission live** works for Claude Code runs over MCP or the Rust
   supervisor (`permissions.on_request: ask`). Codex runs and `delega run` refuse
   it before start ([#164](https://github.com/joshrotenberg/delega/issues/164)).
-- **Cleanup.** Met on Linux; partly met on macOS. Every provider process the
-  CLI and MCP start is held by a keeper, a small `delega` process that stops the
-  provider's whole tree when delega is gone, even after a `SIGKILL`. On Linux
-  the keeper also adopts every orphaned descendant, so cleanup cannot miss one.
-  On macOS two cases can still be missed and reported as confirmed: a detached
-  orphan running a program whose environment macOS hides (Apple's own programs
-  under SIP, such as `/bin/sh`, `/bin/sleep` or `perl`), and a fast fork relay.
-  The first depends on the machine: a Mac that does not hide its programs'
-  environment (one with SIP disabled) shows the run marker and cleanup finds
-  such an orphan. The acceptance results record which kind of machine they come
-  from;
-  fork tracking on macOS is
-  [#167](https://github.com/joshrotenberg/delega/issues/167). On every
-  platform, a run is reported unconfirmed when a process still held the output
-  after the kill, a `SIGKILL` of the keeper alone makes the result unconfirmed,
-  and a `SIGKILL` of the keeper together with delega leaves the worker running.
-  A program that embeds the library without a keeper keeps the earlier gaps,
-  and the result says so in `provider_notes`. Details are in
-  `crates/delega-core/src/process/mod.rs` ("What remains possible") and the
-  expected failures in
+- **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
+  descendant called `setsid` and was orphaned before any process listing saw it,
+  or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`
+  itself leaves the worker running. See the expected failures in
   [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
 - **Environment.** A worker gets a fixed environment allowlist plus what `--env`
   or the configuration file adds. The installed plugin starts `delega mcp` with

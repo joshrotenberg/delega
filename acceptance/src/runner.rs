@@ -42,10 +42,6 @@ const HARD_LIMIT: Duration = Duration::from_secs(30);
 /// How long after `delega` exits the harness waits before it measures what is
 /// left, so a process that is merely slow to die is not counted.
 const SETTLE: Duration = Duration::from_millis(1000);
-/// How much longer the harness waits, after a SIGKILL of `delega`, for the
-/// keeper to stop the tree: the default stop grace (1.5 s), the kill, and
-/// room for a loaded machine.
-const KEEPER_SETTLE: Duration = Duration::from_millis(5000);
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -420,12 +416,6 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         {
             match action {
                 Action::Signal(sig, _) => procs::signal(delega_pid, signal_of(sig)),
-                Action::KillWithKeeper(_) => {
-                    for keeper in procs::keepers_of(delega_pid) {
-                        procs::signal(keeper, Signal::KILL);
-                    }
-                    procs::signal(delega_pid, Signal::KILL);
-                }
                 Action::CloseStdout(_) => drop(stdout.take()),
                 Action::Wait => {}
             }
@@ -459,7 +449,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
             m.latency_kind = "timeout overshoot".to_string();
             m.latency_ms = Some(ms(exited - started).saturating_sub(t * 1000));
         }
-        (Action::Signal(..) | Action::KillWithKeeper(_), _, Some(at)) => {
+        (Action::Signal(..), _, Some(at)) => {
             m.latency_kind = "signal to exit".to_string();
             m.latency_ms = Some(ms(exited - at));
         }
@@ -493,17 +483,6 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
     }
     m.survivors_at_exit = labels;
     std::thread::sleep(SETTLE);
-    // After a SIGKILL of delega its keeper stops the tree by itself, TERM,
-    // then KILL after the grace, which is longer than the settle time.
-    if matches!(action, Action::Signal(Sig::Kill, _)) {
-        let until = Instant::now() + KEEPER_SETTLE;
-        while Instant::now() < until
-            && (!procs::survivors_sampled(&fixture.marker, &fixture.dir, &except, 1).is_empty()
-                || heartbeat_fresh(&fixture.dir))
-        {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
     let settled = procs::survivors_sampled(&fixture.marker, &fixture.dir, &except, 4);
     let mut labels = procs::roles(&settled);
     if heartbeat_fresh(&fixture.dir) {
@@ -778,18 +757,11 @@ fn check_unconfirmed(m: &Measured, reason: Option<&str>, problems: &mut Vec<Stri
 mod judge_tests {
     use super::*;
 
-    /// The relay row as a timing-dependent known gap, whatever the table
-    /// says on this platform (the gap is macOS-only there).
     fn relay_row() -> Case {
-        let mut row = crate::matrix::all()
+        crate::matrix::all()
             .into_iter()
             .find(|r| r.id == "claude-a-relay")
-            .expect("the relay row");
-        row.expect.leak = LeakClass::DocumentedGap;
-        row.expect.survivors = vec!["relay-heartbeat"];
-        row.expect.reason = Some("a timing-dependent gap");
-        row.expect.timing_dependent = true;
-        row
+            .expect("the relay row")
     }
 
     /// A measurement of `row` that met everything but the survivors.
@@ -836,8 +808,8 @@ mod judge_tests {
     fn sigkill_row() -> Case {
         crate::matrix::all()
             .into_iter()
-            .find(|r| r.id == "claude-kk-plain")
-            .expect("the SIGKILL row of delega and its keeper")
+            .find(|r| r.id == "claude-k-plain")
+            .expect("the SIGKILL row")
     }
 
     /// The SIGKILL rows measured with `delega` killed: no output, signal 9.
