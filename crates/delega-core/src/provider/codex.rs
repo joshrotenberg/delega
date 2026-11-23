@@ -3,6 +3,11 @@
 //! Commands run as `codex exec --json`, the prompt on standard input. Sandbox
 //! and approval policy carry the permission mapping, which is explained in
 //! `docs/providers.md`.
+//!
+//! Disable login shells so the user's shell profile cannot add environment
+//! variables to worker commands. Keep Codex's default environment inheritance:
+//! setting `shell_environment_policy.inherit="core"` would also remove some
+//! variables the caller explicitly passed with `--env`.
 
 use serde_json::{Map, Value};
 
