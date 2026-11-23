@@ -487,7 +487,7 @@ fn blocks_text(blocks: Blocks) -> &'static str {
     match blocks {
         Blocks::Run => "stops every run",
         Blocks::CommandGrants => "stops runs that grant exact commands",
-        Blocks::Build => "stops build runs",
+        Blocks::Build => "can stop build runs",
         Blocks::Cleanup => "cleanup would not be confirmed",
         Blocks::Nothing => "warning, no run is refused",
     }

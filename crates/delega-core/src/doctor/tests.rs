@@ -183,7 +183,7 @@ fn the_text_names_a_missing_sandbox_tool_and_that_it_stops_build_runs() {
     for expected in [
         "claude: ready",
         "  sandbox for build runs: socat not found on PATH",
-        "  claude: sandbox_unavailable (stops build runs): socat not found on PATH; Claude Code's \
+        "  claude: sandbox_unavailable (can stop build runs): socat not found on PATH; Claude Code's \
          sandbox needs bwrap and socat on Linux, so build runs with Claude usually fail at \
          startup. Install socat. Doctor does not check other causes",
     ] {

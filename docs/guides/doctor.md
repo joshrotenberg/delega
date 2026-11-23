@@ -69,7 +69,8 @@ are in [Managed settings](../providers.md#managed-settings).
 ## Before using build with Claude Code
 
 Claude Code's `build` runs need its sandbox. On macOS it is built in. On Linux
-it needs `bwrap` and `socat` on the `PATH` the worker gets. Doctor looks for
+it usually needs `bwrap` and `socat` on the `PATH` the worker gets (a managed
+setting can point Claude Code at another `bwrap`). Doctor looks for
 those two files; it does not start the sandbox, so other causes of a failed
 start, such as a system that blocks user namespaces, are not checked. When one
 is missing, doctor shows:
@@ -80,7 +81,7 @@ claude: ready
   sandbox for build runs: socat not found on PATH
   ...
 problems:
-  claude: sandbox_unavailable (stops build runs): socat not found on PATH; Claude Code's sandbox needs bwrap and socat on Linux, so build runs with Claude usually fail at startup. Install socat. Doctor does not check other causes, such as blocked user namespaces
+  claude: sandbox_unavailable (can stop build runs): socat not found on PATH; Claude Code's sandbox needs bwrap and socat on Linux, so build runs with Claude usually fail at startup. Install socat. Doctor does not check other causes, such as blocked user namespaces
 ```
 
 With both found, the line reads `bwrap and socat found on PATH; not otherwise
