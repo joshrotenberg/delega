@@ -101,7 +101,7 @@ fn exit_label(m: &Measured) -> String {
 
 /// Cases with no document to read: the harness closed stdout or killed delega.
 fn unreadable(m: &Measured) -> bool {
-    matches!(m.case.as_str(), "dc" | "dca" | "k")
+    matches!(m.case.as_str(), "dc" | "dca" | "k" | "kk")
 }
 
 /// Whether delega's standard output held one valid result, for rows where one
@@ -235,6 +235,7 @@ fn action_group(m: &Measured) -> &'static str {
         "dh" => "SIGHUP",
         "dc" | "dca" => "stdout closed early",
         "k" => "SIGKILL of delega",
+        "kk" => "SIGKILL of delega and its keeper",
         _ => "other",
     }
 }
