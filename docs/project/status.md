@@ -39,7 +39,11 @@ stands. This page lists the limits a user meets.
   the keeper also adopts every orphaned descendant, so cleanup cannot miss one.
   On macOS two cases can still be missed and reported as confirmed: a detached
   orphan running a program whose environment macOS hides (Apple's own programs
-  under SIP, such as `/bin/sh`, `/bin/sleep` or `perl`), and a fast fork relay;
+  under SIP, such as `/bin/sh`, `/bin/sleep` or `perl`), and a fast fork relay.
+  The first depends on the machine: a Mac that does not hide its programs'
+  environment (one with SIP disabled) shows the run marker and cleanup finds
+  such an orphan. The acceptance results record which kind of machine they come
+  from;
   fork tracking on macOS is
   [#167](https://github.com/joshrotenberg/delega/issues/167). On every
   platform, a run is reported unconfirmed when a process still held the output
