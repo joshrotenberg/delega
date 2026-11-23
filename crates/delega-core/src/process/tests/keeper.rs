@@ -16,8 +16,38 @@ use crate::process::{Ending, KeeperCommand, ProcessHandle, ProcessSpec};
 const ENTRY_ENV: &str = "DELEGA_TEST_KEEPER_ENTRY";
 
 /// The keeper for tests: this test binary, running [`keeper_entry`] only.
+/// The keeper registry the tests' keepers share: a temporary directory of
+/// this test process (mode 0700), never one under the real home.
+/// A test process this one starts as an owner (see [`owner_entry`]) finds
+/// the shared registry in [`REGISTRY_ENV`], so its keeper's orphans are
+/// published where this process's keepers look.
+pub(super) fn test_registry() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    static OWNED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| match std::env::var_os(REGISTRY_ENV) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => OWNED
+            .get_or_init(|| {
+                tempfile::Builder::new()
+                    .prefix("delega-keepers-")
+                    .tempdir()
+                    .expect("a registry directory")
+            })
+            .path()
+            .to_path_buf(),
+    })
+}
+
+/// The registry directory of the test process that started this one.
+pub(super) const REGISTRY_ENV: &str = "DELEGA_TEST_KEEPER_REGISTRY";
+
 pub(super) fn test_keeper() -> KeeperCommand {
     let exe = std::env::current_exe().expect("the test binary's path");
+    test_keeper_without_registry(exe).registry(test_registry())
+}
+
+/// The test keeper with no registry.
+pub(super) fn test_keeper_without_registry(exe: std::path::PathBuf) -> KeeperCommand {
     KeeperCommand::new(
         exe,
         [
@@ -334,6 +364,7 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
             "-q",
         ])
         .env(OWNER_ENV, s.dir())
+        .env(REGISTRY_ENV, test_registry())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -359,6 +390,8 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
 /// sends no more group signals, and the verdict says why it cannot confirm.
 #[tokio::test]
 async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
+    // It leaves a process no live keeper published.
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Unkept);
     let s = Scratch::new();
     let spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
     let handle = ProcessHandle::start(spec);
@@ -592,6 +625,7 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
                 "-q",
             ])
             .env(OWNER_ENV, s.dir())
+            .env(REGISTRY_ENV, test_registry())
             .env(OWNER_RELAY_ENV, "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -654,6 +688,9 @@ const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; POSIX::setpgid(0, 0) or d
 /// descendant before the owner has had a signal refused, whichever process
 /// acts first.
 fn refusing(s: &Scratch, spec: ProcessSpec) -> ProcessSpec {
+    // The descendant can outlive the run's keeper, unpublished, and the test
+    // asserts the run's exact verdict.
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let mut spec = spec;
     spec.refuse_signals = true;
     spec.refusal_file = Some(s.path("refused"));
@@ -708,6 +745,8 @@ fn assert_refusal_stands(report: &crate::process::ProcessReport) {
 /// owner tracks it, and the descendant ends only after the refusal.
 #[tokio::test]
 async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed() {
+    // It leaves a process no live keeper published.
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!("{WAITS_FOR_A_REFUSAL} echo $$ > leader; sleep 60");
@@ -740,6 +779,8 @@ async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed
 /// finds nothing), and the descendant ends only after one was refused.
 #[tokio::test]
 async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_tree_empty() {
+    // It leaves a process no live keeper published.
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!("{WAITS_FOR_A_REFUSAL} exit 0");
@@ -778,6 +819,8 @@ async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_t
 /// Linux owner refusals without the proof would be Confirmed here.
 #[tokio::test]
 async fn an_owner_refusal_stands_when_the_final_census_proves_nothing() {
+    // It leaves a process no live keeper published.
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!("{WAITS_FOR_A_REFUSAL} exit 0");

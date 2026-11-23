@@ -85,6 +85,12 @@ impl ProcessHandle {
     ///
     /// Panics if called outside a Tokio runtime.
     pub fn start(spec: ProcessSpec) -> Self {
+        #[cfg(test)]
+        crate::test_spawn::rooms::enter(if spec.keeper.is_some() {
+            crate::test_spawn::rooms::Room::Kept
+        } else {
+            crate::test_spawn::rooms::Room::Unkept
+        });
         let stop = Stop::default();
         let registry = Arc::new(Registry::default());
         let started_wall = SystemTime::now();
