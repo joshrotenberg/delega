@@ -59,6 +59,13 @@ const WRITE_WAIT_UNLIMITED: Duration = Duration::from_secs(365 * 24 * 3600);
 /// the stop then waits `PRINT_STOP_WAIT` and gives the cut-short status, which
 /// is wrong only if that piece completes the result as `delega` exits.
 ///
+/// Timings measured on macOS with the fake providers, from the signal to the
+/// exit with standard output stalled by a full pipe (5 runs each): 30 to 48 ms
+/// when standard error is read, 1.02 to 1.04 s when standard error is a full
+/// pipe too. After a signal already used to stop the worker, the write is
+/// stopped [`WRITE_WAIT_AFTER_SIGNAL`] plus under 20 ms after it began (4.64 to
+/// 4.66 s from the signal, of which 1.64 to 1.67 s stopping the worker).
+///
 /// A failure to set up the runtime or the signal handlers is a refused result:
 /// nothing was started, and starting a worker `delega` could not stop would be
 /// worse.

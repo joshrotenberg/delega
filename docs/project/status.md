@@ -69,6 +69,9 @@ the harness.
 
 ## Scope
 
+The design decisions behind this scope are listed in
+[Decisions](decisions.md).
+
 In scope now:
 
 - The runner: start, follow up, interrupt, wait, read the result.

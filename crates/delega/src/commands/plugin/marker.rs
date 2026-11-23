@@ -4,6 +4,13 @@
 //! marker itself excepted) and every host the plugin was registered with.
 //! `delega plugin install` reuses a directory only if it holds a valid marker, and `delega plugin uninstall`
 //! acts only on one.
+//!
+//! Fields: `format_version` (1), `managed_by` (`delega`), `version`,
+//! `revision`, `plugin_version`, `files` and `hosts`. A marker is refused as
+//! invalid, and nothing is deleted, when `managed_by` or the version is wrong,
+//! a host is not `claude` or `codex` or is repeated, or a file path is
+//! absolute, has a `..` component, is repeated, or is not one this build
+//! writes ([`writable`]).
 
 use std::io::Read;
 use std::path::Path;
