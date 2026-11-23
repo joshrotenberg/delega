@@ -45,8 +45,8 @@ stands. This page lists the limits a user meets.
   reports cleanup unconfirmed while a survivor it can tie to the run lives,
   except a survivor that leads its own session and exec'd after its parent
   died, which looks like a launchd job and can be reported as confirmed. An
-  orphan made during the run by another program of the same user, including
-  another delega run, makes a run unconfirmed
+  orphan made during the run by another program of the same user that left
+  its session, including one of another delega run, makes a run unconfirmed
   ([#183](https://github.com/joshrotenberg/delega/issues/183)). When its start-up
   check fails it reports fork tracking off, and the earlier macOS gaps (an
   orphan running an Apple program, a fast fork relay) return. On every

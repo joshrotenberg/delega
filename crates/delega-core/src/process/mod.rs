@@ -366,7 +366,10 @@
 //! - The strict rule. At every census and freeze, a scan of every process
 //!   reports as ambiguous (a suspect: followed, never signalled) every live
 //!   process of this user that was reparented to launchd and is not in a
-//!   group or session that proves it someone else's, when either its recorded
+//!   group or session that proves it someone else's (its leader started
+//!   before the keeper, or the leader, still leading it, has a chain of
+//!   parents that reaches such a process without passing through this
+//!   keeper), when either its recorded
 //!   parent was created after the program and never taken, or it was itself
 //!   created during the run, records launchd as its parent and does not lead
 //!   a session of its own. The second case is an orphan that exec'd after it
@@ -404,6 +407,14 @@
 //!     generation and holds no output pipe), 20 runs beside a process-suite
 //!     run in another test process: stopped in 20, `Unconfirmed` in 8 (the
 //!     other process's orphans), `Confirmed` with a relay alive in 0.
+//!   - Live runs, measured by the supervising session on 2026-11-23 with
+//!     the branch binary at ee46250, real Claude Code 2.1.330 (haiku) and
+//!     codex-cli (low effort), build mode, each run in its own temporary
+//!     directory: 12 sequential runs, all `Confirmed`; 24 runs in two rounds
+//!     of 6 concurrent runs per provider, all `Confirmed`; two rounds of one
+//!     Claude Code run that ran `(sleep 25 &)` beside three ordinary
+//!     concurrent runs, all 8 `Confirmed` with no `sleep` left: an orphan that
+//!     stays in its run's session does not affect other runs.
 //!   - The acceptance matrix with the fakes (rows that leave orphans one at
 //!     a time after the others, the rest 8 at a time, 3 repeats of 202 rows):
 //!     see `acceptance/RESULTS.md`.
@@ -412,12 +423,15 @@
 //!   keeps the verdict from `Confirmed` while a survivor lives, with these
 //!   exceptions, which can end `Confirmed` while it runs: a survivor that
 //!   leads a session of its own and exec'd after it was reparented (it looks
-//!   like launchd's own job); one in a group or session whose leader started
-//!   before the keeper (not a descendant's, by construction, unless such a
-//!   leader's pid was reused by a descendant, which the start time rules
-//!   out); a survivor of another user. The other way, an orphan made during
-//!   the run by a program of the same user outside delega makes the run
-//!   `Unconfirmed`, as does one of another delega run whose entry lags.
+//!   like launchd's own job); a survivor of another user. The other way, an
+//!   orphan made during the run by another program of the same user that
+//!   left its session (its group and session leaders gone or orphaned too)
+//!   makes the run `Unconfirmed`, and so do such orphans of a concurrent
+//!   delega run: each counts the other's as possibly its own (a way to tell
+//!   them apart is delega issue 183). An orphan that stays in its own run's
+//!   session does not: that session's leader, the other run's program, leads
+//!   by its chain of parents to processes older than this keeper without
+//!   passing through it. Neither does an orphan created before the run.
 //! - On Linux, two windows remain. The keeper is started with a synchronous
 //!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
 //!   example) holds the owner's start without a bound. And a keeper that stops
