@@ -196,30 +196,15 @@ fn settings_value(guard: Option<&HookCommand>, deny: &[String], sandbox: Option<
 /// sandbox, which refuses to start unsandboxed (`failIfUnavailable`), never
 /// retries a command outside it (`allowUnsandboxedCommands: false`) and
 /// approves sandboxed commands without a `Bash` allow rule
-/// (`autoAllowBashIfSandboxed`). The sandbox treats every `--add-dir` directory
-/// as writable, so each of `permissions.directories` is listed in
-/// `filesystem.denyWrite`. No network domain is allowed, so under `dontAsk`
-/// every host is refused.
-fn sandbox_value(directories: &[String]) -> Value {
-    let mut sandbox = json!({
+/// (`autoAllowBashIfSandboxed`). No network domain is allowed, so under
+/// `dontAsk` every host is refused.
+fn sandbox_value() -> Value {
+    json!({
         "enabled": true,
         "failIfUnavailable": true,
         "allowUnsandboxedCommands": false,
         "autoAllowBashIfSandboxed": true,
-    });
-    if !directories.is_empty() {
-        sandbox["filesystem"] = json!({ "denyWrite": directories });
-    }
-    sandbox
-}
-
-/// A directory as a sandbox path: `//abs/dir`, the absolute form Claude Code
-/// reads in its permission rules and sandbox settings.
-fn sandbox_path(dir: &Path) -> Result<String, Refusal> {
-    let rule = rule_path(dir, "directory_unusable")?;
-    Ok(rule
-        .strip_suffix("/**")
-        .map_or_else(|| "//".to_string(), str::to_string))
+    })
 }
 
 /// Characters refused in a command that becomes a rule: parentheses and commas
@@ -302,7 +287,7 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
         ));
     }
     if scope.mode == Mode::Build {
-        return build_grants(scope, tools, allowed, notes);
+        return Ok(build_grants(tools, allowed, notes));
     }
 
     let mut guard = None;
@@ -348,22 +333,21 @@ fn grants(inputs: &Inputs<'_>) -> Result<Grants, Refusal> {
 
 /// `build`: `Bash` without an allow rule, run inside Claude Code's sandbox.
 /// `permissions.commands` is empty: request validation refuses it with `build`.
+/// `permissions.directories` stay `Read` rules only and get no `--add-dir`
+/// (see `build`), because the sandbox makes every `--add-dir` directory
+/// writable.
 fn build_grants(
-    scope: &super::permissions::Scope,
     mut tools: Vec<&'static str>,
     allowed: Vec<String>,
     mut notes: Vec<String>,
-) -> Result<Grants, Refusal> {
+) -> Grants {
     tools.push("Bash");
-    let directories = scope
-        .directories
-        .iter()
-        .map(|dir| sandbox_path(dir))
-        .collect::<Result<Vec<_>, _>>()?;
     notes.extend([
         "build runs Bash inside Claude Code's sandbox, which approves sandboxed commands; \
-         commands write only to the working directory and Claude Code's per-user temporary \
-         directory, permissions.directories is denied for writing, and the network is refused"
+         commands can write to the working directory and Claude Code's per-user temporary \
+         directory (in a git worktree, git commit also writes the main checkout's .git), \
+         permissions.directories is granted to the Read tool only and is not added to the \
+         sandbox, and the network is refused"
             .to_string(),
         "wider than requested: commands inside the sandbox can read files outside the working \
          directory and permissions.directories"
@@ -380,11 +364,11 @@ fn build_grants(
          startup rather than run commands unsandboxed"
             .to_string(),
     ]);
-    Ok(Grants {
+    Grants {
         tools,
         allowed,
         guard: None,
-        sandbox: Some(sandbox_value(&directories)),
+        sandbox: Some(sandbox_value()),
         commands: Vec::new(),
         notes,
         unenforceable: vec![
@@ -392,7 +376,7 @@ fn build_grants(
              permissions.directories"
                 .to_string(),
         ],
-    })
+    }
 }
 
 /// Build the launch for a request.
@@ -451,8 +435,13 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     args.push(settings);
     let cwd = scope.cwd.to_string_lossy().into_owned();
     args.extend(["--add-dir".to_string(), cwd]);
-    for dir in &scope.directories {
-        args.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);
+    // In `build` the extra directories are reached through their `Read` rules
+    // alone: Claude Code's sandbox lets commands write to every `--add-dir`
+    // directory.
+    if scope.mode != Mode::Build {
+        for dir in &scope.directories {
+            args.extend(["--add-dir".to_string(), dir.to_string_lossy().into_owned()]);
+        }
     }
     args.extend(["--disable-slash-commands", "--no-chrome"].map(String::from));
     args.extend(["--tools".to_string(), g.tools.join(",")]);

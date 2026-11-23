@@ -185,29 +185,47 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
 }
 
 #[test]
-fn claude_build_mode_denies_writes_to_extra_directories_in_the_sandbox() {
+fn claude_build_mode_grants_extra_directories_as_read_rules_without_add_dir() {
     let rig = Rig::new();
     let extra = rig.home.join("docs");
     std::fs::create_dir(&extra).unwrap();
+    let resolved = std::fs::canonicalize(&extra).unwrap();
+    // The parent of the working directory too: listing it must not make the
+    // working directory read-only or writable beyond the sandbox.
+    let parent = std::fs::canonicalize(rig.work.parent().unwrap()).unwrap();
     let mut request = rig.request(Provider::Claude, "p");
     request.permissions.mode = Mode::Build;
-    request.permissions.directories = vec![extra.clone()];
+    request.permissions.directories = vec![extra.clone(), parent.clone()];
     let plan = dry(&rig, &request);
-    let settings = settings_of(&plan.args);
-    let resolved = std::fs::canonicalize(&extra).unwrap();
+    let adds: Vec<&String> = plan
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--add-dir")
+        .map(|w| &w[1])
+        .collect();
     assert_eq!(
-        settings["sandbox"]["filesystem"]["denyWrite"],
-        json!([format!(
-            "//{}",
-            resolved.to_string_lossy().trim_matches('/')
-        )])
+        adds,
+        [&std::fs::canonicalize(&rig.work)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()],
+        "only the working directory is added; the sandbox makes --add-dir writable"
     );
+    let at = plan
+        .args
+        .iter()
+        .position(|a| a == "--allowedTools")
+        .unwrap();
+    for dir in [&resolved, &parent] {
+        let read = format!("Read(//{}/**)", dir.to_string_lossy().trim_matches('/'));
+        assert!(plan.args[at + 1].contains(&read), "{}", plan.args[at + 1]);
+    }
+    let settings = settings_of(&plan.args);
     assert!(
-        plan.args
-            .windows(2)
-            .any(|w| w[0] == "--add-dir" && w[1] == resolved.to_string_lossy()),
-        "the directory is still added for reading"
+        settings["sandbox"].get("filesystem").is_none(),
+        "no denyWrite: {settings}"
     );
+    assert!(!plan.args.join("\n").contains("denyWrite"));
 }
 
 #[test]
@@ -527,7 +545,7 @@ fn codex_build_mode_is_workspace_write_without_network_but_with_temporary_direct
     assert_eq!(plan.mapping.mode, Mode::Build);
     assert!(plan.notes.iter().any(|n| {
         n.contains("wider than requested: the workspace-write sandbox")
-            && n.contains("anywhere under /tmp and $TMPDIR, including a permissions.directories")
+            && n.contains("under /tmp and $TMPDIR, including a permissions.directories entry there, except .git")
     }));
     assert!(
         plan.notes

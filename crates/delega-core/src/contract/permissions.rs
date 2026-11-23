@@ -15,9 +15,10 @@ pub enum Mode {
     /// May edit files in the working directory.
     Write,
     /// May edit files in the working directory and run any command inside the
-    /// provider's OS sandbox. Commands write only to the working directory and
-    /// temporary directories, and have no network. `permissions.commands` must
-    /// be empty: every command already runs inside the sandbox.
+    /// provider's OS sandbox. The sandbox lets commands write to the working
+    /// directory and temporary directories, with provider exceptions such as
+    /// git in a worktree, and gives them no network. `permissions.commands`
+    /// must be empty: every command already runs inside the sandbox.
     Build,
     /// No sandbox and no scope from delega. For Claude Code the user's deny
     /// rules still apply and tools beyond the nine built-ins stay off.

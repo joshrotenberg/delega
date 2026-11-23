@@ -72,8 +72,8 @@ pub struct Args {
     #[arg(long)]
     write: bool,
     /// Allow editing files in the working directory and running any command
-    /// inside the provider's sandbox: writes only to the working directory and
-    /// temporary directories, no network
+    /// inside the provider's sandbox, which lets commands write to the working
+    /// directory and temporary directories and gives them no network
     #[arg(long)]
     build: bool,
     /// No sandbox and no scope from delega
