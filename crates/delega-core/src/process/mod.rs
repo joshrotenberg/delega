@@ -135,7 +135,9 @@
 //!   the child's session and whose parent is gone can still be found. Cleanup
 //!   sweeps read it from `/proc/<pid>/environ` on Linux and from one `ps -U
 //!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both show
-//!   the environment as it was at `exec`. A process found only by the marker is
+//!   the environment as it was at `exec`. A marked process that is in the
+//!   child's session when it is read (it started after the ordinary listing)
+//!   is a member and is signalled as one. A process found only by the marker is
 //!   never signalled by number alone: it is stopped with SIGSTOP when first
 //!   seen, and receives SIGKILL and SIGCONT only from a KILL sweep whose reading
 //!   shows it still stopped with the same start time; a stopped process cannot

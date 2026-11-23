@@ -731,12 +731,23 @@ impl ProcessTree {
             }
         }
         let owned: HashSet<i32> = view.owned().into_iter().collect();
-        view.marked = snapshot
+        for m in snapshot
             .marked
             .iter()
             .filter(|m| m.pid != self.pid && !owned.contains(&m.pid))
-            .map(|m| m.pid)
-            .collect();
+        {
+            // Without `/proc` the marker reading is a listing of its own, so it
+            // can hold a member of the child's session that started after the
+            // ordinary listing. Such a process is a member, signalled as one
+            // (TERM in the polite stop), not stopped as an escaped process:
+            // stopping it could hold up the child's own handling of TERM. Every
+            // group member is in the session, so the session read covers both.
+            if self.pinned && sys::session_lookup(m.pid) == sys::SessionLookup::In(self.pid) {
+                view.session.push(m.pid);
+            } else {
+                view.marked.push(m.pid);
+            }
+        }
         view
     }
 
@@ -992,6 +1003,32 @@ mod tests {
         });
         assert!(view.session.is_empty() && view.tracked.is_empty());
         assert!(view.group.contains(&10));
+    }
+
+    #[test]
+    fn a_marked_process_in_the_childs_session_is_a_member_not_an_escaped_process() {
+        // The "child" here is this process's own session leader, so this
+        // process is a member of its session; it appears only in the marker
+        // reading, as a process started after the ordinary listing would.
+        let own = i32::try_from(std::process::id()).expect("a pid");
+        let Some(session) = sys::session_of(own).filter(|s| *s > 1 && *s != own) else {
+            eprintln!("this process leads its own session or it cannot be read; skipped");
+            return;
+        };
+        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let tree = ProcessTree::new(session, lister, true);
+        let marked = vec![MarkedRow {
+            pid: own,
+            started: "now".into(),
+            stopped: false,
+        }];
+        let view = tree.view(&Snapshot {
+            rows: Vec::new(),
+            sessions: HashMap::new(),
+            marked,
+        });
+        assert_eq!(view.session, vec![own]);
+        assert!(view.marked.is_empty());
     }
 
     #[test]
