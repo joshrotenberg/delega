@@ -101,7 +101,7 @@ lower values from the `[mcp]` section of the
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | `wait_default` | 30 s | `wait` with no `timeout_secs`. `list` reports it as `default_wait_secs`. |
 | `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Waiting and cursors](#waiting-and-cursors)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
-| preflight bound | 10 s | How long `start` waits for its request checks. A start that runs past it can be refused, kind `preflight_timeout`. |
+| preflight bound | 10 s | A bound on `start`'s dry run. A start that runs past it can be refused, kind `preflight_timeout`. |
 | outstanding request checks | 16 | Checks running at once. A `start` beyond it waits for a slot within the preflight bound. Not in `list`. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer. |
 | compact structured answer | 16 KiB | A compact read leaves out a larger structured answer. |
@@ -179,9 +179,9 @@ reported them. A resumed Codex follow-up has no `usage`, and has
 One counter numbers every finished run and every activity entry. A response
 carries its value as `cursor`.
 
-- `wait` returns when a named run finishes or needs attention, or on timeout.
-- Passing the response's `cursor` back as `after_cursor` lets the next call
-  report only what changed since. How waits are answered:
+- `wait` returns the current states of what it names, at the latest after its
+  timeout, with a `cursor`. Pass the cursor back as `after_cursor` to wait for
+  the next change. How waits are answered:
   [`supervisor/core/waits.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/core/waits.rs).
 - A timeout is a response with `timed_out: true` and the current states.
 - Ids that name nothing are listed in `unknown`; the rest are still waited for.
@@ -263,8 +263,7 @@ How drop works: the `Drop` impl in
 ## Retention
 
 Finished results are kept for `retention`, at most `retained_results` and
-`retained_bytes`, oldest dropped first; the newest result is kept even when it
-alone is larger than `retained_bytes`. A result past its time is not returned,
+about `retained_bytes` (an estimate), oldest dropped first. A result past its time is not returned,
 and an id that has gone is unknown. Live workers are not dropped, but their old
 results are.
 
