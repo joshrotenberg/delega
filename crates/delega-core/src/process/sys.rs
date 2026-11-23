@@ -44,7 +44,9 @@ pub(super) fn signal_group(pgid: i32, signal: Signal) -> Result<(), SignalError>
     rustix::process::kill_process_group(pid(pgid)?, signal).map_err(SignalError::from)
 }
 
-/// `kill(pid, signal)`.
+/// `kill(pid, signal)`. Not used on Linux outside tests: nothing is signalled
+/// by number there (see [`signal_checked`]).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(super) fn signal_process(target: i32, signal: Signal) -> Result<(), SignalError> {
     rustix::process::kill_process(pid(target)?, signal).map_err(SignalError::from)
 }
@@ -194,6 +196,20 @@ fn parse_proc_stat(stat: &[u8]) -> Option<ProcStat> {
     })
 }
 
+/// Whether the process behind a pidfd has exited (Linux): a pidfd becomes
+/// readable when its process exits. A poll that fails counts as exited, so a
+/// caller that relies on the process being alive does not.
+#[cfg(target_os = "linux")]
+pub(super) fn pidfd_exited(fd: &std::os::fd::OwnedFd) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let mut fds = [PollFd::new(fd, PollFlags::IN)];
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    !matches!(poll(&mut fds, Some(&now)), Ok(0))
+}
+
 /// The start time of a process in clock ticks (Linux), for checking at
 /// delivery that a pid still names the process it named when it was found.
 #[cfg(target_os = "linux")]
@@ -249,8 +265,14 @@ pub(super) fn signal_checked(
         Err(Errno::SRCH) => return Ok(Delivery::Gone),
         Err(_) => return Ok(Delivery::Refused),
     };
+    // Held but unreadable: gone only if the pidfd says it exited; otherwise
+    // it could not be verified.
     let Some(stat) = proc_stat(target) else {
-        return Ok(Delivery::Gone);
+        return Ok(if pidfd_exited(&fd) {
+            Delivery::Gone
+        } else {
+            Delivery::Refused
+        });
     };
     if !check(&stat) {
         return Ok(Delivery::Gone);

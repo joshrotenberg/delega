@@ -126,9 +126,25 @@ pub fn keeper_main() -> i32 {
 enum Event {
     Exited(Result<sys::ExitSummary, String>),
     Command(ToKeeper),
-    /// The owner's end closed.
+    /// The owner's end closed: a read returned end of file.
     Closed,
+    /// Reading the owner's end failed for another reason. Not the owner
+    /// closing: the program is stopped but left unreaped.
+    ReadFailed,
     Signal,
+}
+
+/// Where the owner stands when the keeper stops the tree on its own.
+enum Owner<'a> {
+    /// Its end closed: nothing of it can signal any more, so the program is
+    /// reaped.
+    Gone,
+    /// It may still be there: the program is reaped only after `released` or
+    /// its end closing.
+    Present(&'a mut mpsc::UnboundedReceiver<Event>),
+    /// Its end failed: whether it is there cannot be known, so the program is
+    /// left unreaped.
+    Unknown,
 }
 
 async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
@@ -230,8 +246,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Reap)) => {
-                    let live = finish(pid, exited).await;
-                    say(&FromKeeper::Reaped(live));
+                    say(&reap_reply(finish(pid, exited).await));
                     drop(child);
                     return 0;
                 }
@@ -239,12 +254,17 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                 // late is ignored.
                 Some(Event::Command(ToKeeper::Released)) => {}
                 Some(Event::Closed) | None => {
-                    stop_alone(&hello, pid, None).await;
+                    stop_alone(&hello, pid, Owner::Gone).await;
+                    drop(child);
+                    return 0;
+                }
+                Some(Event::ReadFailed) => {
+                    stop_alone(&hello, pid, Owner::Unknown).await;
                     drop(child);
                     return 0;
                 }
                 Some(Event::Signal) => {
-                    stop_alone(&hello, pid, Some(&mut rx)).await;
+                    stop_alone(&hello, pid, Owner::Present(&mut rx)).await;
                     drop(child);
                     return 0;
                 }
@@ -252,7 +272,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
             _ = tick.tick() => {
                 reap_orphans(pid);
                 if rustix::process::getppid() != parent || Instant::now() >= ceiling {
-                    stop_alone(&hello, pid, Some(&mut rx)).await;
+                    stop_alone(&hello, pid, Owner::Present(&mut rx)).await;
                     drop(child);
                     return 0;
                 }
@@ -276,7 +296,10 @@ fn read_commands(tx: &mpsc::UnboundedSender<Event>) {
                 }
             }
             Err(rustix::io::Errno::INTR) => {}
-            Err(_) => break,
+            Err(_) => {
+                let _ = tx.send(Event::ReadFailed);
+                return;
+            }
         }
     }
     let _ = tx.send(Event::Closed);
@@ -326,8 +349,10 @@ async fn wait_exit(pid: i32, limit: Duration) -> bool {
 /// The owner asked for the reap: everything is settled on its side. Anything
 /// still alive in the tree is stopped first (Linux), the program is killed if
 /// it has not exited (the owner reaps only an exited program, so this is a
-/// guard), then reaped, and the orphans with it.
-async fn finish(pid: i32, exited: bool) -> usize {
+/// guard; through a pidfd, never by number), then reaped, and the orphans with
+/// it. Returns what the last freeze left alive, or why the program could not
+/// be killed or reaped; then `reaped` is not sent.
+async fn finish(pid: i32, exited: bool) -> Result<usize, String> {
     #[cfg(target_os = "linux")]
     let live = if census(pid) > 0 {
         freeze(pid).await
@@ -337,18 +362,63 @@ async fn finish(pid: i32, exited: bool) -> usize {
     #[cfg(not(target_os = "linux"))]
     let live = 0;
     if !exited && !sys::leader_has_exited(pid) {
-        let _ = sys::signal_process(pid, Signal::KILL);
+        if !signal_program(pid, Signal::KILL) {
+            return Err("the program was alive at the reap and could not be signalled".into());
+        }
         let _ = wait_exit(pid, Duration::from_secs(5)).await;
     }
-    let _ = tokio::task::spawn_blocking(move || {
-        let until = std::time::Instant::now() + Duration::from_secs(5);
-        while !sys::reap_if_exited(pid) && std::time::Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    let reaped = tokio::task::spawn_blocking(move || {
+        consume_reap(pid, sys::reap_if_exited, Duration::from_secs(5))
     })
-    .await;
+    .await
+    .unwrap_or_else(|_| Err("the reap panicked".into()));
     reap_orphans(pid);
-    live
+    reaped.map(|()| live)
+}
+
+/// Reap `pid` with `reap` until it succeeds or `bound` passes.
+fn consume_reap(
+    pid: i32,
+    mut reap: impl FnMut(i32) -> bool,
+    bound: Duration,
+) -> Result<(), String> {
+    let until = std::time::Instant::now() + bound;
+    loop {
+        if reap(pid) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= until {
+            return Err(format!(
+                "the program could not be reaped within {} s",
+                bound.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The answer to `reap`: `reaped` only when the program was reaped.
+fn reap_reply(finished: Result<usize, String>) -> FromKeeper {
+    match finished {
+        Ok(live) => FromKeeper::Reaped(live),
+        Err(why) => FromKeeper::Warn(why),
+    }
+}
+
+/// Signal the program, the keeper's own child: through a pidfd on Linux,
+/// never by number; elsewhere by its pid, which the keeper holds unreaped.
+fn signal_program(pid: i32, signal: Signal) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::process::{PidfdFlags, pidfd_open, pidfd_send_signal};
+        rustix::process::Pid::from_raw(pid)
+            .and_then(|p| pidfd_open(p, PidfdFlags::empty()).ok())
+            .is_some_and(|fd| pidfd_send_signal(&fd, signal).is_ok())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        sys::signal_process(pid, signal).is_ok()
+    }
 }
 
 /// The live processes in the keeper's tree.
@@ -406,7 +476,7 @@ fn reap_orphans(_pid: i32) {
 /// The owner is gone (or asked nothing in time): stop the tree by itself,
 /// TERM, the grace, then KILL until nothing is left or the cleanup deadline
 /// passes, then reap the program and exit.
-async fn stop_alone(hello: &Hello, pid: i32, owner: Option<&mut mpsc::UnboundedReceiver<Event>>) {
+async fn stop_alone(hello: &Hello, pid: i32, owner: Owner<'_>) {
     let deadline = Instant::now() + hello.deadline.max(hello.grace);
     #[cfg(target_os = "linux")]
     {
@@ -421,20 +491,27 @@ async fn stop_alone(hello: &Hello, pid: i32, owner: Option<&mut mpsc::UnboundedR
     // closing. Without either within the bound the program is left unreaped:
     // the keeper exits, and the program goes to the reaper above it (init or
     // another subreaper), which frees its pid only when it reaps it.
-    if let Some(rx) = owner {
-        say(&FromKeeper::Releasing);
-        let acknowledged = tokio::time::timeout(KEEPER_RELEASE_WAIT, async {
-            loop {
-                match rx.recv().await {
-                    Some(Event::Command(ToKeeper::Released) | Event::Closed) | None => break,
-                    Some(_) => {}
+    match owner {
+        Owner::Gone => {}
+        Owner::Unknown => return,
+        Owner::Present(rx) => {
+            say(&FromKeeper::Releasing);
+            let acknowledged = tokio::time::timeout(KEEPER_RELEASE_WAIT, async {
+                loop {
+                    match rx.recv().await {
+                        // Only `released`, or a real end of file, lets the
+                        // program's pid go.
+                        Some(Event::Command(ToKeeper::Released) | Event::Closed) => break true,
+                        Some(Event::ReadFailed) | None => break false,
+                        Some(_) => {}
+                    }
                 }
+            })
+            .await
+            .unwrap_or(false);
+            if !acknowledged {
+                return;
             }
-        })
-        .await
-        .is_ok();
-        if !acknowledged {
-            return;
         }
     }
     let _ = tokio::task::spawn_blocking(move || {
@@ -516,5 +593,33 @@ async fn stop_alone_listed(hello: &Hello, pid: i32, deadline: Instant) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reap_that_never_succeeds_is_not_acknowledged() {
+        let result = consume_reap(1, |_| false, Duration::from_millis(30));
+        assert!(result.is_err());
+        let reply = reap_reply(result.map(|()| 0));
+        assert!(matches!(reply, FromKeeper::Warn(_)), "{reply:?}");
+    }
+
+    #[test]
+    fn a_reap_that_succeeds_is_acknowledged_with_what_was_left() {
+        let mut tries = 0;
+        let result = consume_reap(
+            1,
+            |_| {
+                tries += 1;
+                tries == 3
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(reap_reply(Ok(2)), FromKeeper::Reaped(2));
     }
 }
