@@ -153,6 +153,11 @@ Every Claude run asks for `--model haiku` and every Codex run for
 `--effort low`. Prompts are one or two sentences that say exactly what to do.
 Cases run one at a time.
 
+Unless `--delega` names a binary, the suite first builds `delega` with
+`cargo build`, with cargo's output on standard error. That build has no bound
+from the harness; a stuck build is in front of the maintainer, who can stop it.
+The bounds below apply from the first case on.
+
 ### Verdicts
 
 A case ends `pass`, `fail` or `not_shown`. `fail` means something asserted did
@@ -178,7 +183,7 @@ outcome, with `cleanup.confirmed` true. Beyond that:
 | `read-cwd` | `read` | `completed`, and the answer has the word the harness seeded in `word.txt` in the working directory. |
 | `write-refused` | `read` | `completed` or `refused`, the seeded `note.txt` is unchanged, and `delega run --dry-run` with the same arguments exits 0 with a launch plan that offers no way to write (Claude Code: `--tools` names none of `Edit`, `Write`, `NotebookEdit` and `Bash`; Codex: `sandbox_mode="read-only"`). A dry run that fails, or a plan that offers a way to write, fails the case; only a dry run that could not be started is `not_shown`. So the case shows that the worker was not offered a write and the file stayed unchanged, not that a write was attempted and denied. Denials are counted, not judged. |
 | `read-outside` | `read` | Claude: `completed` or `refused`, the answer does not have the word seeded in a file outside the working directory, and an entry in `permissions.denied` names that file's path. Codex: `completed` and a `wider than requested` provider note; whether the answer has the word is recorded, not asserted, because Codex does not confine reads. |
-| `build` | `build` | `completed`, and the worker ran a seeded `probe.sh` to its end, as `sh probe.sh ../outside <file name>`: it gets its paths only as arguments. The script writes a file in the working directory and one in `$TMPDIR`, tries to write in the outside directory, and runs `/usr/bin/curl -q` against `https://example.com`, leaving a marker for each step's result. Asserted: the working-directory file exists; the temporary file exists in the `TMPDIR` delega was given, Claude Code's `/tmp/claude-<uid>` or elsewhere under `/tmp` (anywhere else fails the case); the outside write was attempted and refused (a probe that did not run fails the case); curl did not succeed. A worker that reached the network fails the case. Not shown: the network check, when curl did not succeed but `/usr/bin/curl` is missing or the harness itself cannot reach the address just before the run; the outside check for Codex when the outside directory is under `/tmp`. |
+| `build` | `build` | `completed`, and the worker ran a seeded `probe.sh` to its end, as `sh probe.sh ../outside <file name>`: it gets its paths only as arguments. The script writes a file in the working directory and one in `$TMPDIR`, tries to write in the outside directory, and runs `/usr/bin/curl -q` against `https://example.com`, leaving a marker for each step's result. Asserted: the working-directory file exists; the temporary file exists in the `TMPDIR` delega was given, Claude Code's `/tmp/claude-<uid>` or elsewhere under `/tmp` (anywhere else fails the case); the outside write was attempted and refused (a probe that did not run fails the case); curl ran and failed (its `net-failed` marker exists). A worker that reached the network fails the case. Not shown: the network check, when neither curl marker exists, or when curl failed but `/usr/bin/curl` is missing for the harness or the harness itself cannot reach the address just before the run; the outside check for Codex when the outside directory is under `/tmp`. |
 | `resume` | `read` | Two runs that keep their session. The first is told a word; the second resumes the first run's `session_id` and must complete, report the same session id, and give the word back. |
 | `interrupt` | `build` | The worker is told to run `sh wait.sh wait-started`, a seeded script that creates the marker file named by its argument in the working directory and then runs `sleep 120`. The harness sends SIGINT to `delega run` once the marker exists. Asserted: `interrupted`, exit 130. If the marker has not appeared 90 s after the start, the harness stops `delega` with SIGTERM and the case is `not_shown`; if `delega` ends before the marker appears, the case fails. |
 | `timeout` | `build` | The worker is told to run `sleep 120`, with `--timeout 10s`. Asserted: `timed_out`, exit 124, and `timing.timeout_secs` 10. |
@@ -232,7 +237,8 @@ still holds one fails the case, with what was already written kept. Each case
 has a bound of 450 s, enough for the two runs of `resume` with every
 escalation: a run is given at most what is left of it, and none starts after
 it. The commands the harness runs itself (the network check with curl, and
-`date`, `uname`, `git` and `delega version` for the metadata) are killed if
+`date`, `uname`, `git` and `delega version` for the metadata, and on macOS
+`getconf DARWIN_USER_TEMP_DIR` for the temporary root) are killed if
 they have not finished 10 s after they start. So each case ends, and the suite
 with it.
 
@@ -257,8 +263,10 @@ One line per case (provider, case, verdict, outcome, seconds) with the
 problems and the not-shown checks of a case that is not a pass, then counts of
 each verdict, then per provider the version number, the number of runs, the
 cost Claude Code reports in `usage.cost_usd` (or that no cost was reported, as
-for Codex) and the token counts. If a provider's version differs between its
-cases, the summary says so and lists the versions. Nothing printed or recorded holds a model's
+for Codex) and the token counts. If a provider's known versions differ between
+its cases, the summary says so and lists them; cases whose version is unknown
+are counted separately ("version unknown for N cases") and never called a
+difference. Nothing printed or recorded holds a model's
 answer, a denial's text, the content of a file other than the words the
 harness seeded, a provider's version line, or an environment value. A version is recorded
 only from the provider's known format (Claude Code: a line that is the version
@@ -276,11 +284,26 @@ seconds, reported cost and tokens, and the checks, notes, not-shown checks and
 problems). It is written to a temporary file beside `FILE` and renamed into
 place. `--report` renders `acceptance/live.jsonl`, when present, into a "Live
 suite" section at the end of `RESULTS.md`, with each case's version, not-shown
-checks and notes; a provider whose version differs between cases is listed as
-such. It refuses a path that is not a regular file before opening it (and opens
-it non-blocking), a file whose first line is not the metadata, and metadata
+checks and notes; versions are shown as in the summary. It refuses, before
+opening it, a path that is not a regular file, a link included, whether or not
+its target exists (and it opens the file non-blocking), a file whose first line is not the metadata, and metadata
 that does not match its rows (the number of cases, a provider's versions).
 Without the file the section says no live run is recorded.
+
+### What the suite does not show
+
+The suite checks `delega`'s behaviour with a worker that follows the probe
+instructions; it is not a test against a worker that tries to evade the probes.
+Beyond that:
+
+- The temporary-write check classifies the path the probe recorded as it is
+  written. A `TMPDIR` that is a link to another directory is not resolved.
+- `write-refused` reads the `sandbox_mode` or `--tools` setting in the dry
+  run's launch plan and does not look for other arguments that could
+  contradict it. delega-core's mapping tests cover the arguments delega
+  generates.
+- The interrupt marker shows that the worker's command started, not that it
+  was still running when the signal arrived.
 
 ### Cost
 
