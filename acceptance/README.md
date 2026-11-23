@@ -314,7 +314,9 @@ and codex-cli 0.171.0, passed 18 of 18 cases in 91 s; Claude Code reported
 $0.0049 for its runs in all, and Codex reported no cost. A second run on the
 same day, of revision `a58ebf1`, passed 18 of 18 with none not shown in 93 s;
 Claude Code reported $0.0028 and Codex no cost. Neither run is recorded in
-`live.jsonl`. Before it, the estimate was at most about $0.25 for
+`live.jsonl`. The recorded run, of revision `9392499` on 2026-11-23, passed 18
+of 18 with none not shown in 84 s; Claude Code reported $0.0027 and Codex no
+cost. Before it, the estimate was at most about $0.25 for
 Claude Code, from two start runs in #115 (default model) that reported $0.011
 and $0.028 each. For Codex, a start run in #115 reported about 16,000 input
 tokens, 13,000 of them cached, and about 600 output tokens; with a ChatGPT

@@ -52,8 +52,8 @@ stands. This page lists the limits a user meets.
   suite per provider locally with
   `cargo run -p delega-acceptance -- --live`: nine cases per provider against
   the installed `claude` (`--model haiku`) and `codex` (`--effort low`),
-  never in CI. No run of it is recorded yet; a recorded run appears in the
-  "Live suite" section of
+  never in CI. The recorded run of 2026-11-23 passed 18 of 18 cases; it is
+  in the "Live suite" section of
   [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
   [Guarantees and how they are tested](../acceptance.md), under "Live suite", lists the
   cases.
