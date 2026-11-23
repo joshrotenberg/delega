@@ -183,6 +183,8 @@ impl Rig {
     /// streams as they are set, so they are set here; a caller that wants
     /// others sets them after this.
     pub fn configure(&self, command: &mut Command) {
+        // (the keeper registry is shared by every fixture of this test
+        // process, so concurrent runs see each other's keepers)
         if !cfg!(debug_assertions) {
             panic!("CLI fixtures require debug system root injection");
         }
@@ -193,6 +195,7 @@ impl Rig {
             .env(SYSTEM_ROOT_ENV, self.system_root())
             .env("PATH", self.path_value())
             .env("HOME", &self.home)
+            .env("DELEGA_KEEPER_REGISTRY", shared_keeper_registry())
             .env("XDG_CONFIG_HOME", &config)
             .env("CLAUDE_CONFIG_DIR", &config)
             .env("CODEX_HOME", &config)
@@ -535,4 +538,17 @@ pub fn managed_mcp_path(root: &Path) -> PathBuf {
     } else {
         "etc/claude-code/managed-mcp.json"
     })
+}
+
+/// One keeper registry (macOS) for every run of this test process: each test
+/// has its own home, and runs that overlap must see each other's keepers.
+pub fn shared_keeper_registry() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("delega-keepers-")
+            .tempdir()
+            .expect("a keeper registry directory")
+    })
+    .path()
 }

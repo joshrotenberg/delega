@@ -173,6 +173,8 @@ struct Fixture {
     work: PathBuf,
     home: PathBuf,
     record: PathBuf,
+    /// The keeper registry every case of this harness run shares.
+    registry: PathBuf,
 }
 
 impl Fixture {
@@ -190,6 +192,7 @@ impl Fixture {
         for d in [&dir, &work, &home, &record] {
             std::fs::create_dir(d)?;
         }
+        let registry = ctx.base.join("keepers");
         for name in [
             "fake-claude.sh",
             "fake-codex.sh",
@@ -213,6 +216,7 @@ impl Fixture {
             work,
             home,
             record,
+            registry,
         })
     }
 
@@ -241,6 +245,7 @@ impl Fixture {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
+            .env("DELEGA_KEEPER_REGISTRY", &self.registry)
             .env("XDG_CONFIG_HOME", &config)
             .env("CLAUDE_CONFIG_DIR", &config)
             .env("CODEX_HOME", &config)

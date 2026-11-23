@@ -86,15 +86,25 @@ pub(crate) fn guard_command() -> Option<delega_core::provider::HookCommand> {
 /// is held by a keeper that stops its tree when delega is gone. Without a usable
 /// path to this executable no keeper is configured, and the result says so.
 pub(crate) fn keeper_command() -> Option<delega_core::process::KeeperCommand> {
-    let exe = std::env::current_exe().ok()?;
-    let command = exe
-        .is_absolute()
-        .then(|| delega_core::process::KeeperCommand::new(exe, [keeper::NAME]))?;
+    let command = keeper_command_without_registry()?;
     Some(match keeper_registry() {
         Some(dir) => command.registry(dir),
         None => command,
     })
 }
+
+/// [`keeper_command`] without the keeper registry, for `delega doctor`, which
+/// writes nothing (the registry directory is created on first use).
+pub(crate) fn keeper_command_without_registry() -> Option<delega_core::process::KeeperCommand> {
+    let exe = std::env::current_exe().ok()?;
+    exe.is_absolute()
+        .then(|| delega_core::process::KeeperCommand::new(exe, [keeper::NAME]))
+}
+
+/// Overrides the keeper registry's directory (an absolute path); tests and the
+/// acceptance harness use it to give concurrent runs with separate homes one
+/// registry.
+pub(crate) const KEEPER_REGISTRY_ENV: &str = "DELEGA_KEEPER_REGISTRY";
 
 /// The keeper registry on macOS: `~/Library/Application Support/delega/keepers`,
 /// a per-user directory that no provider's build worker may write (it is
@@ -104,6 +114,9 @@ pub(crate) fn keeper_command() -> Option<delega_core::process::KeeperCommand> {
 fn keeper_registry() -> Option<std::path::PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;
+    }
+    if let Some(dir) = std::env::var_os(KEEPER_REGISTRY_ENV).map(std::path::PathBuf::from) {
+        return dir.is_absolute().then_some(dir);
     }
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
     home.is_absolute()
