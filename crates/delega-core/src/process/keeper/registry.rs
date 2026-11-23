@@ -53,8 +53,12 @@ pub(super) fn checked_dir(dir: &Path) -> Result<(), String> {
     if meta.uid() != rustix::process::getuid().as_raw() {
         return Err("the registry directory is owned by another user".into());
     }
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err("the registry directory is open to group or others".into());
+    let mode = meta.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "the registry directory is open to group or others (mode {:o})",
+            mode & 0o7777
+        ));
     }
     Ok(())
 }

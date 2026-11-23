@@ -30,6 +30,7 @@ pub(super) fn test_registry() -> &'static std::path::Path {
             .get_or_init(|| {
                 tempfile::Builder::new()
                     .prefix("delega-keepers-")
+                    .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
                     .tempdir()
                     .expect("a registry directory")
             })

@@ -119,6 +119,7 @@ fn fake(provider: &str) -> PathBuf {
 
 impl Rig {
     pub fn new() -> Self {
+        rooms::enter(rooms::Room::Kept);
         let tmp = tempfile::tempdir().expect("create temporary directory");
         let root = std::fs::canonicalize(tmp.path()).expect("resolve temporary directory");
         let make = |name: &str| {
@@ -547,8 +548,74 @@ pub fn shared_keeper_registry() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         tempfile::Builder::new()
             .prefix("delega-keepers-")
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .tempdir()
             .expect("a keeper registry directory")
     })
     .path()
+}
+
+/// Which tests may run beside each other (macOS). Every `delega run` here is
+/// kept, and a macOS keeper counts as possibly its own an orphan no other
+/// live keeper published. A test whose run deliberately leaves such a
+/// process (a provider's detached descendant) runs alone, so no other test's
+/// run, which may assert confirmed cleanup, meets it. The room is held until
+/// the test's thread ends; waiting uses a condition variable.
+pub mod rooms {
+    use std::cell::RefCell;
+    use std::sync::{Condvar, Mutex};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Room {
+        /// Ordinary kept runs: any number at once.
+        Kept,
+        /// A test that leaves a process no keeper published: alone.
+        Alone,
+    }
+
+    static STATE: Mutex<(Option<Room>, usize)> = Mutex::new((None, 0));
+    static CHANGED: Condvar = Condvar::new();
+
+    struct Held(Room);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+            state.1 -= 1;
+            if state.1 == 0 {
+                state.0 = None;
+            }
+            CHANGED.notify_all();
+        }
+    }
+
+    thread_local! {
+        static HELD: RefCell<Option<Held>> = const { RefCell::new(None) };
+    }
+
+    /// Enter `room` for the rest of this test's thread. A thread that holds
+    /// `Alone` keeps it.
+    pub fn enter(room: Room) {
+        let on_test_thread = std::thread::current()
+            .name()
+            .is_some_and(|name| name != "main");
+        if !cfg!(target_os = "macos") || !on_test_thread {
+            return;
+        }
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            match held.as_ref() {
+                Some(h) if h.0 == room || h.0 == Room::Alone => return,
+                _ => {}
+            }
+            *held = None;
+            let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+            while state.1 > 0 && (state.0 != Some(room) || room == Room::Alone) {
+                state = CHANGED.wait(state).unwrap_or_else(|p| p.into_inner());
+            }
+            state.0 = Some(room);
+            state.1 += 1;
+            *held = Some(Held(room));
+        });
+    }
 }

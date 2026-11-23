@@ -255,6 +255,8 @@ fn an_interrupted_run_in_text_mode_exits_130_with_a_summary_on_stderr() {
 
 #[test]
 fn a_descendant_the_provider_leaves_behind_is_stopped_before_delega_exits() {
+    // Its provider leaves a detached descendant behind.
+    support::rooms::enter(support::rooms::Room::Alone);
     for provider in PROVIDERS {
         let (rig, out) =
             Rig::run_with_timely_listing(provider, "descendant", &["--output", "json"]);
