@@ -135,6 +135,8 @@ pub(super) struct Report {
     /// Live suspects: processes that may be the tree's and cannot be proven
     /// either way. Never signalled.
     pub ambiguous: u32,
+    /// Where the first failed read happened, when one did.
+    pub hole: Option<&'static str>,
 }
 
 impl Report {
@@ -149,7 +151,7 @@ impl Report {
             self.losses,
             self.recovered,
             self.ambiguous
-        )
+        ) + &self.hole.map(|h| format!(" hole={h}")).unwrap_or_default()
     }
 
     /// The count to act on: an unproven result is never zero.
@@ -331,6 +333,8 @@ struct Tracker {
     /// How deep recovery scans are nested (a loss met during a recovery
     /// starts another).
     depth: u32,
+    /// Where the first failed read since the previous answer happened.
+    first_hole: Option<&'static str>,
     /// How old each process was when it was taken, in microseconds, for the
     /// measurement in the tests.
     #[cfg(test)]
@@ -362,6 +366,7 @@ impl Tracker {
             failed: false,
             saturated: false,
             depth: 0,
+            first_hole: None,
             #[cfg(test)]
             ages: Vec::new(),
             refused: 0,
@@ -489,7 +494,7 @@ impl Tracker {
             Ok(Some(ident)) => ident,
             Ok(None) => return Taken::Gone,
             Err(_) => {
-                self.read_failures += 1;
+                self.hole("take1");
                 return Taken::No;
             }
         };
@@ -533,7 +538,7 @@ impl Tracker {
                 if proven {
                     self.refused += 1;
                 } else {
-                    self.read_failures += 1;
+                    self.hole("take2");
                 }
                 return Taken::No;
             }
@@ -591,7 +596,7 @@ impl Tracker {
         let kids = match darwin::children(pid) {
             Ok(kids) => kids,
             Err(_) => {
-                self.read_failures += 1;
+                self.hole("list_under1");
                 Vec::new()
             }
         };
@@ -686,7 +691,7 @@ impl Tracker {
         // A relay can lose one generation after another while the scans
         // run; past this depth the tracker stops chasing and says so.
         if self.depth >= MAX_DEPTH {
-            self.read_failures += 1;
+            self.hole("recover1");
             return;
         }
         self.depth += 1;
@@ -697,7 +702,7 @@ impl Tracker {
             Ok(pids) => {
                 let _ = self.classify(pids);
             }
-            Err(_) => self.read_failures += 1,
+            Err(_) => self.hole("recover2"),
         }
         if let Some(window) = self.windows.get_mut(index) {
             window.open = window.open.saturating_sub(1);
@@ -748,14 +753,6 @@ impl Tracker {
         })
     }
 
-    /// Whether a process that started at `start` and whose parent has the
-    /// unique id `parent` may come from a missed fork.
-    fn in_window(&self, start: u64, parent: u64) -> bool {
-        self.windows
-            .iter()
-            .any(|w| w.since <= start && start <= w.until && parent > w.above)
-    }
-
     /// Read the processes in `pids` that are not held. Take every one forked
     /// by a known process (proven) or by a suspect (a suspect), and their
     /// children, until nothing new is found; then take as a suspect every
@@ -765,7 +762,6 @@ impl Tracker {
             proven: 0,
             complete: true,
         };
-        let lowest = self.windows.iter().map(|w| w.above).min();
         let mut table = Vec::with_capacity(pids.len());
         // The kernel's record of every process that could be a suspect, read
         // with its identity: it may exit before it is looked at.
@@ -789,7 +785,6 @@ impl Tracker {
                 match read_new(pid) {
                     Ok(Some(ident)) => {
                         if ident.puniqueid > self.floor
-                            && lowest.is_some_and(|above| ident.puniqueid > above)
                             && !self.known.contains(&ident.puniqueid)
                             && !self.suspected.contains(&ident.puniqueid)
                         {
@@ -799,7 +794,7 @@ impl Tracker {
                                 }
                                 Ok(None) => {}
                                 Err(_) => {
-                                    self.read_failures += 1;
+                                    self.hole("classify1");
                                     scanned.complete = false;
                                 }
                             }
@@ -808,7 +803,7 @@ impl Tracker {
                     }
                     Ok(None) => {}
                     Err(_) => {
-                        self.read_failures += 1;
+                        self.hole("classify2");
                         scanned.complete = false;
                     }
                 }
@@ -819,13 +814,13 @@ impl Tracker {
                     pending = again.into_iter().filter(|p| seen.insert(*p)).collect();
                 }
                 Err(_) => {
-                    self.read_failures += 1;
+                    self.hole("classify3");
                     scanned.complete = false;
                 }
             }
             if rounds >= MAX_ROUNDS && !pending.is_empty() {
                 // Processes kept appearing faster than they were read.
-                self.read_failures += 1;
+                self.hole("classify4");
                 scanned.complete = false;
                 break;
             }
@@ -905,7 +900,6 @@ impl Tracker {
             let suspect = !record.zombie()
                 && record.ppid == 1
                 && record.ruid == self.my_uid
-                && self.in_window(record.start_us, ident.puniqueid)
                 && !self.provably_foreign(ident.pid, record.pgid);
             if !suspect {
                 continue;
@@ -930,7 +924,7 @@ impl Tracker {
         match darwin::all_pids() {
             Ok(pids) => self.classify(pids),
             Err(_) => {
-                self.read_failures += 1;
+                self.hole("scan1");
                 Scanned::default()
             }
         }
@@ -949,7 +943,10 @@ impl Tracker {
                 Err(_) => failures += 1,
             }
         }
-        self.read_failures += failures;
+        if failures > 0 {
+            self.hole("refresh");
+            self.read_failures += failures - 1;
+        }
         for pid in gone {
             self.exited(pid);
         }
@@ -981,12 +978,27 @@ impl Tracker {
             losses: self.losses,
             recovered: self.recovered,
             ambiguous: self.live_suspects(),
+            hole: if self.broken() {
+                Some(if self.failed { "kevent" } else { "saturated" })
+            } else {
+                self.first_hole
+            },
         };
+        self.first_hole = None;
         self.refused = 0;
         self.read_failures = 0;
         self.losses = 0;
         self.recovered = 0;
         report
+    }
+
+    /// Count a failed read, and remember where the first one since the
+    /// previous answer happened, for the answer's details.
+    fn hole(&mut self, site: &'static str) {
+        self.read_failures += 1;
+        if self.first_hole.is_none() {
+            self.first_hole = Some(site);
+        }
     }
 
     /// The holes counted so far, to tell whether a pass added any.
@@ -1070,7 +1082,7 @@ impl Tracker {
                         return Sent::Gone;
                     }
                     Err(_) => {
-                        self.read_failures += 1;
+                        self.hole("send1");
                         return Sent::Refused;
                     }
                 },
@@ -1125,7 +1137,7 @@ impl Tracker {
                     Ok(None) => self.exited(pid),
                     Err(_) => {
                         all_stopped = false;
-                        self.read_failures += 1;
+                        self.hole("freeze_kill1");
                     }
                 }
             }
@@ -1191,11 +1203,7 @@ mod tests {
         let _ = t.suspect(start, 100);
         let _ = t.suspect(start + 10, 100);
         assert_eq!(t.windows.len(), 1);
-        assert!(t.in_window(start + 5, 101));
-        // A parent created before the process that may have forked is not
-        // one a missed fork made.
-        assert!(!t.in_window(start + 5, 100));
-        assert!(!t.in_window(start.saturating_sub(10 * MARGIN_US), 101));
+        assert!(t.windows[0].since <= start && t.windows[0].until >= start + 10);
     }
 
     #[test]

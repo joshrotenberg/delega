@@ -632,6 +632,26 @@ async fn a_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_r
     );
 }
 
+/// The relay of [`session_relay`] with its output on the null device: a new
+/// session each generation, and no output pipe to hold. A generation the
+/// macOS tracker missed is in no session of the run and has a parent that is
+/// gone, so only the second source's check of orphans created during the run
+/// keeps the verdict from `Confirmed`.
+fn detached_session_relay(dir: &std::path::Path) -> String {
+    session_relay(dir).replacen("exec perl", "exec </dev/null >/dev/null 2>&1; exec perl", 1)
+}
+
+#[tokio::test]
+async fn a_session_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_run() {
+    require_perl!();
+    let run = relay_run_of(detached_session_relay).await;
+    assert!(
+        !(run.alive && run.cleanup == Cleanup::Confirmed),
+        "a relay process was alive but cleanup says Confirmed: {}",
+        run.diagnostics
+    );
+}
+
 /// A double fork as fast as perl can do it: the program's child forks a
 /// child that calls `setsid`, forks the grandchild and exits at once, and is
 /// reaped. Where the macOS tracker took the middle process, the grandchild is
