@@ -566,7 +566,7 @@ caller assignments and adapter settings.
 | Named by caller | `env_pass`, populated by `[env] pass` and repeatable `--env NAME` (`-e`). Missing names appear as `named_not_set` in dry runs. Already-allowed names keep their group. |
 | Set by caller | `env_set`, populated by `[env.set]` and `--env NAME=VALUE`. Flags override config; assignments override values passed from the parent. |
 | Set by adapter | The four Claude variables listed under [Claude Code](#claude-code). Attempts to name or set these are refused with `forbidden_env_name`. |
-| Run marker | `DELEGA_RUN_MARKER`, added by the process layer when the provider runs through a keeper (the CLI and MCP always use one): random hex values separated by `:`, the one in delega's own environment, if any, then a new one. Cleanup finds a descendant that left the provider's session by it (see `crates/delega-core/src/process/mod.rs`). The worker can read it; it grants nothing. |
+| Run marker | `DELEGA_RUN_MARKER`, set when the provider runs through a keeper (always from the CLI and MCP). Cleanup uses it to find a descendant that left the provider's session ([`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs)). It grants nothing. |
 
 Caller names accept ASCII letters, digits and underscores and start with a
 letter or underscore. `invalid_env_name` omits the invalid name in case it
