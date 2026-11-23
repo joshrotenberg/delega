@@ -3,7 +3,7 @@ members = ["crates/delega", "crates/delega-core", "crates/delega-mcp", "acceptan
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-dev"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -11,8 +11,8 @@ repository = "https://github.com/joshrotenberg/delega"
 homepage = "https://joshrotenberg.com/delega/"
 
 [workspace.dependencies]
-delega-core = { path = "crates/delega-core", version = "0.1.0" }
-delega-mcp = { path = "crates/delega-mcp", version = "0.1.0" }
+delega-core = { path = "crates/delega-core", version = "0.1.0-dev" }
+delega-mcp = { path = "crates/delega-mcp", version = "0.1.0-dev" }
 clap = { version = "4.6", features = ["derive"] }
 jsonschema = { version = "0.61", default-features = false }
 libc = "0.2"
