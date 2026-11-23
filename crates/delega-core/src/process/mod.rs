@@ -132,8 +132,13 @@
 //!   complete census must find nothing. Its budget is checked for every
 //!   process. An answer that is not complete is never zero, so neither the
 //!   owner's verdict nor the keeper's own cleanup ends on an unproven empty
-//!   tree. Each answer carries its passes and whether it completed, in
-//!   `diagnostics.keeper.tree_reports`.
+//!   tree. A read of `/proc` that fails for any reason but the process being
+//!   gone (ENOENT, ESRCH) makes the pass incomplete, never counts as absence;
+//!   a children read is kept only if the parent's pidfd shows it had not
+//!   exited by the end of the read; a refused hold anywhere in a freeze leaves
+//!   it unproven whatever later passes find; and the freeze releases its
+//!   pidfds before the final census. Each answer carries its passes and
+//!   whether it completed, in `diagnostics.keeper.tree_reports`.
 //!   finds nothing counts only when the keeper's census agrees, and a keeper
 //!   that still finds processes alive when it reaps the child makes the verdict
 //!   `Unconfirmed` ([`TREE_LEFT_AT_REAP_REASON`]). A keeper that could not
@@ -154,8 +159,9 @@
 //!   `KEEPER_RELEASE_WAIT` (2 s) for `released`: the owner sends its group and
 //!   member signals while holding a lock that its answer also takes, so none of
 //!   them is in flight, and none follows, once the keeper frees the child's
-//!   pid. Without `released` (or the owner's end closing) the keeper does not
-//!   reap the child: it exits and leaves it to the reaper above it (init or
+//!   pid. Without `released` (or the owner's end closing with a real end of
+//!   file; a failed read of the socket is not one) the keeper does not reap
+//!   the child: it exits and leaves it to the reaper above it (init or
 //!   another subreaper), which frees the pid when it reaps it. The keeper
 //!   installs its signal handlers before it starts the child.
 //!   `PR_SET_PDEATHSIG` is not used: it fires when the thread that forked the
@@ -347,7 +353,9 @@
 //!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
 //!   example) holds the owner's start without a bound. And a keeper that stops
 //!   the tree on its own (a signal, its ceiling, a new parent) and gets no
-//!   `released` from the owner within 2 s exits without reaping the child:
+//!   `released` from the owner within 2 s, or whose read of the socket fails,
+//!   exits without reaping the child (and a `reap` it cannot complete is not
+//!   acknowledged, which makes the verdict `Unconfirmed`):
 //!   from then until the reaper above it reaps the child, an owner that wakes
 //!   (it was stopped) and has not seen the keeper's end close could still send
 //!   a group signal by the child's pid; once the child is reaped that pid can

@@ -488,7 +488,8 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     // A stopped or unscheduled generation writes nothing, so on Linux any
     // process still working in the case directory counts as alive too.
     #[cfg(target_os = "linux")]
-    let survivors = super::fixtures::case_processes(&s.dir());
+    let survivors = super::fixtures::case_processes(&s.dir())
+        .unwrap_or_else(|e| panic!("survivors unknown: {e}"));
     #[cfg(not(target_os = "linux"))]
     let survivors: Vec<i32> = Vec::new();
     let alive = first != second || written_after || !survivors.is_empty();

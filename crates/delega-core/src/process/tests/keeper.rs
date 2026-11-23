@@ -512,7 +512,8 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
             // A quiet heartbeat alone is not death: a stopped or unscheduled
             // generation writes nothing. No process may work in the case
             // directory either.
-            survivors = super::fixtures::case_processes(&s.dir());
+            survivors = super::fixtures::case_processes(&s.dir())
+                .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
             if before == after
                 && super::gaps::heartbeat_age(&s) > Duration::from_millis(300)
                 && survivors.is_empty()
@@ -528,5 +529,35 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
             stopped,
             "attempt {attempt}: the relay outlived the keeper's cleanup; survivors {survivors:?}"
         );
+    }
+}
+
+/// A process the cleanup had to signal and could not verify is not signalled,
+/// and the verdict is not Confirmed even when it then ends by itself and every
+/// sweep afterwards finds nothing.
+#[tokio::test]
+async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed() {
+    require_perl!();
+    let s = Scratch::new();
+    let script = "perl -e 'use POSIX; setpgid(0,0); exec q(sleep), q(1)' & echo $! > gc; \
+                  echo $$ > leader; sleep 60";
+    let mut spec = kept(sh(&s, script, LONG));
+    spec.refuse_signals = true;
+    let handle = ProcessHandle::start(spec);
+    let gc = s.pid("gc").await;
+    let _ = s.pid("leader").await;
+    let _reaper = Reaper(vec![gc]);
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert_gone("the descendant", &[gc]).await;
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => {
+            assert_eq!(
+                reason,
+                crate::process::UNVERIFIED_SIGNAL_REASON,
+                "{report:#?}"
+            );
+        }
+        other => panic!("a refused signal must not confirm cleanup: {other:?}"),
     }
 }

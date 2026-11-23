@@ -317,27 +317,58 @@ impl Held {
 
 /// The live processes whose working directory is `dir` (Linux, from
 /// `/proc/<pid>/cwd`): what a case started there and left running, found
-/// independently of any heartbeat or listing delega used.
+/// independently of any heartbeat or listing delega used. A failed
+/// enumeration, or an entry of this user's that cannot be read for a reason
+/// other than the process being gone, is an error, never absence. Another
+/// user's processes cannot be ours and are skipped.
 #[cfg(target_os = "linux")]
-pub(super) fn case_processes(dir: &std::path::Path) -> Vec<i32> {
-    let Ok(dir) = std::fs::canonicalize(dir) else {
-        return Vec::new();
+pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let gone = |e: &std::io::Error| {
+        e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3)
     };
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|pid| {
-            std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == dir)
-                && std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-                    stat.rsplit_once(')')
-                        .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
-                        .is_some_and(|state| state != "Z" && state != "X")
-                })
-        })
-        .collect()
+    let dir = std::fs::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
+    let uid = rustix::process::getuid().as_raw();
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").map_err(|e| format!("read /proc: {e}"))? {
+        let entry = entry.map_err(|e| format!("read /proc entry: {e}"))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let owner = match std::fs::metadata(entry.path()) {
+            Ok(meta) => meta.uid(),
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(format!("stat /proc/{pid}: {e}")),
+        };
+        if owner != uid {
+            continue;
+        }
+        let cwd = match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+            Ok(cwd) => cwd,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(format!("read /proc/{pid}/cwd: {e}")),
+        };
+        if cwd != dir {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(format!("read /proc/{pid}/stat: {e}")),
+        };
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
+            .ok_or_else(|| format!("unreadable /proc/{pid}/stat"))?;
+        if state != "Z" && state != "X" {
+            found.push(pid);
+        }
+    }
+    Ok(found)
 }
 
 /// End what a relay case left in `dir`, without signalling a foreign process:
@@ -350,8 +381,10 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
     while began.elapsed() < Duration::from_secs(5) {
         #[cfg(target_os = "linux")]
         {
-            let left = case_processes(dir);
-            if left.is_empty() {
+            // An unknown answer is retried; the test has failed already
+            // when this runs, so the teardown only does what it can.
+            let left = case_processes(dir).unwrap_or_default();
+            if left.is_empty() && case_processes(dir).is_ok() {
                 return;
             }
             let canonical = std::fs::canonicalize(dir).ok();

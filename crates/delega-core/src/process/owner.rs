@@ -727,6 +727,10 @@ impl OwnedProcess {
         let lister = spec.lister.clone().unwrap_or_else(system_lister);
         let mut tree = ProcessTree::new(pid, lister, spec.track_descendants)
             .with_mirror(registry.tracked.clone());
+        #[cfg(test)]
+        {
+            tree.refuse_signals = spec.refuse_signals;
+        }
         if let (Some(keeper), Some(marker)) = (&keeper, &marker) {
             tree = tree
                 .with_keeper(keeper.keeper_pid)

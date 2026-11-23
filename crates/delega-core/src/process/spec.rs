@@ -169,6 +169,10 @@ pub struct ProcessSpec {
     /// Test seam: make the first N group SIGKILLs do nothing.
     #[cfg(test)]
     pub(crate) swallow_group_kills: u32,
+    /// Test seam: treat every signal to a single process as unverifiable, as
+    /// a missing pidfd or start time would.
+    #[cfg(test)]
+    pub(crate) refuse_signals: bool,
     /// Test seam: panic in the owner loop right after the child starts.
     #[cfg(test)]
     pub(crate) panic_in_loop: bool,
@@ -259,6 +263,8 @@ impl ProcessSpec {
             lister: None,
             #[cfg(test)]
             swallow_group_kills: 0,
+            #[cfg(test)]
+            refuse_signals: false,
             #[cfg(test)]
             panic_in_loop: false,
             #[cfg(test)]

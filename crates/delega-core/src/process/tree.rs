@@ -455,6 +455,9 @@ pub(crate) struct ProcessTree {
     ticks: HashMap<i32, u64>,
     /// The child's start time in ticks, read while it was pinned.
     root_ticks: Option<u64>,
+    /// Test seam: every signal to a single process is refused.
+    #[cfg(test)]
+    pub(crate) refuse_signals: bool,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -529,6 +532,8 @@ impl ProcessTree {
             pin: None,
             ticks: HashMap::new(),
             root_ticks: None,
+            #[cfg(test)]
+            refuse_signals: false,
         }
     }
 
@@ -926,6 +931,12 @@ impl ProcessTree {
     /// residual in the module documentation. A group or session member is
     /// signalled only while the child's pid pins them, holding the pin's lock.
     fn signal_found(&self, pid: i32, found: Found, signal: Signal) {
+        #[cfg(test)]
+        if self.refuse_signals {
+            let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+            obs.stats.unverified_signals += 1;
+            return;
+        }
         let member = matches!(found, Found::Group | Found::Session);
         let held = self.pin.as_ref().map(|pin| pin.lock());
         if member && (!self.pinned || held.as_ref().is_some_and(|pinned| !**pinned)) {
