@@ -290,10 +290,12 @@ version = "0.1.0-dev"
 dependencies = [
  "clap",
  "delega-core",
+ "libc",
  "rustix",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

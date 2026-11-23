@@ -19,10 +19,12 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 delega-core.workspace = true
+libc.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "signal", "macros"] }
 
 [lints]
 workspace = true

@@ -17,6 +17,9 @@ const COMMITTED: &[&str] = &[
     "spike-numbers.jsonl",
 ];
 
+/// Inputs of `--report` that exist only after a recorded live run.
+const OPTIONAL: &[&str] = &["live.jsonl"];
+
 fn acceptance_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -44,6 +47,12 @@ fn the_committed_reports_are_what_report_generates_from_the_committed_results() 
     for name in COMMITTED {
         std::fs::copy(dir.join(name), scratch.path().join(name))
             .unwrap_or_else(|err| panic!("copy {name}: {err}"));
+    }
+    for name in OPTIONAL {
+        if dir.join(name).exists() {
+            std::fs::copy(dir.join(name), scratch.path().join(name))
+                .unwrap_or_else(|err| panic!("copy {name}: {err}"));
+        }
     }
     report::regenerate(scratch.path(), &scratch.path().join("results.jsonl"))
         .expect("regenerate the reports");

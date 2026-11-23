@@ -48,8 +48,15 @@ stands. This page lists the limits a user meets.
   delega refuses such runs up front with `managed_mcp_exclusive`, and
   `delega doctor` reports it. See
   [Managed settings](../providers.md#managed-settings).
-- **Live suite.** The fake-provider tests run in CI; the live suite per provider
-  is pending ([#139](https://github.com/joshrotenberg/delega/issues/139)).
+- **Live suite.** The fake-provider tests run in CI. A maintainer runs the live
+  suite per provider locally with
+  `cargo run -p delega-acceptance -- --live`: nine cases per provider against
+  the installed `claude` (`--model haiku`) and `codex` (`--effort low`),
+  never in CI. The recorded run of 2026-11-23 passed 18 of 18 cases; it is
+  in the "Live suite" section of
+  [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
+  [Guarantees and how they are tested](../acceptance.md), under "Live suite", lists the
+  cases.
 
 ## Acceptance run
 

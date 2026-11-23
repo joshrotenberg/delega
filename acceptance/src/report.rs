@@ -3,7 +3,9 @@
 //! Nothing here measures anything. `--report` reads the committed results
 //! (and, when present, `results.meta.json`, `repeats.jsonl` and
 //! `spike-numbers.jsonl`) and writes both documents, so a fresh full run can
-//! be turned into documents with one command.
+//! be turned into documents with one command. When `live.jsonl` is present
+//! (a recorded `--live` run: its metadata, then its rows), RESULTS.md ends
+//! with a "Live suite" section made from it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -11,6 +13,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::live::LiveRow;
 use crate::matrix::{self, LeakClass};
 use crate::runner::Measured;
 
@@ -40,11 +43,22 @@ pub fn regenerate(dir: &Path, results: &Path) -> Result<(), String> {
         .and_then(|t| serde_json::from_str(&t).ok());
     let repeats: Vec<Measured> = read_rows(&dir.join("repeats.jsonl")).unwrap_or_default();
     let spike: Vec<SpikeRow> = read_rows(&dir.join("spike-numbers.jsonl")).unwrap_or_default();
-    std::fs::write(
-        dir.join("RESULTS.md"),
-        results_md(&rows, meta.as_ref(), &repeats),
-    )
-    .map_err(|e| format!("write RESULTS.md: {e}"))?;
+    let live_path = dir.join("live.jsonl");
+    // Present in any form, a dangling link included: anything but a regular
+    // file is refused by `read_regular_file`, not taken as absent.
+    let live = if std::fs::symlink_metadata(&live_path).is_ok() {
+        let text = crate::live::read_regular_file(&live_path, 16 * 1024 * 1024)?;
+        Some(crate::live::read_live(&text).map_err(|e| format!("{}: {e}", live_path.display()))?)
+    } else {
+        None
+    };
+    let mut results = results_md(&rows, meta.as_ref(), &repeats);
+    results.push_str(&match &live {
+        Some((meta, rows)) => live_section(rows, Some(meta)),
+        None => live_section(&[], None),
+    });
+    std::fs::write(dir.join("RESULTS.md"), results)
+        .map_err(|e| format!("write RESULTS.md: {e}"))?;
     std::fs::write(dir.join("COMPARISON.md"), comparison_md(&rows, &spike))
         .map_err(|e| format!("write COMPARISON.md: {e}"))?;
     Ok(())
@@ -477,6 +491,89 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     out
 }
 
+/// The "Live suite" section: the recorded `--live` run, or a line saying
+/// there is none.
+pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> String {
+    let mut out = String::from("\n## Live suite\n\n");
+    out.push_str(
+        "Acceptance criterion 6 asks for a small live suite per provider. `--live` runs it against the\n\
+         installed `claude` and `codex` (README.md, \"Live suite\"); this section is generated from the\n\
+         recorded run in `live.jsonl`, whose first line is the run's metadata.\n\n",
+    );
+    if rows.is_empty() {
+        out.push_str("No live run is recorded.\n");
+        return out;
+    }
+    if let Some(meta) = meta {
+        let text = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
+        let _ = writeln!(out, "- Date: {}.", text(&meta["date"]));
+        let _ = writeln!(out, "- Machine: {}.", text(&meta["os"]));
+        let _ = writeln!(out, "- delega: version {}.", text(&meta["delega_version"]));
+        let _ = writeln!(
+            out,
+            "- Harness commit: `{}`.",
+            text(&meta["harness_commit"])
+        );
+        for provider in crate::live::PROVIDERS {
+            if rows.iter().any(|r| r.provider == provider) {
+                let _ = writeln!(
+                    out,
+                    "- {provider}: {}.",
+                    crate::live::version_label(provider, rows)
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "- Claude cases used `--model {}`, Codex cases `--effort {}`.",
+            text(&meta["claude_model"]),
+            text(&meta["codex_effort"])
+        );
+        out.push('\n');
+    }
+    let count = |v: &str| rows.iter().filter(|r| r.verdict == v).count();
+    let _ = writeln!(
+        out,
+        "{} cases: {} pass, {} fail, {} not shown.\n",
+        rows.len(),
+        count("pass"),
+        count("fail"),
+        count("not_shown")
+    );
+    out.push_str("| Provider | Case | Version | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems | Not shown and notes |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    let cell = |items: Vec<String>| {
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join("; ").replace('|', "/")
+        }
+    };
+    for r in rows {
+        let notes: Vec<String> = r
+            .not_shown
+            .iter()
+            .map(|n| format!("not shown: {n}"))
+            .chain(r.notes.iter().cloned())
+            .collect();
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            r.provider,
+            r.case,
+            r.provider_version.as_deref().unwrap_or("-"),
+            r.verdict,
+            r.outcome.as_deref().unwrap_or("-"),
+            yes(r.cleanup_confirmed),
+            r.denied,
+            r.runs,
+            r.cost_usd.map_or("-".to_string(), |c| format!("${c:.4}")),
+            cell(r.problems.clone()),
+            cell(notes),
+        );
+    }
+    out
+}
+
 /// Written by the reviewer of the harness, not measured by it.
 const TIME_BREAKDOWN: &str = "## Where the time goes in a run\n\n\
     Measured by the reviewer on a release build, not by this harness. On an idle machine a plain Claude\n\
@@ -851,6 +948,73 @@ fn differences(rows: &[Measured], spike: &[SpikeRow]) -> String {
 #[cfg(test)]
 mod tests {
     use super::percentile;
+
+    #[test]
+    fn the_live_section_says_when_no_run_is_recorded() {
+        let text = super::live_section(&[], None);
+        assert!(text.contains("## Live suite"), "{text}");
+        assert!(text.contains("No live run is recorded."), "{text}");
+    }
+
+    #[test]
+    fn the_live_section_lists_each_case_with_versions_date_and_notes() {
+        let (meta, rows) =
+            crate::live::read_live(include_str!("../tests/fixtures/live/live.jsonl"))
+                .expect("the sample live results");
+        let text = super::live_section(&rows, Some(&meta));
+        assert!(text.contains("- Date: 2026-11-22."), "{text}");
+        assert!(text.contains("- claude: claude 2.1.400."), "{text}");
+        assert!(text.contains("- codex: codex 0.99.0."), "{text}");
+        assert!(
+            text.contains("3 cases: 1 pass, 1 fail, 1 not shown."),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "| claude | plain-answer | claude 2.1.400 | pass | completed | yes | 0 | 1 | $0.0010 | none | none |"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("not so: cleanup confirmed"), "{text}");
+        assert!(
+            text.contains("not shown: that the worker's request failed: the harness itself could not reach https://example.com; the temporary file was in /tmp"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn regenerate_refuses_live_results_whose_metadata_does_not_match() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let fixture = include_str!("../tests/fixtures/live/live.jsonl");
+        let broken = fixture.replacen("\"cases\":3", "\"cases\":4", 1);
+        assert_ne!(broken, fixture);
+        std::fs::write(dir.path().join("live.jsonl"), broken).expect("write");
+        let results = concat!(env!("CARGO_MANIFEST_DIR"), "/results.jsonl");
+        let error =
+            super::regenerate(dir.path(), std::path::Path::new(results)).expect_err("refused");
+        assert!(error.contains("cases"), "{error}");
+    }
+
+    #[test]
+    fn regenerate_refuses_a_live_results_path_that_is_a_link_dangling_or_not() {
+        let results = concat!(env!("CARGO_MANIFEST_DIR"), "/results.jsonl");
+        for target in ["exists", "missing"] {
+            let dir = tempfile::tempdir().expect("scratch");
+            std::fs::write(
+                dir.path().join("exists"),
+                include_str!("../tests/fixtures/live/live.jsonl"),
+            )
+            .expect("write");
+            std::os::unix::fs::symlink(dir.path().join(target), dir.path().join("live.jsonl"))
+                .expect("link");
+            let error =
+                super::regenerate(dir.path(), std::path::Path::new(results)).expect_err("refused");
+            assert!(
+                error.ends_with("is not a regular file"),
+                "{target}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn percentile_is_nearest_rank() {

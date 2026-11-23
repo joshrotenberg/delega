@@ -1,5 +1,6 @@
 //! `delega-acceptance`: run the acceptance matrix against the built `delega`,
-//! or regenerate the documents from a results file. See `acceptance/README.md`.
+//! run the live suite against the installed providers (`--live` only), or
+//! regenerate the documents from a results file. See `acceptance/README.md`.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use clap::Parser;
 use delega_acceptance::delega_bin::{build, require_absent_managed_mcp, workspace_root};
+use delega_acceptance::live;
 use delega_acceptance::matrix::{self, Row};
 use delega_acceptance::procs;
 use delega_acceptance::report;
@@ -66,6 +68,53 @@ struct Args {
     /// Do not print a line per finished case.
     #[arg(long)]
     quiet: bool,
+    /// Run the live suite against the installed `claude` and `codex`, with
+    /// the real HOME. Calls the real models and costs money. Nothing live runs
+    /// without this flag. Combines with `--provider`, `--out`, `--delega`,
+    /// `--list` and `--quiet` only.
+    #[arg(long)]
+    live: bool,
+    /// The provider for `--live`: claude or codex. Default: both.
+    #[arg(long, value_parser = ["claude", "codex"])]
+    provider: Option<String>,
+}
+
+/// Refuse a live option without `--live`, and `--live` with a matrix option.
+fn check_live_args(args: &Args) -> Result<(), String> {
+    if !args.live {
+        if args.provider.is_some() {
+            return Err(
+                "--provider selects the provider of the live suite, which runs only with --live"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    let matrix_options = [
+        ("--all", args.all),
+        ("--smoke", args.smoke),
+        ("--filter", !args.filter.is_empty()),
+        ("--timing-gaps", args.timing_gaps),
+        ("--repeat", args.repeat != 1),
+        ("--jobs", args.jobs != 8),
+        ("--report", args.report),
+        ("--results", args.results.is_some()),
+        ("--sweep", args.sweep),
+        ("--allow-skips", args.allow_skips),
+    ];
+    let given: Vec<&str> = matrix_options
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| *name)
+        .collect();
+    if given.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "--live cannot be combined with {}",
+            given.join(", ")
+        ))
+    }
 }
 
 fn acceptance_dir() -> PathBuf {
@@ -74,6 +123,13 @@ fn acceptance_dir() -> PathBuf {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    if let Err(err) = check_live_args(&args) {
+        eprintln!("delega-acceptance: {err}");
+        return ExitCode::from(2);
+    }
+    if args.live {
+        return run_live(&args);
+    }
     if args.sweep {
         return sweep_all();
     }
@@ -98,7 +154,7 @@ fn main() -> ExitCode {
         matrix::all()
     } else {
         eprintln!(
-            "delega-acceptance: give --all, --smoke, --filter TEXT or --timing-gaps (see --help)"
+            "delega-acceptance: give --all, --smoke, --filter TEXT, --timing-gaps or --live (see --help)"
         );
         return ExitCode::from(2);
     };
@@ -190,6 +246,97 @@ fn main() -> ExitCode {
     }
 
     summarize(&measured, wall, left.len(), args.allow_skips)
+}
+
+/// The live suite: every planned case in turn, one line each, then the
+/// summary. Exits non-zero when a case fails.
+fn run_live(args: &Args) -> ExitCode {
+    let planned = match live::plan(args.provider.as_deref()) {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("delega-acceptance: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    if args.list {
+        for p in &planned {
+            println!("{}", p.id());
+        }
+        return ExitCode::SUCCESS;
+    }
+    let delega = match args
+        .delega
+        .clone()
+        .map_or_else(|| build(!cfg!(debug_assertions)), Ok)
+    {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("delega-acceptance: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let root = match live::temp_root() {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("delega-acceptance: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let suite = live::Live::new(delega.clone(), root, live::Env::Inherit);
+    if let Err(err) = live::install_stop_handler() {
+        eprintln!("delega-acceptance: {err}");
+        return ExitCode::FAILURE;
+    }
+    let runs: u32 = planned.iter().map(|p| p.case.runs()).sum();
+    eprintln!(
+        "live suite: {} cases, {runs} model runs, against the installed providers (Claude --model {}, Codex --effort {})",
+        planned.len(),
+        live::CLAUDE_MODEL,
+        live::CODEX_EFFORT
+    );
+    if args.provider.is_some() {
+        eprintln!(
+            "live suite: doctor is skipped; it checks both providers and has no option to check one"
+        );
+    }
+    let began = std::time::Instant::now();
+    let mut rows = Vec::new();
+    for p in planned {
+        let row = suite.run(p);
+        if !args.quiet || row.verdict != "pass" {
+            println!("{}", live::line(&row));
+        }
+        rows.push(row);
+        if live::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!(
+                "delega-acceptance: stopped by the maintainer after {}; its directory was removed and no results were written",
+                p.id()
+            );
+            return ExitCode::from(130);
+        }
+    }
+    let wall = began.elapsed();
+    if let Some(path) = &args.out {
+        let meta = live::meta(&delega, &rows, wall);
+        // A Ctrl-C while the metadata was gathered still stops the suite
+        // before anything is published.
+        if live::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("delega-acceptance: stopped by the maintainer; no results were written");
+            return ExitCode::from(130);
+        }
+        if let Err(err) = live::write_live(path, &meta, &rows) {
+            eprintln!("delega-acceptance: write {}: {err}", path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    let (text, no_failure) = live::summary(&rows);
+    print!("{text}");
+    println!("finished in {:.0} s", wall.as_secs_f64());
+    if no_failure {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn write_results(path: &PathBuf, rows: &[Measured]) -> std::io::Result<()> {
@@ -356,4 +503,57 @@ fn read_dirs(dir: &std::path::Path, prefix: &str) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, check_live_args};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("delega-acceptance").chain(args.iter().copied()))
+            .expect("arguments parse")
+    }
+
+    #[test]
+    fn a_provider_without_live_is_refused_so_nothing_live_starts_by_accident() {
+        let error = check_live_args(&parse(&["--provider", "claude"])).expect_err("refused");
+        assert!(error.contains("only with --live"), "{error}");
+        assert!(check_live_args(&parse(&["--smoke"])).is_ok());
+        assert!(!parse(&["--smoke"]).live);
+    }
+
+    #[test]
+    fn live_is_refused_with_a_matrix_option() {
+        for extra in [
+            &["--all"][..],
+            &["--smoke"],
+            &["--filter", "x"],
+            &["--timing-gaps"],
+            &["--repeat", "3"],
+            &["--report"],
+            &["--sweep"],
+        ] {
+            let mut args = vec!["--live"];
+            args.extend_from_slice(extra);
+            let error = check_live_args(&parse(&args)).expect_err("refused");
+            assert!(error.contains(extra[0]), "{error}");
+        }
+    }
+
+    #[test]
+    fn live_accepts_a_provider_an_output_file_and_a_list() {
+        let args = parse(&[
+            "--live",
+            "--provider",
+            "codex",
+            "--out",
+            "/x.jsonl",
+            "--list",
+        ]);
+        assert!(check_live_args(&args).is_ok());
+        assert!(
+            Args::try_parse_from(["delega-acceptance", "--live", "--provider", "gemini"]).is_err()
+        );
+    }
 }

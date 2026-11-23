@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "run": "run-18ea88335ab5ced0-0",
+  "provider": "claude",
+  "outcome": "timed_out",
+  "text": "working",
+  "error": {
+    "kind": "timed_out",
+    "message": "the provider was still running after the 2 s time limit and was stopped"
+  },
+  "cleanup": {
+    "confirmed": true
+  },
+  "permissions": {
+    "mode": "read"
+  },
+  "provider_notes": [
+    "the user's and the project's Claude Code settings other than their deny rules were not applied: --setting-sources is empty, so their hooks, env, apiKeyHelper, plugins, skills, MCP servers and instructions are not loaded",
+    "no deny rules were found in the user's or the project's Claude Code settings files, so none were applied",
+    "Claude Code loads no CLAUDE.md file and no auto memory into the worker's context by itself: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 stops it loading the user's, the project's and reference directories' CLAUDE.md files and the auto-memory index, and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 turns its auto-memory feature off; the worker can still read such files with its tools, as the delegated preamble asks it to for repository instructions",
+    "3 environment variables of the caller were withheld; 5 were passed"
+  ],
+  "applied": {
+    "sources": {
+      "cwd": "flag",
+      "model": "flag",
+      "permissions.mode": "default",
+      "permissions.on_request": "default",
+      "permissions.strict": "default",
+      "prompt": "flag",
+      "provider": "flag",
+      "session.ephemeral": "flag",
+      "timeout_secs": "flag"
+    },
+    "env": {
+      "passed": {
+        "total": 5,
+        "base": 2,
+        "network": 0,
+        "provider": 0,
+        "named_by_caller": 0,
+        "set_by_caller": 0,
+        "set_by_delega": 3
+      },
+      "withheld": {
+        "total": 3,
+        "never_passed": 3,
+        "not_allowlisted": 0
+      },
+      "named": []
+    },
+    "deny_rules": {
+      "files": [],
+      "skipped": [],
+      "applied": 0
+    },
+    "context": {
+      "settings": "deny_rules",
+      "instructions": false
+    }
+  },
+  "timing": {
+    "queued_at": "2026-11-23T01:25:55.607Z",
+    "started_at": "2026-11-23T01:25:55.688Z",
+    "finished_at": "2026-11-23T01:25:59.242Z",
+    "duration_ms": 3553,
+    "timeout_secs": 2
+  },
+  "provenance": {
+    "delega_version": "0.1.0-dev",
+    "provider_executable": "/fakes/fake-claude.sh",
+    "provider_version": "2.1.400 (Claude Code)"
+  }
+}
