@@ -400,6 +400,24 @@ pub(in crate::process) fn self_test() -> Result<(), String> {
     if own.uniqueid == 0 || own.puniqueid != up.uniqueid {
         return Err("proc_pidinfo flavor 17 does not name the keeper's parent".into());
     }
+    // The kernel record read through `sysctl` is decoded at fixed offsets of
+    // `struct kinfo_proc`; check them against what libproc says of the
+    // keeper itself.
+    let info = bsd_info(me)
+        .map_err(|e| format!("proc_pidinfo of the keeper failed: {e}"))?
+        .ok_or("proc_pidinfo found no keeper")?;
+    let record = kern_proc(me)
+        .map_err(|e| format!("sysctl KERN_PROC of the keeper failed: {e}"))?
+        .ok_or("sysctl KERN_PROC found no keeper")?;
+    if record.start_us != info.start_us
+        || record.ppid != info.ppid
+        || record.pgid != info.pgid
+        || record.ruid != info.ruid
+        || record.zombie()
+        || record.exiting()
+    {
+        return Err("sysctl KERN_PROC does not describe the keeper as libproc does".into());
+    }
     if signal(&own, Signal::CONT) != Sent::Delivered {
         return Err("a signal by audit token did not reach the keeper".into());
     }
