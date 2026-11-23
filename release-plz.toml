@@ -1,0 +1,43 @@
+[workspace]
+release_always = false
+changelog_update = true
+changelog_config = "cliff.toml"
+# dist creates the GitHub Release when the CLI tag is pushed with COMMITTER_TOKEN.
+git_release_enable = false
+git_tag_enable = false
+semver_check = true
+pr_labels = ["release"]
+pr_draft = false
+publish_allow_dirty = false
+publish_no_verify = false
+publish_timeout = "10m"
+
+[[package]]
+name = "delega"
+release = true
+publish = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+version_group = "delega"
+changelog_path = "CHANGELOG.md"
+changelog_include = ["delega-core", "delega-mcp"]
+
+[[package]]
+name = "delega-core"
+release = true
+publish = true
+version_group = "delega"
+changelog_update = false
+
+[[package]]
+name = "delega-mcp"
+release = true
+publish = true
+version_group = "delega"
+changelog_update = false
+
+[[package]]
+name = "delega-acceptance"
+release = false
+publish = false
+changelog_update = false

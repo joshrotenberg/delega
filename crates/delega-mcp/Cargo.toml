@@ -1,12 +1,16 @@
 [package]
 name = "delega-mcp"
-description = "The MCP adapter over delega-core"
+description = "MCP server adapter for running Claude Code and Codex agents with delega"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["claude", "codex", "mcp", "agents"]
+categories = ["development-tools"]
+publish = true
 
 [dependencies]
 delega-core.workspace = true
@@ -24,3 +28,6 @@ tower-mcp = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true
+
+[package.metadata.dist]
+dist = false

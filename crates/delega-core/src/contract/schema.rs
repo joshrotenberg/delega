@@ -18,9 +18,9 @@ use super::request::Request;
 use super::result::RunResult;
 
 /// The committed request schema, embedded at build time.
-pub const REQUEST_SCHEMA: &str = include_str!("../../../../schemas/request.schema.json");
+pub const REQUEST_SCHEMA: &str = include_str!("../../schemas/request.schema.json");
 /// The committed result schema, embedded at build time.
-pub const RESULT_SCHEMA: &str = include_str!("../../../../schemas/result.schema.json");
+pub const RESULT_SCHEMA: &str = include_str!("../../schemas/result.schema.json");
 
 // The schema states what a document may look like: structure, types, enums,
 // numeric ranges, list lengths, the schema version, the rule that
@@ -217,7 +217,7 @@ mod tests {
 
     fn schema_path(file: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../schemas")
+            .join("schemas")
             .join(file)
     }
 

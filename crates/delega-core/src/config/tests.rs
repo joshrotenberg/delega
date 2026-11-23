@@ -843,7 +843,7 @@ fn the_error_text_makes_control_characters_visible() {
 #[test]
 fn committed_schemas_config_matches_the_generated_schema() {
     let generated = generate_schema();
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/config.schema.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/config.schema.json");
     let committed = std::fs::read_to_string(&path).unwrap_or_default();
     if generated == committed {
         return;

@@ -41,7 +41,7 @@ use crate::supervisor::limits as supervisor;
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The committed schema of the document, embedded at build time.
-pub const DOCTOR_SCHEMA: &str = include_str!("../../../schemas/doctor.schema.json");
+pub const DOCTOR_SCHEMA: &str = include_str!("../schemas/doctor.schema.json");
 
 /// Problem kind: process inspection cannot be run, so every cleanup would be
 /// reported as not confirmed.

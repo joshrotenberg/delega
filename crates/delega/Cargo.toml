@@ -1,12 +1,16 @@
 [package]
 name = "delega"
-description = "The delega command line"
+description = "Run Claude Code and Codex agents from the command line or over MCP"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["claude", "codex", "mcp", "cli"]
+categories = ["command-line-utilities"]
+publish = true
 
 [[bin]]
 name = "delega"

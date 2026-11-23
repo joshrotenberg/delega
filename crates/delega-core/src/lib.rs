@@ -30,26 +30,29 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests {
-    /// The workspace version, read from the manifest at the repository root.
-    fn workspace_manifest_version() -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let manifest = std::fs::read_to_string(path).expect("read workspace manifest");
-        let mut in_package = false;
-        for line in manifest.lines() {
-            let line = line.trim();
-            if line.starts_with('[') {
-                in_package = line == "[workspace.package]";
-            } else if in_package && let Some(rest) = line.strip_prefix("version") {
-                let value = rest.trim_start().trim_start_matches('=').trim();
-                return value.trim_matches('"').to_string();
-            }
-        }
-        panic!("no version under [workspace.package]");
+    fn read_manifest(path: &std::path::Path) -> toml::Table {
+        std::fs::read_to_string(path)
+            .expect("read manifest")
+            .parse()
+            .expect("parse manifest")
     }
 
     #[test]
-    fn version_matches_the_workspace_manifest() {
-        assert_eq!(super::VERSION, workspace_manifest_version());
+    fn version_matches_the_manifest() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let package = read_manifest(&root.join("Cargo.toml"));
+        let version = &package["package"]["version"];
+        if let Some(version) = version.as_str() {
+            // Cargo writes a normalized manifest with a literal version in the archive.
+            assert_eq!(super::VERSION, version);
+        } else {
+            assert_eq!(version["workspace"].as_bool(), Some(true));
+            let workspace = read_manifest(&root.join("../../Cargo.toml"));
+            assert_eq!(
+                Some(super::VERSION),
+                workspace["workspace"]["package"]["version"].as_str()
+            );
+        }
     }
 
     #[test]

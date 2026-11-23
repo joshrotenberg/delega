@@ -4,7 +4,7 @@ The [README](https://github.com/joshrotenberg/delega/blob/main/README.md) is
 canonical for what exists and states where each of the six acceptance criteria
 stands. This page lists the limits a user meets.
 
-- **Version** 0.1.0-dev. No release; build from source
+- **Version** 0.1.0. No release; build from source
   ([#140](https://github.com/joshrotenberg/delega/issues/140)).
 - **Platforms.** macOS and Linux. CI runs fmt, clippy, the tests and the full
   acceptance matrix on `macos-latest` and `ubuntu-latest`, and builds on Rust

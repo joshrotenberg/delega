@@ -28,6 +28,10 @@ delega doctor     # what a run would meet, without starting a worker
 has the details and [Plugin setup](https://github.com/joshrotenberg/delega/blob/main/docs/getting-started/plugin.md)
 covers the MCP tools and skills in Claude Code and Codex.
 
+The 0.1.0 release tooling prepares crates.io packages and shell-installable
+binaries for macOS and Linux. Automated publishing is gated by the repository
+variable `RELEASE_ENABLED`.
+
 ## Example
 
 ```sh

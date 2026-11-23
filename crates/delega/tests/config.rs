@@ -253,8 +253,7 @@ fn the_files_executable_is_used_unless_the_override_variable_is_set() {
     let rig = Rig::new();
     let program = rig.path("bin-claude");
     std::os::unix::fs::symlink(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../delega-core/src/provider/tests/fakes/fake-claude.sh"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake-claude.sh"),
         &program,
     )
     .expect("link");
@@ -671,8 +670,7 @@ fn doctor_reports_the_file_it_read_and_applies_its_executables_environment_and_l
     let rig = Rig::new();
     let program = rig.path("bin-codex");
     std::os::unix::fs::symlink(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../delega-core/src/provider/tests/fakes/fake-codex.sh"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fake-codex.sh"),
         &program,
     )
     .expect("link");

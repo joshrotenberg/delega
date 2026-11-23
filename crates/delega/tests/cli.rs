@@ -36,11 +36,10 @@ fn schema_result_prints_the_result_schema_and_exits_zero() {
 }
 
 #[test]
-fn schema_output_equals_the_committed_files() {
-    let request = include_str!("../../../schemas/request.schema.json");
-    let result = include_str!("../../../schemas/result.schema.json");
-    assert_eq!(text(&delega(&["schema", "request"]).stdout), request);
-    assert_eq!(text(&delega(&["schema", "result"]).stdout), result);
+fn schema_output_equals_the_embedded_schemas() {
+    use delega_core::contract::schema::{REQUEST_SCHEMA, RESULT_SCHEMA};
+    assert_eq!(text(&delega(&["schema", "request"]).stdout), REQUEST_SCHEMA);
+    assert_eq!(text(&delega(&["schema", "result"]).stdout), RESULT_SCHEMA);
 }
 
 #[test]
@@ -185,20 +184,19 @@ fn skill_list_json_is_a_versioned_catalog_with_sha256_digests() {
     }
 }
 
-fn skill_file(name: &str) -> Vec<u8> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../skills")
-        .join(name)
-        .join("SKILL.md");
-    std::fs::read(path).expect("read skill file")
+fn skill_content(name: &str) -> &'static [u8] {
+    delega_core::skills::find(name)
+        .expect("embedded skill")
+        .content()
+        .as_bytes()
 }
 
 #[test]
-fn skill_show_prints_the_skill_file_byte_for_byte() {
+fn skill_show_prints_the_embedded_skill_byte_for_byte() {
     for name in ["run", "delegate"] {
         let out = delega(&["skill", "show", name]);
         assert_eq!(out.status.code(), Some(0), "{name}");
-        assert_eq!(out.stdout, skill_file(name), "{name}");
+        assert_eq!(out.stdout, skill_content(name), "{name}");
     }
 }
 
@@ -211,7 +209,7 @@ fn skill_show_json_carries_the_content_and_catalog_fields() {
     assert_eq!(value["uri"], "skill://delega/run/SKILL.md");
     assert_eq!(
         value["content"].as_str().expect("content").as_bytes(),
-        skill_file("run")
+        skill_content("run")
     );
     let listed: serde_json::Value = serde_json::from_str(&text(
         &delega(&["skill", "list", "--output", "json"]).stdout,

@@ -1,6 +1,6 @@
 //! The skill catalog: guidance documents embedded in the executable.
 //!
-//! Each `skills/<name>/SKILL.md` at the repository root is embedded at build
+//! Each `skills/<name>/SKILL.md` at the crate root is embedded at build
 //! time by `build.rs`, which lists the directories and generates the
 //! `include_str!` calls. Nothing is read from disk at run time. The CLI, the
 //! MCP server and the plugin installer all serve this one catalog.
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
 
     fn skills_dir() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
     }
 
     fn doc(name: &str) -> &'static str {
