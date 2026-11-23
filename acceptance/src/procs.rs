@@ -32,60 +32,6 @@ pub struct Proc {
     pub command: String,
 }
 
-/// The keepers `delega` started: its children that run `process-keeper`.
-pub fn keepers_of(delega: i32) -> Vec<i32> {
-    ps().into_iter()
-        .filter(|p| p.ppid == delega && p.command.contains("process-keeper"))
-        .map(|p| p.pid)
-        .collect()
-}
-
-/// Whether this system hides the environment of its own programs from
-/// `ps -E`, as macOS does for Apple's programs under System Integrity
-/// Protection. Probed once per process: `/bin/sleep` is started with
-/// `DELEGA_RUN_MARKER` set to a value of the probe's own, and the value is
-/// looked for in what `ps -E` shows for it. Always false on Linux, where the
-/// keeper reads `/proc` and does not depend on it. A probe that cannot run
-/// counts as hidden, the case that expects less of delega.
-pub fn system_programs_hide_environment() -> bool {
-    static HIDDEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *HIDDEN.get_or_init(|| {
-        if std::env::consts::OS == "linux" {
-            return false;
-        }
-        let value = format!(
-            "{:x}{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        );
-        let Ok(mut sleeper) = Command::new("/bin/sleep")
-            .arg("5")
-            .env_clear()
-            .env("DELEGA_RUN_MARKER", &value)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .guarded_spawn()
-        else {
-            return true;
-        };
-        std::thread::sleep(Duration::from_millis(200));
-        let shown = Command::new("/bin/ps")
-            .args(["-Eww", "-o", "command=", "-p", &sleeper.id().to_string()])
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .guarded_output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&value));
-        let _ = sleeper.kill();
-        let _ = sleeper.wait();
-        !shown
-    })
-}
-
 pub fn ps() -> Vec<Proc> {
     let Ok(out) = Command::new("/bin/ps")
         .args(["-axww", "-o", "pid=,ppid=,stat=,command="])

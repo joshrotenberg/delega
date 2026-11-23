@@ -101,7 +101,7 @@ fn exit_label(m: &Measured) -> String {
 
 /// Cases with no document to read: the harness closed stdout or killed delega.
 fn unreadable(m: &Measured) -> bool {
-    matches!(m.case.as_str(), "dc" | "dca" | "k" | "kk")
+    matches!(m.case.as_str(), "dc" | "dca" | "k")
 }
 
 /// Whether delega's standard output held one valid result, for rows where one
@@ -235,7 +235,6 @@ fn action_group(m: &Measured) -> &'static str {
         "dh" => "SIGHUP",
         "dc" | "dca" => "stdout closed early",
         "k" => "SIGKILL of delega",
-        "kk" => "SIGKILL of delega and its keeper",
         _ => "other",
     }
 }
@@ -255,15 +254,6 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     if let Some(meta) = meta {
         let text = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
         let _ = writeln!(out, "- Machine: {}.", text(&meta["os"]));
-        if let Some(hidden) = meta["system_programs_hide_environment"].as_bool() {
-            let _ = writeln!(
-                out,
-                "- The system hides the environment of its own programs from `ps -E`: {}. On \
-                 macOS the orphan rows are expected failures when it does and passes when it \
-                 does not (process module docs, \"What remains possible\").",
-                if hidden { "yes" } else { "no" }
-            );
-        }
         let _ = writeln!(
             out,
             "- delega: {}.",

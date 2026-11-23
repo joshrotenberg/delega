@@ -122,7 +122,7 @@ Every run ends in exactly one outcome, and the exit status follows it.
 | `failed` | 1 | The provider or delega hit an error. `error.kind` says which. |
 | `refused` | 2 | The run did not go ahead: invalid request, a limit reached, or a needed permission denied. Usage errors also exit 2. |
 | `timed_out` | 124 | The time limit passed. |
-| `interrupted` | 130 | Ctrl-C, SIGTERM, SIGHUP or SIGQUIT stopped the run. delega cleans up and prints the result first. SIGKILL cannot be handled and writes no result (the worker's keeper still stops the worker), so use SIGTERM to stop delega. |
+| `interrupted` | 130 | Ctrl-C, SIGTERM, SIGHUP or SIGQUIT stopped the run. delega cleans up and prints the result first. SIGKILL cannot be handled and leaves the worker running, so use SIGTERM to stop delega. |
 
 ## Read the result
 

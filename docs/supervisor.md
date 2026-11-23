@@ -109,9 +109,7 @@ lower values from the `[mcp]` section of the
 | `interrupt_bound` | 30 s | The longest `interrupt` or `close` waits for a running run to settle. |
 
 `SupervisorConfig::provider` is the base `ProviderOptions` every run inherits
-(executable overrides, hook command, keeper command, environment options;
-without a keeper command each result carries a `provider_notes` entry naming the
-cleanup gaps that remain). The supervisor sets
+(executable overrides, hook command, environment options). The supervisor sets
 some fields per run, for example `run_id`, `worker` and `progress`
 ([`supervisor/config.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/config.rs)).
 

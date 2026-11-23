@@ -1442,9 +1442,6 @@ fn the_worker_receives_exactly_the_expected_names_and_no_others() {
             "FAKE_RECORD_DIR",
             "NAMED_ONE",
             "SET_ONE",
-            // The keeper's run marker, which cleanup uses to find a
-            // descendant that left the provider's session.
-            "DELEGA_RUN_MARKER",
         ];
         expected.extend(allowed);
         if provider == "claude" {

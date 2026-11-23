@@ -33,8 +33,7 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
 use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
-use super::marker::MarkedRow;
-use super::sys::{self, Signal};
+use super::sys::{self, Signal, SignalError};
 
 /// Why a process table could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,8 +66,6 @@ pub(crate) struct ProcessRow {
     pub started: String,
     pub group: i32,
     pub zombie: bool,
-    /// Stopped by a signal (`T` in the state column).
-    pub stopped: bool,
 }
 
 /// Parse one process table including state and group membership.
@@ -80,16 +77,13 @@ pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
             let pid = parts.next()?.parse().ok()?;
             let parent = parts.next()?.parse().ok()?;
             let group = parts.next()?.parse().ok()?;
-            let state = parts.next()?;
-            let zombie = state.starts_with('Z');
-            let stopped = state.starts_with('T');
+            let zombie = parts.next()?.starts_with('Z');
             let started = parts.collect::<Vec<_>>().join(" ");
             (!started.is_empty()).then_some(ProcessRow {
                 pid,
                 parent,
                 group,
                 zombie,
-                stopped,
                 started,
             })
         })
@@ -115,6 +109,7 @@ fn ps_timeout() -> std::time::Duration {
 pub(crate) async fn list_processes_from(
     programs: &[PathBuf],
 ) -> Result<Vec<ProcessRow>, InspectError> {
+    let failed = |e: std::io::Error| InspectError::Failed(format!("ps: {e}"));
     let mut spawned = None;
     let mut last_error = None;
     for program in programs {
@@ -133,7 +128,7 @@ pub(crate) async fn list_processes_from(
             Err(error) => last_error = Some((program.clone(), error)),
         }
     }
-    let Some(child) = spawned else {
+    let Some(mut child) = spawned else {
         let detail = last_error.map_or_else(
             || "no ps program configured".to_string(),
             |(program, error)| format!("{}: {error}", program.display()),
@@ -142,18 +137,6 @@ pub(crate) async fn list_processes_from(
             "ps could not be started ({detail})"
         )));
     };
-    read_listing(child, PS_MAX_BYTES)
-        .await
-        .and_then(|s| validate_listing(&s, std::process::id()))
-}
-
-/// Read one listing from a started `ps`, within `PS_TIMEOUT` and `max` bytes,
-/// and reap it whatever happens.
-async fn read_listing(
-    mut child: tokio::process::Child,
-    max: usize,
-) -> Result<String, InspectError> {
-    let failed = |e: std::io::Error| InspectError::Failed(format!("ps: {e}"));
     let mut stdout = child
         .stdout
         .take()
@@ -167,7 +150,7 @@ async fn read_listing(
                 break;
             }
             bytes.extend_from_slice(&chunk[..n]);
-            if bytes.len() > max {
+            if bytes.len() > PS_MAX_BYTES {
                 return Err(InspectError::Failed("ps: output too large".into()));
             }
         }
@@ -181,7 +164,7 @@ async fn read_listing(
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
     let result = match tokio::time::timeout(ps_timeout(), read).await {
-        Ok(result) => result,
+        Ok(result) => result.and_then(|s| validate_listing(&s, std::process::id())),
         Err(_) => Err(InspectError::TimedOut),
     };
     if result.is_err() {
@@ -191,22 +174,6 @@ async fn read_listing(
         let _ = child.wait().await;
     }
     result
-}
-
-/// Run one listing command, bounded as [`list_processes_from`] is.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-pub(crate) async fn run_listing(
-    mut command: tokio::process::Command,
-    max: usize,
-) -> Result<String, InspectError> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let child = super::spawn::spawn(&mut command)
-        .map_err(|e| InspectError::Unavailable(format!("ps could not be started ({e})")))?;
-    read_listing(child, max).await
 }
 
 /// Run bounded process inspection with the system `ps`.
@@ -231,7 +198,7 @@ pub async fn check_inspection() -> Result<(), String> {
 /// processes, so inspection is unavailable and cleanup is reported as not
 /// confirmed. It cannot substitute a program, so it can only make the verdict
 /// weaker. Nothing sets it outside that harness.
-pub(crate) const NO_LISTING_ENV: &str = "DELEGA_TEST_NO_PROCESS_LISTING";
+const NO_LISTING_ENV: &str = "DELEGA_TEST_NO_PROCESS_LISTING";
 
 fn system_programs() -> Vec<PathBuf> {
     if std::env::var_os(NO_LISTING_ENV).is_some() {
@@ -318,14 +285,6 @@ pub struct InspectionStats {
     /// They are not counted as members: a process that short-lived is
     /// usually unrelated, and a relay of them is a known gap.
     pub vanished_rows: u64,
-    /// Readings of the run marker taken (a kept run's sweeps only).
-    pub marker_readings: u64,
-    /// Marked processes found outside the group, the session and the tracked
-    /// descendants, summed over those readings.
-    pub marked_rows: u64,
-    /// Signals not sent because the process could not be verified (Linux: no
-    /// pidfd, or no recorded start time). Any makes the verdict `Unconfirmed`.
-    pub unverified_signals: u64,
 }
 
 /// The shared receipts: the public numbers plus the instant of the latest
@@ -339,10 +298,6 @@ pub(crate) struct Observations {
 pub(crate) type SharedObservations = Arc<Mutex<Observations>>;
 pub(crate) type Warnings = Arc<Mutex<Vec<String>>>;
 
-/// The tracked descendants alive at the latest snapshot, each with its start
-/// time in clock ticks where the system gives one.
-pub(crate) type Mirror = Arc<Mutex<Vec<(i32, Option<u64>)>>>;
-
 /// Add a warning once.
 pub(crate) fn push_warning(warnings: &Warnings, warning: String) {
     let mut guard = warnings.lock().unwrap_or_else(|e| e.into_inner());
@@ -351,58 +306,10 @@ pub(crate) fn push_warning(warnings: &Warnings, warning: String) {
     }
 }
 
-/// Whether the child's pid still names its group and session, shared between
-/// the owner's group signals, the tree's member signals and the keeper link,
-/// which releases it when the keeper says it reaps the child on its own or
-/// its end closes. Signals that rely on the pin are sent while holding the
-/// lock, so none is in flight once it is released.
-#[derive(Debug)]
-pub(crate) struct GroupPin(Mutex<bool>);
-
-impl Default for GroupPin {
-    fn default() -> Self {
-        Self(Mutex::new(true))
-    }
-}
-
-impl GroupPin {
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, bool> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub(crate) fn release(&self) {
-        *self.lock() = false;
-    }
-
-    pub(crate) fn pinned(&self) -> bool {
-        *self.lock()
-    }
-}
-
-/// How a pid was found, which decides what it must still be when it is
-/// signalled.
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-enum Found {
-    /// A member of the child's group: its group id must still be the child's.
-    Group,
-    /// A member of the child's session: its session id must still be the
-    /// child's.
-    Session,
-    /// A tracked descendant: its start time, when recorded, must match.
-    Tracked,
-    /// Found by the run marker: its start time, when recorded, must match,
-    /// and with `true` it must still be stopped.
-    Marked(Option<u64>, bool),
-}
-
 /// Whether a pid may ever be owned: not the child (it seeds the set), not init
-/// or the kernel, not the process that runs this code, and not the keeper.
-fn adoptable(child: i32, keeper: Option<i32>, pid: i32) -> bool {
-    pid > 1
-        && pid != child
-        && Some(pid) != keeper
-        && u32::try_from(pid).is_ok_and(|p| p != std::process::id())
+/// or the kernel, and not the process that runs this code.
+fn adoptable(child: i32, pid: i32) -> bool {
+    pid > 1 && pid != child && u32::try_from(pid).is_ok_and(|p| p != std::process::id())
 }
 
 fn clip(text: &str, chars: usize) -> String {
@@ -413,8 +320,6 @@ fn clip(text: &str, chars: usize) -> String {
 pub(crate) struct Snapshot {
     pub rows: Vec<ProcessRow>,
     sessions: HashMap<i32, sys::SessionLookup>,
-    /// Processes that carry the run marker, when it was read.
-    marked: Vec<MarkedRow>,
 }
 
 pub(crate) struct ProcessTree {
@@ -428,36 +333,9 @@ pub(crate) struct ProcessTree {
     /// The tracked descendants alive at the latest snapshot, readable without
     /// the tree lock, for the paths that cannot run a scan (an owner that is
     /// dropped, a report written after the owner was lost).
-    mirror: Mirror,
+    mirror: Arc<Mutex<Vec<i32>>>,
     lister: Lister,
     enabled: bool,
-    /// The keeper, a direct child of this process and the program's parent.
-    /// Its children are owned; it never is.
-    keeper: Option<i32>,
-    /// The run marker's own value, for a kept run.
-    marker: Option<String>,
-    /// Marked processes this tree stopped, with the start time the marker
-    /// reading showed. Only these may receive SIGKILL, and only when a later
-    /// reading shows them still stopped with that start time.
-    marked_stopped: HashMap<i32, String>,
-    /// Processes outside the group that a freeze has stopped.
-    frozen: HashSet<i32>,
-    /// The latest freeze snapshot, which [`ProcessTree::kill_frozen`] signals.
-    last_freeze: Option<(Snapshot, SweepView)>,
-    /// Whether the child's pid still names its group and session: true while
-    /// the child is unreaped by this process or by the keeper. When the keeper
-    /// is lost it is false, and only recorded identities are followed.
-    pinned: bool,
-    /// The pin shared with the keeper link, for a kept run.
-    pin: Option<Arc<GroupPin>>,
-    /// Start times in clock ticks of tracked processes (Linux), checked
-    /// through a pidfd when they are signalled.
-    ticks: HashMap<i32, u64>,
-    /// The child's start time in ticks, read while it was pinned.
-    root_ticks: Option<u64>,
-    /// Test seam: every signal to a single process is refused.
-    #[cfg(test)]
-    pub(crate) refuse_signals: bool,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -471,8 +349,6 @@ pub(crate) struct SweepView {
     /// Tracked descendants with a matching start identity, outside the group
     /// and the session.
     pub tracked: Vec<i32>,
-    /// Processes that carry the run marker and are none of the above.
-    pub marked: Vec<i32>,
     /// Rows alive in the listing but gone, or unreadable, when their session
     /// was read. Counted, not treated as members.
     pub vanished: usize,
@@ -481,24 +357,11 @@ pub(crate) struct SweepView {
 impl SweepView {
     /// Whether the sweep found nothing alive.
     pub fn is_empty(&self) -> bool {
-        self.group.is_empty()
-            && self.session.is_empty()
-            && self.tracked.is_empty()
-            && self.marked.is_empty()
+        self.group.is_empty() && self.session.is_empty() && self.tracked.is_empty()
     }
 
     /// Every pid found, once.
     pub fn all(&self) -> Vec<i32> {
-        let mut all = self.owned();
-        all.extend(&self.marked);
-        all.sort_unstable();
-        all.dedup();
-        all
-    }
-
-    /// The pids found by membership or ancestry, once: what may be signalled
-    /// directly.
-    pub fn owned(&self) -> Vec<i32> {
         let mut all: Vec<i32> = self
             .group
             .iter()
@@ -523,119 +386,12 @@ impl ProcessTree {
             mirror: Default::default(),
             lister,
             enabled,
-            keeper: None,
-            marker: None,
-            marked_stopped: HashMap::new(),
-            frozen: HashSet::new(),
-            last_freeze: None,
-            pinned: true,
-            pin: None,
-            ticks: HashMap::new(),
-            root_ticks: None,
-            #[cfg(test)]
-            refuse_signals: false,
         }
-    }
-
-    /// The pin shared with the keeper link.
-    #[must_use]
-    pub fn with_pin(mut self, pin: Arc<GroupPin>) -> Self {
-        self.pin = Some(pin);
-        self
-    }
-
-    /// Record `pid` as tracked with this start, and its start time in ticks
-    /// where the system gives one.
-    /// Record `row` as tracked. On Linux its start time in ticks is recorded
-    /// too, read from `/proc` when the row is classified, but only when that
-    /// read shows the process now holding the pid is ours: it is in the
-    /// child's session or group (pinned), or its parent is the keeper (which
-    /// has only processes of this tree as children), the child itself
-    /// (pinned), or the parent the listing showed, whose own recorded start
-    /// time still matches. Otherwise no start
-    /// time is recorded, and a signal that would rely on one is refused, which
-    /// makes the verdict `Unconfirmed`.
-    fn track(&mut self, row: &ProcessRow) {
-        // Tried again on a later listing while the listing still shows the
-        // same process (same start), so one read that could not verify it is
-        // not final.
-        let same = self
-            .known
-            .get(&row.pid)
-            .is_none_or(|started| *started == row.started);
-        if same
-            && !self.ticks.contains_key(&row.pid)
-            && let Some(ticks) = self.verified_ticks(row)
-        {
-            self.ticks.insert(row.pid, ticks);
-        }
-        if !same {
-            self.ticks.remove(&row.pid);
-        }
-        self.known.insert(row.pid, row.started.clone());
-    }
-
-    #[cfg(target_os = "linux")]
-    fn verified_ticks(&self, row: &ProcessRow) -> Option<u64> {
-        // The pin's lock is held across the read: the keeper reaps the child
-        // only after the owner answered `released`, which takes this lock, so
-        // the child's pid cannot be freed (and its session or group reused)
-        // between the check and the read.
-        let held = self.pin.as_ref().map(|pin| pin.lock());
-        let pinned = self.pinned && held.as_ref().is_none_or(|pinned| **pinned);
-        let stat = sys::proc_stat(row.pid)?;
-        // A member of the child's session or group is ours by that alone
-        // while the child's pid pins them; this covers a member first seen
-        // after the child exited and it was reparented.
-        let member = pinned && (stat.session == self.pid || stat.group == self.pid);
-        let parent_is_ours = Some(stat.parent) == self.keeper
-            || (stat.parent == self.pid && pinned)
-            || (stat.parent == row.parent
-                && self
-                    .ticks
-                    .get(&row.parent)
-                    .is_some_and(|t| sys::start_ticks(row.parent) == Some(*t)));
-        (member || parent_is_ours).then_some(stat.start_ticks)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn verified_ticks(&self, _row: &ProcessRow) -> Option<u64> {
-        None
-    }
-
-    /// The child's pid no longer names its group and session (the keeper that
-    /// held it unreaped is gone). From now on the child itself is followed by
-    /// its recorded start time, like a tracked descendant, and nothing is a
-    /// member by its group or session id.
-    pub fn unpin(&mut self) {
-        if self.pinned {
-            self.pinned = false;
-            if let Some(started) = self.root_started.clone() {
-                self.known.insert(self.pid, started);
-                if let Some(ticks) = self.root_ticks {
-                    self.ticks.insert(self.pid, ticks);
-                }
-            }
-        }
-    }
-
-    /// The keeper's pid: its children are owned, and it never is.
-    #[must_use]
-    pub fn with_keeper(mut self, keeper: i32) -> Self {
-        self.keeper = Some(keeper);
-        self
-    }
-
-    /// The run marker's value: sweeps also find the processes that carry it.
-    #[must_use]
-    pub fn with_marker(mut self, token: String) -> Self {
-        self.marker = Some(token);
-        self
     }
 
     /// Publish the live tracked descendants to `mirror` after each snapshot.
     #[must_use]
-    pub fn with_mirror(mut self, mirror: Mirror) -> Self {
+    pub fn with_mirror(mut self, mirror: Arc<Mutex<Vec<i32>>>) -> Self {
         self.mirror = mirror;
         self
     }
@@ -713,63 +469,41 @@ impl ProcessTree {
             return;
         }
         let root_pid = self.pid;
-        let keeper = self.keeper;
-        // The keeper is a direct child of this process, so its pid cannot
-        // name another process while the owner holds it unreaped. Its row
-        // must say so before its children are taken as owned.
-        let keeper_seed = keeper.filter(|k| {
-            rows.iter().any(|r| {
-                r.pid == *k
-                    && !r.zombie
-                    && u32::try_from(r.parent).is_ok_and(|p| p == std::process::id())
-            })
-        });
         let root = rows.iter().find(|row| row.pid == self.pid);
         if self.root_started.is_none() {
             self.root_started = root.map(|r| r.started.clone());
-            // The child is pinned now (unreaped), so its pid is its own.
-            if self.root_started.is_some() && self.pinned {
-                self.root_ticks = sys::start_ticks(self.pid);
-                if let Some(ticks) = self.root_ticks {
-                    self.ticks.insert(self.pid, ticks);
-                }
-            }
         }
         let mut owned: HashSet<i32> = HashSet::new();
         if let Some(root) = root
-            && self.pinned
             && Some(&root.started) == self.root_started.as_ref()
         {
             owned.insert(self.pid);
             for row in rows
                 .iter()
-                .filter(|r| !r.zombie && adoptable(root_pid, keeper, r.pid))
+                .filter(|r| !r.zombie && adoptable(root_pid, r.pid))
             {
                 let member = row.group == self.pid
                     || sessions.get(&row.pid) == Some(&sys::SessionLookup::In(self.pid));
                 if member {
                     owned.insert(row.pid);
-                    self.track(row);
+                    self.known.insert(row.pid, row.started.clone());
                 }
             }
         }
         for row in rows {
             if self.known.get(&row.pid) == Some(&row.started) {
                 owned.insert(row.pid);
-                if !row.zombie && !self.ticks.contains_key(&row.pid) {
-                    self.track(row);
-                }
             }
         }
         for _ in 0..rows.len() {
             let before = owned.len();
             for row in rows {
-                if adoptable(root_pid, keeper, row.pid)
-                    && (owned.contains(&row.parent) || Some(row.parent) == keeper_seed)
+                if adoptable(root_pid, row.pid)
+                    && owned.contains(&row.parent)
                     && !owned.contains(&row.pid)
                 {
                     owned.insert(row.pid);
-                    self.track(row);
+                    self.known.insert(row.pid, row.started.clone());
                 }
             }
             if before == owned.len() {
@@ -778,68 +512,21 @@ impl ProcessTree {
         }
     }
 
-    async fn snapshot(&mut self, with_marker: bool) -> Result<Snapshot, InspectError> {
-        let token = self.marker.clone().filter(|_| with_marker);
-        // Without `/proc` the marker reading is a listing of its own that does
-        // not need the rows, so the two run at once.
-        #[cfg(not(target_os = "linux"))]
-        let (rows, early) = match &token {
-            Some(token) => {
-                let (rows, marked) = tokio::join!(self.rows(), super::marker::marked(&[], token));
-                (rows?, Some(marked))
-            }
-            None => (self.rows().await?, None),
-        };
-        #[cfg(target_os = "linux")]
-        let (rows, early): (_, Option<Result<Vec<MarkedRow>, InspectError>>) =
-            (self.rows().await?, None);
-        // The keeper may have let go of the child while the listing ran.
-        if self.pin.as_ref().is_some_and(|pin| !pin.pinned()) {
-            self.unpin();
-        }
+    async fn snapshot(&mut self) -> Result<Snapshot, InspectError> {
+        let rows = self.rows().await?;
         let sessions = self.read_sessions(&rows);
         self.adopt(&rows, &sessions);
-        let marked = match token {
-            Some(token) => {
-                let found = match early {
-                    Some(found) => found,
-                    None => super::marker::marked(&rows, &token).await,
-                };
-                let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
-                obs.stats.marker_readings += 1;
-                match found {
-                    Ok(found) => found
-                        .into_iter()
-                        .filter(|m| {
-                            Some(m.pid) != self.keeper
-                                && u32::try_from(m.pid).is_ok_and(|p| p != std::process::id())
-                        })
-                        .collect(),
-                    Err(error) => {
-                        obs.stats.failures += 1;
-                        obs.stats.last_error =
-                            Some(clip(&format!("marker reading: {error}"), MAX_ERROR_CHARS));
-                        return Err(error);
-                    }
-                }
-            }
-            None => Vec::new(),
-        };
-        let tracked: Vec<(i32, Option<u64>)> = rows
+        let tracked: Vec<i32> = rows
             .iter()
             .filter(|r| !r.zombie && self.known.get(&r.pid) == Some(&r.started))
-            .map(|r| (r.pid, self.ticks.get(&r.pid).copied()))
+            .map(|r| r.pid)
             .collect();
         *self.mirror.lock().unwrap_or_else(|e| e.into_inner()) = tracked;
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
         obs.stats.root_identity_observed = self.root_started.is_some();
         obs.stats.retained_descendant_identities = self.known.len();
         drop(obs);
-        Ok(Snapshot {
-            rows,
-            sessions,
-            marked,
-        })
+        Ok(Snapshot { rows, sessions })
     }
 
     /// Classify the live processes in one table. The child is the session
@@ -851,12 +538,6 @@ impl ProcessTree {
     fn view(&self, snapshot: &Snapshot) -> SweepView {
         let mut view = SweepView::default();
         for row in snapshot.rows.iter().filter(|r| !r.zombie) {
-            if !self.pinned {
-                if self.known.get(&row.pid) == Some(&row.started) {
-                    view.tracked.push(row.pid);
-                }
-                continue;
-            }
             if row.group == self.pid {
                 view.group.push(row.pid);
                 continue;
@@ -880,24 +561,6 @@ impl ProcessTree {
                 }
             }
         }
-        let owned: HashSet<i32> = view.owned().into_iter().collect();
-        for m in snapshot
-            .marked
-            .iter()
-            .filter(|m| m.pid != self.pid && !owned.contains(&m.pid))
-        {
-            // Without `/proc` the marker reading is a listing of its own, so it
-            // can hold a member of the child's session that started after the
-            // ordinary listing. Such a process is a member, signalled as one
-            // (TERM in the polite stop), not stopped as an escaped process:
-            // stopping it could hold up the child's own handling of TERM. Every
-            // group member is in the session, so the session read covers both.
-            if self.pinned && sys::session_lookup(m.pid) == sys::SessionLookup::In(self.pid) {
-                view.session.push(m.pid);
-            } else {
-                view.marked.push(m.pid);
-            }
-        }
         view
     }
 
@@ -905,200 +568,43 @@ impl ProcessTree {
     /// an identified owned process. With `signal`, everything the sweep found
     /// is signalled from that same snapshot; a TERM is followed by CONT so a
     /// stopped process receives it.
-    ///
-    /// A process found only by the run marker is never signalled by number
-    /// alone: it is stopped (SIGSTOP) when first seen, and receives SIGKILL
-    /// (then SIGCONT) from a KILL sweep only when that sweep's reading shows it
-    /// still stopped with the start time it had when it was stopped. A stopped
-    /// process cannot exit by itself, so its pid cannot have been reused.
     pub async fn sweep(&mut self, signal: Option<Signal>) -> Result<SweepView, InspectError> {
-        let snapshot = self.snapshot(true).await?;
+        let snapshot = self.snapshot().await?;
         let view = self.view(&snapshot);
-        self.note_view(&view);
+        if view.vanished > 0 {
+            let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+            obs.stats.vanished_rows += view.vanished as u64;
+        }
         if let Some(signal) = signal {
-            for pid in view.owned() {
-                let found = Self::found(&view, pid);
-                self.signal_found(pid, found, signal);
-                if signal == Signal::TERM {
-                    self.signal_found(pid, found, Signal::CONT);
+            for pid in view.all() {
+                // A session member is checked again just before it is signalled.
+                if view.session.contains(&pid)
+                    && sys::session_lookup(pid) != sys::SessionLookup::In(self.pid)
+                {
+                    continue;
                 }
-            }
-            for marked in snapshot
-                .marked
-                .iter()
-                .filter(|m| view.marked.contains(&m.pid))
-            {
-                self.signal_marked(marked, signal == Signal::KILL);
+                self.deliver(pid, signal);
             }
         }
         Ok(view)
     }
 
-    fn note_view(&self, view: &SweepView) {
-        let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
-        obs.stats.vanished_rows += view.vanished as u64;
-        obs.stats.marked_rows += view.marked.len() as u64;
-    }
-
-    fn found(view: &SweepView, pid: i32) -> Found {
-        if view.group.contains(&pid) {
-            Found::Group
-        } else if view.session.contains(&pid) {
-            Found::Session
-        } else {
-            Found::Tracked
-        }
-    }
-
-    /// Signal one process if it is still what it was found as. On Linux the
-    /// check is made through a pidfd (see [`sys::signal_checked`]), so a pid
-    /// reused since the listing is never signalled. Elsewhere a session member
-    /// is checked again just before the signal and the rest go by pid, the
-    /// residual in the module documentation. A group or session member is
-    /// signalled only while the child's pid pins them, holding the pin's lock.
-    fn signal_found(&self, pid: i32, found: Found, signal: Signal) {
-        #[cfg(test)]
-        if self.refuse_signals {
-            let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
-            obs.stats.unverified_signals += 1;
-            return;
-        }
-        let member = matches!(found, Found::Group | Found::Session);
-        let held = self.pin.as_ref().map(|pin| pin.lock());
-        if member && (!self.pinned || held.as_ref().is_some_and(|pinned| !**pinned)) {
-            return;
-        }
-        #[cfg(target_os = "linux")]
-        let result = {
-            let child = self.pid;
-            let ticks = match found {
-                Found::Group | Found::Session => None,
-                Found::Tracked => self.ticks.get(&pid).copied(),
-                Found::Marked(ticks, _) => ticks,
-            };
-            // A tracked or marked process without a recorded start time
-            // cannot be verified at delivery: it is not signalled.
-            if matches!(found, Found::Tracked | Found::Marked(..)) && ticks.is_none() {
-                Ok(sys::Delivery::Refused)
-            } else {
-                sys::signal_checked(pid, signal, |stat| match found {
-                    Found::Group => stat.group == child,
-                    Found::Session => stat.session == child,
-                    Found::Tracked => ticks == Some(stat.start_ticks),
-                    Found::Marked(_, stopped) => {
-                        ticks == Some(stat.start_ticks)
-                            && (!stopped || matches!(stat.state, 'T' | 't'))
-                    }
-                })
-            }
-        };
-        #[cfg(not(target_os = "linux"))]
-        let result = {
-            if matches!(found, Found::Session)
-                && sys::session_lookup(pid) != sys::SessionLookup::In(self.pid)
-            {
-                return;
-            }
-            sys::signal_checked(pid, signal, |_| true)
-        };
-        drop(held);
-        match result {
-            Ok(sys::Delivery::Sent | sys::Delivery::Gone) => {}
-            Ok(sys::Delivery::Refused) => {
-                let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
-                obs.stats.unverified_signals += 1;
-            }
-            Err(error) => push_warning(
-                &self.warnings,
-                format!("Descendant signal failed: {error:?}"),
-            ),
-        }
-    }
-
-    /// Stop a marked process, or kill one this tree stopped earlier that is
-    /// still stopped with the same start time. Returns whether it was new.
-    fn signal_marked(&mut self, marked: &MarkedRow, kill: bool) -> bool {
-        let known = self.marked_stopped.get(&marked.pid) == Some(&marked.started);
-        if known && marked.stopped {
-            if kill {
-                let found = Found::Marked(marked.ticks, true);
-                self.signal_found(marked.pid, found, Signal::KILL);
-                self.signal_found(marked.pid, Found::Marked(marked.ticks, false), Signal::CONT);
-            }
-            return false;
-        }
-        self.signal_found(marked.pid, Found::Marked(marked.ticks, false), Signal::STOP);
-        self.marked_stopped
-            .insert(marked.pid, marked.started.clone());
-        true
-    }
-
-    /// One round of a freeze: a fresh snapshot, and SIGSTOP to every process
-    /// it finds outside the child's group (owned by ancestry or session, or
-    /// marked) that this freeze has not already stopped. Returns how many were
-    /// new; a round that finds none means everything found is stopped and
-    /// cannot start anything more. The group is left to the group signal.
-    pub async fn freeze_round(&mut self) -> Result<usize, InspectError> {
-        let snapshot = self.snapshot(true).await?;
-        let view = self.view(&snapshot);
-        self.note_view(&view);
-        let mut new = 0;
-        let outside: Vec<i32> = view.session.iter().chain(&view.tracked).copied().collect();
-        for pid in outside {
-            let stopped = snapshot.rows.iter().any(|r| r.pid == pid && r.stopped);
-            if stopped && self.frozen.contains(&pid) {
-                continue;
-            }
-            self.signal_found(pid, Self::found(&view, pid), Signal::STOP);
-            self.frozen.insert(pid);
-            new += 1;
-        }
-        let marked: Vec<MarkedRow> = snapshot
-            .marked
-            .iter()
-            .filter(|m| view.marked.contains(&m.pid))
-            .cloned()
-            .collect();
-        for m in &marked {
-            if self.signal_marked(m, false) {
-                new += 1;
-            }
-        }
-        self.last_freeze = Some((snapshot, view));
-        Ok(new)
-    }
-
-    /// End a freeze: SIGKILL, then SIGCONT, to what the latest freeze round
-    /// found outside the group. Owned processes are signalled as a sweep
-    /// signals them; marked ones only when that round showed them stopped by
-    /// this tree with the same start time.
-    pub fn kill_frozen(&mut self) -> SweepView {
-        let Some((snapshot, view)) = self.last_freeze.take() else {
-            return SweepView::default();
-        };
-        for pid in view
-            .session
-            .iter()
-            .chain(&view.tracked)
-            .copied()
-            .collect::<Vec<_>>()
+    fn deliver(&self, pid: i32, signal: Signal) {
+        for signal in [
+            Some(signal),
+            (signal == Signal::TERM).then_some(Signal::CONT),
+        ]
+        .into_iter()
+        .flatten()
         {
-            let found = Self::found(&view, pid);
-            self.signal_found(pid, found, Signal::KILL);
-            self.signal_found(pid, found, Signal::CONT);
-        }
-        for m in snapshot
-            .marked
-            .iter()
-            .filter(|m| view.marked.contains(&m.pid))
-        {
-            if self.marked_stopped.get(&m.pid) == Some(&m.started) && m.stopped {
-                self.signal_found(m.pid, Found::Marked(m.ticks, true), Signal::KILL);
-                self.signal_found(m.pid, Found::Marked(m.ticks, false), Signal::CONT);
+            match sys::signal_process(pid, signal) {
+                Ok(()) | Err(SignalError::NoSuchProcess) => {}
+                Err(error) => push_warning(
+                    &self.warnings,
+                    format!("Descendant signal failed: {error:?}"),
+                ),
             }
         }
-        self.frozen.clear();
-        view
     }
 
     #[cfg(test)]
@@ -1129,7 +635,7 @@ impl ProcessTree {
         if !self.enabled {
             return CaptureOutcome::TrackingDisabled;
         }
-        match self.snapshot(false).await {
+        match self.snapshot().await {
             Ok(_) => CaptureOutcome::Success,
             Err(error) => {
                 self.warn(&error);
@@ -1186,104 +692,9 @@ mod tests {
         tree.adopt(&rows, &sessions);
         assert!(!tree.known.contains_key(&2));
         assert!(!tree.known.contains_key(&40));
-        let view = tree.view(&Snapshot {
-            rows,
-            sessions,
-            marked: Vec::new(),
-        });
+        let view = tree.view(&Snapshot { rows, sessions });
         assert!(view.session.is_empty() && view.tracked.is_empty());
         assert!(view.group.contains(&10));
-    }
-
-    #[test]
-    fn a_marked_process_in_the_childs_session_is_a_member_not_an_escaped_process() {
-        // The "child" here is this process's own session leader, so this
-        // process is a member of its session; it appears only in the marker
-        // reading, as a process started after the ordinary listing would.
-        let own = i32::try_from(std::process::id()).expect("a pid");
-        let Some(session) = sys::session_of(own).filter(|s| *s > 1 && *s != own) else {
-            eprintln!("this process leads its own session or it cannot be read; skipped");
-            return;
-        };
-        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
-        let tree = ProcessTree::new(session, lister, true);
-        let marked = vec![MarkedRow {
-            pid: own,
-            started: "now".into(),
-            stopped: false,
-            ticks: None,
-        }];
-        let view = tree.view(&Snapshot {
-            rows: Vec::new(),
-            sessions: HashMap::new(),
-            marked,
-        });
-        assert_eq!(view.session, vec![own]);
-        assert!(view.marked.is_empty());
-    }
-
-    /// Not run on macOS; runs in the Linux CI job. A member of the child's
-    /// session gets its start time recorded when it is classified even when
-    /// its parent cannot be verified (the leader exited and it was
-    /// reparented), so the pidfd check can verify it when it is signalled.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_session_member_with_an_unverified_parent_still_gets_a_start_time() {
-        let own = i32::try_from(std::process::id()).expect("a pid");
-        let Some(session) = sys::session_of(own).filter(|s| *s > 1 && *s != own) else {
-            eprintln!("this process leads its own session or it cannot be read; skipped");
-            return;
-        };
-        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
-        let tree = ProcessTree::new(session, lister, true);
-        let row = ProcessRow {
-            pid: own,
-            // A parent with no recorded start time, as init after a reparent.
-            parent: 1,
-            started: "now".into(),
-            group: own,
-            zombie: false,
-            stopped: false,
-        };
-        assert_eq!(tree.verified_ticks(&row), sys::start_ticks(own));
-        assert!(tree.verified_ticks(&row).is_some());
-    }
-
-    /// Not run on macOS; runs in the Linux CI job. Once the pin shared with
-    /// the keeper is released, membership no longer proves identity: a
-    /// session member with an unverified parent gets no start time. And a
-    /// release waits for a verification that holds the pin's lock.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_released_pin_stops_membership_from_proving_identity() {
-        let own = i32::try_from(std::process::id()).expect("a pid");
-        let Some(session) = sys::session_of(own).filter(|s| *s > 1 && *s != own) else {
-            eprintln!("this process leads its own session or it cannot be read; skipped");
-            return;
-        };
-        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
-        let pin = Arc::new(GroupPin::default());
-        let tree = ProcessTree::new(session, lister, true).with_pin(pin.clone());
-        let row = ProcessRow {
-            pid: own,
-            parent: 1,
-            started: "now".into(),
-            group: own,
-            zombie: false,
-            stopped: false,
-        };
-        assert!(tree.verified_ticks(&row).is_some());
-        // A release while a verification holds the lock waits for it.
-        let held = pin.lock();
-        let releasing = {
-            let pin = pin.clone();
-            std::thread::spawn(move || pin.release())
-        };
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(*held, "the release went through while the lock was held");
-        drop(held);
-        releasing.join().expect("the release finished");
-        assert!(tree.verified_ticks(&row).is_none());
     }
 
     #[test]
@@ -1369,7 +780,6 @@ mod tests {
                 parent: 1,
                 group: 42,
                 zombie: true,
-                stopped: false,
                 started: "Tue Nov 11 10:00:00 2026".into()
             }
         );
@@ -1388,7 +798,6 @@ mod tests {
                         // Not the child's group, so these count as tracked.
                         group: 99,
                         zombie: false,
-                        stopped: false,
                         started: started.into(),
                     })
                     .collect())
@@ -1484,7 +893,6 @@ mod tests {
                         parent: 1,
                         group: 10,
                         zombie: true,
-                        stopped: false,
                         started: "leader".into(),
                     },
                     ProcessRow {
@@ -1492,7 +900,6 @@ mod tests {
                         parent: 10,
                         group: 10,
                         zombie: dead,
-                        stopped: false,
                         started: "child".into(),
                     },
                 ])
@@ -1516,7 +923,6 @@ mod tests {
                 parent,
                 group,
                 zombie,
-                stopped: false,
                 started: started.into(),
             })
             .collect()
