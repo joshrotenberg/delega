@@ -1,10 +1,10 @@
 # The supervisor
 
 `delega_core::supervisor` runs several workers at once. It is the library behind
-the [MCP tools](api.md#mcp): each tool is one operation of
-[`Supervisor`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/mod.rs),
-with the same arguments and a serializable response. This page covers what a
-library caller sees; [api.md](api.md#mcp) covers the tools.
+the [MCP tools](api.md#mcp): each tool corresponds to one operation of
+[`Supervisor`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/mod.rs).
+This page covers what a library caller sees; [api.md](api.md#mcp) covers the
+tools and where their arguments differ.
 
 A worker is one provider conversation. A run is one assignment given to it.
 `start` makes a worker and its first run; `follow_up` adds a run to the same
@@ -34,14 +34,14 @@ worker, which continues the worker's provider session.
   instead, kind `cwd_required`, as a finished run with no worker; `delega mcp`
   uses it. `follow_up` takes no `cwd` and runs in the first request's.
 - `read` is compact by default; `Detail::Full` adds every field of the result,
-  the whole activity history and the supervisor's diagnostics. `interrupt` and
+  the retained activity history and the supervisor's diagnostics. `interrupt` and
   `close` return compact results.
 
 A call that cannot be answered returns an `Error`:
 
 | Error | When |
 | --- | --- |
-| `UnknownRun`, `UnknownWorker` | No run or worker has this id, or its results have aged out. |
+| `UnknownRun`, `UnknownWorker` | No run or worker has this id, or a finished run or closed worker has aged out ([Retention](#retention)). |
 | `InvalidArguments` | The arguments do not fit together, such as `wait` with no ids. |
 | `ShutDown` | The supervisor was shut down and takes no new work. |
 | `Stopped` | The supervisor's task has ended. |
@@ -101,7 +101,7 @@ lower values from the `[mcp]` section of the
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | `wait_default` | 30 s | `wait` with no `timeout_secs`. `list` reports it as `default_wait_secs`. |
 | `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Waiting and cursors](#waiting-and-cursors)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
-| preflight bound | 10 s | The longest `start` spends on its request checks, including waiting for a check slot. Then it is refused, kind `preflight_timeout`. |
+| preflight bound | 10 s | After request validation, the longest `start` waits for a check slot and the dry run together. Then it is refused, kind `preflight_timeout`. |
 | outstanding request checks | 16 | Checks running at once. A `start` beyond it waits for a slot within the preflight bound. Not in `list`. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer. |
 | compact structured answer | 16 KiB | A compact read leaves out a larger structured answer. |
@@ -109,14 +109,16 @@ lower values from the `[mcp]` section of the
 | `interrupt_bound` | 30 s | The longest `interrupt` or `close` waits for a running run to settle. |
 
 `SupervisorConfig::provider` is the base `ProviderOptions` every run inherits
-(executable overrides, hook command, environment options).
+(executable overrides, hook command, environment options). Per run the
+supervisor replaces `run_id`, `worker` and `progress`, and turns on
+`progress_text`.
 
 ## Starting and refusing
 
-`start` checks the request, the name, the live-worker limit, and then runs the
+`start` checks the request, the name and the live-worker limit, and runs the
 provider layer's dry run (working directory, `native_args`, executable, answer
-schema) off the supervisor's task, within the preflight bound. A slow
-filesystem delays only that `start`, not other calls.
+schema) off the supervisor's task. A slow filesystem delays only that `start`,
+not other calls.
 
 A start that is refused is still a run: the response is `finished`, the outcome
 `refused`, the error says why, and `read` returns the result. **A refused start
@@ -158,7 +160,7 @@ A follow-up is refused as a finished run, not an error:
 | --- | --- |
 | `worker_closed` | The worker is closed. |
 | `queue_full` | The worker's queue is full. |
-| `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one. A follow-up queued behind a run is checked again when its turn comes. |
+| `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one. Checked again when the run is dispatched, so a follow-up can return `queued` and later end `no_session`. |
 | `invalid_request` | The prompt is not valid. |
 
 A response that says a run is `finished` carries its `outcome` and `error`. An
@@ -177,13 +179,12 @@ reported them. A resumed Codex follow-up has no `usage`, and has
 One counter numbers every finished run and every activity entry. A response
 carries its value as `cursor`.
 
-- Without `after_cursor`, `wait` returns when a named run finishes, or when a
-  named worker's current run (the one it had when the call was made) finishes.
-  A worker with nothing running returns at once.
-- With `after_cursor`, it returns when a named run, or a run of a named worker,
-  finished after that cursor, at once if one already has. Passing back each
-  response's cursor sees every finish once. Each run and worker says whether it
-  `changed` after the cursor.
+- `wait` returns when something named finishes or a permission request needs
+  attention. Without `after_cursor` that is a named run or a named worker's
+  current run; a worker with nothing running returns at once.
+- With `after_cursor`, it returns at once if something named changed after that
+  cursor. Pass each response's cursor back. Each run and worker says whether it
+  `changed`; several finishes on one worker between calls show as one change.
 - A timeout is a response with `timed_out: true` and the current states.
 - Ids that name nothing are listed in `unknown`; the rest are still waited for.
   If all are unknown the call returns at once. No ids at all is
@@ -199,7 +200,9 @@ carries its value as `cursor`.
 
 A finished run returns its result: compact by default (run, worker, provider,
 outcome, text, structured answer, error, cleanup, denied requests, provider
-notes, session id, timing) or whole with `Detail::Full`.
+notes, session id, timing, and [`applied`](api.md#applied)) or whole with
+`Detail::Full`. The fields are in
+`crates/delega-core/src/supervisor/views.rs`.
 
 | Field | Meaning |
 | --- | --- |
@@ -210,8 +213,9 @@ notes, session id, timing) or whole with `Detail::Full`.
 **Paging a long answer.** Pass `text_offset` (characters) to get the window of up
 to 20000 characters starting there, in either detail. Read again at
 `offset + length` while `more` is true. An offset past the end gives an empty
-window with the total. Page by run id: a `read` by worker returns the latest
-run, which can change between pages. The response names its `run`; treat a
+window with the total. Page by run id: a `read` by worker returns its running
+run, else its next queued run, else its latest finished one, which can change
+between pages. The response names its `run`; treat a
 different `run` as a new answer.
 
 An unfinished run returns its state and progress: time queued and running, the
@@ -220,13 +224,12 @@ time limit, partial text and recent activity.
 | Progress | Kept per run | Compact returns |
 | --- | --- | --- |
 | Partial text (the agent's messages so far, redacted, see [providers.md](providers.md#progress-events)) | last 16384 characters | last 2000 |
-| Activity (one entry per provider output line, kind and short summary) | 200 entries | last 10 |
+| Activity (provider events and delega's own entries, kind and short summary) | 200 entries | last 10 |
 
 `after_cursor` returns only entries after it. Consecutive provider `system`
 events with the same summary, such as Claude Code's `thinking_tokens`, are one
-entry: each new one replaces it with a new cursor, and from the second on its
-summary ends in ` (N in a row)`. `activity_total` counts every event reported;
-`activity_omitted` is the total less the entries returned.
+entry whose summary ends in ` (N in a row)`. `activity_total` and
+`activity_omitted` say how much was left out.
 
 Full detail adds the whole kept history and diagnostics: provider, permission
 mode, queued and started times, whether and why a stop was requested, and how
@@ -243,18 +246,19 @@ How activity is kept: `crates/delega-core/src/supervisor/activity.rs`.
 | `interrupt` of a queued run | Removes it. Its result is `interrupted`: no `started_at`, zero duration, confirmed cleanup. |
 | `interrupt` of a finished run | Returns its result unchanged. |
 | `interrupt` of a worker | Acts on its current run. |
-| `close` | Marks the worker closed, ends each queued run `interrupted` with `discarded by close`, stops the running run as `interrupt` does (it can return `settled: false`), and frees the live-worker slot at once. Finished results stay readable. Closing again reports `already_closed`. |
-| `shutdown` | Closes every live worker the same way with `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits up to `shutdown_bound`. The report's `unsettled` lists runs still running; `failed` reports a failure of the supervisor's task. Registered waits are released with the current states. Reads and `list` keep working. |
+| `close` | Marks the worker closed, ends each queued run `interrupted` with `discarded by close`, stops the running run as `interrupt` does (it can return `settled: false`), and frees the live-worker slot at once; the running slot frees when the run ends. Finished results stay readable. Closing again reports `already_closed`, the current state and nothing discarded. |
+| `shutdown` | Closes every live worker the same way with `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits up to `shutdown_bound`. The report's `unsettled` lists runs still running; `failed` reports a failure of the supervisor's task. Waits registered when it begins are released with the current states. Reads and `list` keep working. |
 | Drop of the last clone | Signals every provider to stop and returns without waiting. The processes end shortly after. |
 
-**Only `shutdown().await` waits for cleanup and reports what could not be
-confirmed.** An embedder such as an MCP server should call it, and let it
-finish, before its runtime drops. Drop is the safety net.
+**Drop does not wait.** `shutdown().await` (or `connection_closed().await`,
+the same bounded shutdown) waits for every run and reports what could not be
+confirmed. An embedder such as an MCP server should call one and let it finish
+before its runtime drops.
 
 A panic in a run's task ends that run `failed`, kind `internal_error`, with an
 unconfirmed cleanup; other workers are unaffected. A panic in the supervisor's
-own task stops every provider; every later call returns `Error::Failed`, and
-`shutdown()` returns a report with `failed` set.
+own task stops every provider; calls that need that task return
+`Error::Failed`, and `shutdown()` returns a report with `failed` set.
 
 How drop works: the `Drop` impl in
 `crates/delega-core/src/supervisor/mod.rs`.
@@ -262,10 +266,10 @@ How drop works: the `Drop` impl in
 ## Retention
 
 Finished results are kept for `retention`, at most `retained_results` and
-`retained_bytes`, oldest dropped first. A result past its time is not returned.
-A closed worker is listed while any of its results is kept, then disappears; an
-id that has gone is unknown. Live workers are not dropped, but their old
-results are.
+about `retained_bytes` (the newest result is kept even if it alone is larger),
+oldest dropped first. A result past its time is not returned. A closed worker
+is listed while any of its results is kept, then disappears; an id that has
+gone is unknown. Live workers are not dropped, but their old results are.
 
 ## Timing
 
