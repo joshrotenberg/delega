@@ -329,6 +329,11 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
     };
     let dir = std::fs::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
     let uid = rustix::process::getuid().as_raw();
+    let own_start = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|stat| stat_state_and_start(&stat))
+        .map(|(_, started)| started)
+        .ok_or("unreadable /proc/self/stat")?;
     let mut found = Vec::new();
     for entry in std::fs::read_dir("/proc").map_err(|e| format!("read /proc: {e}"))? {
         let entry = entry.map_err(|e| format!("read /proc entry: {e}"))?;
@@ -347,6 +352,19 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
         if owner != uid {
             continue;
         }
+        // The stat needs no ptrace rights, unlike the working directory. A
+        // process older than this test process cannot be one of its own, so
+        // it is skipped before its working directory is read.
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(format!("read /proc/{pid}/stat: {e}")),
+        };
+        let (state, started) =
+            stat_state_and_start(&stat).ok_or_else(|| format!("unreadable /proc/{pid}/stat"))?;
+        if started < own_start {
+            continue;
+        }
         let cwd = match std::fs::read_link(format!("/proc/{pid}/cwd")) {
             Ok(cwd) => cwd,
             Err(e) if gone(&e) => continue,
@@ -355,20 +373,20 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
         if cwd != dir {
             continue;
         }
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(e) if gone(&e) => continue,
-            Err(e) => return Err(format!("read /proc/{pid}/stat: {e}")),
-        };
-        let state = stat
-            .rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
-            .ok_or_else(|| format!("unreadable /proc/{pid}/stat"))?;
         if state != "Z" && state != "X" {
             found.push(pid);
         }
     }
     Ok(found)
+}
+
+/// The state letter and the start time in clock ticks (field 22) of one
+/// `/proc/<pid>/stat` line, counted from the last `)`.
+#[cfg(target_os = "linux")]
+fn stat_state_and_start(stat: &str) -> Option<(String, u64)> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
+    Some((fields.first()?.to_string(), fields.get(19)?.parse().ok()?))
 }
 
 /// End what a relay case left in `dir`, without signalling a foreign process:
