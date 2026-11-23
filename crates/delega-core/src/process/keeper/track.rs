@@ -1332,8 +1332,13 @@ impl Tracker {
 mod tests {
     use super::*;
 
+    /// A tracker whose floor is this test process's unique id, as a keeper's
+    /// is its own: processes created before the test are never suspects.
     fn tracker() -> Tracker {
-        Tracker::new(Arc::new(ProcQueue::new().expect("a kqueue")), 0)
+        let me = darwin::identity(rustix::process::getpid().as_raw_nonzero().get())
+            .unwrap()
+            .unwrap();
+        Tracker::new(Arc::new(ProcQueue::new().expect("a kqueue")), me.uniqueid)
     }
 
     #[test]
