@@ -687,27 +687,22 @@ async fn a_session_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_
     );
 }
 
-/// A fork the macOS tracker never saw (the test seam drops the event): the
-/// program's first child is a short-lived intermediate that starts a
-/// detached grandchild in a session of its own, holding no pipe, and exits at
-/// once. No loss, no listing and no window records it, so only the check of
-/// orphans whose parent was created during the run and never taken can keep
-/// the verdict from `Confirmed` while the grandchild runs.
-#[cfg(target_os = "macos")]
-#[tokio::test]
-async fn a_detached_survivor_of_a_fork_the_tracker_never_saw_is_never_confirmed() {
-    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
-    require_perl!();
+/// One kept run, with the keeper's first fork event dropped (the test seam),
+/// of a perl program that waits half a second without forking (so the
+/// tracker has started), then forks a short-lived intermediate: it starts a
+/// detached grandchild in a session of its own, holding no pipe, and exits
+/// at once. The grandchild runs `grandchild` (perl code). Returns the report
+/// and whether the grandchild was alive after it.
+async fn dropped_fork_run(grandchild: &str) -> (crate::process::ProcessReport, bool) {
     let s = Scratch::new();
-    // The program is perl itself: it waits half a second without forking, so
-    // the tracker has started, and its first fork, the one whose event is
-    // dropped, is the intermediate.
-    let script = "use POSIX; select(undef, undef, undef, 0.5); \
-         if (fork() == 0) { POSIX::setsid(); open STDIN, q(<), q(/dev/null); \
+    let script = format!(
+        "use POSIX; select(undef, undef, undef, 0.5); \
+         if (fork() == 0) {{ POSIX::setsid(); open STDIN, q(<), q(/dev/null); \
          open STDOUT, q(>), q(/dev/null); open STDERR, q(>), q(/dev/null); \
-         if (fork() == 0) { open F, q(>), q(gc.tmp); print F $$; close F; \
-         rename q(gc.tmp), q(gc); exec q(/bin/sleep), q(60) } POSIX::_exit(0) } \
-         wait; select(undef, undef, undef, 0.01) until -s q(gc); exit 0";
+         if (fork() == 0) {{ open F, q(>), q(gc.tmp); print F $$; close F; \
+         rename q(gc.tmp), q(gc); {grandchild} }} POSIX::_exit(0) }} \
+         wait; select(undef, undef, undef, 0.01) until -s q(gc); exit 0"
+    );
     let mut spec = sh(&s, "", LONG);
     spec.program = "/usr/bin/perl".into();
     spec.args = vec!["-e".into(), script.into()];
@@ -715,48 +710,54 @@ async fn a_detached_survivor_of_a_fork_the_tracker_never_saw_is_never_confirmed(
         Some(super::keeper::test_keeper().env(crate::process::keeper::DROP_FORK_ENV, "1"));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     let alive = is_running_async(pids[0]).await;
+    (report, alive)
+}
+
+/// What a dropped-fork run may end in: never `Confirmed` while the
+/// grandchild runs. Where `ps -E` hides the environment of Apple's programs
+/// (System Integrity Protection), only the strict check can tie it to the
+/// run, so it survives as a suspect, never signalled, and the verdict is
+/// `Unconfirmed`; elsewhere the run marker can find it and stop it.
+fn assert_dropped_fork_outcome(report: &crate::process::ProcessReport, alive: bool, apple: bool) {
     assert!(
         !(alive && report.cleanup == Cleanup::Confirmed),
         "the detached grandchild is alive but cleanup says Confirmed: {report:#?}"
     );
-    // The grandchild was a suspect: never signalled, so alive, and the
-    // verdict says the keeper could not prove its tree empty.
-    assert!(alive, "{report:#?}");
-    assert!(
-        matches!(&report.cleanup, Cleanup::Unconfirmed { reason, .. }
-            if reason == crate::process::KEEPER_UNPROVEN_REASON),
-        "{report:#?}"
-    );
+    if apple && !super::fixtures::marker_visible_for_system_programs() {
+        assert!(alive, "{report:#?}");
+        assert!(
+            matches!(&report.cleanup, Cleanup::Unconfirmed { reason, .. }
+                if reason == crate::process::KEEPER_UNPROVEN_REASON),
+            "{report:#?}"
+        );
+    }
 }
 
-/// 20 kept runs of the relay of [`detached_session_relay`] (a new session
-/// each generation, no output pipe), counting runs that stopped it, runs
-/// that ended `Unconfirmed`, and runs that claimed `Confirmed` with a relay
-/// process alive. Run beside the process suite (another test process) with
-/// `cargo test --release -- --ignored measure_the_session_relay --nocapture`.
+/// A fork the macOS tracker never saw, whose grandchild execs `/bin/sleep`
+/// after its parent died: macOS then records launchd as its parent, so the
+/// strict check's launchd case (created during the run, not leading a
+/// session) is what keeps the verdict from `Confirmed`.
+#[cfg(target_os = "macos")]
 #[tokio::test]
-#[ignore = "a measurement, not a check"]
-async fn measure_the_session_relay() {
-    if !super::fixtures::perl_available() {
-        return;
-    }
-    let (mut stopped, mut unconfirmed, mut false_confirmations) = (0, 0, 0);
-    for _ in 0..20 {
-        let run = relay_run_of(detached_session_relay).await;
-        if !run.alive {
-            stopped += 1;
-        }
-        if run.cleanup != Cleanup::Confirmed {
-            unconfirmed += 1;
-        }
-        if run.alive && run.cleanup == Cleanup::Confirmed {
-            false_confirmations += 1;
-        }
-    }
-    eprintln!(
-        "session relay without a pipe: stopped {stopped} of 20, Unconfirmed {unconfirmed}, \
-         Confirmed with a relay alive {false_confirmations}"
-    );
+async fn a_detached_survivor_of_a_fork_the_tracker_never_saw_is_never_confirmed() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+    require_perl!();
+    let (report, alive) = dropped_fork_run("exec q(/bin/sleep), q(60)").await;
+    assert_dropped_fork_outcome(&report, alive, true);
+}
+
+/// The same with a grandchild that never execs (perl sleeps itself): its
+/// recorded parent is the dead intermediate, created during the run and never
+/// taken, so the strict check's original-parent case keeps the verdict from
+/// `Confirmed`. perl's environment shows to `ps -E` only where Apple's
+/// programs' do, so the same expectation holds.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_detached_survivor_that_never_execs_is_never_confirmed() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+    require_perl!();
+    let (report, alive) = dropped_fork_run("sleep 60; exit 0").await;
+    assert_dropped_fork_outcome(&report, alive, true);
 }
 
 /// A double fork as fast as perl can do it: the program's child forks a
