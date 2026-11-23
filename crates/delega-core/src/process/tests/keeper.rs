@@ -258,6 +258,8 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
 
 /// Set to a scratch directory to make [`owner_entry`] act as an owner.
 const OWNER_ENV: &str = "DELEGA_TEST_OWNER_DIR";
+/// Set as well to make the owner's program the fork relay.
+const OWNER_RELAY_ENV: &str = "DELEGA_TEST_OWNER_RELAY";
 
 /// Not a test: an owning process, when this binary is started as one. It runs
 /// one kept program in the directory named by [`OWNER_ENV`] that starts a
@@ -269,13 +271,19 @@ fn owner_entry() {
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    let script = format!(
-        "echo $$ > leader; {OWN_GROUP} & echo $! > group; \
-         {} >/dev/null 2>&1 & echo $! > session; \
-         sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
-         sleep 60",
-        own_session_sleeper()
-    );
+    let script = if std::env::var_os(OWNER_RELAY_ENV).is_some() {
+        // The program is the fork relay of gaps.rs, run long enough that only
+        // a stop explains its end.
+        format!("echo $$ > leader; {}", super::gaps::long_relay())
+    } else {
+        format!(
+            "echo $$ > leader; {OWN_GROUP} & echo $! > group; \
+             {} >/dev/null 2>&1 & echo $! > session; \
+             sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
+             sleep 60",
+            own_session_sleeper()
+        )
+    };
     let mut spec = ProcessSpec::new("/bin/sh", LONG)
         .args(["-c", &script])
         .cwd(&dir)
@@ -455,4 +463,72 @@ async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
         "{:?}",
         report.diagnostics.warnings
     );
+}
+
+/// Gap 3 with a fork relay, on Linux, where the keeper's own cleanup must
+/// leave nothing after a SIGKILL of the owner: its census and freeze walk the
+/// tree again from the keeper's own children until a pass finds nothing new
+/// with every process stopped, so a generation reparented to the keeper
+/// between two reads is not missed. The race is a matter of timing, so the
+/// case is repeated 20 times; any surviving generation fails it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
+    require_perl!();
+    use crate::test_spawn::Guarded;
+    for attempt in 1..=20 {
+        let s = Scratch::new();
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let mut owner = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "process::tests::keeper::owner_entry",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env(OWNER_ENV, s.dir())
+            .env(OWNER_RELAY_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .guarded_spawn()
+            .expect("start the owner");
+        let owner_pid = i32::try_from(owner.id()).expect("a pid");
+        s.exists("beat").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = crate::process::sys::signal_process(owner_pid, crate::process::sys::Signal::KILL);
+        let _ = owner.wait();
+        // The keeper's grace is 0.5 s; give it ample time, then require the
+        // heartbeat to have stopped changing.
+        let began = std::time::Instant::now();
+        let mut stopped = false;
+        while began.elapsed() < Duration::from_secs(15) {
+            let before = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let after = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
+            if before == after && super::gaps::heartbeat_age(&s) > Duration::from_millis(300) {
+                stopped = true;
+                break;
+            }
+        }
+        if !stopped {
+            // End the survivor generation by generation so nothing is left.
+            for _ in 0..3000 {
+                if super::gaps::heartbeat_age(&s) > Duration::from_millis(300) {
+                    break;
+                }
+                if let Ok(pid) = std::fs::read_to_string(s.path("beat"))
+                    && let Ok(pid) = pid.trim().parse::<i32>()
+                {
+                    let _ =
+                        crate::process::sys::signal_process(pid, crate::process::sys::Signal::KILL);
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+        assert!(
+            stopped,
+            "attempt {attempt}: the relay outlived the keeper's cleanup"
+        );
+    }
 }

@@ -429,11 +429,11 @@ const RELAY: &str = "exec perl -e 'use POSIX; \
 
 /// The same relay with 4000 generations, so it outlives any stop by many
 /// seconds and only a stop can explain its end.
-fn long_relay() -> String {
+pub(super) fn long_relay() -> String {
     RELAY.replace("(1..300)", "(1..4000)")
 }
 
-fn heartbeat_age(scratch: &Scratch) -> Duration {
+pub(super) fn heartbeat_age(scratch: &Scratch) -> Duration {
     std::fs::metadata(scratch.path("beat"))
         .and_then(|m| m.modified())
         .ok()
