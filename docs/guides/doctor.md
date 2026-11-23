@@ -22,7 +22,8 @@ Code deny rules are read from is in [Deny rules](../providers.md#deny-rules).
 
 For each provider: the executable a run would use and where it came from, its
 version, counts of the environment a worker would get, the files a Claude run
-would read deny rules from, with their rule counts (not the rules), and managed settings found. Also the configuration file, the
+would read deny rules from, with their rule counts (not the rules), and managed settings found.
+For Claude Code it also says whether the sandbox `build` runs need can start. Also the configuration file, the
 limits in force, the built-in skills, and whether process inspection works. It
 never prints an environment value, a deny rule or a file's content. See
 [Doctor](../api.md#doctor) for each field.
@@ -60,7 +61,27 @@ The document's JSON Schema is
 ## Reading problems
 
 Each entry in `problems` has a `kind`, a message, the provider (null for the
-whole system) and what it `blocks`: `run`, `command_grants`, `cleanup` or
-`nothing`. A provider is `ready` when no problem blocks `run` for it. The table
+whole system) and what it `blocks`: `run`, `command_grants`, `build`, `cleanup`
+or `nothing`. A provider is `ready` when no problem blocks `run` for it. The table
 of kinds is in [Doctor](../api.md#doctor), and the managed settings locations
 are in [Managed settings](../providers.md#managed-settings).
+
+## Before using build with Claude Code
+
+Claude Code's `build` runs need its sandbox. On macOS it is built in. On Linux
+it needs `bwrap` and `socat` on the `PATH` the worker gets. When one is
+missing, doctor shows:
+
+```text
+claude: ready
+  ...
+  sandbox for build runs: not available, missing socat
+  ...
+problems:
+  claude: sandbox_unavailable (stops build runs): Claude Code's sandbox needs bwrap and socat on PATH and socat was not found, so every build run with Claude would fail at startup; install socat
+```
+
+Claude stays `ready` for other modes and the exit status does not change.
+Install the `bubblewrap` and `socat` packages with the system's package
+manager, then run doctor again. In JSON, read `providers[].sandbox.missing`
+or look for a problem with `blocks: "build"`.

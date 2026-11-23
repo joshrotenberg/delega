@@ -261,7 +261,7 @@ In `write` and `build`, the scoped `Edit` rule covers both the `Edit` and
 | `sandbox` setting | Effect |
 | --- | --- |
 | `enabled: true` | Runs Bash in Claude Code's OS sandbox. Network is denied under `dontAsk`. |
-| `failIfUnavailable: true` | Startup fails if the sandbox is unavailable. Linux requires `bubblewrap` and `socat`. |
+| `failIfUnavailable: true` | Startup fails if the sandbox is unavailable. macOS has it built in; Linux requires `bubblewrap` (`bwrap`) and `socat`. `delega doctor` reports `sandbox_unavailable` when they are not on the worker's `PATH` ([Doctor](api.md#doctor)). |
 | `allowUnsandboxedCommands: false` | Failed commands stay inside the sandbox. |
 | `autoAllowBashIfSandboxed: true` | Claude Code approves sandboxed commands without a Bash allow rule. Some commands, including `eval` and the probed `git -c … commit`, can still be denied. |
 
