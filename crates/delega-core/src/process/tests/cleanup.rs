@@ -392,7 +392,10 @@ both!(
         // and the verdict is Unconfirmed, because something still held the
         // output that no sweep found. On Linux a kept run finds it anyway (it
         // becomes the keeper's child), kills it, and the pipes close by
-        // themselves. Elsewhere `sleep`, an Apple program, shows no run marker.
+        // themselves. On macOS the same holds where `ps -E` shows the run marker
+        // of `sleep`; where the system hides the environment of its own
+        // programs (System Integrity Protection) it is the gap, and the held
+        // pipe makes it Unconfirmed. Never Confirmed with the orphan alive.
         // It starts after the first scan, and the leader exits before the next, so
         // no scan can have seen it with its parent alive.
         let script = format!(
@@ -413,10 +416,26 @@ both!(
         let kept = super::fixtures::KEEP
             .try_with(|keep| *keep)
             .unwrap_or(false);
+        assert!(
+            !(report.cleanup == Cleanup::Confirmed && is_running(pids[0])),
+            "Confirmed with the orphan alive: {report:#?}"
+        );
         if kept && cfg!(target_os = "linux") {
             assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
             assert!(!report.diagnostics.pipes_closed_by_owner, "{report:#?}");
             super::fixtures::assert_gone("the orphan holding the pipes", &pids).await;
+            return;
+        }
+        if kept && super::fixtures::marker_visible_for_system_programs() {
+            // Found by its marker and stopped. Whether it was killed before
+            // or after the drain bound decides between the two honest verdicts.
+            super::fixtures::assert_gone("the orphan holding the pipes", &pids).await;
+            assert!(
+                report.cleanup == Cleanup::Confirmed
+                    || matches!(&report.cleanup, Cleanup::Unconfirmed { reason, .. }
+                        if reason == crate::process::PIPES_HELD_REASON),
+                "{report:#?}"
+            );
             return;
         }
         // The report did not wait for the process that holds the pipes: it is

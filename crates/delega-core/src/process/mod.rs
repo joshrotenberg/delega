@@ -280,7 +280,13 @@
 //!   environment that leaves the marker out, and, measured on macOS 27.2 with
 //!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
 //!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
-//!   for a Homebrew binary and for this crate's test binary. Such a descendant
+//!   for a Homebrew binary and for this crate's test binary. Whether this applies
+//!   depends on the machine: a macOS system that does not hide the environment
+//!   of its own programs shows the marker of `sleep` too, and a run on GitHub's
+//!   macos-latest runner found such an orphan by its marker. The tests probe
+//!   it (start `/bin/sleep` with a marker value and look for it in `ps -E`) and
+//!   expect accordingly, and so does the acceptance harness, which records the
+//!   answer in its results. Where it is hidden, such a descendant
 //!   ends with `Confirmed` while it runs, as without a keeper, unless it holds
 //!   the output pipes past the drain bound, which makes the verdict
 //!   `Unconfirmed`.

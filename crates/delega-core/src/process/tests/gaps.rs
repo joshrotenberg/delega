@@ -477,7 +477,8 @@ async fn a_fork_relay_is_stopped_in_a_kept_run() {
 /// Whatever the platform, a kept run of the relay never claims `Confirmed`
 /// while a relay process is alive. On Linux the keeper stops it; on macOS it
 /// is not stopped, but it holds the output pipes past the drain bound, and a
-/// held pipe makes the verdict `Unconfirmed`.
+/// held pipe makes the verdict `Unconfirmed` (or, where `ps -E` shows the
+/// marker of perl, a freeze that keeps finding new generations does).
 #[tokio::test]
 async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
     require_perl!();
@@ -486,7 +487,7 @@ async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
         !(alive && cleanup == Cleanup::Confirmed),
         "a relay process was alive but cleanup says Confirmed"
     );
-    if alive {
+    if alive && !super::fixtures::marker_visible_for_system_programs() {
         match &cleanup {
             Cleanup::Unconfirmed { reason, .. } => {
                 assert_eq!(reason, crate::process::PIPES_HELD_REASON);
