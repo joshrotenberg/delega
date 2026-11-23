@@ -532,42 +532,40 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
     }
 }
 
-/// A descendant in a process group of its own that ends by itself 3 s after
-/// the leader is no longer its parent, so every signal the cleanup sends it in
-/// that time is refused (the test seam refuses them all) and it still ends.
-/// The leader's pid is passed in, so a leader that exits before the
-/// descendant starts does not leave it waiting; the leader's end (by a stop
-/// or by itself) starts the 3 s, and the sweeps that follow it come within
-/// them.
-const ENDS_AFTER_ITS_PARENT: &str = "perl -e 'use POSIX; setpgid(0,0); \
-     while (getppid() == $ARGV[0]) { select(undef, undef, undef, 0.02) } sleep 3' $$ & \
-     echo $! > gc;";
+/// A descendant that leaves the leader's process group, says so in
+/// `gc-ready` only after `setpgid` succeeded, and then waits, holding none of
+/// the run's pipes, until the owner has recorded a refused signal (the test
+/// seam creates `refused` then; it refuses every signal to a single process).
+/// It ends only then, by itself. The leader goes on only once `gc-ready` is
+/// written, so no group signal can reach the descendant before it left the
+/// group, and nothing but the refusal decides when it ends.
+const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; POSIX::setpgid(0, 0) or die; \
+     open F, q(>), q(gc-ready); print F $$; close F; \
+     until (-e q(refused)) { select(undef, undef, undef, 0.02) }' \
+     </dev/null >/dev/null 2>&1 & echo $! > gc; \
+     until [ -s gc-ready ]; do sleep 0.01; done;";
 
-/// A process the cleanup had to signal and could not verify is not signalled,
-/// and the verdict is not Confirmed even when it then ends by itself and every
-/// sweep afterwards finds nothing. The run has no keeper, so nothing but the
-/// owner signals the descendant and no final census can supersede the
-/// refusal; which process ends first does not change the outcome.
-#[tokio::test]
-async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed() {
-    require_perl!();
-    let s = Scratch::new();
-    let script = format!("{ENDS_AFTER_ITS_PARENT} echo $$ > leader; sleep 60");
-    let mut spec = sh(&s, &script, LONG);
-    spec.keeper = None;
+/// The spec with every signal to a single process refused, and the refusal
+/// recorded in the scratch directory's `refused`.
+fn refusing(s: &Scratch, spec: ProcessSpec) -> ProcessSpec {
+    let mut spec = spec;
     spec.refuse_signals = true;
-    let handle = ProcessHandle::start(spec);
-    let gc = s.pid("gc").await;
-    let _ = s.pid("leader").await;
-    let _reaper = Reaper(vec![gc]);
-    handle.interrupt();
-    let report = handle.wait().await;
-    assert_gone("the descendant", &[gc]).await;
-    assert_eq!(report.diagnostics.keeper, None, "{report:#?}");
-    assert!(
-        report.diagnostics.inspection.unverified_signals > 0,
-        "{report:#?}"
-    );
+    spec.refusal_file = Some(s.path("refused"));
+    spec
+}
+
+/// The keeper's last report, its answer to the reap.
+fn reap_report(report: &crate::process::ProcessReport) -> String {
+    report
+        .diagnostics
+        .keeper
+        .as_ref()
+        .and_then(|k| k.tree_reports.last().cloned())
+        .unwrap_or_default()
+}
+
+/// Assert the verdict is Unconfirmed for an unverified signal.
+fn assert_refusal_stands(report: &crate::process::ProcessReport) {
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
             assert_eq!(
@@ -576,25 +574,54 @@ async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed
                 "{report:#?}"
             );
         }
-        other => panic!("a refused signal must not confirm cleanup: {other:?}"),
+        other => panic!("a refused signal must not confirm cleanup: {other:?}: {report:#?}"),
     }
+}
+
+/// A process the cleanup had to signal and could not verify is not signalled,
+/// and the verdict is not Confirmed even when it then ends by itself and every
+/// sweep afterwards finds nothing. The run has no keeper, so nothing but the
+/// owner signals the descendant and no final census can supersede the
+/// refusal. The stop comes once the descendant has left the group and the
+/// owner tracks it, and the descendant ends only after the refusal.
+#[tokio::test]
+async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed() {
+    require_perl!();
+    let s = Scratch::new();
+    let script = format!("{WAITS_FOR_A_REFUSAL} echo $$ > leader; sleep 60");
+    let mut spec = refusing(&s, sh(&s, &script, LONG));
+    spec.keeper = None;
+    let handle = ProcessHandle::start(spec);
+    let gc = s.pid("gc").await;
+    let _reaper = Reaper(vec![gc]);
+    let _ = s.pid("leader").await;
+    super::fixtures::wait_tracked(&handle, gc).await;
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert_gone("the descendant", &[gc]).await;
+    assert_eq!(report.diagnostics.keeper, None, "{report:#?}");
+    assert!(s.path("refused").exists(), "{report:#?}");
+    assert!(
+        report.diagnostics.inspection.unverified_signals > 0,
+        "{report:#?}"
+    );
+    assert_refusal_stands(&report);
 }
 
 /// The narrower Rule A of `process/mod.rs`. A kept run whose owner had a
 /// signal refused: on Linux the keeper is a child subreaper, so its final
 /// census at the reap, which proves its tree empty once the descendant has
-/// ended by itself, supersedes the refusal and the verdict is Confirmed. On
-/// macOS there is no subreaper and no such proof, so the refusal stands. The
-/// leader exits at once, so the owner's sweeps after the exit, not the
-/// keeper, are the first to meet the descendant: the keeper is asked for its
-/// tree only once a sweep finds nothing.
+/// ended, supersedes the refusal and the verdict is Confirmed. On macOS there
+/// is no subreaper and no such proof, so the refusal stands. The leader exits
+/// once the descendant has left its group; the owner's sweeps after the exit
+/// meet the descendant (the keeper is asked for its tree only once a sweep
+/// finds nothing), and the descendant ends only after one was refused.
 #[tokio::test]
 async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_tree_empty() {
     require_perl!();
     let s = Scratch::new();
-    let script = format!("{ENDS_AFTER_ITS_PARENT} exit 0");
-    let mut spec = kept(sh(&s, &script, LONG));
-    spec.refuse_signals = true;
+    let script = format!("{WAITS_FOR_A_REFUSAL} exit 0");
+    let spec = refusing(&s, kept(sh(&s, &script, LONG)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_gone("the descendant", &pids).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
@@ -605,17 +632,46 @@ async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_t
     let keeper = report.diagnostics.keeper.as_ref().expect("a kept run");
     if cfg!(target_os = "linux") {
         assert!(keeper.subreaper, "{report:#?}");
+        assert_eq!(
+            reap_report(&report),
+            "reaped: live=0 proven=true",
+            "{report:#?}"
+        );
         assert_confirmed(&report);
     } else {
-        match &report.cleanup {
-            Cleanup::Unconfirmed { reason, .. } => {
-                assert_eq!(
-                    reason,
-                    crate::process::UNVERIFIED_SIGNAL_REASON,
-                    "{report:#?}"
-                );
-            }
-            other => panic!("without a subreaper a refusal must stand: {other:?}"),
-        }
+        assert_eq!(
+            reap_report(&report),
+            "reaped: live=0 proven=false",
+            "{report:#?}"
+        );
+        assert_refusal_stands(&report);
     }
+}
+
+/// The same kept run, with a keeper whose first read of `/proc` fails (a test
+/// seam; on Linux it is the keeper's first reap of orphans, before the owner
+/// asks it anything, so no answer of the keeper reports it). Its final census
+/// then proves nothing, and the owner's refusal stands on every platform: a
+/// verdict that waived Linux owner refusals without the proof would be
+/// Confirmed here.
+#[tokio::test]
+async fn an_owner_refusal_stands_when_the_final_census_proves_nothing() {
+    require_perl!();
+    let s = Scratch::new();
+    let script = format!("{WAITS_FOR_A_REFUSAL} exit 0");
+    let mut spec = refusing(&s, sh(&s, &script, LONG));
+    spec.keeper = Some(test_keeper().env(crate::process::keeper::INJECT_READ_FAILURES_ENV, "1"));
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_gone("the descendant", &pids).await;
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    assert!(
+        report.diagnostics.inspection.unverified_signals > 0,
+        "the owner never had a signal refused: {report:#?}"
+    );
+    assert_eq!(
+        reap_report(&report),
+        "reaped: live=0 proven=false",
+        "{report:#?}"
+    );
+    assert_refusal_stands(&report);
 }

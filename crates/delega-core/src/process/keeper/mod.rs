@@ -55,6 +55,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub(crate) use link::{KeeperLink, LaunchSpec, LinkHandle, StartError, start};
+
+/// Test seam: a keeper started by the tests with this variable makes that many
+/// of its reads of `/proc` fail (Linux), so its final census proves nothing.
+#[cfg(test)]
+pub(crate) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
 pub use run::keeper_main;
 
 /// A program and arguments that run [`keeper_main`].

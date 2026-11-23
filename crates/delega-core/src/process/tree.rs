@@ -463,6 +463,9 @@ pub(crate) struct ProcessTree {
     /// Test seam: every signal to a single process is refused.
     #[cfg(test)]
     pub(crate) refuse_signals: bool,
+    /// Test seam: created whenever a refused signal is recorded.
+    #[cfg(test)]
+    pub(crate) refusal_file: Option<std::path::PathBuf>,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -539,6 +542,8 @@ impl ProcessTree {
             root_ticks: None,
             #[cfg(test)]
             refuse_signals: false,
+            #[cfg(test)]
+            refusal_file: None,
         }
     }
 
@@ -1030,6 +1035,10 @@ impl ProcessTree {
         obs.stats.unverified_signals += 1;
         if matches!(found, Found::Marked(..)) {
             obs.unverified_marked += 1;
+        }
+        #[cfg(test)]
+        if let Some(path) = &self.refusal_file {
+            let _ = std::fs::write(path, "refused\n");
         }
     }
 

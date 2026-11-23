@@ -246,6 +246,12 @@ impl KeeperLink {
                 .and_then(Result::ok),
             _ => None,
         };
+        if let Some(reaped) = confirmed {
+            self.handle.log(format!(
+                "reaped: live={} proven={}",
+                reaped.live, reaped.proven
+            ));
+        }
         // The keeper exits after it said `reaped`; one that does not is
         // killed. It is this process's own child, so its pid is ours.
         end_child(&mut self.child, KEEPER_REPLY_TIMEOUT).await;

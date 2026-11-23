@@ -739,6 +739,7 @@ impl OwnedProcess {
         #[cfg(test)]
         {
             tree.refuse_signals = spec.refuse_signals;
+            tree.refusal_file = spec.refusal_file.clone();
         }
         if let (Some(keeper), Some(marker)) = (&keeper, &marker) {
             tree = tree

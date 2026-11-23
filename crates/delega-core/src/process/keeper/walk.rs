@@ -52,20 +52,15 @@ pub(super) struct ReadFailed;
 static READ_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 /// Test seam: make this many of the next reads in this process fail, on any
-/// thread. Set in the keeper from [`INJECT_READ_FAILURES_ENV`], and in a
+/// thread. Set in the keeper from [`super::INJECT_READ_FAILURES_ENV`], and in a
 /// helper process of the walk tests.
 #[cfg(test)]
 static INJECTED_READ_FAILURES: AtomicU64 = AtomicU64::new(0);
 
-/// Test seam: the keeper started by the tests injects this many read failures
-/// (see [`INJECTED_READ_FAILURES`]).
-#[cfg(test)]
-pub(super) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
-
 /// Set the test seam [`INJECTED_READ_FAILURES`] from the environment.
 #[cfg(test)]
 pub(super) fn inject_read_failures_from_env() {
-    if let Some(n) = std::env::var(INJECT_READ_FAILURES_ENV)
+    if let Some(n) = std::env::var(super::INJECT_READ_FAILURES_ENV)
         .ok()
         .and_then(|v| v.parse().ok())
     {

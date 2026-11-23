@@ -173,6 +173,10 @@ pub struct ProcessSpec {
     /// a missing pidfd or start time would.
     #[cfg(test)]
     pub(crate) refuse_signals: bool,
+    /// Test seam: a file the owner creates whenever it records a refused
+    /// signal, so a test can make a descendant wait for the refusal.
+    #[cfg(test)]
+    pub(crate) refusal_file: Option<std::path::PathBuf>,
     /// Test seam: panic in the owner loop right after the child starts.
     #[cfg(test)]
     pub(crate) panic_in_loop: bool,
@@ -265,6 +269,8 @@ impl ProcessSpec {
             swallow_group_kills: 0,
             #[cfg(test)]
             refuse_signals: false,
+            #[cfg(test)]
+            refusal_file: None,
             #[cfg(test)]
             panic_in_loop: false,
             #[cfg(test)]
