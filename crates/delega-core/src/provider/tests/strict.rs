@@ -119,7 +119,7 @@ fn build_with_strict_is_refused_on_both_providers_for_read_confinement() {
 }
 
 #[test]
-fn build_without_strict_runs_on_both_providers_with_a_wider_note() {
+fn build_without_strict_plans_on_both_providers_with_a_wider_note() {
     let rig = Rig::new();
     for provider in [Provider::Claude, Provider::Codex] {
         let plan = dry_run(
