@@ -1377,8 +1377,10 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert!(listed.is_some());
-        assert!(t.by_pid.contains_key(&pid));
-        assert!(t.live.values().all(|e| e.proven));
+        // The test process's other children belong to concurrent tests; only
+        // this one is asserted on.
+        let own_child = t.by_pid.get(&pid).and_then(|u| t.live.get(u));
+        assert!(own_child.is_some_and(|e| e.proven));
         assert!(matches!(launchd, Taken::No));
     }
 
