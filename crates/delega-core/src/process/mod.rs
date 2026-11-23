@@ -249,15 +249,21 @@
 //!   census after the child has exited and before it reaps it. That census
 //!   proves the tree empty when it is complete (two passes in a row found the
 //!   same live set, the independent scan of every `/proc/*/stat` found the same
-//!   set, and the tree was not in flux), found nothing alive, and within itself
-//!   refused no hold and met no failed read. The keeper says so in its
-//!   `reaped` line.
+//!   set, and the tree was not in flux), found nothing alive, and refused no
+//!   hold, and no read of `/proc` has failed in the keeper since it started:
+//!   not in this census (a pass it discarded as in flux included), not in the
+//!   census and freeze just before it, and not in any walk earlier in the run.
+//!   The keeper says so in its `reaped` line, and the owner records that line
+//!   last in `diagnostics.keeper.tree_reports`.
 //! - Such a proof supersedes every earlier refusal by the owner
 //!   ([`UNVERIFIED_SIGNAL_REASON`]) and every earlier refused hold of the
-//!   keeper ([`KEEPER_UNPROVEN_REASON`]), and only those: earlier failed reads
-//!   and freezes that did not complete for another reason stay sticky, and so
-//!   does a refusal meant for a process found only by the run marker, which
-//!   need not be a descendant and so need not be in the keeper's tree.
+//!   keeper ([`KEEPER_UNPROVEN_REASON`]), and only those. A failed read is
+//!   never superseded: one the keeper reported in an answer, or a freeze that
+//!   did not complete for another reason, keeps the verdict `Unconfirmed`
+//!   ([`KEEPER_UNPROVEN_REASON`]), and any failed read at all withholds the
+//!   proof, so the refusals stay. Nor is a refusal meant for a process found
+//!   only by the run marker, which need not be a descendant and so need not
+//!   be in the keeper's tree.
 //! - A refused process that is still alive cannot produce that proof. The
 //!   census holds nothing and so refuses nothing; it counts every live process
 //!   whose stat it reads, in the children files and in the scan, and a stat
@@ -267,10 +273,10 @@
 //!   and so is in the keeper's tree (or the pid now names a process that is
 //!   not ours, which needs no signal).
 //! - Without that proof (no subreaper, a lost keeper, a reap that was not
-//!   acknowledged, a census that was incomplete, found anything alive, or met
-//!   a refusal or failed read of its own) refusals stay sticky. macOS keeps the
-//!   strict rule: without a subreaper an orphan can leave the keeper's tree, so
-//!   the keeper never reports a proof there.
+//!   acknowledged, a final census that was incomplete, found anything alive or
+//!   refused a hold, or any failed read in the keeper) refusals stay sticky.
+//!   macOS keeps the strict rule: without a subreaper an orphan can leave the
+//!   keeper's tree, so the keeper never reports a proof there.
 //!
 //! It also requires that the listing taken before the first signal completed
 //! (see "How a child is owned"). That listing is the only one that can see a
