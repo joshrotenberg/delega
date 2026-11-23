@@ -14,7 +14,7 @@ worker, which continues the worker's provider session.
 
 | Operation | MCP tool | Waits for a provider? | Returns |
 | --- | --- | --- | --- |
-| `start(Request)` | `start` | no | `StartResponse`: worker id, run id, state `queued` or `running`. |
+| `start(Request)` | `start` | no | `StartResponse`: run id and state; a worker id unless the start was refused (state `finished`). |
 | `follow_up(worker, prompt, timeout_secs?)` | `follow_up` | no | `StartResponse` for the new run. |
 | `wait(WaitTargets, timeout_secs?, after_cursor?)` | `wait` | yes, bounded | `WaitResponse`: current states, `cursor`, `timed_out`, `unknown`, and `limit_reached` when the wait was not allowed to block. |
 | `read(Target, Detail, after_cursor?, text_offset?)` | `read` | no | `ReadResponse`: the result, or progress. |
@@ -161,7 +161,7 @@ A follow-up is refused as a finished run, not an error:
 | `worker_closed` | The worker is closed. |
 | `queue_full` | The worker's queue is full. |
 | `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one. A follow-up can return `queued` and later end `no_session`. |
-| `invalid_request` | The prompt is not valid. |
+| `invalid_request` | The follow-up's request fails validation (for example its prompt or `timeout_secs`). |
 
 A response that says a run is `finished` carries its `outcome` and `error`. An
 unknown worker is an error. `list` shows `can_follow_up`: false for a closed
