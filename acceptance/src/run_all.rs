@@ -20,9 +20,46 @@ pub fn run_all(
     let work: Vec<(usize, u32)> = (1..=repeat)
         .flat_map(|r| (0..rows.len()).map(move |i| (i, r)))
         .collect();
-    let next = AtomicUsize::new(0);
+    // On macOS a kept run counts as possibly its own an orphan made during it
+    // by any other run of the same user, so rows that leave one run in a
+    // batch of their own, one at a time, after the others.
+    let alone_here =
+        |(i, _): &&(usize, u32)| cfg!(target_os = "macos") && leaves_orphans(&rows[*i]);
+    let alone: Vec<(usize, u32)> = work.iter().filter(alone_here).copied().collect();
+    let together: Vec<(usize, u32)> = work.iter().filter(|w| !alone_here(w)).copied().collect();
+    let total = work.len();
     let done = AtomicUsize::new(0);
     let results: Mutex<Vec<(usize, u32, Measured)>> = Mutex::new(Vec::new());
+    run_batch(ctx, rows, &together, jobs, total, &done, &results, quiet);
+    run_batch(ctx, rows, &alone, 1, total, &done, &results, quiet);
+    let mut list = results.into_inner().unwrap_or_default();
+    list.sort_by_key(|(i, r, _)| (*i, *r));
+    list.into_iter().map(|(_, _, m)| m).collect()
+}
+
+/// Whether a row's provider leaves a process beyond its run's own tree
+/// (an orphan, a detached or `setsid` descendant, a relay), or kills delega
+/// and its keeper together.
+fn leaves_orphans(row: &Row) -> bool {
+    matches!(
+        row.variant,
+        "setsid" | "orphan" | "orphan-late" | "relay" | "bare"
+    ) || row.case.id == "kk"
+}
+
+/// Run `work` on `jobs` threads.
+#[allow(clippy::too_many_arguments)]
+fn run_batch(
+    ctx: &Context,
+    rows: &[Row],
+    work: &[(usize, u32)],
+    jobs: usize,
+    total: usize,
+    done: &AtomicUsize,
+    results: &Mutex<Vec<(usize, u32, Measured)>>,
+    quiet: bool,
+) {
+    let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         for _ in 0..jobs.max(1) {
             scope.spawn(|| {
@@ -34,9 +71,7 @@ pub fn run_all(
                     if !quiet {
                         eprintln!(
                             "[{finished}/{}] {} #{r}: {}",
-                            work.len(),
-                            measured.id,
-                            measured.verdict
+                            total, measured.id, measured.verdict
                         );
                     }
                     if let Ok(mut list) = results.lock() {
@@ -46,9 +81,6 @@ pub fn run_all(
             });
         }
     });
-    let mut list = results.into_inner().unwrap_or_default();
-    list.sort_by_key(|(i, r, _)| (*i, *r));
-    list.into_iter().map(|(_, _, m)| m).collect()
 }
 
 /// The smallest `--repeat` at which a gap that never showed counts as closed.

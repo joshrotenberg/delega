@@ -374,23 +374,6 @@
 //!   its own jobs, which lead their own sessions. Any suspect alive makes the
 //!   verdict `Unconfirmed`, and so does one first seen in the keeper's last
 //!   answer before the reap, which the reap reply carries.
-//! - The keeper registry, so that one run does not count another run's
-//!   orphans as its own. The CLI and MCP use
-//!   `~/Library/Application Support/delega/keepers` (or the absolute path in
-//!   `DELEGA_KEEPER_REGISTRY`); a library caller sets
-//!   `KeeperCommand::registry`. The directory must be a real directory owned
-//!   by this user with no group or other permissions, checked before every
-//!   use, and created with mode 0700 when missing. Each keeper writes
-//!   `keeper-<pid>-<unique id>` and appends the unique id of every process it
-//!   proved its own, never a suspect; it removes the file when it exits. An
-//!   orphan whose recorded parent, or which itself, is in the entry of
-//!   another keeper that is alive with the unique id its entry names is that
-//!   run's: it is not ambiguous here. An entry never causes a signal. A stale
-//!   entry (its keeper gone, or a pid with another unique id) is ignored and
-//!   removed. An entry can lag its keeper: an orphan whose parent is not yet
-//!   published is ambiguous, an honest `Unconfirmed`. Without a registry (none
-//!   given, or the directory fails its check) the rule stays strict, and the
-//!   report has a warning that says so.
 //! - Budgets: a census may take 1 s, a freeze 2 s with its final census, and
 //!   a batch of events between requests 250 ms. Past its budget the tracker
 //!   stops and answers unproven (`hole=budget`). The macOS keeper answers
@@ -417,18 +400,13 @@
 //!     off): `/usr/bin/true` 2000 times in a script, median 3.32 s on and
 //!     3.28 s off; one `/usr/bin/true`, 126 ms on and 98 ms off. 200 kept runs
 //!     of a small script with a few forks: none `Unconfirmed`.
-//!   - `measure_overlapping_runs`: 20 pairs in which one kept run makes an
-//!     orphan its keeper proves while the other runs: the other `Confirmed`
-//!     in 20.
 //!   - `measure_the_session_relay` (a relay that changes session each
 //!     generation and holds no output pipe), 20 runs beside a process-suite
 //!     run in another test process: stopped in 20, `Unconfirmed` in 8 (the
-//!     other process's orphans, in another registry), `Confirmed` with a
-//!     relay alive in 0.
-//!   - The acceptance matrix with the fakes (8 cases at a time, 3 repeats of
-//!     202 rows): every row met its expectation; no macOS row left a survivor
-//!     apart from the two deliberate rows that kill delega and its keeper
-//!     together.
+//!     other process's orphans), `Confirmed` with a relay alive in 0.
+//!   - The acceptance matrix with the fakes (rows that leave orphans one at
+//!     a time after the others, the rest 8 at a time, 3 repeats of 202 rows):
+//!     see `acceptance/RESULTS.md`.
 //! - What remains on macOS: the tracker watches from user space, so under
 //!   load a process can be born, fork and exit unseen. The strict rule then
 //!   keeps the verdict from `Confirmed` while a survivor lives, with these
@@ -458,8 +436,9 @@
 //!     leaves the child unreaped to the reaper above it, and the verdict is
 //!     `Unconfirmed`;
 //!   - on macOS, a survivor of a fork the tracker missed that leads its own
-//!     session and exec'd after it was reparented can end `Confirmed` while
-//!     it runs, and an orphan of an unrelated program of the same user makes
+//!     session and exec'd after it was reparented looks like a launchd job
+//!     and can end `Confirmed` while it runs, and an orphan made during the
+//!     run by another program or another delega run of the same user makes
 //!     a run `Unconfirmed` (see "What remains on macOS" above); with fork
 //!     tracking off, a detached orphan whose environment the system hides
 //!     from `ps -E` (Apple's programs under SIP) and a fast fork relay can be
