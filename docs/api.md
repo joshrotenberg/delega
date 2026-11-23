@@ -375,7 +375,8 @@ and their digests; and whether process inspection works.
 **Problems.** Each has a `kind`, a message, the provider (null for the whole
 system) and what it `blocks`: `run`, `command_grants`, `build`, `cleanup` or
 `nothing`.
-A problem blocks `run` only where a run would be refused or fail for it.
+A problem blocks `run` only where a run would be refused or fail for it;
+`build` marks one that can stop `build` runs (the message says why).
 
 | Kind | Blocks | Meaning |
 | --- | --- | --- |

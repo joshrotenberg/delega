@@ -653,7 +653,7 @@
       "type": "object",
       "properties": {
         "blocks": {
-          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands), `build` (only\nruns in the `build` permission mode), `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
+          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands), `build` (can stop\nruns in the `build` permission mode; see the message), `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
           "$ref": "#/$defs/Blocks"
         },
         "kind": {

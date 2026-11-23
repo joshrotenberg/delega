@@ -213,8 +213,8 @@ pub struct ReportedProblem {
     /// A description.
     pub message: String,
     /// What the problem stops: `run` (every run with the provider),
-    /// `command_grants` (only runs that grant exact commands), `build` (only
-    /// runs in the `build` permission mode), `cleanup`
+    /// `command_grants` (only runs that grant exact commands), `build` (can stop
+    /// runs in the `build` permission mode; see the message), `cleanup`
     /// (runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no
     /// run is refused).
     pub blocks: Blocks,
