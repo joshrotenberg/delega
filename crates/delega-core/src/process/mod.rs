@@ -68,7 +68,10 @@
 //! macOS), and every tracked descendant with a
 //! matching start time. The sweep signals what it finds. A descendant that
 //! keeps the output pipes open after the kill does not hold the report: the
-//! owner closes its ends after the drain bound and says so in the diagnostics.
+//! owner closes its ends after the drain bound and says so in the diagnostics,
+//! and the verdict is `Unconfirmed` ([`PIPES_HELD_REASON`]) even when every
+//! sweep afterwards found nothing, because a process that none of them saw
+//! held the output. This holds with or without a keeper.
 //! If process listing is unavailable (no `ps`, or repeated failures) cleanup
 //! does not wait out its deadline: it kills the group, reaps the leader,
 //! checks the group with `kill(-pgid, 0)`, and reports `Unconfirmed` saying
@@ -259,7 +262,9 @@
 //! And if the owner is killed with SIGKILL, nothing stops the child (see "What
 //! no in-process code can do").
 //!
-//! A kept run closes these, with these residuals:
+//! A kept run closes these on Linux. On macOS it closes the SIGKILL of the
+//! owner, and the two gaps remain in part; tracking forks on macOS is
+//! delega issue 167. In detail:
 //!
 //! - On Linux the keeper is the reaper of every orphan, so the `setsid`
 //!   descendant and every generation of the relay are the keeper's descendants
@@ -276,14 +281,20 @@
 //!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
 //!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
 //!   for a Homebrew binary and for this crate's test binary. Such a descendant
-//!   ends with `Confirmed` while it runs, as without a keeper.
+//!   ends with `Confirmed` while it runs, as without a keeper, unless it holds
+//!   the output pipes past the drain bound, which makes the verdict
+//!   `Unconfirmed`.
 //! - On macOS a fast fork relay is not stopped. In 50 interrupted kept runs of
 //!   the relay in `tests/gaps.rs` (perl, a new generation about every 5 ms, 4000
 //!   generations), measured on macOS 27.2 arm64 at a load average of about 15
-//!   (`measure_the_relay_freeze`), the freeze stopped it in none, and all 50
-//!   reported `Confirmed` with a relay process alive: each listing takes 20 ms
-//!   or more, so the generation it shows has exited before its SIGSTOP, and the
-//!   relay runs perl, whose environment `ps -E` does not show.
+//!   (`measure_the_relay_freeze`), the freeze stopped it in none: each listing
+//!   takes 20 ms or more, so the generation it shows has exited before its
+//!   SIGSTOP, and the relay runs perl, whose environment `ps -E` does not show.
+//!   That relay holds the output pipes, and with the held-pipe verdict all 50
+//!   runs of a second measurement (load average about 20) ended `Unconfirmed`
+//!   and none `Confirmed`; before it, all 50 had ended `Confirmed` with a relay
+//!   process alive. A relay that does not hold the output still ends
+//!   `Confirmed` while it runs.
 //! - SIGKILL aimed at the keeper itself, on every platform. The owner notices
 //!   (the keeper's end of the socket closes before `reaped`) and reports
 //!   `Unconfirmed`; if the owner is killed with the keeper, nothing stops the
@@ -432,7 +443,8 @@ pub use handle::{Interrupter, ProcessHandle, run};
 pub use keeper::{KeeperCommand, keeper_main};
 pub use marker::MARKER_ENV;
 pub use owner::{
-    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, LATE_LISTING_REASON, is_late_listing_only,
+    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, LATE_LISTING_REASON, PIPES_HELD_REASON,
+    is_late_listing_only,
 };
 pub use report::{
     Diagnostics, Ending, KeeperDiagnostics, LeaderExit, ProcessReport, ProcessTiming, SignalRecord,

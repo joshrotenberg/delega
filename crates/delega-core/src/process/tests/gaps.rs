@@ -423,6 +423,9 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
     let s = Scratch::new();
     let mut spec = kept(sh(&s, &long_relay(), LONG));
     spec.stop_grace = Duration::from_millis(100);
+    // The relay holds the output pipes; the owner closes them a second after
+    // the kill.
+    spec.drain_bound = Duration::from_secs(1);
     let handle = crate::process::ProcessHandle::start(spec);
     s.exists("beat").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -459,7 +462,7 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
 #[tokio::test]
 #[cfg_attr(
     not(target_os = "linux"),
-    ignore = "macOS residual: in 50 interrupted kept runs on macOS 27.2 the freeze stopped the relay in 0, and all 50 reported Confirmed with a relay process alive; see process/mod.rs"
+    ignore = "macOS residual: in 50 interrupted kept runs on macOS 27.2 the freeze stopped the relay in 0 (all 50 ended Unconfirmed because the relay held the output); see process/mod.rs"
 )]
 async fn a_fork_relay_is_stopped_in_a_kept_run() {
     require_perl!();
@@ -469,6 +472,28 @@ async fn a_fork_relay_is_stopped_in_a_kept_run() {
         "a relay process was alive after the report: {cleanup:?}"
     );
     assert_eq!(cleanup, Cleanup::Confirmed);
+}
+
+/// Whatever the platform, a kept run of the relay never claims `Confirmed`
+/// while a relay process is alive. On Linux the keeper stops it; on macOS it
+/// is not stopped, but it holds the output pipes past the drain bound, and a
+/// held pipe makes the verdict `Unconfirmed`.
+#[tokio::test]
+async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
+    require_perl!();
+    let (alive, cleanup, _) = relay_run().await;
+    assert!(
+        !(alive && cleanup == Cleanup::Confirmed),
+        "a relay process was alive but cleanup says Confirmed"
+    );
+    if alive {
+        match &cleanup {
+            Cleanup::Unconfirmed { reason, .. } => {
+                assert_eq!(reason, crate::process::PIPES_HELD_REASON);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 /// The measurement behind the macOS residual: 50 interrupted kept runs of the
@@ -484,6 +509,7 @@ async fn measure_the_relay_freeze() {
     let mut stopped = 0;
     let mut false_confirmations = 0;
     let mut unconfirmed = 0;
+    let mut pipes_held = 0;
     let mut took = Vec::new();
     for _ in 0..50 {
         let (alive, cleanup, stop) = relay_run().await;
@@ -497,12 +523,16 @@ async fn measure_the_relay_freeze() {
         if cleanup != Cleanup::Confirmed {
             unconfirmed += 1;
         }
+        if matches!(&cleanup, Cleanup::Unconfirmed { reason, .. } if reason == crate::process::PIPES_HELD_REASON)
+        {
+            pipes_held += 1;
+        }
     }
     took.sort();
     eprintln!(
         "relay: stopped in {stopped} of 50 runs; Confirmed with a relay alive in \
-         {false_confirmations}; Unconfirmed in {unconfirmed}; interrupt to report median \
-         {:?}, max {:?}",
+         {false_confirmations}; Unconfirmed in {unconfirmed} ({pipes_held} because a process \
+         held the output); interrupt to report median {:?}, max {:?}",
         took[25], took[49]
     );
 }

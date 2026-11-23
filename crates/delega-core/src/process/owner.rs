@@ -452,6 +452,13 @@ pub const FREEZE_INCOMPLETE_REASON: &str = "processes kept appearing while they 
      stopped, through every listing of the freeze, so one may have been started after the last \
      listing";
 
+/// The reason of an `Unconfirmed` verdict when the owner had to close its
+/// ends of the output pipes because something still held them when the drain
+/// bound ran out: a process that inherited them was alive after the kill and
+/// no sweep found it.
+pub const PIPES_HELD_REASON: &str = "a process still held the program's output pipes when the \
+     drain bound ran out, and no sweep found it, so it may still be running";
+
 #[doc(hidden)]
 pub const LATE_LISTING_REASON: &str = "the process listing taken before the first signal did not \
      complete, so a descendant that left the session when its parent was stopped could not be \
@@ -938,6 +945,10 @@ impl OwnedProcess {
                     unconfirmed(LATE_LISTING_REASON)
                 } else if shared.freeze_incomplete.load(Ordering::SeqCst) {
                     unconfirmed(FREEZE_INCOMPLETE_REASON)
+                } else if shared.pipes_closed_by_owner.load(Ordering::SeqCst) {
+                    // Every sweep came up empty, yet something held the
+                    // output after the kill: a process none of them can see.
+                    unconfirmed(PIPES_HELD_REASON)
                 } else {
                     Cleanup::Confirmed
                 };

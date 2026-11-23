@@ -388,10 +388,11 @@ both!(
         let s = Scratch::new();
         // The sleep calls setsid and its parent exits at once, so neither the
         // sweep nor a scan can know it. It keeps the pipes open: the report still
-        // comes back within the drain bound and says the owner closed the pipes.
-        // The process itself is the known gap (delega issue 1) and the test stops
-        // it. Today's verdict for it is Confirmed, which is that gap; the ignored
-        // tests in gaps.rs state the wanted one.
+        // comes back within the drain bound and says the owner closed the pipes,
+        // and the verdict is Unconfirmed, because something still held the
+        // output that no sweep found. On Linux a kept run finds it anyway (it
+        // becomes the keeper's child), kills it, and the pipes close by
+        // themselves. Elsewhere `sleep`, an Apple program, shows no run marker.
         // It starts after the first scan, and the leader exits before the next, so
         // no scan can have seen it with its parent alive.
         let script = format!(
@@ -409,6 +410,15 @@ both!(
         let started = Instant::now();
         let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
         assert_eq!(report.ending, Ending::Exited { code: 0 });
+        let kept = super::fixtures::KEEP
+            .try_with(|keep| *keep)
+            .unwrap_or(false);
+        if kept && cfg!(target_os = "linux") {
+            assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+            assert!(!report.diagnostics.pipes_closed_by_owner, "{report:#?}");
+            super::fixtures::assert_gone("the orphan holding the pipes", &pids).await;
+            return;
+        }
         // The report did not wait for the process that holds the pipes: it is
         // alive now, and it sleeps a minute.
         assert!(is_running(pids[0]), "{report:#?}");
@@ -423,7 +433,12 @@ both!(
             "{:?}",
             report.diagnostics.warnings
         );
-        assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+        match &report.cleanup {
+            Cleanup::Unconfirmed { reason, .. } => {
+                assert_eq!(reason, crate::process::PIPES_HELD_REASON, "{report:#?}");
+            }
+            other => panic!("a held output pipe must not confirm cleanup: {other:?}"),
+        }
     }
 );
 
