@@ -62,7 +62,8 @@ directories;
 exact commands the worker may run and `permissions.directories` for extra
 directories it may read. A request
 the worker makes that was not granted is answered no and listed in
-`permissions.denied` in the result. Turn on `permissions.strict` to refuse
+`permissions.denied` in the result, unless the run asks you
+([Answer a permission request](#answer-a-permission-request)). Turn on `permissions.strict` to refuse
 the run before it starts when the provider cannot enforce the permissions as
 stated (Codex `read` and `write` cannot confine reads or commands, and `build`
 on either provider cannot confine what commands read); the run is
@@ -84,9 +85,10 @@ Give each its own working directory.
 1. Start the workers you need. Keep each worker's id and run id.
 2. Do your own work.
 3. Call `wait` with the `runs` or `workers` you are waiting on and a short
-   `timeout_secs`. It returns when any of them finishes, or on timeout, with
-   their current states and a `cursor`. Pass the returned cursor as `after` on
-   the next call and it tells you only of what finished since.
+   `timeout_secs`. It returns when any of them finishes, when a permission
+   request opens or is resolved, or on timeout, with their current states and a
+   `cursor`. Pass the returned cursor as `after` on the next call and it tells
+   you only of what changed since.
 4. Call `read` with the `run` to get its result.
 
 Prefer short waits and the cursor to one long wait. A timeout costs nothing: the
@@ -119,12 +121,12 @@ The person you work for decides what a worker may do. For each pending request:
 You may deny a request on your own, for example one that is clearly outside the
 assignment, and tell the person you did. Never allow a request without the
 person's answer. Deny a Bash request whose summary has `truncated: true`,
-because the full command is hidden from both of you.
+because part of the command may be hidden from both of you.
 
-A request nobody answers is denied when `permissions.ask_timeout` expires (120
-seconds by default). A person may need longer, so set it when you start the
-run, up to 600. Read `permissions.asked` in the final result for each decision
-and whether it reached the provider. Use `follow_up` for a question in the
+A request nobody answers is denied, at the latest when `permissions.ask_timeout`
+expires (120 seconds by default). A person may need longer, so set it when you
+start the run, up to 600. Read `permissions.asked` in the final result for each
+decision and whether it was written to the provider. Use `follow_up` for a question in the
 worker's final answer.
 
 ## Read a long answer

@@ -53,11 +53,12 @@ Code's [Strict](../providers.md#strict).
 
 ## Live decisions
 
-Claude Code runs supervised over MCP or Rust can set `on_request: ask`. The
-caller allows or denies each eligible tool use. Over MCP the caller is usually
-the supervising agent; the plugin's delegate skill tells it to ask the person
-it works for before allowing anything. The view gives bounded,
-redacted arguments needed for a decision and reports file content by size.
+Claude Code runs supervised over MCP or Rust can set `on_request: ask`. An
+eligible tool use is shown to the caller, who can allow or deny it; one nobody
+answers is denied. Over MCP the caller is usually the supervising agent; the
+plugin's delegate skill tells it to ask the person it works for before allowing
+anything. The view shows selected fields of the request, such as the command,
+path or URL, bounded and redacted, and reports file content by size.
 The result records decisions in `permissions.asked`. See
 [Permissions](../api.md#permissions) for the timeout and
 [Run independent workers over MCP](../guides/mcp-workers.md) for how to answer.
