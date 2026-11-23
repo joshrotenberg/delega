@@ -47,6 +47,10 @@ const BSD_INFO_SIZE: usize = std::mem::size_of::<libc::proc_bsdinfo>();
 const KINFO_PROC_SIZE: usize = 648;
 const KINFO_OFFSET_START_SEC: usize = 0;
 const KINFO_OFFSET_START_USEC: usize = 8;
+/// `int p_flag` in `struct extern_proc`, and its `P_WEXIT` bit: the process
+/// is exiting.
+const KINFO_OFFSET_FLAG: usize = 32;
+const P_WEXIT: u32 = 0x2000;
 /// `char p_stat` in `struct extern_proc`.
 const KINFO_OFFSET_STAT: usize = 36;
 /// `uid_t p_ruid` in `kp_eproc.e_pcred`, `pid_t e_ppid` and `pid_t e_pgid`
@@ -276,11 +280,18 @@ pub(in crate::process) struct KernProc {
     pub pgid: i32,
     pub ruid: u32,
     stat: u8,
+    flags: u32,
 }
 
 impl KernProc {
     pub(in crate::process) fn zombie(&self) -> bool {
         self.stat == SZOMB
+    }
+
+    /// Exiting (`P_WEXIT`): libproc no longer describes it, it forks nothing
+    /// more, and it becomes a zombie.
+    pub(in crate::process) fn exiting(&self) -> bool {
+        self.flags & P_WEXIT != 0
     }
 }
 
@@ -302,6 +313,7 @@ pub(in crate::process) fn kern_proc(pid: i32) -> Result<Option<KernProc>, Errno>
                 pgid: u32_at(&buf, KINFO_OFFSET_PGID).cast_signed(),
                 ruid: u32_at(&buf, KINFO_OFFSET_RUID),
                 stat: buf[KINFO_OFFSET_STAT],
+                flags: u32_at(&buf, KINFO_OFFSET_FLAG),
             }))
         }
         _ => Err(Errno::IO),

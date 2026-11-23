@@ -99,19 +99,29 @@ fn now_us() -> u64 {
 fn read_new(pid: i32) -> Result<Option<Ident>, rustix::io::Errno> {
     let until = Instant::now() + CREATING_WAIT;
     loop {
-        if let Some(ident) = darwin::identity(pid)? {
+        let read = darwin::identity(pid);
+        if let Ok(Some(ident)) = read {
             return Ok(Some(ident));
         }
-        match darwin::kern_proc(pid)? {
-            None => return Ok(None),
-            Some(k) if k.zombie() => return Ok(None),
-            Some(_) => {}
+        if gone(pid)? {
+            return Ok(None);
         }
+        // libproc failed for another reason, and the process is there: a
+        // failed read.
+        read?;
         if Instant::now() >= until {
             return Err(rustix::io::Errno::AGAIN);
         }
         std::thread::sleep(Duration::from_micros(100));
     }
+}
+
+/// Whether the process with this pid is gone by the kernel's own record: no
+/// such process, a zombie, or exiting. libproc answers ESRCH (or fails) for
+/// all three, and also for a process still being created, which is not gone.
+/// An error when the record cannot be read.
+fn gone(pid: i32) -> Result<bool, rustix::io::Errno> {
+    Ok(darwin::kern_proc(pid)?.is_none_or(|k| k.zombie() || k.exiting()))
 }
 
 /// What a census or a freeze found.
@@ -965,7 +975,12 @@ impl Tracker {
             match darwin::identity(entry.ident.pid) {
                 Ok(Some(now)) if now.uniqueid == entry.ident.uniqueid => {}
                 Ok(_) => gone.push(entry.ident.pid),
-                Err(_) => failures += 1,
+                // An exiting process can fail the read; only the kernel's
+                // record saying it is gone makes it gone.
+                Err(_) => match self::gone(entry.ident.pid) {
+                    Ok(true) => gone.push(entry.ident.pid),
+                    Ok(false) | Err(_) => failures += 1,
+                },
             }
         }
         if failures > 0 {
