@@ -411,10 +411,14 @@ carries:
   `permissions.denied`.
 - No network domain is allowed, so under `dontAsk` every host is refused.
 
-`permissions.directories` gets its `Read(//DIR/**)` rule and no `--add-dir`:
-the sandbox lets commands write to every `--add-dir` directory. Live, the
-`Read` tool read a file in such a directory and a command's write to it was
-denied ([Verified](#verified-against-the-real-cli)).
+`permissions.directories` gets its `Read(//DIR/**)` rule, which `Read`, `Glob`
+and `Grep` use, and no `--add-dir`: the sandbox lets commands write to every
+`--add-dir` directory. Live, the `Read` tool read a file in such a directory and
+a command's write to it was denied
+([Verified](#verified-against-the-real-cli)). delega does not make a listed
+directory writable, but one inside a location commands can already write (the
+working directory, or Claude Code's per-user temporary directory) stays
+writable.
 
 Commands can write to the working directory and to Claude Code's per-user
 temporary directory: Claude Code sets `TMPDIR` to it (`/tmp/claude-<uid>`), and
@@ -449,8 +453,11 @@ not refuse a run for them.
   start with `permissions_not_enforceable` instead. Claude Code must be 2.1.325 or later for the hook
   interface.
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
-  It is readable, not editable: no `Edit` or `Write` rule names it. In `build`
-  it gets the `Read` rule only ([Build](#build)).
+  delega does not make it editable: no `Edit` or `Write` rule names it. One
+  inside the working directory is still covered by the working directory's
+  `Edit` and `Write` rules in `write`. In `build` it gets the `Read` rule only
+  and stays writable by commands when it lies inside a writable location
+  ([Build](#build)).
 
 ### Text refused because it could change a rule
 
@@ -865,7 +872,8 @@ other checks still apply.
 
 - Reads are not limited to the working directory or the listed directories.
 - Commands are not limited to the list in `read` and `write`.
-- In `build`, a `permissions.directories` entry under `/tmp` or `$TMPDIR` is
+- delega does not make `permissions.directories` writable, but in `build` an
+  entry inside the working directory or under `/tmp` or `$TMPDIR` stays
   writable by commands.
 - Denials are reported only for commands the stream marks `declined`. Other
   blocked actions appear as failed commands and are not in `permissions.denied`.
@@ -1169,7 +1177,7 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
   - With that branch binary, a `permissions.directories` entry that contained
     the working directory (working directory `P/cwd`, directory `P`) became
     `denyWrite` `["//P"]`, and then `touch ./inside` in the working directory
-    was denied too: the worker could write nowhere.
+    was denied too.
   - Raw `claude` with the same sandbox settings, no `--add-dir` for an extra
     directory `SIDE` and only a `Read(//SIDE/**)` allow rule: the `Read` tool
     read `SIDE/readme.txt`, a command's write to `SIDE` was denied, the working

@@ -173,6 +173,9 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
     for part in [
         "wider than requested: commands inside the sandbox can read",
         "commands can write anywhere in it, and other Claude Code sessions",
+        "permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
+         not added to the sandbox, so delega does not make it writable, though one inside a \
+         location commands can write stays writable",
         "bubblewrap and socat",
         "git -c name=value) are denied and listed in permissions.denied",
     ] {

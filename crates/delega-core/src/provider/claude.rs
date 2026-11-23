@@ -346,8 +346,9 @@ fn build_grants(
         "build runs Bash inside Claude Code's sandbox, which approves sandboxed commands; \
          commands can write to the working directory and Claude Code's per-user temporary \
          directory (in a git worktree, git commit also writes the main checkout's .git), \
-         permissions.directories is granted to the Read tool only and is not added to the \
-         sandbox, and the network is refused"
+         permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
+         not added to the sandbox, so delega does not make it writable, though one inside a \
+         location commands can write stays writable; the network is refused"
             .to_string(),
         "wider than requested: commands inside the sandbox can read files outside the working \
          directory and permissions.directories"

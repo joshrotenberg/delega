@@ -31,7 +31,10 @@ the working directory and the extra directories, and it gets no edit tools. In
 command granted with `--allow-command` is matched by its text; once it runs, it
 can write files or reach paths outside those scopes. In `build`, commands run in
 Claude Code's sandbox, which confines their writes and refuses the network but
-does not confine their reads ([Build](../providers.md#build)). See
+does not confine their reads ([Build](../providers.md#build)). delega does not
+make the extra directories writable in `read`, `write` or `build`, but one that lies inside a
+location the worker can already write (the working directory, or a temporary
+directory in `build`) stays writable. See
 [Permission mapping](../providers.md#permission-mapping),
 [Commands and directories](../providers.md#commands-and-directories) and
 [What cannot be enforced](../providers.md#what-cannot-be-enforced).
