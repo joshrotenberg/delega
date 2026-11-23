@@ -792,6 +792,7 @@ mod tests {
     /// children; here the root has only what the mode starts.
     #[test]
     fn census_helper_entry() {
+        use crate::test_spawn::Guarded;
         let (Some(mode), Some(out)) = (
             std::env::var_os(HELPER_ENV),
             std::env::var_os(HELPER_OUT_ENV),
@@ -801,6 +802,25 @@ mod tests {
         let me = i32::try_from(std::process::id()).expect("a pid");
         let found = match mode.to_str() {
             Some("empty") => format!("proven={}", final_census_proves_empty(me, 0)),
+            Some("one-child") => {
+                let mut child = std::process::Command::new("sleep")
+                    .arg("30")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .guarded_spawn()
+                    .expect("start a child");
+                let pid = i32::try_from(child.id()).expect("a pid");
+                let walked = census(me, 0);
+                let proven = final_census_proves_empty(me, 0);
+                let alive = !gone_by_pidfd(pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                format!(
+                    "complete={} live={} alive={alive} proven={proven}",
+                    walked.complete, walked.live
+                )
+            }
             Some("transient") => {
                 // One read fails: the first of the census, in its check for
                 // flux, so that pass is discarded and is not counted in the
@@ -853,25 +873,15 @@ mod tests {
         assert_eq!(in_a_helper("empty"), "proven=true");
     }
 
-    /// A live process in the tree, here a child of this test process standing
-    /// in for the keeper, keeps the census from proving the tree empty,
-    /// whether or not anything ever held or refused it.
+    /// A live process in the tree, the root's only child, is counted exactly
+    /// once by a complete census, and keeps the final census from proving the
+    /// tree empty, though nothing ever held or refused it.
     #[test]
     fn a_live_descendant_keeps_the_final_census_from_proving_the_tree_empty() {
-        use crate::test_spawn::Guarded;
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .guarded_spawn()
-            .expect("start a child");
-        let pid = i32::try_from(child.id()).expect("a pid");
-        let me = i32::try_from(std::process::id()).expect("a pid");
-        let walked = census(me, 0);
-        let alive = !gone_by_pidfd(pid);
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(alive, "the child ended during the census");
-        assert!(!walked.proves_empty(), "{walked:?}");
-        assert!(walked.effective_live() >= 1, "{walked:?}");
+        assert_eq!(
+            in_a_helper("one-child"),
+            "complete=true live=1 alive=true proven=false"
+        );
     }
 
     /// A read that fails once, in a pass the census then discards as in flux,
