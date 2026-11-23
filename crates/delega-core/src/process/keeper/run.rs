@@ -440,6 +440,11 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
             detail = detail.replace("ambiguous=0", "ambiguous=1");
         }
         let mut unproven = super::link::reply_unproven("census", &detail);
+        // A hole in an earlier answer the owner did not read (its request
+        // timed out) is not lost.
+        if super::track::get().is_some_and(super::track::Handle::ever_unproven) {
+            unproven = true;
+        }
         let live = if counted > 0 {
             let (left, detail) = freeze_report(pid).await;
             unproven |= super::link::reply_unproven("freeze", &detail);

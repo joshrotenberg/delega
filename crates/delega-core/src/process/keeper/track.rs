@@ -198,6 +198,9 @@ pub(super) struct Handle {
     tx: mpsc::Sender<Request>,
     queue: Arc<ProcQueue>,
     group: Arc<Mutex<bool>>,
+    /// Whether any answer of this keeper had a hole or met a suspect; kept
+    /// for the reap reply, so a hole in an answer nobody read is not lost.
+    unproven: Arc<std::sync::atomic::AtomicBool>,
 }
 
 static TRACKER: OnceLock<Handle> = OnceLock::new();
@@ -227,20 +230,28 @@ pub(super) fn prepare() -> Result<(), String> {
         .ok_or("the keeper's own identity could not be read")?;
     let (tx, rx) = mpsc::channel();
     let group = Arc::new(Mutex::new(false));
+    let unproven = Arc::new(std::sync::atomic::AtomicBool::new(false));
     std::thread::Builder::new()
         .name("keeper-track".into())
         .spawn({
             let queue = queue.clone();
             let group = group.clone();
+            let unproven = unproven.clone();
             move || {
                 let mut tracker = Tracker::new(queue, me.uniqueid);
                 tracker.group = group;
+                tracker.unproven = unproven;
                 tracker.run(&rx);
             }
         })
         .map_err(|e| format!("the tracker thread could not start: {e}"))?;
     TRACKER
-        .set(Handle { tx, queue, group })
+        .set(Handle {
+            tx,
+            queue,
+            group,
+            unproven,
+        })
         .map_err(|_| "the tracker was prepared twice".to_string())
 }
 
@@ -265,7 +276,15 @@ impl Handle {
         if self.tx.send(make(tx)).is_err() {
             return failed;
         }
-        rx.recv().unwrap_or(failed)
+        // The tracker answers within its budget; a tracker that does not is
+        // an unproven answer, and nothing waits on it longer.
+        rx.recv_timeout(FREEZE_BUDGET + Duration::from_secs(3))
+            .unwrap_or(failed)
+    }
+
+    /// Whether any answer of this keeper had a hole or met a suspect.
+    pub(super) fn ever_unproven(&self) -> bool {
+        self.unproven.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(super) fn census(&self) -> Report {
@@ -287,7 +306,7 @@ impl Handle {
     pub(super) fn signal_all(&self, signal: Signal) {
         let (tx, rx) = mpsc::channel();
         if self.tx.send(Request::Signal(signal, tx)).is_ok() {
-            let _ = rx.recv();
+            let _ = rx.recv_timeout(Duration::from_secs(3));
         }
     }
 }
@@ -379,6 +398,8 @@ struct Tracker {
     group: Arc<Mutex<bool>>,
     /// Group signals sent, for the tests.
     group_signals: u32,
+    /// See [`Handle::ever_unproven`].
+    unproven: Arc<std::sync::atomic::AtomicBool>,
     /// How old each process was when it was taken, in microseconds, for the
     /// measurement in the tests.
     #[cfg(test)]
@@ -417,6 +438,7 @@ impl Tracker {
             fork_dropped: false,
             group: Arc::new(Mutex::new(false)),
             group_signals: 0,
+            unproven: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             ages: Vec::new(),
             refused: 0,
@@ -1146,6 +1168,10 @@ impl Tracker {
             },
         };
         self.first_hole = None;
+        if report.refused > 0 || report.read_failures > 0 || report.ambiguous > 0 {
+            self.unproven
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         self.refused = 0;
         self.read_failures = 0;
         self.losses = 0;
@@ -1205,7 +1231,8 @@ impl Tracker {
             last = set.len();
             let sound =
                 scanned.complete && scanned.proven == 0 && self.holes() == before && !self.broken();
-            if sound && previous.as_ref() == Some(&set) {
+            // A pass that ran past the budget proves nothing.
+            if sound && previous.as_ref() == Some(&set) && !self.spent() {
                 return (set.len(), pass, true);
             }
             previous = sound.then_some(set);
@@ -1323,6 +1350,7 @@ impl Tracker {
                 && scanned.proven == 0
                 && self.holes() == before
                 && !self.broken()
+                && !self.spent()
             {
                 frozen = true;
                 break;
