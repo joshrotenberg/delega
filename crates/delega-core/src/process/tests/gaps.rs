@@ -428,9 +428,14 @@ const RELAY: &str = "exec perl -e 'use POSIX; \
     sleep 60'";
 
 /// The same relay with 4000 generations, so it outlives any stop by many
-/// seconds and only a stop can explain its end.
-pub(super) fn long_relay() -> String {
-    RELAY.replace("(1..300)", "(1..4000)")
+/// seconds and only a stop can explain its end. The case directory `dir` is
+/// passed to `perl` as an argument it ignores, so every generation's command
+/// line names it (a fork keeps the command line) and `case_processes` finds
+/// any that survive.
+pub(super) fn long_relay(dir: &std::path::Path) -> String {
+    let dir = dir.to_str().expect("a scratch directory named in UTF-8");
+    assert!(!dir.contains('\''), "{dir}");
+    format!("{} '{dir}'", RELAY.replace("(1..300)", "(1..4000)"))
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -461,7 +466,7 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
 
 async fn relay_run_with_diagnostics() -> RelayRun {
     let s = Scratch::new();
-    let mut spec = kept(sh(&s, &long_relay(), LONG));
+    let mut spec = kept(sh(&s, &long_relay(&s.dir()), LONG));
     spec.stop_grace = Duration::from_millis(100);
     // The relay holds the output pipes; the owner closes them a second after
     // the kill.
@@ -486,7 +491,8 @@ async fn relay_run_with_diagnostics() -> RelayRun {
         .and_then(|m| m.modified())
         .is_ok_and(|modified| modified > reported);
     // A stopped or unscheduled generation writes nothing, so on Linux any
-    // process still working in the case directory counts as alive too.
+    // process that names the case directory on its command line counts as
+    // alive too.
     #[cfg(target_os = "linux")]
     let survivors = super::fixtures::case_processes(&s.dir())
         .unwrap_or_else(|e| panic!("survivors unknown: {e}"));

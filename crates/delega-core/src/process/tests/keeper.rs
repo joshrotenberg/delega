@@ -276,7 +276,7 @@ fn owner_entry() {
     let script = if std::env::var_os(OWNER_RELAY_ENV).is_some() {
         // The program is the fork relay of gaps.rs, run long enough that only
         // a stop explains its end.
-        format!("echo $$ > leader; {}", super::gaps::long_relay())
+        format!("echo $$ > leader; {}", super::gaps::long_relay(&dir))
     } else {
         format!(
             "echo $$ > leader; {OWN_GROUP} & echo $! > group; \
@@ -510,8 +510,8 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
             tokio::time::sleep(Duration::from_millis(300)).await;
             let after = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
             // A quiet heartbeat alone is not death: a stopped or unscheduled
-            // generation writes nothing. No process may work in the case
-            // directory either.
+            // generation writes nothing. No process may name the case
+            // directory on its command line either.
             survivors = super::fixtures::case_processes(&s.dir())
                 .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
             if before == after

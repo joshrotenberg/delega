@@ -315,20 +315,22 @@ impl Held {
     }
 }
 
-/// The live processes whose working directory is `dir` (Linux, from
-/// `/proc/<pid>/cwd`): what a case started there and left running, found
-/// independently of any heartbeat or listing delega used. A failed
-/// enumeration, or an entry of this user's that cannot be read for a reason
-/// other than the process being gone, is an error, never absence. Another
-/// user's processes cannot be ours and are skipped.
+/// The live processes started during this test whose command line names
+/// `dir` (Linux, from `/proc/<pid>/cmdline`): what a case started there and
+/// left running, found independently of any heartbeat or listing delega used.
+/// The scripts of a case pass its directory on their command lines (see
+/// `gaps::long_relay`), and a fork keeps the command line. The command line is
+/// read, as bytes, because it needs no ptrace rights, unlike the working
+/// directory, which a process that is not dumpable denies. A failed
+/// enumeration, or a process started during the test whose stat or command
+/// line cannot be read for a reason other than the process being gone, is an
+/// error, never absence.
 #[cfg(target_os = "linux")]
 pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> {
-    use std::os::unix::fs::MetadataExt;
     let gone = |e: &std::io::Error| {
         e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3)
     };
-    let dir = std::fs::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
-    let uid = rustix::process::getuid().as_raw();
+    let names = path_names(dir)?;
     let own_start = std::fs::read("/proc/self/stat")
         .ok()
         .and_then(|stat| stat_state_and_start(&stat))
@@ -344,17 +346,8 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
         else {
             continue;
         };
-        let owner = match std::fs::metadata(entry.path()) {
-            Ok(meta) => meta.uid(),
-            Err(e) if gone(&e) => continue,
-            Err(e) => return Err(format!("stat /proc/{pid}: {e}")),
-        };
-        if owner != uid {
-            continue;
-        }
-        // The stat needs no ptrace rights, unlike the working directory. A
-        // process older than this test process cannot be one of its own, so
-        // it is skipped before its working directory is read.
+        // A process older than this test process cannot be one of its own,
+        // so it is skipped before its command line is read.
         let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
             Err(e) if gone(&e) => continue,
@@ -362,22 +355,64 @@ pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> 
         };
         let (state, started) =
             stat_state_and_start(&stat).ok_or_else(|| format!("unreadable /proc/{pid}/stat"))?;
-        if started < own_start {
+        if started < own_start || state == "Z" || state == "X" {
             continue;
         }
-        let cwd = match std::fs::read_link(format!("/proc/{pid}/cwd")) {
-            Ok(cwd) => cwd,
+        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(cmdline) => cmdline,
             Err(e) if gone(&e) => continue,
-            Err(e) => return Err(format!("read /proc/{pid}/cwd: {e}")),
+            Err(e) => return Err(format!("read /proc/{pid}/cmdline: {e}")),
         };
-        if cwd != dir {
-            continue;
-        }
-        if state != "Z" && state != "X" {
+        if names.iter().any(|name| holds_path(&cmdline, name)) {
             found.push(pid);
         }
     }
     Ok(found)
+}
+
+/// The ways a command line can name `dir`: as given, and canonical.
+#[cfg(target_os = "linux")]
+fn path_names(dir: &std::path::Path) -> Result<Vec<Vec<u8>>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let canonical = std::fs::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
+    let mut names = vec![dir.as_os_str().as_bytes().to_vec()];
+    let canonical = canonical.as_os_str().as_bytes().to_vec();
+    if !names.contains(&canonical) {
+        names.push(canonical);
+    }
+    Ok(names)
+}
+
+/// Whether `bytes` holds `path` as a whole path: followed by the end, a `/`,
+/// or a byte that cannot continue a file name the scripts use (a NUL between
+/// arguments, a quote, a space), so one directory does not match another
+/// whose name it begins.
+#[cfg(any(target_os = "linux", test))]
+fn holds_path(bytes: &[u8], path: &[u8]) -> bool {
+    if path.is_empty() || bytes.len() < path.len() {
+        return false;
+    }
+    (0..=bytes.len() - path.len()).any(|at| {
+        bytes[at..].starts_with(path)
+            && bytes
+                .get(at + path.len())
+                .is_none_or(|next| !(next.is_ascii_alphanumeric() || b"._-".contains(next)))
+    })
+}
+
+#[test]
+fn a_command_line_names_a_directory_only_as_a_whole_path() {
+    let dir = b"/tmp/.tmpAbC123";
+    assert!(holds_path(b"perl\0-e\0code\0/tmp/.tmpAbC123\0", dir));
+    assert!(holds_path(
+        b"sh\0-c\0exec perl -e 'x' '/tmp/.tmpAbC123'",
+        dir
+    ));
+    assert!(holds_path(b"/tmp/.tmpAbC123/beat", dir));
+    assert!(holds_path(b"/tmp/.tmpAbC123", dir));
+    assert!(!holds_path(b"/tmp/.tmpAbC1234\0", dir));
+    assert!(!holds_path(b"/tmp/.tmpAbC12\0", dir));
+    assert!(!holds_path(b"", dir));
 }
 
 /// The state letter and the start time in clock ticks (field 22) of one
@@ -403,8 +438,8 @@ fn a_stat_line_with_a_name_that_is_not_utf8_and_holds_a_parenthesis_is_read() {
 }
 
 /// End what a relay case left in `dir`, without signalling a foreign process:
-/// on Linux every process working in `dir`, each through a pidfd opened and
-/// then checked to still work there; elsewhere the pid in the heartbeat file,
+/// on Linux every process [`case_processes`] finds, each through a pidfd
+/// opened and then checked to still name `dir` on its command line; elsewhere the pid in the heartbeat file,
 /// only while `ps` shows it is the relay's `perl`. Repeats until nothing is
 /// left or 5 s pass.
 pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
@@ -418,7 +453,7 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
             if left.is_empty() && case_processes(dir).is_ok() {
                 return;
             }
-            let canonical = std::fs::canonicalize(dir).ok();
+            let names = path_names(dir).unwrap_or_default();
             for pid in left {
                 let Some(raw) = rustix::process::Pid::from_raw(pid) else {
                     continue;
@@ -427,9 +462,9 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
                 else {
                     continue;
                 };
-                let still_here = std::fs::read_link(format!("/proc/{pid}/cwd"))
+                let still_here = std::fs::read(format!("/proc/{pid}/cmdline"))
                     .ok()
-                    .is_some_and(|cwd| Some(cwd) == canonical);
+                    .is_some_and(|cmdline| names.iter().any(|name| holds_path(&cmdline, name)));
                 if still_here {
                     let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
                 }
