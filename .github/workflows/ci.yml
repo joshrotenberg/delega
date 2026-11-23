@@ -36,6 +36,17 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      # The keeper and the gap tests depend on timing on Linux (the keeper's
+      # walk races the tree it stops), so they run five more times there; any
+      # failure fails the job.
+      - name: Keeper and gap tests, five repeats (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          for attempt in 1 2 3 4 5; do
+            echo "keeper and gap tests, repeat $attempt of 5"
+            cargo test --locked -p delega-core --lib -- \
+              process::keeper:: process::tests::keeper:: process::tests::gaps::
+          done
       - name: Processes left by the tests
         if: always()
         run: ps -axo pid,ppid,command | grep -E "fake-claude|fake-codex|sleep 300" | grep -v grep || true
@@ -80,6 +91,18 @@ jobs:
         with:
           name: acceptance-k-relay-repeats
           path: acceptance-k-relay.jsonl
+      # Every relay row (each provider and case) must end Confirmed with no
+      # survivor on Linux, where the keeper stops the relay. Whether an owner
+      # or keeper refusal is superseded depends on timing, so every relay row
+      # runs five more times; any failure fails the job.
+      - name: Every relay row, five repeats (Linux)
+        if: runner.os == 'Linux'
+        run: cargo run --release --locked -p delega-acceptance -- --filter=-relay --repeat 5 --out acceptance-relay.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: acceptance-relay-repeats
+          path: acceptance-relay.jsonl
 
   msrv:
     name: build on the minimum supported Rust
