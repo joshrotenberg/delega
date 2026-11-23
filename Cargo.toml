@@ -40,3 +40,6 @@ unused_must_use = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+[profile.dist]
+inherits = "release"
