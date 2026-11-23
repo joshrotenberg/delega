@@ -872,9 +872,9 @@ other checks still apply.
 
 - Reads are not limited to the working directory or the listed directories.
 - Commands are not limited to the list in `read` and `write`.
-- delega does not make `permissions.directories` writable, but in `build` an
-  entry inside the working directory or under `/tmp` or `$TMPDIR` stays
-  writable by commands.
+- delega does not make `permissions.directories` writable, but in `build`
+  commands can write in an entry that lies where the sandbox lets them write
+  (the working directory, `/tmp`, `$TMPDIR`).
 - Denials are reported only for commands the stream marks `declined`. Other
   blocked actions appear as failed commands and are not in `permissions.denied`.
   A note says so on every run.
