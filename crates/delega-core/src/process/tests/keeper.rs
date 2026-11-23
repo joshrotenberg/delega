@@ -225,6 +225,8 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
     let _reaper = Reaper(vec![pid]);
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watching = done.clone();
+    // Stops the watcher however the test ends.
+    let stop_watching = super::fixtures::SetOnDrop(done.clone());
     let watcher = tokio::task::spawn_blocking(move || {
         let mut states = Vec::new();
         while !watching.load(std::sync::atomic::Ordering::SeqCst) {
@@ -245,7 +247,7 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(stop_watching);
     let states = watcher.await.expect("the watcher ended");
     assert!(is_running(pid), "a foreign marked process was signalled");
     assert!(
@@ -502,33 +504,29 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
         // heartbeat to have stopped changing.
         let began = std::time::Instant::now();
         let mut stopped = false;
+        let mut survivors = Vec::new();
         while began.elapsed() < Duration::from_secs(15) {
             let before = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
             tokio::time::sleep(Duration::from_millis(300)).await;
             let after = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-            if before == after && super::gaps::heartbeat_age(&s) > Duration::from_millis(300) {
+            // A quiet heartbeat alone is not death: a stopped or unscheduled
+            // generation writes nothing. No process may work in the case
+            // directory either.
+            survivors = super::fixtures::case_processes(&s.dir());
+            if before == after
+                && super::gaps::heartbeat_age(&s) > Duration::from_millis(300)
+                && survivors.is_empty()
+            {
                 stopped = true;
                 break;
             }
         }
         if !stopped {
-            // End the survivor generation by generation so nothing is left.
-            for _ in 0..3000 {
-                if super::gaps::heartbeat_age(&s) > Duration::from_millis(300) {
-                    break;
-                }
-                if let Ok(pid) = std::fs::read_to_string(s.path("beat"))
-                    && let Ok(pid) = pid.trim().parse::<i32>()
-                {
-                    let _ =
-                        crate::process::sys::signal_process(pid, crate::process::sys::Signal::KILL);
-                }
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
+            super::fixtures::end_relay_leftovers(&s.dir()).await;
         }
         assert!(
             stopped,
-            "attempt {attempt}: the relay outlived the keeper's cleanup"
+            "attempt {attempt}: the relay outlived the keeper's cleanup; survivors {survivors:?}"
         );
     }
 }

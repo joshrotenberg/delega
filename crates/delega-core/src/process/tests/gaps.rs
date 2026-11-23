@@ -433,6 +433,7 @@ pub(super) fn long_relay() -> String {
     RELAY.replace("(1..300)", "(1..4000)")
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) fn heartbeat_age(scratch: &Scratch) -> Duration {
     std::fs::metadata(scratch.path("beat"))
         .and_then(|m| m.modified())
@@ -484,28 +485,23 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     let written_after = std::fs::metadata(s.path("beat"))
         .and_then(|m| m.modified())
         .is_ok_and(|modified| modified > reported);
-    let alive = first != second || written_after;
+    // A stopped or unscheduled generation writes nothing, so on Linux any
+    // process still working in the case directory counts as alive too.
+    #[cfg(target_os = "linux")]
+    let survivors = super::fixtures::case_processes(&s.dir());
+    #[cfg(not(target_os = "linux"))]
+    let survivors: Vec<i32> = Vec::new();
+    let alive = first != second || written_after || !survivors.is_empty();
     let diagnostics = format!(
-        "cleanup {:?}; keeper {:?}; warnings {:?}; signals {:?}",
+        "survivors {survivors:?}; cleanup {:?}; keeper {:?}; warnings {:?}; signals {:?}",
         report.cleanup,
         report.diagnostics.keeper,
         report.diagnostics.warnings,
         report.diagnostics.signals
     );
-    // A relay that survived is ended here, so nothing is left: the last
-    // writer of the heartbeat is the live generation, and the relay is
-    // killed generation by generation until the heartbeat goes stale.
-    for _ in 0..3000 {
-        if heartbeat_age(&s) > Duration::from_millis(300) {
-            break;
-        }
-        if let Ok(pid) = std::fs::read_to_string(s.path("beat"))
-            && let Ok(pid) = pid.trim().parse::<i32>()
-        {
-            let _ = crate::process::sys::signal_process(pid, crate::process::sys::Signal::KILL);
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    // A relay that survived is ended here, so nothing is left, without
+    // signalling a foreign process (see `end_relay_leftovers`).
+    super::fixtures::end_relay_leftovers(&s.dir()).await;
     RelayRun {
         alive,
         cleanup: report.cleanup,

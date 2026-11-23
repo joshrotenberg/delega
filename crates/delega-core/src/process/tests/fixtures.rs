@@ -314,3 +314,98 @@ impl Held {
         self.open.send_replace(true);
     }
 }
+
+/// The live processes whose working directory is `dir` (Linux, from
+/// `/proc/<pid>/cwd`): what a case started there and left running, found
+/// independently of any heartbeat or listing delega used.
+#[cfg(target_os = "linux")]
+pub(super) fn case_processes(dir: &std::path::Path) -> Vec<i32> {
+    let Ok(dir) = std::fs::canonicalize(dir) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == dir)
+                && std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                    stat.rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
+                        .is_some_and(|state| state != "Z" && state != "X")
+                })
+        })
+        .collect()
+}
+
+/// End what a relay case left in `dir`, without signalling a foreign process:
+/// on Linux every process working in `dir`, each through a pidfd opened and
+/// then checked to still work there; elsewhere the pid in the heartbeat file,
+/// only while `ps` shows it is the relay's `perl`. Repeats until nothing is
+/// left or 5 s pass.
+pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(5) {
+        #[cfg(target_os = "linux")]
+        {
+            let left = case_processes(dir);
+            if left.is_empty() {
+                return;
+            }
+            let canonical = std::fs::canonicalize(dir).ok();
+            for pid in left {
+                let Some(raw) = rustix::process::Pid::from_raw(pid) else {
+                    continue;
+                };
+                let Ok(fd) = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())
+                else {
+                    continue;
+                };
+                let still_here = std::fs::read_link(format!("/proc/{pid}/cwd"))
+                    .ok()
+                    .is_some_and(|cwd| Some(cwd) == canonical);
+                if still_here {
+                    let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let beat = dir.join("beat");
+            let fresh = std::fs::metadata(&beat)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_millis(300));
+            if !fresh {
+                return;
+            }
+            if let Some(pid) = std::fs::read_to_string(&beat)
+                .ok()
+                .and_then(|t| t.trim().parse::<i32>().ok())
+            {
+                let command = std::process::Command::new("/bin/ps")
+                    .args(["-o", "command=", "-p", &pid.to_string()])
+                    .guarded_output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+                if command.contains("perl") {
+                    let _ = sys::signal_process(pid, Signal::KILL);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Sets a flag when dropped, so a watcher thread stops even when an
+/// assertion fails first.
+pub(super) struct SetOnDrop(pub(super) Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
