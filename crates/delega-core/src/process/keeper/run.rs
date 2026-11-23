@@ -96,8 +96,6 @@ fn read_hello() -> Result<(Hello, Vec<OwnedFd>), String> {
 /// Standard input must be the keeper's end of the socket pair the owner made;
 /// standard output and standard error are not used.
 pub fn keeper_main() -> i32 {
-    #[cfg(all(test, target_os = "linux"))]
-    super::walk::inject_read_failures_from_env();
     let (hello, fds) = match read_hello() {
         Ok(read) => read,
         Err(why) => {
@@ -376,6 +374,10 @@ struct Finished {
 /// empty, or why the program could not be killed or reaped; then `reaped` is
 /// not sent.
 async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, String> {
+    // Test seam: injected only now, at the reap, so no answer to the owner
+    // can report the failures; only the proof can show them.
+    #[cfg(all(test, target_os = "linux"))]
+    super::walk::inject_read_failures_from_env();
     #[cfg(target_os = "linux")]
     let live = if census(pid) > 0 {
         freeze(pid).await
@@ -491,11 +493,27 @@ async fn freeze(pid: i32) -> usize {
     freeze_report(pid).await.0
 }
 
+/// The file named by [`super::FREEZE_GATE_ENV`] in the keeper's environment,
+/// read once (a test seam).
+#[cfg(all(test, target_os = "linux"))]
+fn freeze_gate() -> Option<&'static std::path::Path> {
+    static GATE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| std::env::var_os(super::FREEZE_GATE_ENV).map(Into::into))
+        .as_deref()
+}
+
 /// The freeze with its pass details, for the owner's diagnostics.
 async fn freeze_report(pid: i32) -> (usize, String) {
     #[cfg(target_os = "linux")]
     {
         tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(gate) = freeze_gate() {
+                let until = std::time::Instant::now() + Duration::from_secs(60);
+                while !gate.exists() && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
             let walked =
                 super::walk::freeze_kill(rustix::process::getpid().as_raw_nonzero().get(), pid);
             (walked.effective_live(), walked.detail())

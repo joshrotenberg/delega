@@ -546,11 +546,17 @@ const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; POSIX::setpgid(0, 0) or d
      until [ -s gc-ready ]; do sleep 0.01; done;";
 
 /// The spec with every signal to a single process refused, and the refusal
-/// recorded in the scratch directory's `refused`.
+/// recorded in the scratch directory's `refused`. A kept spec's keeper holds
+/// every freeze of its tree until then, so the keeper cannot end the
+/// descendant before the owner has had a signal refused, whichever process
+/// acts first.
 fn refusing(s: &Scratch, spec: ProcessSpec) -> ProcessSpec {
     let mut spec = spec;
     spec.refuse_signals = true;
     spec.refusal_file = Some(s.path("refused"));
+    if let Some(keeper) = spec.keeper.take() {
+        spec.keeper = Some(keeper.env(crate::process::keeper::FREEZE_GATE_ENV, s.path("refused")));
+    }
     spec
 }
 
@@ -648,19 +654,19 @@ async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_t
     }
 }
 
-/// The same kept run, with a keeper whose first read of `/proc` fails (a test
-/// seam; on Linux it is the keeper's first reap of orphans, before the owner
-/// asks it anything, so no answer of the keeper reports it). Its final census
-/// then proves nothing, and the owner's refusal stands on every platform: a
-/// verdict that waived Linux owner refusals without the proof would be
-/// Confirmed here.
+/// The same kept run, with a keeper whose first read of `/proc` after the
+/// owner says `reap` fails (a test seam, Linux). No answer of the keeper can
+/// report it, so only the proof shows it: the final census proves nothing,
+/// and the owner's refusal stands on every platform. A verdict that waived
+/// Linux owner refusals without the proof would be Confirmed here.
 #[tokio::test]
 async fn an_owner_refusal_stands_when_the_final_census_proves_nothing() {
     require_perl!();
     let s = Scratch::new();
     let script = format!("{WAITS_FOR_A_REFUSAL} exit 0");
-    let mut spec = refusing(&s, sh(&s, &script, LONG));
+    let mut spec = sh(&s, &script, LONG);
     spec.keeper = Some(test_keeper().env(crate::process::keeper::INJECT_READ_FAILURES_ENV, "1"));
+    let spec = refusing(&s, spec);
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_gone("the descendant", &pids).await;
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");

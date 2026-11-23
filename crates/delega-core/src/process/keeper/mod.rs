@@ -59,9 +59,16 @@ pub(crate) use link::reply_unproven as link_reply_unproven;
 pub(crate) use link::{KeeperLink, LaunchSpec, LinkHandle, StartError, start};
 
 /// Test seam: a keeper started by the tests with this variable makes that many
-/// of its reads of `/proc` fail (Linux), so its final census proves nothing.
+/// of its reads of `/proc` fail once the owner says `reap` (Linux), so no
+/// answer reports them and its final census proves nothing.
 #[cfg(test)]
 pub(crate) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
+
+/// Test seam: a keeper started by the tests with this variable holds every
+/// freeze of its tree (Linux) until the file it names exists, for at most
+/// 60 s, so a test can order the keeper's freeze after an event of the owner.
+#[cfg(test)]
+pub(crate) const FREEZE_GATE_ENV: &str = "DELEGA_TEST_KEEPER_FREEZE_GATE";
 pub use run::keeper_main;
 
 /// A program and arguments that run [`keeper_main`].

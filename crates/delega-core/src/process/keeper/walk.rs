@@ -52,7 +52,7 @@ pub(super) struct ReadFailed;
 static READ_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 /// Test seam: make this many of the next reads in this process fail, on any
-/// thread. Set in the keeper from [`super::INJECT_READ_FAILURES_ENV`], and in a
+/// thread. Set in the keeper at the reap from [`super::INJECT_READ_FAILURES_ENV`], and in a
 /// helper process of the walk tests.
 #[cfg(test)]
 static INJECTED_READ_FAILURES: AtomicU64 = AtomicU64::new(0);
