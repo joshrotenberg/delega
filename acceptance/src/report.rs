@@ -259,8 +259,8 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
             let _ = writeln!(
                 out,
                 "- The system hides the environment of its own programs from `ps -E`: {}. On \
-                 macOS the orphan rows are expected failures when it does and passes when it \
-                 does not (process module docs, \"What remains possible\").",
+                 macOS the keeper's fork tracker does not depend on it, and the orphan rows are \
+                 expected to pass either way (process module docs, \"What remains possible\").",
                 if hidden { "yes" } else { "no" }
             );
         }

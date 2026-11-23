@@ -729,6 +729,36 @@ async fn a_detached_survivor_of_a_fork_the_tracker_never_saw_is_never_confirmed(
     );
 }
 
+/// 20 kept runs of the relay of [`detached_session_relay`] (a new session
+/// each generation, no output pipe), counting runs that stopped it, runs
+/// that ended `Unconfirmed`, and runs that claimed `Confirmed` with a relay
+/// process alive. Run beside the process suite (another test process) with
+/// `cargo test --release -- --ignored measure_the_session_relay --nocapture`.
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn measure_the_session_relay() {
+    if !super::fixtures::perl_available() {
+        return;
+    }
+    let (mut stopped, mut unconfirmed, mut false_confirmations) = (0, 0, 0);
+    for _ in 0..20 {
+        let run = relay_run_of(detached_session_relay).await;
+        if !run.alive {
+            stopped += 1;
+        }
+        if run.cleanup != Cleanup::Confirmed {
+            unconfirmed += 1;
+        }
+        if run.alive && run.cleanup == Cleanup::Confirmed {
+            false_confirmations += 1;
+        }
+    }
+    eprintln!(
+        "session relay without a pipe: stopped {stopped} of 20, Unconfirmed {unconfirmed}, \
+         Confirmed with a relay alive {false_confirmations}"
+    );
+}
+
 /// A double fork as fast as perl can do it: the program's child forks a
 /// child that calls `setsid`, forks the grandchild and exits at once, and is
 /// reaped. Where the macOS tracker took the middle process, the grandchild is

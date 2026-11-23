@@ -587,6 +587,40 @@ async fn measure_the_fork_trackers_cost() {
     );
 }
 
+/// 20 pairs of overlapping kept runs (macOS): run B, a quiet script, starts
+/// first; while it runs, run A makes an orphan that A's keeper proves (its
+/// parent exits after A's keeper took the orphan). B must stay `Confirmed`:
+/// the orphan's parent is in A's registry entry. Run with `cargo test
+/// --release -- --ignored measure_overlapping_runs --nocapture`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn measure_overlapping_runs() {
+    let mut confirmed = 0;
+    let mut others = Vec::new();
+    for _ in 0..20 {
+        let b_dir = Scratch::new();
+        let a_dir = Scratch::new();
+        let b = ProcessHandle::start(kept(sh(&b_dir, "sleep 1.5; exit 0", LONG)));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let a = ProcessHandle::start(kept(sh(
+            &a_dir,
+            "perl -e 'use POSIX; if (fork() == 0) { POSIX::setsid(); \
+             open STDOUT, q(>), q(/dev/null); open STDERR, q(>), q(/dev/null); \
+             open F, q(>), q(gc); print F $$; close F; sleep 2; exit 0 } \
+             select(undef, undef, undef, 0.3)'; sleep 1.5; exit 0",
+            LONG,
+        )));
+        let (b, _a) = tokio::join!(b.wait(), a.wait());
+        if b.cleanup == Cleanup::Confirmed {
+            confirmed += 1;
+        } else {
+            others.push(format!("{:?}", b.cleanup));
+        }
+    }
+    eprintln!("overlapping runs: B Confirmed in {confirmed} of 20; others {others:?}");
+}
+
 /// A keeper that ends without saying whether it started the program may have
 /// started it: the run fails to start, and its cleanup is not confirmed.
 #[tokio::test]

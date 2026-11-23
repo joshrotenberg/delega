@@ -38,12 +38,14 @@ stands. This page lists the limits a user meets.
   provider's whole tree when delega is gone, even after a `SIGKILL`. On Linux
   the keeper also adopts every orphaned descendant, so cleanup cannot miss one.
   On macOS the keeper tracks forks with `kqueue` and libproc
-  ([#167](https://github.com/joshrotenberg/delega/issues/167)): it follows every
-  descendant from its fork, so it stops a detached orphan running one of
-  Apple's programs and a fast fork relay, and the acceptance matrix shows no
-  survivor. It is a user-space observer, so under heavy load a relay that
-  changes session each generation can still slip past it (1 of 20 runs beside
-  the test suite) and may then be reported as confirmed. When its start-up
+  ([#167](https://github.com/joshrotenberg/delega/issues/167)): it takes each
+  child at its fork, and in the measured acceptance runs no macOS cleanup row
+  left a survivor apart from the two that kill delega and its keeper together.
+  It watches from user space, so under load it can miss a process; it then
+  reports cleanup unconfirmed while a survivor it can tie to the run lives,
+  except a survivor that leads its own session and exec'd after its parent
+  died, which can be reported as confirmed. An orphan made during the run by
+  another program of the same user makes a run unconfirmed. When its start-up
   check fails it reports fork tracking off, and the earlier macOS gaps (an
   orphan running an Apple program, a fast fork relay) return. On every
   platform, a run is reported unconfirmed when a process still held the output

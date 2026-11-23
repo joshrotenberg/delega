@@ -353,64 +353,93 @@
 //!   `sys/darwin.rs`). A `kqueue` watches every process of the tree for
 //!   `NOTE_FORK` and `NOTE_EXIT`; on a fork the keeper lists the parent's
 //!   children at once and takes each one whose recorded parent (the unique id
-//!   from `proc_pidinfo` flavor 17, `PROC_PIDUNIQIDENTIFIERINFO`, which is not
-//!   in the public SDK headers) is the parent's. That record survives the
-//!   reparenting to launchd, so a child whose parent exited before the listing
-//!   is still recovered by a scan of the user's processes, whatever its
-//!   session, environment or program. A process in the program's session is
-//!   the tree's too, which the scans use as a second proof. Signals go by
-//!   audit token (`proc_signal_with_audittoken`), which the kernel checks
-//!   against the pid version, so a reused pid is never signalled. A process
-//!   that may come from a fork the tracker missed and cannot be proven either
-//!   way is a suspect: followed, never signalled, and reported as `ambiguous`,
-//!   which makes the verdict `Unconfirmed`. Nothing is signalled during the
-//!   run; the freeze at the stop stops every proven process and every one
-//!   found from then on. At start the keeper checks that these calls answer as
-//!   expected; when they do not, it says `tracker off` and cleanup falls back
-//!   to process listings and the run marker, with the limits of the earlier
-//!   design (an orphan running an Apple program, whose environment `ps -E`
-//!   does not show under System Integrity Protection, and a fast fork relay
-//!   are missed), and the report has `diagnostics.keeper.fork_tracking` false
-//!   and a warning.
+//!   from `proc_pidinfo` flavor 17, `PROC_PIDUNIQIDENTIFIERINFO`, not in the
+//!   public SDK headers) is the parent's. A process is proven the tree's that
+//!   way, or by being in the program's session (looked up between two reads
+//!   of its identity that carry the same unique id). A child whose parent
+//!   exited before the listing is recovered by a scan of this user's
+//!   processes, matched by that recorded parent. Signals go by audit token
+//!   (`proc_signal_with_audittoken`), which the kernel checks against the pid
+//!   version, to proven processes only. Nothing is signalled during the run;
+//!   the freeze at the stop stops every proven process and every one found
+//!   from then on.
+//! - The strict rule. At every census and freeze, a scan of every process
+//!   reports as ambiguous (a suspect: followed, never signalled) every live
+//!   process of this user that was reparented to launchd and is not in a
+//!   group or session that proves it someone else's, when either its recorded
+//!   parent was created after the program and never taken, or it was itself
+//!   created during the run, records launchd as its parent and does not lead
+//!   a session of its own. The second case is an orphan that exec'd after it
+//!   was reparented: macOS then records launchd as the parent, as it does for
+//!   its own jobs, which lead their own sessions. Any suspect alive makes the
+//!   verdict `Unconfirmed`, and so does one first seen in the keeper's last
+//!   answer before the reap, which the reap reply carries.
+//! - The keeper registry, so that one run does not count another run's
+//!   orphans as its own. The CLI and MCP use
+//!   `~/Library/Application Support/delega/keepers` (or the absolute path in
+//!   `DELEGA_KEEPER_REGISTRY`); a library caller sets
+//!   `KeeperCommand::registry`. The directory must be a real directory owned
+//!   by this user with no group or other permissions, checked before every
+//!   use, and created with mode 0700 when missing. Each keeper writes
+//!   `keeper-<pid>-<unique id>` and appends the unique id of every process it
+//!   proved its own, never a suspect; it removes the file when it exits. An
+//!   orphan whose recorded parent, or which itself, is in the entry of
+//!   another keeper that is alive with the unique id its entry names is that
+//!   run's: it is not ambiguous here. An entry never causes a signal. A stale
+//!   entry (its keeper gone, or a pid with another unique id) is ignored and
+//!   removed. An entry can lag its keeper: an orphan whose parent is not yet
+//!   published is ambiguous, an honest `Unconfirmed`. Without a registry (none
+//!   given, or the directory fails its check) the rule stays strict, and the
+//!   report has a warning that says so.
+//! - Budgets: a census may take 1 s, a freeze 2 s with its final census, and
+//!   a batch of events between requests 250 ms. Past its budget the tracker
+//!   stops and answers unproven (`hole=budget`). The macOS keeper answers
+//!   census and freeze requests from a blocking task, so its loop keeps
+//!   handling the socket, the signals and the ceiling.
+//! - Fork tracking off: at start the keeper checks that these calls answer as
+//!   expected (identity, the parent record, a signal by token, the layout of
+//!   the `sysctl` record). When they do not, it says `tracker off`, the report
+//!   has `diagnostics.keeper.fork_tracking` false and a warning, and cleanup
+//!   falls back to process listings and the run marker, which miss an orphan
+//!   running an Apple program (whose environment `ps -E` does not show under
+//!   System Integrity Protection) and a fast fork relay.
 //! - What was measured on macOS 27.2, Apple M4 Pro (14 cores), about 950
-//!   processes, release builds, on 2026-11-23:
-//!   - `measure_the_tracker` (a perl relay of 300 generations driven on the
-//!     test thread): every generation taken, at an age of 355 µs median, 456
-//!     µs p90, 836 µs p99, 4.2 ms at most; a scan of every process 1.2 ms
-//!     median, a recovery scan of the user's processes 0.5 ms, at 967
-//!     processes.
+//!   processes, release builds, 2026-11-23, with no other load unless said:
+//!   - `measure_the_tracker` (a perl relay of 300 generations): every
+//!     generation taken, at an age of 355 µs median, 836 µs p99, 4.2 ms at
+//!     most; a scan of every process 1.2 ms median, a recovery scan 0.5 ms.
 //!   - `measure_the_relay_freeze` (50 interrupted kept runs of the 4000
-//!     generation relay): at a load average of about 8, stopped in 50,
-//!     `Confirmed` in 50; with CPU burners (twice the core count, load average
-//!     rising to 38), stopped in 50, `Confirmed` in 49 and `Unconfirmed` in 1
-//!     because the keeper reported a hole. Interrupt to report: median 304 ms
-//!     and 356 ms.
-//!   - `measure_the_fast_double_fork` (50 kept runs): the grandchild stopped
-//!     and `Confirmed` in 50.
-//!   - `measure_the_fork_trackers_cost` (9 kept runs each, tracker on and off,
-//!     alternating): a script that runs `/usr/bin/true` 2000 times, median
-//!     3.07 s on and 3.01 s off; one `/usr/bin/true`, 111 ms on and 87 ms off,
-//!     most of the difference being the census scans. 200 kept runs of a small
-//!     script with a few forks: none `Unconfirmed`.
-//!   - The acceptance matrix with the fakes (8 cases at a time): relay, orphan
-//!     and bare rows pass on macOS, 4 full runs (202 rows each) with no
-//!     survivor and no false confirmation; before the session backstop below,
-//!     3 of 72 relay rows had ended `Confirmed` with the relay alive.
-//! - What remains on macOS, measured: the tracker is a user-space observer.
-//!   Under load a generation can be born, fork and exit while the keeper is
-//!   descheduled, and its child then names a parent that was never taken. The
-//!   tracker follows such a chain as a suspect when it sees a sign of the miss,
-//!   but the stress runs found misses with no sign: before the session
-//!   backstop, a relay that holds no output pipe ended `Confirmed` while it
-//!   ran in 1 of 25 runs beside the test suite
-//!   (`a_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_run`).
-//!   The backstop takes any process in the program's session, which catches a
-//!   relay that stays in the session (40 of 40 runs afterwards). A relay that
-//!   leaves the session each generation is not covered by it: it survived in
-//!   1 of 20 runs beside the test suite, with the verdict `Unconfirmed` in that
-//!   run, but no mechanism guarantees that verdict for one that holds no
-//!   output pipe. So on macOS a fast relay that changes session can still be
-//!   missed under load, and then the verdict can be `Confirmed`.
+//!     generation relay): stopped in 50, `Confirmed` in 50; with CPU burners
+//!     (load average up to 38), stopped in 50, `Confirmed` in 49, one
+//!     `Unconfirmed` because the keeper reported a hole. (Before the strict
+//!     rule.)
+//!   - `measure_the_fork_trackers_cost` (9 kept runs each, tracker on and
+//!     off): `/usr/bin/true` 2000 times in a script, median 3.32 s on and
+//!     3.28 s off; one `/usr/bin/true`, 126 ms on and 98 ms off. 200 kept runs
+//!     of a small script with a few forks: none `Unconfirmed`.
+//!   - `measure_overlapping_runs`: 20 pairs in which one kept run makes an
+//!     orphan its keeper proves while the other runs: the other `Confirmed`
+//!     in 20.
+//!   - `measure_the_session_relay` (a relay that changes session each
+//!     generation and holds no output pipe), 20 runs beside a process-suite
+//!     run in another test process: stopped in 20, `Unconfirmed` in 8 (the
+//!     other process's orphans, in another registry), `Confirmed` with a
+//!     relay alive in 0.
+//!   - The acceptance matrix with the fakes (8 cases at a time, 3 repeats of
+//!     202 rows): every row met its expectation; no macOS row left a survivor
+//!     apart from the two deliberate rows that kill delega and its keeper
+//!     together.
+//! - What remains on macOS: the tracker watches from user space, so under
+//!   load a process can be born, fork and exit unseen. The strict rule then
+//!   keeps the verdict from `Confirmed` while a survivor lives, with these
+//!   exceptions, which can end `Confirmed` while it runs: a survivor that
+//!   leads a session of its own and exec'd after it was reparented (it looks
+//!   like launchd's own job); one in a group or session whose leader started
+//!   before the keeper (not a descendant's, by construction, unless such a
+//!   leader's pid was reused by a descendant, which the start time rules
+//!   out); a survivor of another user. The other way, an orphan made during
+//!   the run by a program of the same user outside delega makes the run
+//!   `Unconfirmed`, as does one of another delega run whose entry lags.
 //! - On Linux, two windows remain. The keeper is started with a synchronous
 //!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
 //!   example) holds the owner's start without a bound. And a keeper that stops
@@ -428,11 +457,13 @@
 //!   - a keeper that is lost, or that exits without the owner's `released`,
 //!     leaves the child unreaped to the reaper above it, and the verdict is
 //!     `Unconfirmed`;
-//!   - on macOS, a fork relay that changes session each generation can be
-//!     missed under load (measured above), and then the verdict can be
-//!     `Confirmed`; with fork tracking off, a detached orphan whose
-//!     environment the system hides from `ps -E` (Apple's programs under SIP)
-//!     and a fast fork relay can be missed;
+//!   - on macOS, a survivor of a fork the tracker missed that leads its own
+//!     session and exec'd after it was reparented can end `Confirmed` while
+//!     it runs, and an orphan of an unrelated program of the same user makes
+//!     a run `Unconfirmed` (see "What remains on macOS" above); with fork
+//!     tracking off, a detached orphan whose environment the system hides
+//!     from `ps -E` (Apple's programs under SIP) and a fast fork relay can be
+//!     missed;
 //!   - a process the kernel prevents inspecting or signalling (`hidepid`,
 //!     another user's, no pidfd) leaves the verdict `Unconfirmed`, and the
 //!     keeper's own cleanup keeps going until its deadline and then exits.
@@ -556,9 +587,10 @@
 //! places (the tests of `delega-mcp` have one more, for `mkfifo`): a
 //! `pre_exec` hook in `sys.rs` that calls only `setsid`, used for the child and
 //! for the keeper, and, on macOS only, `sys/darwin.rs`, with one block per
-//! foreign call of the fork tracker (`proc_pidinfo`, `proc_listpids`,
-//! `sysctl`, `proc_signal_with_audittoken`, `kevent`) and the declaration of
-//! `proc_signal_with_audittoken`, each with its safety argument.
+//! foreign call of the fork tracker (`proc_pidinfo`, `proc_listpids` with
+//! the thread's errno around it, `sysctl`, `proc_signal_with_audittoken`,
+//! `kevent`) and the declaration of `proc_signal_with_audittoken`, each with
+//! its safety argument.
 //!
 //! Verified on macOS only. Not yet verified on Linux, for the Linux run to
 //! check:

@@ -296,6 +296,13 @@ Behaviour:
   SIGKILL cannot be handled and writes no result; the worker's keeper
   (`delega process-keeper`, between `delega` and the provider) then stops the
   worker's tree. Stop `delega` with SIGTERM or SIGINT to get a result.
+- **Keeper registry (macOS).** Each keeper records the processes it proved part
+  of its run in `~/Library/Application Support/delega/keepers`, so that one
+  run does not count another run's orphans as possibly its own.
+  `DELEGA_KEEPER_REGISTRY` (an absolute path) replaces that directory; it must
+  be owned by the user with no group or other permissions. `delega doctor`
+  uses none. Without one, an orphan of another run can make cleanup
+  unconfirmed.
 - **Slow readers.** Writing the result waits for whoever reads standard output.
   A signal during that write stops it; after a signal already used to stop the
   worker, the write gets 3 s. A cut-short write exits with the outcome's status,

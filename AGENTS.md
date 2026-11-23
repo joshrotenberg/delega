@@ -48,3 +48,9 @@ Applies to commits, pull requests, issues, README, docs and code comments.
 - Tests never touch real provider state or the real home directory, never need
   the network, and survive being run concurrently.
 - A test name says what would break.
+- On macOS a kept run counts any orphan of the run's lifetime that no live
+  keeper published as possibly its own. A test that deliberately leaves such a
+  process (an orphan, a detached or `setsid` descendant, a fork relay, a killed
+  owner or keeper, a process kept after its run) takes the exclusive room:
+  `crate::test_spawn::rooms::hold(Room::Alone)` in delega-core (or
+  `both_alone!`), `support::rooms::enter(Room::Alone)` in the CLI tests.
