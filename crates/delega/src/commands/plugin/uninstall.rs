@@ -20,7 +20,10 @@
 //! removed, including one chosen with `--install-dir`. A directory that does
 //! not exist is nothing to do and runs no host command, because without the
 //! marker it cannot tell whose registration it would remove. A dry run skips
-//! the listings and the ownership checks. There is no lock: concurrent runs on
+//! the host listings and registration checks, but still requires a valid
+//! marker and refuses owned paths that are symbolic links. A host named with
+//! `--host` that the marker does not list is reported `not_registered` and
+//! nothing is run for it. There is no lock: concurrent runs on
 //! one directory are not supported.
 //!
 //! Exit status: 0 on success and on a dry run, 1 when a host command
