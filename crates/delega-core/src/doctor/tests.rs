@@ -1,7 +1,7 @@
 //! The committed schema and the shape of a report.
 
 use super::*;
-use crate::provider::doctor::{CommandHook, DenyInfo, EnvCounts};
+use crate::provider::doctor::{CommandHook, DenyInfo, EnvCounts, SANDBOX_UNAVAILABLE};
 use crate::provider::{DenyFile, SkippedFile};
 
 const REGENERATE: &str = "DELEGA_UPDATE_SCHEMAS=1 cargo test -p delega-core committed_schemas";
@@ -49,6 +49,12 @@ fn full_report() -> Report {
                     required_version: "2.1.325".to_string(),
                     available: true,
                 }),
+                sandbox: Some(SandboxCheck {
+                    system: "linux".to_string(),
+                    requirements_met: true,
+                    requires: vec!["bwrap".to_string(), "socat".to_string()],
+                    missing: Vec::new(),
+                }),
                 env: Some(EnvCounts {
                     passed: 5,
                     base: 3,
@@ -77,6 +83,7 @@ fn full_report() -> Report {
                 executable_source: None,
                 version: None,
                 command_hook: None,
+                sandbox: None,
                 env: None,
                 deny_rules: None,
                 managed_settings: Vec::new(),
@@ -147,6 +154,83 @@ fn the_limits_come_from_the_constants() {
         limits.supervisor.max_outstanding_request_checks,
         supervisor::MAX_PENDING_PREFLIGHTS
     );
+}
+
+/// The full report with Claude Code's sandbox missing `socat`, as
+/// `diagnose_at` reports it.
+fn report_without_socat() -> Report {
+    let mut report = full_report();
+    let sandbox = SandboxCheck {
+        system: "linux".to_string(),
+        requirements_met: false,
+        requires: vec!["bwrap".to_string(), "socat".to_string()],
+        missing: vec!["socat".to_string()],
+    };
+    let problem = sandbox.problem().expect("a problem");
+    report.providers[0].sandbox = Some(sandbox);
+    report.problems.push(ReportedProblem {
+        provider: Some(Provider::Claude),
+        kind: problem.kind,
+        message: problem.message,
+        blocks: problem.blocks,
+    });
+    report
+}
+
+#[test]
+fn the_text_names_a_missing_sandbox_tool_and_that_it_stops_build_runs() {
+    let text = report_without_socat().to_text();
+    for expected in [
+        "claude: ready",
+        "  sandbox for build runs: socat not found on PATH",
+        "  claude: sandbox_unavailable (can stop build runs): socat not found on PATH; Claude Code's \
+         sandbox needs bwrap and socat on Linux, so build runs with Claude usually fail at \
+         startup. Install socat. Doctor does not check other causes",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let available = full_report().to_text();
+    assert!(
+        available.contains(
+            "  sandbox for build runs: bwrap and socat found on PATH; not otherwise checked"
+        ),
+        "{available}"
+    );
+    let mut macos = full_report();
+    macos.providers[0].sandbox = Some(SandboxCheck::of("macos", None, std::path::Path::new("/")));
+    let text = macos.to_text();
+    assert!(
+        text.contains(
+            "  sandbox for build runs: no tool needed on this system; not otherwise checked"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_json_names_a_missing_sandbox_tool_and_satisfies_the_schema() {
+    let report = report_without_socat();
+    let value: Value = serde_json::from_str(&report.to_json()).expect("json");
+    let schema: Value = serde_json::from_str(DOCTOR_SCHEMA).expect("schema");
+    assert!(jsonschema::is_valid(&schema, &value));
+    assert_eq!(
+        value["providers"][0]["sandbox"],
+        json!({
+            "missing": ["socat"],
+            "requirements_met": false,
+            "requires": ["bwrap", "socat"],
+            "system": "linux"
+        })
+    );
+    assert_eq!(value["providers"][1]["sandbox"], Value::Null);
+    let problem = value["problems"]
+        .as_array()
+        .expect("problems")
+        .iter()
+        .find(|p| p["kind"] == SANDBOX_UNAVAILABLE)
+        .expect("the sandbox problem");
+    assert_eq!(problem["blocks"], "build");
+    assert_eq!(problem["provider"], "claude");
 }
 
 #[test]

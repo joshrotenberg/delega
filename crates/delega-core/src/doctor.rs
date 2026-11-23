@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 use crate::contract::limits::{DEFAULT_TIMEOUT_SECS, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
 use crate::contract::request::Provider;
-use crate::provider::doctor::{self, Blocks, Problem, ProviderCheck};
+use crate::provider::doctor::{self, Blocks, Problem, ProviderCheck, SandboxCheck};
 use crate::provider::limits::{
     MAX_OUTPUT_BYTES, MAX_STDERR_BYTES, MIN_CLAUDE_HOOK_VERSION, VERSION_PROBE_TIMEOUT,
 };
@@ -213,7 +213,8 @@ pub struct ReportedProblem {
     /// A description.
     pub message: String,
     /// What the problem stops: `run` (every run with the provider),
-    /// `command_grants` (only runs that grant exact commands) or `cleanup`
+    /// `command_grants` (only runs that grant exact commands), `build` (can stop
+    /// runs in the `build` permission mode; see the message), `cleanup`
     /// (runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no
     /// run is refused).
     pub blocks: Blocks,
@@ -296,13 +297,24 @@ pub async fn diagnose_at(
     status: &crate::config::Status,
     system: &SystemPaths,
 ) -> Result<Report, Refusal> {
+    diagnose_on(options, status, system, std::env::consts::OS).await
+}
+
+/// [`diagnose_at`] with Claude Code's sandbox dependencies judged for `os`
+/// instead of this system, so a test can build Linux's report on any system.
+pub(crate) async fn diagnose_on(
+    options: &ProviderOptions,
+    status: &crate::config::Status,
+    system: &SystemPaths,
+    os: &str,
+) -> Result<Report, Refusal> {
     let options = ProviderOptions {
         system_paths: system.clone(),
         ..options.clone()
     };
     let (claude, codex) = tokio::join!(
-        doctor::check(Provider::Claude, &options),
-        doctor::check(Provider::Codex, &options)
+        doctor::check_on(Provider::Claude, &options, os),
+        doctor::check_on(Provider::Codex, &options, os)
     );
     let inspection = crate::process::check_inspection().await;
     let mut providers = Vec::new();
@@ -475,6 +487,7 @@ fn blocks_text(blocks: Blocks) -> &'static str {
     match blocks {
         Blocks::Run => "stops every run",
         Blocks::CommandGrants => "stops runs that grant exact commands",
+        Blocks::Build => "can stop build runs",
         Blocks::Cleanup => "cleanup would not be confirmed",
         Blocks::Nothing => "warning, no run is refused",
     }
@@ -502,6 +515,9 @@ fn provider_text(out: &mut String, found: &ProviderCheck, managed_mcp_blocks_run
             },
             hook.required_version
         );
+    }
+    if let Some(sandbox) = &found.sandbox {
+        sandbox_text(out, sandbox);
     }
     if let Some(env) = &found.env {
         let _ = writeln!(
@@ -531,6 +547,26 @@ fn provider_text(out: &mut String, found: &ProviderCheck, managed_mcp_blocks_run
         &found.managed_settings,
         managed_mcp_blocks_run,
     );
+}
+
+/// The line that says what was checked of the sandbox `build` runs require.
+fn sandbox_text(out: &mut String, sandbox: &SandboxCheck) {
+    let detail = if sandbox.requirements_met && sandbox.requires.is_empty() {
+        "no tool needed on this system; not otherwise checked".to_string()
+    } else if sandbox.requirements_met {
+        format!(
+            "{} found on PATH; not otherwise checked",
+            sandbox.requires.join(" and ")
+        )
+    } else if sandbox.missing.is_empty() {
+        format!(
+            "Claude Code has no sandbox on this system ({})",
+            sandbox.system
+        )
+    } else {
+        format!("{} not found on PATH", sandbox.missing.join(" and "))
+    };
+    let _ = writeln!(out, "  sandbox for build runs: {detail}");
 }
 
 /// The managed settings block of one provider. Nothing when none was found.

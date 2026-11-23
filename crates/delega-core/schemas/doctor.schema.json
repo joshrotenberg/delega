@@ -84,6 +84,11 @@
           "const": "command_grants"
         },
         {
+          "description": "Only runs in the `build` permission mode.",
+          "type": "string",
+          "const": "build"
+        },
+        {
           "description": "Runs still start, but each would report its cleanup as not confirmed.",
           "type": "string",
           "const": "cleanup"
@@ -618,6 +623,17 @@
           "description": "Whether no problem stops every run with this provider.",
           "type": "boolean"
         },
+        "sandbox": {
+          "description": "For Claude Code, the platform and `PATH` dependencies of the sandbox\n`build` runs require, as checked. Null for Codex.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "version": {
           "description": "The first line of `--version` output, or null when there was none.",
           "type": [
@@ -637,7 +653,7 @@
       "type": "object",
       "properties": {
         "blocks": {
-          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands) or `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
+          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands), `build` (can stop\nruns in the `build` permission mode; see the message), `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
           "$ref": "#/$defs/Blocks"
         },
         "kind": {
@@ -714,6 +730,40 @@
         "max_output_bytes",
         "max_stderr_bytes",
         "version_probe_timeout_secs"
+      ]
+    },
+    "SandboxCheck": {
+      "description": "What doctor checks of the platform and `PATH` dependencies of Claude Code's\nsandbox, which `build` runs require. It looks for files and starts nothing,\nso it is not proof the sandbox starts: a kernel or security policy that\nblocks user namespaces, for example, is not checked.",
+      "type": "object",
+      "properties": {
+        "missing": {
+          "description": "Those of `requires` not found on the worker's `PATH`. Relative and\nempty entries are taken from the working directory.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requirements_met": {
+          "description": "Whether the checked dependencies are met: on macOS always (Claude Code\nuses the built-in Seatbelt framework), on Linux when every tool in\n`requires` was found on the worker's `PATH`, elsewhere never (Claude\nCode has no sandbox there). Other causes of a failed start are not\nchecked.",
+          "type": "boolean"
+        },
+        "requires": {
+          "description": "The executables looked for: `bwrap` and `socat` on Linux, none\nelsewhere.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "system": {
+          "description": "The system, as Rust names it: `macos`, `linux` or another.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system",
+        "requirements_met",
+        "requires",
+        "missing"
       ]
     },
     "SkillDigest": {

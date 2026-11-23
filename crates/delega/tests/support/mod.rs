@@ -3,13 +3,16 @@
 //! Every test runs the built `delega` binary against the fake providers that
 //! the core crate keeps for its own tests, linked into `tests/fakes`. The binary
 //! starts with an empty environment plus the few variables set here: a temporary
-//! HOME, the fakes as the provider executables, and a record directory the
-//! fakes write into. Nothing reads real provider state, the real home
+//! HOME, the fakes as the provider executables, a record directory the
+//! fakes write into, and a `PATH` that starts with stand-ins for the tools
+//! Claude Code's sandbox needs on Linux, so doctor's report does not depend on
+//! the packages installed on the host. Nothing reads real provider state, the real home
 //! directory or the network, and no real provider CLI is ever started.
 
 #![allow(dead_code)]
 
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -102,6 +105,9 @@ pub struct Rig {
     pub record: PathBuf,
 }
 
+/// The tools Claude Code's sandbox needs on Linux, which doctor looks for.
+pub const SANDBOX_TOOLS: [&str; 2] = ["bwrap", "socat"];
+
 /// The test-only variable that moves the managed settings lookup.
 pub const SYSTEM_ROOT_ENV: &str = "DELEGA_TEST_SYSTEM_ROOT";
 
@@ -120,12 +126,35 @@ impl Rig {
             std::fs::create_dir(&path).expect("create directory");
             path
         };
+        let tools = make("sandbox-tools");
+        for name in SANDBOX_TOOLS {
+            let path = tools.join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 1\n").expect("write tool stand-in");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod tool stand-in");
+        }
         Self {
             work: make("work"),
             home: make("home"),
             record: make("record"),
             _tmp: tmp,
         }
+    }
+
+    /// The directory of stand-ins for `bwrap` and `socat`, first on `PATH`.
+    /// They exit 1 if run; doctor only looks for them.
+    pub fn sandbox_tools(&self) -> PathBuf {
+        self.path("sandbox-tools")
+    }
+
+    /// The `PATH` every command gets.
+    pub fn path_value(&self) -> std::ffi::OsString {
+        std::env::join_paths([
+            self.sandbox_tools(),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .expect("join PATH")
     }
 
     /// A path inside the temporary area.
@@ -162,7 +191,7 @@ impl Rig {
         command
             .env_clear()
             .env(SYSTEM_ROOT_ENV, self.system_root())
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", self.path_value())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &config)
             .env("CLAUDE_CONFIG_DIR", &config)

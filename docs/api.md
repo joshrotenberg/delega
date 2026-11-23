@@ -337,8 +337,9 @@ Behaviour:
 `delega doctor` reports what a run in the current directory would meet, with
 the [configuration file](#configuration-file) applied and no `--env`. It starts
 no worker and writes nothing. It may start each found provider's `--version`
-probe (5 s limit) and attempts one `ps` listing. It prints no environment value, deny rule or
-file content.
+probe (5 s limit) and attempts one `ps` listing. It looks for Claude Code's
+sandbox tools on the worker's `PATH` without starting them. It prints no
+environment value, deny rule or file content.
 
 For `claude` and `codex` each it reports:
 
@@ -346,6 +347,13 @@ For `claude` and `codex` each it reports:
   `DELEGA_CODEX_BIN`, `config`, `PATH`, or `option` for a library caller);
 - the version, and for Claude Code whether the command hook interface is there
   (2.1.325 or later, needed by `--allow-command`);
+- for Claude Code, `sandbox`: the platform and `PATH` dependencies of the
+  sandbox [`build`](providers.md#build) runs need. `system` (`macos`, `linux`,
+  ...), `requirements_met`, `requires` (`bwrap` and `socat` on Linux, none on
+  macOS) and `missing` (those not found on the worker's `PATH`; relative and
+  empty entries count from the working directory). Finding the tools does not
+  prove the sandbox starts: other causes, such as a system that blocks user
+  namespaces, are not checked;
 - environment variable counts by reason, and how many would be withheld;
 - for Claude Code, the deny rules: files read with counts, files skipped and
   why, rules applied;
@@ -365,8 +373,10 @@ force for a run and for the supervisor, with the `[mcp]` section applied
 and their digests; and whether process inspection works.
 
 **Problems.** Each has a `kind`, a message, the provider (null for the whole
-system) and what it `blocks`: `run`, `command_grants`, `cleanup` or `nothing`.
-A problem blocks `run` only where a run would be refused or fail for it.
+system) and what it `blocks`: `run`, `command_grants`, `build`, `cleanup` or
+`nothing`.
+A problem blocks `run` only where a run would be refused or fail for it;
+`build` marks one that can stop `build` runs (the message says why).
 
 | Kind | Blocks | Meaning |
 | --- | --- | --- |
@@ -375,6 +385,7 @@ A problem blocks `run` only where a run would be refused or fail for it.
 | `version_probe_failed` | `command_grants` (Claude), `nothing` (Codex) | `--version` failed or was killed. Only a Claude run that grants commands is refused. |
 | `version_probe_timed_out` | `command_grants` (Claude), `nothing` (Codex) | `--version` did not answer in 5 s. |
 | `unsupported_provider_version` | `command_grants` | Claude Code older than 2.1.325, or unreadable version: `--allow-command` runs are refused. |
+| `sandbox_unavailable` | `build` | On Linux, `bwrap` or `socat` was not found on the worker's `PATH`, so Claude `build` runs usually fail at startup; on a system other than macOS and Linux, Claude Code has no sandbox. The message names what is missing. |
 | `settings_unreadable` | `run` | A Claude Code settings file read for deny rules cannot be used. The message names it. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound. |
 | `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`; Claude runs are refused. Other managed settings are informational. |
@@ -390,7 +401,7 @@ kind and blocks `run`. A provider is `ready` when nothing blocks `run` for it.
 `version`, `cwd`, `providers`, `process_inspection`, `config`, `limits`,
 `problems` and `skills`; schema `crates/delega-core/schemas/doctor.schema.json`.
 `env` and `deny_rules` are null when the launch could not be built, and
-`deny_rules` and `command_hook` are null for Codex.
+`deny_rules`, `command_hook` and `sandbox` are null for Codex.
 
 **Exit status.**
 
@@ -400,7 +411,7 @@ kind and blocks `run`. A provider is `ready` when nothing blocks `run` for it.
 | 1 | No provider is ready, the configuration file is refused, or process inspection is unavailable. |
 | 2 | Doctor cannot run (for example an unusable current directory). |
 
-A missing provider, or a problem that blocks only `command_grants`, does not
+A missing provider, or a problem that blocks only `command_grants` or `build`, does not
 make the exit 1 while the other provider is ready.
 
 ### Install and uninstall
