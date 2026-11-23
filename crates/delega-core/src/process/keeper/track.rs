@@ -58,7 +58,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::process::limits::KEEPER_FREEZE_PASSES;
@@ -197,6 +197,7 @@ enum Request {
 pub(super) struct Handle {
     tx: mpsc::Sender<Request>,
     queue: Arc<ProcQueue>,
+    group: Arc<Mutex<bool>>,
 }
 
 static TRACKER: OnceLock<Handle> = OnceLock::new();
@@ -225,15 +226,21 @@ pub(super) fn prepare() -> Result<(), String> {
         .flatten()
         .ok_or("the keeper's own identity could not be read")?;
     let (tx, rx) = mpsc::channel();
+    let group = Arc::new(Mutex::new(false));
     std::thread::Builder::new()
         .name("keeper-track".into())
         .spawn({
             let queue = queue.clone();
-            move || Tracker::new(queue, me.uniqueid).run(&rx)
+            let group = group.clone();
+            move || {
+                let mut tracker = Tracker::new(queue, me.uniqueid);
+                tracker.group = group;
+                tracker.run(&rx);
+            }
         })
         .map_err(|e| format!("the tracker thread could not start: {e}"))?;
     TRACKER
-        .set(Handle { tx, queue })
+        .set(Handle { tx, queue, group })
         .map_err(|_| "the tracker was prepared twice".to_string())
 }
 
@@ -267,6 +274,13 @@ impl Handle {
 
     pub(super) fn freeze_kill(&self) -> Report {
         self.ask(Request::Freeze)
+    }
+
+    /// The program is about to be reaped: from now on no signal goes to its
+    /// group by number, which a reused id could name. Returns once no group
+    /// signal is in flight (one is sent only under the same lock).
+    pub(super) fn release_group(&self) {
+        *self.group.lock().unwrap_or_else(|p| p.into_inner()) = true;
     }
 
     /// Send `signal`, then SIGCONT, to every live proven process held.
@@ -360,6 +374,11 @@ struct Tracker {
     expired: bool,
     #[cfg(test)]
     fork_dropped: bool,
+    /// Set once the program is about to be reaped (see
+    /// [`Handle::release_group`]); group signals are sent only under it.
+    group: Arc<Mutex<bool>>,
+    /// Group signals sent, for the tests.
+    group_signals: u32,
     /// How old each process was when it was taken, in microseconds, for the
     /// measurement in the tests.
     #[cfg(test)]
@@ -396,6 +415,8 @@ impl Tracker {
             expired: false,
             #[cfg(test)]
             fork_dropped: false,
+            group: Arc::new(Mutex::new(false)),
+            group_signals: 0,
             #[cfg(test)]
             ages: Vec::new(),
             refused: 0,
@@ -1255,8 +1276,17 @@ impl Tracker {
         let refused_before = self.refused;
         self.freezing = true;
         if let Some(program) = self.program {
-            // The keeper holds the program unreaped, so its pid is its group.
-            let _ = sys::signal_group(program, Signal::STOP);
+            // While the keeper holds the program unreaped its pid is its
+            // group; once the reap began it may name another group, and only
+            // the signals by token below are sent.
+            let released = self.group.clone();
+            let released = released.lock().unwrap_or_else(|p| p.into_inner());
+            if *released {
+                self.hole("released");
+            } else {
+                let _ = sys::signal_group(program, Signal::STOP);
+                self.group_signals += 1;
+            }
         }
         self.signal_live(Signal::STOP);
         let mut passes = 0;
@@ -1480,6 +1510,26 @@ mod tests {
             "{}",
             report.detail()
         );
+    }
+
+    #[test]
+    fn a_freeze_after_the_group_is_released_sends_no_group_signal() {
+        use crate::test_spawn::Guarded;
+        let mut t = tracker();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .guarded_spawn()
+            .expect("start a child");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        // Not the program's group: the test only counts the group signals.
+        t.program = Some(pid);
+        *t.group.lock().unwrap() = true;
+        let report = t.freeze_kill();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(t.group_signals, 0);
+        assert_eq!(report.hole, Some("released"), "{report:?}");
+        assert!(!report.complete || report.read_failures > 0, "{report:?}");
     }
 
     #[test]

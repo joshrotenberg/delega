@@ -472,6 +472,10 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
     } else {
         None
     };
+    #[cfg(target_os = "macos")]
+    if let Some(tracker) = super::track::get() {
+        tracker.release_group();
+    }
     let reaped = tokio::task::spawn_blocking(move || {
         consume_reap(pid, sys::reap_if_exited, Duration::from_secs(5))
     })
@@ -712,6 +716,10 @@ async fn stop_alone(hello: &Hello, pid: i32, owner: Owner<'_>) {
                 return;
             }
         }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(tracker) = super::track::get() {
+        tracker.release_group();
     }
     let _ = tokio::task::spawn_blocking(move || {
         let until = std::time::Instant::now() + Duration::from_secs(2);
