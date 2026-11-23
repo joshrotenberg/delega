@@ -37,6 +37,28 @@ macro_rules! both {
     };
 }
 
+/// [`both!`] for a test that deliberately makes processes a keeper may miss
+/// or that outlive its run: both variants run alone (see
+/// `crate::test_spawn::rooms`).
+macro_rules! both_alone {
+    ($direct:ident, $kept:ident, $body:expr) => {
+        #[tokio::test]
+        async fn $direct() {
+            crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+            crate::process::tests::fixtures::KEEP
+                .scope(false, $body)
+                .await
+        }
+        #[tokio::test]
+        async fn $kept() {
+            crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+            crate::process::tests::fixtures::KEEP
+                .scope(true, $body)
+                .await
+        }
+    };
+}
+
 mod budgets;
 mod cleanup;
 mod endings;

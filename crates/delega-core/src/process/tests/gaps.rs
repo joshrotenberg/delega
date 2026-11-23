@@ -74,6 +74,7 @@ fn assert_no_false_confirmation(descendant: i32, cleanup: &Cleanup) {
 
 #[tokio::test]
 async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!("{WAIT_FOR_SCAN} echo $$ > leader; {OWN_GROUP} & echo $! > gc; exit 0");
@@ -86,6 +87,7 @@ async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
 
 #[tokio::test]
 async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cleaned_up() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     // The crash lands 0.2 s after the descendant starts. No periodic scan runs
@@ -113,6 +115,7 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
 /// listing is never early, so each also starts no sooner than its offset.
 #[tokio::test]
 async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     use crate::process::ProcessHandle;
     use std::sync::Mutex;
     use std::time::Instant;
@@ -180,6 +183,7 @@ async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing
 #[tokio::test]
 async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_leader_crashes_before_the_first_periodic_listing()
  {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!(
@@ -202,6 +206,7 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
 /// the documented residual there.
 #[tokio::test]
 async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!(
@@ -217,6 +222,7 @@ async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run
 
 #[tokio::test]
 async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let script = format!(
@@ -239,6 +245,7 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn an_orphan_that_clears_its_environment_and_runs_sleep_is_stopped_by_the_keeper() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let detach =
@@ -310,6 +317,7 @@ async fn assert_descendant_and_middle_are_gone(s: &Scratch, descendant: i32) {
 
 #[tokio::test]
 async fn a_setsid_descendant_with_a_live_parent_is_cleaned_up_when_the_leader_exits_normally() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let spec = leader_with_a_live_middle_process(&s, "exit 0");
@@ -322,6 +330,7 @@ async fn a_setsid_descendant_with_a_live_parent_is_cleaned_up_when_the_leader_ex
 #[tokio::test]
 async fn a_setsid_descendant_with_a_live_parent_is_cleaned_up_when_the_leader_exits_with_an_error()
 {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let spec = leader_with_a_live_middle_process(&s, "exit 3");
@@ -333,6 +342,7 @@ async fn a_setsid_descendant_with_a_live_parent_is_cleaned_up_when_the_leader_ex
 
 #[tokio::test]
 async fn a_setsid_descendant_with_a_live_parent_is_cleaned_up_when_the_leader_crashes() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let spec = leader_with_a_live_middle_process(&s, "kill -KILL $$; sleep 5");
@@ -361,6 +371,7 @@ fn foreign(kind: &str) -> i32 {
 
 #[tokio::test]
 async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     // Five processes that belong to the test: a plain background process, one
     // in a session of its own, and an orphan of each kind (reparented to pid 1,
@@ -558,6 +569,7 @@ fn assert_relay_stopped(run: &RelayRun) {
     ignore = "needs the keeper's walk (Linux) or its fork tracker (macOS)"
 )]
 async fn a_fork_relay_is_stopped_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     assert_relay_stopped(&relay_run_with_diagnostics().await);
 }
@@ -570,6 +582,7 @@ async fn a_fork_relay_is_stopped_in_a_kept_run() {
 /// perl, a freeze that keeps finding new generations does).
 #[tokio::test]
 async fn a_fork_relay_is_never_confirmed_while_it_runs_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let run = relay_run_with_diagnostics().await;
     assert!(
@@ -607,6 +620,7 @@ fn session_relay(dir: &std::path::Path) -> String {
     ignore = "needs the keeper's walk (Linux) or its fork tracker (macOS)"
 )]
 async fn a_fork_relay_that_changes_session_each_generation_is_stopped_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     assert_relay_stopped(&relay_run_of(session_relay).await);
 }
@@ -623,6 +637,7 @@ fn detached_relay(dir: &std::path::Path) -> String {
 /// never claims `Confirmed` while a relay process is alive.
 #[tokio::test]
 async fn a_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let run = relay_run_of(detached_relay).await;
     assert!(
@@ -643,6 +658,7 @@ fn detached_session_relay(dir: &std::path::Path) -> String {
 
 #[tokio::test]
 async fn a_session_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let run = relay_run_of(detached_session_relay).await;
     assert!(
@@ -660,6 +676,7 @@ async fn a_session_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_
 /// grandchild runs.
 #[tokio::test]
 async fn a_fast_double_fork_is_never_confirmed_while_its_grandchild_runs_in_a_kept_run() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let (cleanup, alive) = double_fork_run().await;
     assert!(
@@ -689,6 +706,7 @@ async fn double_fork_run() -> (Cleanup, bool) {
 #[tokio::test]
 #[ignore = "a measurement, not a check"]
 async fn measure_the_fast_double_fork() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     if !super::fixtures::perl_available() {
         return;
     }
@@ -714,6 +732,7 @@ async fn measure_the_fast_double_fork() {
 /// It is never signalled, whatever the verdict.
 #[tokio::test]
 async fn an_orphan_made_beside_a_kept_run_while_it_runs_is_never_signalled() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let spec = kept(sh(
         &s,
@@ -738,6 +757,7 @@ async fn an_orphan_made_beside_a_kept_run_while_it_runs_is_never_signalled() {
 #[tokio::test]
 #[ignore = "a measurement, not a check"]
 async fn measure_the_relay_freeze() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     if !super::fixtures::perl_available() {
         return;
     }
@@ -800,6 +820,7 @@ fn failing_exit_listing(marker: std::path::PathBuf) -> Lister {
 
 #[tokio::test]
 async fn a_missed_listing_at_exit_is_unconfirmed_whatever_later_sweeps_find() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let s = Scratch::new();
     let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
@@ -846,6 +867,7 @@ fn delayed_lister(
 
 #[tokio::test]
 async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     // The exit budget is the real one (3.1 s). Every listing after the first
     // takes a fixed 400 ms and then the real `ps`, well inside the budget, so the
@@ -906,6 +928,7 @@ const HELD_LISTING: Duration = Duration::from_millis(1250);
 /// others may meet the late listing only when the machine makes them.
 #[tokio::test]
 async fn fifty_concurrent_runs_never_confirm_cleanup_with_a_live_descendant() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     let mut tasks = Vec::new();
     for n in 0..50 {

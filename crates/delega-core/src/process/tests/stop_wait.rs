@@ -381,6 +381,7 @@ async fn stop_with_slow_listings(term_handler: &str, grace: Duration) -> (Proces
 
 #[tokio::test]
 async fn a_listing_always_slower_than_the_sweep_budget_still_gets_the_descendant_one_term() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     // Proves: every listing after the first takes longer than the budget of a
     // bounded sweep, yet the repeat (one unbounded sweep at a time) completes
     // and the descendant in its own session, which holds the pipes, gets one
@@ -411,6 +412,7 @@ async fn a_listing_always_slower_than_the_sweep_budget_still_gets_the_descendant
 
 #[tokio::test]
 async fn a_listing_always_slower_than_the_sweep_budget_still_kills_a_term_ignoring_descendant() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     // Proves: the KILL sweep after the grace is repeated the same way, so a
     // descendant that ignores TERM and never exits is killed at the grace and
     // does not hold the run until the drain bound (a minute) closes its pipes.

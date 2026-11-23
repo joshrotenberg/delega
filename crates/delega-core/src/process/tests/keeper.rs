@@ -192,6 +192,7 @@ async fn a_kept_run_reports_a_crash_by_its_signal() {
 
 #[tokio::test]
 async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let script = format!("{OWN_GROUP} & echo $! > gc; echo $$ > leader; sleep 60");
     let spec = kept(sh(&s, &script, Duration::from_millis(800)));
@@ -352,6 +353,7 @@ fn parent_of(pid: i32) -> Option<i32> {
 /// TERM, the grace, then KILL, and exits.
 #[tokio::test]
 async fn sigkill_of_the_owner_leaves_nothing_running() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     require_perl!();
     use crate::test_spawn::Guarded;
     let s = Scratch::new();
@@ -390,8 +392,7 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
 /// sends no more group signals, and the verdict says why it cannot confirm.
 #[tokio::test]
 async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
-    // It leaves a process no live keeper published.
-    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Unkept);
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
     let handle = ProcessHandle::start(spec);

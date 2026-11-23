@@ -574,6 +574,8 @@ mod tests {
 
     #[test]
     fn an_orphan_keeps_the_unique_id_of_the_parent_that_forked_it() {
+        // It makes an orphan no keeper published.
+        crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
         // perl forks a grandchild that calls setsid and sleeps, prints its
         // pid and its own pid, and exits: the grandchild is reparented.
         let out = std::process::Command::new("/usr/bin/perl")

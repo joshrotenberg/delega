@@ -76,6 +76,7 @@ const WAIT_WHILE_GUARDED: &str = "while (-e q(keep)) { select(undef, undef, unde
 
 #[tokio::test]
 async fn a_crash_while_a_descendant_holds_the_output_pipe_does_not_hang() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     // The background sleep inherits both pipes and outlives its parent.
     let spec = sh(
@@ -96,6 +97,7 @@ async fn a_crash_while_a_descendant_holds_the_output_pipe_does_not_hang() {
 
 #[tokio::test]
 async fn a_grandchild_that_outlives_its_parent_in_the_same_group_is_cleaned_up() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let spec = sh(
         &s,
@@ -111,6 +113,7 @@ async fn a_grandchild_that_outlives_its_parent_in_the_same_group_is_cleaned_up()
 
 #[tokio::test]
 async fn a_grandchild_that_ignores_terminate_is_killed_after_its_parent_exits() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let spec = sh(
         &s,
@@ -124,7 +127,7 @@ async fn a_grandchild_that_ignores_terminate_is_killed_after_its_parent_exits() 
     assert_stopped_in_time("grandchild", &pids, started).await;
 }
 
-both!(
+both_alone!(
     a_descendant_in_another_process_group_is_cleaned_up_by_the_session_sweep,
     a_descendant_in_another_process_group_is_cleaned_up_by_the_session_sweep_kept,
     async {
@@ -141,7 +144,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     a_descendant_in_its_own_session_is_found_by_the_scan_and_cleaned_up,
     a_descendant_in_its_own_session_is_found_by_the_scan_and_cleaned_up_kept,
     async {
@@ -168,7 +171,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     interrupting_stops_a_tracked_descendant_that_holds_the_pipes_without_waiting_for_the_grace,
     interrupting_stops_a_tracked_descendant_that_holds_the_pipes_without_waiting_for_the_grace_kept,
     async {
@@ -197,7 +200,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     a_descendant_in_its_own_session_started_just_before_an_interrupt_needs_the_pre_stop_scan,
     a_descendant_in_its_own_session_started_just_before_an_interrupt_needs_the_pre_stop_scan_kept,
     async {
@@ -231,7 +234,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     an_own_group_descendant_started_just_before_an_interrupt_is_stopped_every_time,
     an_own_group_descendant_started_just_before_an_interrupt_is_stopped_every_time_kept,
     async {
@@ -258,7 +261,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     a_leader_that_keeps_forking_own_group_children_leaves_none_behind,
     a_leader_that_keeps_forking_own_group_children_leaves_none_behind_kept,
     async {
@@ -295,7 +298,7 @@ fn detached_own_group() -> String {
     format!("perl -e 'use POSIX; setpgid(0,0); {WAIT_WHILE_GUARDED}' >/dev/null 2>&1 </dev/null")
 }
 
-both!(
+both_alone!(
     a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_behind,
     a_terminate_handler_that_starts_a_child_in_its_own_group_leaves_none_behind_kept,
     async {
@@ -329,7 +332,7 @@ both!(
     }
 );
 
-both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind, a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind_kept, async {
+both_alone!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind, a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind_kept, async {
     require_perl!();
     let s = Scratch::new();
     // The scenario of the test above with a leader that keeps running after its
@@ -380,7 +383,7 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     assert_stopped_in_time("children started by the handler", &children, quit_at).await;
 });
 
-both!(
+both_alone!(
     a_pipe_held_by_a_process_that_left_the_session_does_not_hold_the_report,
     a_pipe_held_by_a_process_that_left_the_session_does_not_hold_the_report_kept,
     async {
@@ -468,7 +471,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     failing_inspection_finishes_quickly_as_unconfirmed_and_says_what_was_checked,
     failing_inspection_finishes_quickly_as_unconfirmed_and_says_what_was_checked_kept,
     async {
@@ -513,6 +516,7 @@ both!(
 
 #[tokio::test]
 async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let missing = lister_for(vec!["/nonexistent/delega-ps".into()]);
     let mut spec = sh(
@@ -582,21 +586,25 @@ async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
 
 #[tokio::test]
 async fn a_listing_program_that_prints_nothing_does_not_confirm_cleanup() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     assert_bad_listing_is_unconfirmed("").await;
 }
 
 #[tokio::test]
 async fn a_listing_without_the_owning_process_does_not_confirm_cleanup() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     assert_bad_listing_is_unconfirmed("1 0 1 S Mon Nov 18 10:00:00 2026\n").await;
 }
 
 #[tokio::test]
 async fn a_listing_that_is_garbage_does_not_confirm_cleanup() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     assert_bad_listing_is_unconfirmed("this is not a process table\n").await;
 }
 
 #[tokio::test]
 async fn without_descendant_tracking_the_group_and_session_are_still_swept() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     let mut spec = sh(
         &s,
@@ -614,7 +622,7 @@ async fn without_descendant_tracking_the_group_and_session_are_still_swept() {
     assert_stopped_in_time("grandchild", &pids, started).await;
 }
 
-both!(
+both_alone!(
     without_descendant_tracking_a_session_member_outside_the_group_is_swept,
     without_descendant_tracking_a_session_member_outside_the_group_is_swept_kept,
     async {
@@ -636,7 +644,7 @@ both!(
     }
 );
 
-both!(
+both_alone!(
     the_report_does_not_claim_more_than_the_sweep_found,
     the_report_does_not_claim_more_than_the_sweep_found_kept,
     async {
@@ -649,6 +657,7 @@ both!(
 
 #[tokio::test]
 async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_kills_are_lost() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     let s = Scratch::new();
     // Inspection never returns, so only the timer that repeats the group KILL
     // can stop the child; the first two KILLs are made to do nothing. The stop
@@ -709,6 +718,7 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
 
 #[tokio::test]
 async fn churn_of_short_lived_orphans_does_not_keep_a_plain_run_from_being_confirmed() {
+    crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     // Other things on a machine start and orphan short-lived processes all the
     // time. Two threads do that in a loop while plain runs of `true` go on.
