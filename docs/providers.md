@@ -264,12 +264,14 @@ In `write` and `build`, the scoped `Edit` rule covers both the `Edit` and
 | `failIfUnavailable: true` | Startup fails if the sandbox is unavailable. macOS has it built in; Linux requires `bubblewrap` (`bwrap`) and `socat`. `delega doctor` reports `sandbox_unavailable` when they are not found on the worker's `PATH`; it does not check other causes ([Doctor](api.md#doctor)). |
 | `allowUnsandboxedCommands: false` | Failed commands stay inside the sandbox. |
 | `autoAllowBashIfSandboxed: true` | Claude Code approves sandboxed commands without a Bash allow rule. Some commands, including `eval` and the probed `git -c … commit`, can still be denied. |
+| `filesystem.denyWrite` | Blocks writes in per-project session folders with `//tmp/claude-<uid>/-*` and, on macOS, `//private/tmp/claude-<uid>/-*`. The UID is delega's effective UID. |
 
 Commands can read outside the working directory and listed directories, so
 the run carries a `wider than requested` note. Commands can write in the
 working directory and Claude Code's per-user `TMPDIR` (`/tmp/claude-<uid>`,
-shared with that user's Claude Code sessions). `git add` and `git commit` can
-write to the main checkout's Git metadata from a worktree.
+shared with that user's Claude Code sessions), except for per-project session
+folders. Files directly in the temporary directory remain writable.
+`git add` and `git commit` can write to the main checkout's Git metadata from a worktree.
 
 Listed directories get a scoped Read rule without `--add-dir`. A directory
 inside a writable location stays writable by commands.
@@ -686,7 +688,7 @@ See `crates/delega-core/src/provider/env.rs`.
 
 ### 2026-11-22, Claude Code 2.1.330 and codex-cli 0.171.0 (#98)
 
-- Raw Claude with delega's launch flags plus the [Build](#build) sandbox
+- Raw Claude with delega's launch flags plus the original build sandbox
   settings ran `cargo test` under `dontAsk` without a Bash allow rule. Its
   per-user `TMPDIR` was writable, the rest of `/tmp`
   and `$HOME` were blocked, and the network was denied. An `--add-dir`
@@ -712,6 +714,16 @@ See `crates/delega-core/src/provider/env.rs`.
 - Raw Claude with a scoped Read rule and no `--add-dir` read the extra
   directory with the Read tool and blocked command writes there. The working
   directory stayed writable and Read on `/etc/hosts` was denied.
+
+### 2026-11-22, Claude Code 2.1.330 on macOS (#176)
+
+- With delega's build launch flags, setting `CLAUDE_CODE_TMPDIR` to a per-run
+  directory moved the folders Claude Code created, but sandboxed commands
+  still received `TMPDIR=/tmp/claude-501` and could write there.
+- Adding `//tmp/claude-501/-*` and `//private/tmp/claude-501/-*` to
+  `filesystem.denyWrite` blocked a write to
+  `/tmp/claude-501/-delega-probe-session/x` with `Operation not permitted`.
+  Writing `"$TMPDIR/p3"` and writing in the working directory still succeeded.
 
 ### Claude Code 2.1.330, date unrecorded
 

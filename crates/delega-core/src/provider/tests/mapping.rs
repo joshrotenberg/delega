@@ -132,21 +132,35 @@ fn claude_write_mode_scopes_edit_and_write_tools_with_one_edit_rule() {
 }
 
 #[test]
+fn claude_build_sandbox_denies_only_session_paths_for_the_given_uid() {
+    let deny_write = [
+        "//tmp/claude-501/-*",
+        #[cfg(target_os = "macos")]
+        "//private/tmp/claude-501/-*",
+    ];
+    assert_eq!(
+        claude::sandbox_value(501),
+        json!({
+            "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": true,
+            "enabled": true,
+            "failIfUnavailable": true,
+            "filesystem": { "denyWrite": deny_write },
+        })
+    );
+}
+
+#[test]
 fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
     let rig = Rig::new();
     let mut request = rig.request(Provider::Claude, "p");
     request.permissions.mode = Mode::Build;
     let plan = dry(&rig, &request);
     let allowed = format!("{},{}", rule(&rig, "Read"), rule(&rig, "Edit"));
-    let settings = json!({
+    let settings = crate::canonical::sorted(json!({
         "disableAllHooks": true,
-        "sandbox": {
-            "allowUnsandboxedCommands": false,
-            "autoAllowBashIfSandboxed": true,
-            "enabled": true,
-            "failIfUnavailable": true
-        }
-    });
+        "sandbox": claude::sandbox_value(rustix::process::geteuid().as_raw()),
+    }));
     let expected = claude_base(&rig, "Read,Glob,Grep,Edit,Write,Bash", &allowed, &settings);
     assert_eq!(plan.args[..plan.args.len() - 1], expected[..]);
     assert!(
@@ -162,17 +176,20 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
             .contains(&"DELEGA_EXACT_BASH_GRANTS".to_string()),
         "build needs no command guard"
     );
-    assert!(
-        plan.mapping
-            .settings
-            .iter()
-            .any(|s| s.starts_with("sandbox=") && s.contains("\"failIfUnavailable\":true")),
-        "{:?}",
-        plan.mapping.settings
+    let sandbox = plan
+        .mapping
+        .settings
+        .iter()
+        .find_map(|s| s.strip_prefix("sandbox="))
+        .expect("sandbox mapping");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(sandbox).unwrap(),
+        settings["sandbox"]
     );
     for part in [
         "wider than requested: commands inside the sandbox can read",
-        "commands can write anywhere in it, and other Claude Code sessions",
+        "directory except its per-project session folders",
+        "write files directly in it",
         "permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
          not added to the sandbox, so delega does not make it writable, though one inside a \
          location commands can write stays writable",
@@ -224,11 +241,11 @@ fn claude_build_mode_grants_extra_directories_as_read_rules_without_add_dir() {
         assert!(plan.args[at + 1].contains(&read), "{}", plan.args[at + 1]);
     }
     let settings = settings_of(&plan.args);
-    assert!(
-        settings["sandbox"].get("filesystem").is_none(),
-        "no denyWrite: {settings}"
+    assert_eq!(
+        settings["sandbox"]["filesystem"],
+        claude::sandbox_value(rustix::process::geteuid().as_raw())["filesystem"],
+        "only Claude Code's session folders are denied"
     );
-    assert!(!plan.args.join("\n").contains("denyWrite"));
 }
 
 #[test]

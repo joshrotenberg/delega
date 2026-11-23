@@ -42,6 +42,10 @@ interrupted one 130. The other cases are under
 [First run](https://github.com/joshrotenberg/delega/blob/main/docs/getting-started/first-run.md)
 explains the result and the other cases.
 
+In Claude Code build mode, sandboxed commands can write in the working
+directory and in Claude Code's per-user temporary directory, except its
+per-project session folders. See [Build permissions](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#build).
+
 ## Acceptance criteria
 
 These six points are the acceptance criteria for the core. Nothing else is
