@@ -65,10 +65,14 @@ pub(crate) use link::{KeeperLink, LaunchSpec, LinkHandle, StartError, start};
 pub(crate) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
 
 /// Test seam: a keeper started by the tests with this variable holds every
-/// freeze of its tree (Linux) until the file it names exists, for at most
-/// 60 s, so a test can order the keeper's freeze after an event of the owner.
+/// freeze of its tree (Linux) until the file it names exists, so a test can
+/// order the keeper's freeze after an event of the owner. After 60 s it fails
+/// closed: no freeze runs, and the keeper writes the marker
+/// [`gate_expired_marker`] names, which the tests assert absent.
 #[cfg(test)]
 pub(crate) const FREEZE_GATE_ENV: &str = "DELEGA_TEST_KEEPER_FREEZE_GATE";
+#[cfg(test)]
+pub(crate) use run::gate_expired_marker;
 pub use run::keeper_main;
 
 /// A program and arguments that run [`keeper_main`].

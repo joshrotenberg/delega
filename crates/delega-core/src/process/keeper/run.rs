@@ -502,17 +502,51 @@ fn freeze_gate() -> Option<&'static std::path::Path> {
         .as_deref()
 }
 
+/// Wait up to 60 s for the freeze gate's file to exist (a test seam). It
+/// fails closed: when the wait runs out the keeper writes a marker next to
+/// the file (`<gate>.gate-expired`, which the tests assert absent), and that
+/// freeze and every later one of this keeper do not run; each answers with
+/// an incomplete freeze, which is never zero.
+#[cfg(all(test, target_os = "linux"))]
+fn gate_opened(gate: &std::path::Path) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static EXPIRED: AtomicBool = AtomicBool::new(false);
+    if EXPIRED.load(Ordering::SeqCst) {
+        return false;
+    }
+    let until = std::time::Instant::now() + Duration::from_secs(60);
+    while !gate.exists() {
+        if std::time::Instant::now() >= until {
+            EXPIRED.store(true, Ordering::SeqCst);
+            let _ = std::fs::write(gate_expired_marker(gate), "expired\n");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// The marker a keeper writes when its freeze gate expired.
+#[cfg(test)]
+pub(crate) fn gate_expired_marker(gate: &std::path::Path) -> std::path::PathBuf {
+    let mut name = gate.as_os_str().to_os_string();
+    name.push(".gate-expired");
+    name.into()
+}
+
 /// The freeze with its pass details, for the owner's diagnostics.
 async fn freeze_report(pid: i32) -> (usize, String) {
     #[cfg(target_os = "linux")]
     {
         tokio::task::spawn_blocking(move || {
             #[cfg(test)]
-            if let Some(gate) = freeze_gate() {
-                let until = std::time::Instant::now() + Duration::from_secs(60);
-                while !gate.exists() && std::time::Instant::now() < until {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+            if let Some(gate) = freeze_gate()
+                && !gate_opened(gate)
+            {
+                return (
+                    1,
+                    "passes=0 complete=false refused=0 read_failures=0 gate=expired".into(),
+                );
             }
             let walked =
                 super::walk::freeze_kill(rustix::process::getpid().as_raw_nonzero().get(), pid);

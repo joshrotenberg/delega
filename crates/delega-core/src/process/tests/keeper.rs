@@ -560,6 +560,19 @@ fn refusing(s: &Scratch, spec: ProcessSpec) -> ProcessSpec {
     spec
 }
 
+/// Assert that the keeper's freeze gate, if a freeze waited at it, was opened
+/// by the owner's refusal and did not expire: an expired gate runs no freeze
+/// and leaves its marker, so a run whose ordering was not the one the gate
+/// enforces fails here rather than passing on a stale refusal.
+fn assert_gate_opened_by_the_refusal(s: &Scratch) {
+    assert!(s.path("refused").exists(), "the owner recorded no refusal");
+    let marker = crate::process::keeper::gate_expired_marker(&s.path("refused"));
+    assert!(
+        !marker.exists(),
+        "the keeper's freeze gate expired before the owner's refusal"
+    );
+}
+
 /// The keeper's last report, its answer to the reap.
 fn reap_report(report: &crate::process::ProcessReport) -> String {
     report
@@ -630,6 +643,7 @@ async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_t
     let spec = refusing(&s, kept(sh(&s, &script, LONG)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_gone("the descendant", &pids).await;
+    assert_gate_opened_by_the_refusal(&s);
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert!(
         report.diagnostics.inspection.unverified_signals > 0,
@@ -669,6 +683,7 @@ async fn an_owner_refusal_stands_when_the_final_census_proves_nothing() {
     let spec = refusing(&s, spec);
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_gone("the descendant", &pids).await;
+    assert_gate_opened_by_the_refusal(&s);
     assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
     assert!(
         report.diagnostics.inspection.unverified_signals > 0,
