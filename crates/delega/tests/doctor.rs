@@ -157,6 +157,10 @@ fn a_clean_setup_reports_both_providers_as_json_with_the_documented_shape() {
     assert_eq!(claude["command_hook"]["available"], true);
     assert_eq!(claude["executable_source"], "DELEGA_CLAUDE_BIN");
     assert_eq!(claude["deny_rules"]["applied"], 0);
+    // The rig's PATH carries stand-ins for bwrap and socat, so the result does
+    // not depend on the host's packages.
+    assert_eq!(claude["sandbox"]["requirements_met"], true);
+    assert_eq!(claude["sandbox"]["missing"], serde_json::json!([]));
     // The proxy variable is passed; its value is not in any output.
     assert!(claude["env"]["network"].as_u64().expect("network") >= 1);
     assert!(claude["env"]["passed"].as_u64().expect("passed") >= 1);
@@ -164,6 +168,7 @@ fn a_clean_setup_reports_both_providers_as_json_with_the_documented_shape() {
     assert_eq!(codex["ready"], true);
     assert_eq!(codex["command_hook"], Value::Null);
     assert_eq!(codex["deny_rules"], Value::Null);
+    assert_eq!(codex["sandbox"], Value::Null);
     // The limits are the code's constants.
     let limits = &report["limits"];
     assert_eq!(limits["run"]["default_timeout_secs"], 600);
@@ -227,6 +232,40 @@ fn one_missing_executable_is_a_problem_for_that_provider_and_the_exit_is_zero() 
     assert!(shown.contains("codex: not ready"), "{shown}");
     assert!(shown.contains("executable: not found"), "{shown}");
     assert!(shown.contains("provider_not_found"), "{shown}");
+}
+
+#[test]
+fn a_missing_sandbox_tool_with_claude_the_only_ready_provider_exits_zero() {
+    let rig = Rig::new();
+    let empty = rig.path("empty-bin");
+    std::fs::create_dir(&empty).expect("mkdir");
+    let out = doctor_with(&rig, &["--output", "json"], |c| {
+        c.env("PATH", &empty).env("DELEGA_CODEX_BIN", missing(&rig));
+    });
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let report = json_of(&out);
+    assert_eq!(report["ready"], true);
+    assert_eq!(provider(&report, "claude")["ready"], true);
+    assert_eq!(provider(&report, "codex")["ready"], false);
+    let sandbox_problems: Vec<&Value> = report["problems"]
+        .as_array()
+        .expect("problems")
+        .iter()
+        .filter(|p| p["kind"] == "sandbox_unavailable")
+        .collect();
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            provider(&report, "claude")["sandbox"]["missing"],
+            serde_json::json!(["bwrap", "socat"])
+        );
+        assert_eq!(sandbox_problems.len(), 1, "{report}");
+        assert_eq!(sandbox_problems[0]["blocks"], "build");
+        assert_eq!(sandbox_problems[0]["provider"], "claude");
+    } else {
+        // macOS needs no tool, so nothing is missing there.
+        assert!(sandbox_problems.is_empty(), "{report}");
+    }
+    assert_no_value(&out);
 }
 
 #[test]
