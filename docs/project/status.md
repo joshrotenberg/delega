@@ -33,10 +33,31 @@ stands. This page lists the limits a user meets.
 - **Asking permission live** works for Claude Code runs over MCP or the Rust
   supervisor (`permissions.on_request: ask`). Codex runs and `delega run` refuse
   it before start ([#164](https://github.com/joshrotenberg/delega/issues/164)).
-- **Cleanup gaps.** Cleanup reports confirmed while a process still runs when a
-  descendant called `setsid` and was orphaned before any process listing saw it,
-  or when a fast fork relay is never listed long enough. A `SIGKILL` of `delega`
-  itself leaves the worker running. See the expected failures in
+- **Cleanup.** Every provider process the CLI and MCP start is held by a
+  keeper, a small `delega` process between delega and the provider. When delega
+  is gone, even after a `SIGKILL`, the keeper stops the provider's whole tree,
+  TERM then KILL, within the cleanup deadline. On Linux the keeper is a child
+  subreaper, so a descendant whose parent exits becomes the keeper's child and
+  cleanup cannot miss it. What remains, where cleanup can report confirmed while
+  a process still runs:
+  - On macOS, a descendant that called `setsid`, whose parent exited before any
+    process listing saw the two together, and that does not show the run
+    marker: one started with an environment that leaves `DELEGA_RUN_MARKER`
+    out, or one running an Apple program, because `ps -E` shows no environment
+    for those (measured on macOS 27.2 with SIP enabled).
+  - On macOS, a fast fork relay: the freeze stopped the test relay in 0 of 50
+    runs.
+  - On every platform, a `SIGKILL` of the keeper together with delega leaves the
+    worker running. A `SIGKILL` of the keeper alone makes the result
+    unconfirmed.
+  - A program that embeds the library and supplies no keeper gets the earlier
+    gaps (a `setsid` descendant orphaned between listings, a fast fork relay,
+    and a `SIGKILL` of the caller), and the result says so in
+    `provider_notes`.
+
+  The process module's documentation
+  (`crates/delega-core/src/process/mod.rs`, "What remains possible") has the
+  details and measurements; the expected failures are in
   [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
 - **Environment.** A worker gets a fixed environment allowlist plus what `--env`
   or the configuration file adds. The installed plugin starts `delega mcp` with

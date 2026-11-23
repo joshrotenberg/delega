@@ -112,7 +112,7 @@ One versioned JSON object, the same from every surface.
 | `text` | The answer. For other outcomes, partial text or empty. |
 | `structured`, `structured_valid` | The structured answer when `answer_schema` was given, and whether it satisfied the schema. |
 | `error` | `kind`, `message`, and `provider_exit_code` when the provider exited with one. Present unless `completed`. |
-| `cleanup` | `confirmed: true` when no process of the run was found left; otherwise `confirmed: false`, a `reason`, and `pids` and `process_groups` when known. Known gaps: `crates/delega-core/src/process/mod.rs`. |
+| `cleanup` | `confirmed: true` when no process of the run was found left; otherwise `confirmed: false`, a `reason`, and `pids` and `process_groups` when known. Reasons include a process still holding the output after the kill, and the keeper ending before the provider was reaped. How cleanup works and what it can miss: [`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs). |
 | `permissions` | `mode` applied; `denied`, the denials delega recognised (for Codex, commands Codex marks declined), up to a cap; `asked`, the live requests with their redacted input summary, decision, reason and whether the response was written. |
 | `provider_notes` | Where the provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied, as names, counts, paths and digests. See [`applied`](#applied). |
@@ -293,8 +293,9 @@ Behaviour:
 - **Interrupt.** SIGINT, SIGTERM, SIGHUP and SIGQUIT stop the worker and its
   descendants, then print the result with its cleanup verdict. Cleanup waits at
   most 10 s by default. Further signals are acknowledged once and ignored.
-  SIGKILL cannot be handled: the worker keeps running without its time limit,
-  so stop `delega` with SIGTERM or SIGINT.
+  SIGKILL cannot be handled and writes no result; the worker's keeper
+  (`delega process-keeper`, between `delega` and the provider) then stops the
+  worker's tree. Stop `delega` with SIGTERM or SIGINT to get a result.
 - **Slow readers.** Writing the result waits for whoever reads standard output.
   A signal during that write stops it; after a signal already used to stop the
   worker, the write gets 3 s. A cut-short write exits with the outcome's status,
@@ -715,7 +716,7 @@ once, and one input message may be at most 32 MiB.
   calls, releases open waits, and stops the workers, waiting at most 30 s (runs
   still unsettled then give exit status 1), then waits
   at most 15 s for the transport and exits. A second signal is acknowledged and
-  ignored. SIGKILL leaves the workers running. A client that stops reading
+  ignored. After SIGKILL each worker's keeper stops that worker's tree. A client that stops reading
   standard output should signal the server.
 - **Exit status.**
 
