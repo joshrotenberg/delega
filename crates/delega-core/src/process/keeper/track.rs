@@ -916,13 +916,13 @@ impl Tracker {
         seen_alive: &HashSet<u64>,
     ) -> bool {
         let mut record = record;
-        if record.ppid != 1 && !seen_alive.contains(&ident.puniqueid) {
-            if let (Ok(Some(again)), Ok(Some(still))) =
+        if record.ppid != 1
+            && !seen_alive.contains(&ident.puniqueid)
+            && let (Ok(Some(again)), Ok(Some(still))) =
                 (darwin::kern_proc(ident.pid), darwin::identity(ident.pid))
-                && still.uniqueid == ident.uniqueid
-            {
-                record = again;
-            }
+            && still.uniqueid == ident.uniqueid
+        {
+            record = again;
         }
         // An orphan that exec'd after it was reparented names launchd as its
         // parent, as launchd's own jobs do; those lead a session of their

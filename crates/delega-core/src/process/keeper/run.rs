@@ -119,8 +119,7 @@ pub fn keeper_main() -> i32 {
             return 2;
         }
     };
-    let code = runtime.block_on(keep(hello, fds));
-    code
+    runtime.block_on(keep(hello, fds))
 }
 
 /// Something the keeper must act on.
