@@ -721,8 +721,8 @@ See `crates/delega-core/src/provider/env.rs`.
 
 ### Claude Code 2.1.330, 2026-11-23
 
-- With only `Edit(//<cwd>/**)` allowed under `dontAsk` (the branch binary for
-  #157, model haiku), the Write tool created a file in the working directory,
+- With only `Edit(//<cwd>/**)` allowed under `dontAsk` (model haiku, the branch
+  binary for #157), the Write tool created a file in the working directory,
   the Edit tool changed it, and a Write outside the working directory was
   denied and listed in `permissions.denied`. The CLI reports a `Write(path)`
   allow rule as never matched.
