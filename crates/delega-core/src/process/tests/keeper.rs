@@ -532,16 +532,29 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
     }
 }
 
+/// A descendant in a process group of its own that ends by itself 3 s after
+/// the leader is no longer its parent, so every signal the cleanup sends it in
+/// that time is refused (the test seam refuses them all) and it still ends.
+/// The leader's pid is passed in, so a leader that exits before the
+/// descendant starts does not leave it waiting; the leader's end (by a stop
+/// or by itself) starts the 3 s, and the sweeps that follow it come within
+/// them.
+const ENDS_AFTER_ITS_PARENT: &str = "perl -e 'use POSIX; setpgid(0,0); \
+     while (getppid() == $ARGV[0]) { select(undef, undef, undef, 0.02) } sleep 3' $$ & \
+     echo $! > gc;";
+
 /// A process the cleanup had to signal and could not verify is not signalled,
 /// and the verdict is not Confirmed even when it then ends by itself and every
-/// sweep afterwards finds nothing.
+/// sweep afterwards finds nothing. The run has no keeper, so nothing but the
+/// owner signals the descendant and no final census can supersede the
+/// refusal; which process ends first does not change the outcome.
 #[tokio::test]
 async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed() {
     require_perl!();
     let s = Scratch::new();
-    let script = "perl -e 'use POSIX; setpgid(0,0); exec q(sleep), q(1)' & echo $! > gc; \
-                  echo $$ > leader; sleep 60";
-    let mut spec = kept(sh(&s, script, LONG));
+    let script = format!("{ENDS_AFTER_ITS_PARENT} echo $$ > leader; sleep 60");
+    let mut spec = sh(&s, &script, LONG);
+    spec.keeper = None;
     spec.refuse_signals = true;
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
@@ -550,6 +563,11 @@ async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed
     handle.interrupt();
     let report = handle.wait().await;
     assert_gone("the descendant", &[gc]).await;
+    assert_eq!(report.diagnostics.keeper, None, "{report:#?}");
+    assert!(
+        report.diagnostics.inspection.unverified_signals > 0,
+        "{report:#?}"
+    );
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
             assert_eq!(
@@ -559,5 +577,45 @@ async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed
             );
         }
         other => panic!("a refused signal must not confirm cleanup: {other:?}"),
+    }
+}
+
+/// The narrower Rule A of `process/mod.rs`. A kept run whose owner had a
+/// signal refused: on Linux the keeper is a child subreaper, so its final
+/// census at the reap, which proves its tree empty once the descendant has
+/// ended by itself, supersedes the refusal and the verdict is Confirmed. On
+/// macOS there is no subreaper and no such proof, so the refusal stands. The
+/// leader exits at once, so the owner's sweeps after the exit, not the
+/// keeper, are the first to meet the descendant: the keeper is asked for its
+/// tree only once a sweep finds nothing.
+#[tokio::test]
+async fn a_refused_signal_is_superseded_only_by_a_final_census_that_proves_the_tree_empty() {
+    require_perl!();
+    let s = Scratch::new();
+    let script = format!("{ENDS_AFTER_ITS_PARENT} exit 0");
+    let mut spec = kept(sh(&s, &script, LONG));
+    spec.refuse_signals = true;
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_gone("the descendant", &pids).await;
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    assert!(
+        report.diagnostics.inspection.unverified_signals > 0,
+        "the owner never had a signal refused: {report:#?}"
+    );
+    let keeper = report.diagnostics.keeper.as_ref().expect("a kept run");
+    if cfg!(target_os = "linux") {
+        assert!(keeper.subreaper, "{report:#?}");
+        assert_confirmed(&report);
+    } else {
+        match &report.cleanup {
+            Cleanup::Unconfirmed { reason, .. } => {
+                assert_eq!(
+                    reason,
+                    crate::process::UNVERIFIED_SIGNAL_REASON,
+                    "{report:#?}"
+                );
+            }
+            other => panic!("without a subreaper a refusal must stand: {other:?}"),
+        }
     }
 }

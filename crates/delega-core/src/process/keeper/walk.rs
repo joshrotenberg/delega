@@ -664,6 +664,75 @@ mod tests {
         assert_eq!(walked.effective_live(), 1);
     }
 
+    /// Only a complete census that found nothing, refused nothing and had no
+    /// failed read is a proof; a freeze's earlier refusals are not carried
+    /// into the final census, which is its own walk.
+    #[test]
+    fn only_a_complete_empty_census_without_refusals_or_failed_reads_proves_the_tree_empty() {
+        let proof = Walked {
+            live: 0,
+            passes: 2,
+            complete: true,
+            refused: 0,
+            read_failures: 0,
+            complete_apart_from_refusals: true,
+        };
+        assert!(proof.proves_empty());
+        assert!(!Walked { live: 1, ..proof }.proves_empty());
+        assert!(
+            !Walked {
+                complete: false,
+                ..proof
+            }
+            .proves_empty()
+        );
+        assert!(
+            !Walked {
+                refused: 1,
+                ..proof
+            }
+            .proves_empty()
+        );
+        assert!(
+            !Walked {
+                read_failures: 1,
+                ..proof
+            }
+            .proves_empty()
+        );
+    }
+
+    /// A live process in the tree, here a child of this test process standing
+    /// in for the keeper, keeps the census from proving the tree empty,
+    /// whether or not anything ever held or refused it.
+    #[test]
+    fn a_live_descendant_keeps_the_final_census_from_proving_the_tree_empty() {
+        use crate::test_spawn::Guarded;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .guarded_spawn()
+            .expect("start a child");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let walked = census(me, 0);
+        let alive = !gone_by_pidfd(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(alive, "the child ended during the census");
+        assert!(!walked.proves_empty(), "{walked:?}");
+        assert!(walked.effective_live() >= 1, "{walked:?}");
+    }
+
+    /// A census that met a failed read is no proof, even with nothing alive.
+    #[test]
+    fn a_census_with_a_failed_read_does_not_prove_the_tree_empty() {
+        FAIL_READS.with(|fail| fail.set(true));
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let walked = census(me, 0);
+        FAIL_READS.with(|fail| fail.set(false));
+        assert!(!walked.proves_empty(), "{walked:?}");
+    }
+
     #[test]
     fn a_read_error_makes_the_census_incomplete_and_never_zero() {
         FAIL_READS.with(|fail| fail.set(true));
