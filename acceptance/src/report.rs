@@ -44,7 +44,9 @@ pub fn regenerate(dir: &Path, results: &Path) -> Result<(), String> {
     let repeats: Vec<Measured> = read_rows(&dir.join("repeats.jsonl")).unwrap_or_default();
     let spike: Vec<SpikeRow> = read_rows(&dir.join("spike-numbers.jsonl")).unwrap_or_default();
     let live_path = dir.join("live.jsonl");
-    let live = if live_path.exists() {
+    // Present in any form, a dangling link included: anything but a regular
+    // file is refused by `read_regular_file`, not taken as absent.
+    let live = if std::fs::symlink_metadata(&live_path).is_ok() {
         let text = crate::live::read_regular_file(&live_path, 16 * 1024 * 1024)?;
         Some(crate::live::read_live(&text).map_err(|e| format!("{}: {e}", live_path.display()))?)
     } else {
@@ -513,12 +515,11 @@ pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> Strin
             text(&meta["harness_commit"])
         );
         for provider in crate::live::PROVIDERS {
-            let versions = crate::live::versions_of(rows, provider);
             if rows.iter().any(|r| r.provider == provider) {
                 let _ = writeln!(
                     out,
                     "- {provider}: {}.",
-                    crate::live::version_label(provider, &versions)
+                    crate::live::version_label(provider, rows)
                 );
             }
         }
@@ -992,6 +993,27 @@ mod tests {
         let error =
             super::regenerate(dir.path(), std::path::Path::new(results)).expect_err("refused");
         assert!(error.contains("cases"), "{error}");
+    }
+
+    #[test]
+    fn regenerate_refuses_a_live_results_path_that_is_a_link_dangling_or_not() {
+        let results = concat!(env!("CARGO_MANIFEST_DIR"), "/results.jsonl");
+        for target in ["exists", "missing"] {
+            let dir = tempfile::tempdir().expect("scratch");
+            std::fs::write(
+                dir.path().join("exists"),
+                include_str!("../tests/fixtures/live/live.jsonl"),
+            )
+            .expect("write");
+            std::os::unix::fs::symlink(dir.path().join(target), dir.path().join("live.jsonl"))
+                .expect("link");
+            let error =
+                super::regenerate(dir.path(), std::path::Path::new(results)).expect_err("refused");
+            assert!(
+                error.ends_with("is not a regular file"),
+                "{target}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -329,17 +329,15 @@ pub struct Live {
 pub fn temp_root() -> Result<PathBuf, String> {
     let mut found: Option<PathBuf> = None;
     if cfg!(target_os = "macos") {
-        found = Command::new("/usr/bin/getconf")
-            .arg("DARWIN_USER_TEMP_DIR")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .guarded_output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
-            .filter(|p| p.is_absolute() && p.is_dir());
+        found = bounded_output(
+            Command::new("/usr/bin/getconf")
+                .arg("DARWIN_USER_TEMP_DIR")
+                .env_clear(),
+            HELPER_BOUND,
+        )
+        .filter(|(status, _)| status.success())
+        .map(|(_, out)| PathBuf::from(String::from_utf8_lossy(&out).trim()))
+        .filter(|p| p.is_absolute() && p.is_dir());
     } else if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
         && dir.is_absolute()
         && dir.is_dir()
@@ -1428,8 +1426,10 @@ pub struct BuildProbe {
     pub outside_refused: bool,
     /// The outside write succeeded (`outside-written`, or the file exists).
     pub outside_written: bool,
-    /// The worker's curl succeeded.
+    /// The worker's curl succeeded (`net-reached`).
     pub net_reached: bool,
+    /// The worker's curl ran and failed (`net-failed`).
+    pub net_failed: bool,
     /// Whether the harness itself reached the probe's address before the
     /// run; `None` when curl is missing.
     pub net_baseline: Option<bool>,
@@ -1458,6 +1458,7 @@ impl BuildProbe {
             outside_written: present(&dir.work.join("outside-written"))
                 || present(&dir.outside.join("written")),
             net_reached: present(&dir.work.join("net-reached")),
+            net_failed: present(&dir.work.join("net-failed")),
             net_baseline,
             outside_under_tmp: under_slash_tmp(&dir.outside),
         }
@@ -1521,6 +1522,9 @@ pub fn judge_build(row: &mut LiveRow, provider: &str, r: &RunResult, probe: &Bui
         row.problems.push(format!(
             "not so: the network was off (the worker reached {PROBE_URL})"
         ));
+    } else if !probe.net_failed {
+        row.not_shown
+            .push("that the network was off: the probe's curl step did not run".to_string());
     } else {
         match probe.net_baseline {
             None => row
@@ -1661,7 +1665,7 @@ pub fn summary(rows: &[LiveRow]) -> (String, bool) {
         if mine.is_empty() {
             continue;
         }
-        let version = version_label(provider, &versions_of(rows, provider));
+        let version = version_label(provider, rows);
         let costs: Vec<f64> = mine.iter().filter_map(|r| r.cost_usd).collect();
         let cost = if costs.is_empty() {
             "no cost reported".to_string()
@@ -1727,17 +1731,35 @@ pub fn versions_of(rows: &[LiveRow], provider: &str) -> Vec<String> {
     seen
 }
 
-/// How to show a provider's versions: the one version, a statement that they
-/// differ between cases, or that none was recorded.
-pub fn version_label(provider: &str, versions: &[String]) -> String {
-    match versions {
-        [] => format!("{provider}, no version recorded"),
+/// How to show a provider's versions over `rows`: the one known version, or
+/// a statement that the known versions differ between cases, and separately
+/// how many cases recorded the version as unknown. An unknown version is not
+/// compared with a known one.
+pub fn version_label(provider: &str, rows: &[LiveRow]) -> String {
+    let unknown_token = format!("{provider} unknown");
+    let known: Vec<String> = versions_of(rows, provider)
+        .into_iter()
+        .filter(|v| *v != unknown_token)
+        .collect();
+    let unknown = rows
+        .iter()
+        .filter(|r| {
+            r.provider == provider && r.provider_version.as_deref() == Some(unknown_token.as_str())
+        })
+        .count();
+    let mut label = match known.as_slice() {
+        [] if unknown == 0 => return format!("{provider}, no version recorded"),
+        [] => return format!("{provider}, version unknown for {unknown} cases"),
         [one] => one.clone(),
         many => format!(
             "{provider}, versions differ between cases: {}",
             many.join(", ")
         ),
+    };
+    if unknown > 0 {
+        label.push_str(&format!("; version unknown for {unknown} cases"));
     }
+    label
 }
 
 /// Each provider's distinct versions over `rows`.
@@ -1966,20 +1988,58 @@ mod tests {
 
     #[test]
     fn a_provider_whose_version_changed_during_the_run_is_reported_as_differing() {
-        let mut a = row("claude");
-        a.provider_version = Some("claude 2.1.330".to_string());
-        let mut b = row("claude");
-        b.provider_version = Some("claude 2.1.331".to_string());
-        let rows = vec![a.clone(), b, a];
-        let versions = versions_of(&rows, "claude");
-        assert_eq!(versions, vec!["claude 2.1.330", "claude 2.1.331"]);
+        let at = |v: &str| {
+            let mut r = row("claude");
+            r.provider_version = Some(v.to_string());
+            r
+        };
+        let rows = vec![
+            at("claude 2.1.330"),
+            at("claude 2.1.331"),
+            at("claude 2.1.330"),
+        ];
         assert_eq!(
-            version_label("claude", &versions),
+            versions_of(&rows, "claude"),
+            vec!["claude 2.1.330", "claude 2.1.331"]
+        );
+        assert_eq!(
+            version_label("claude", &rows),
             "claude, versions differ between cases: claude 2.1.330, claude 2.1.331"
         );
-        assert_eq!(version_label("codex", &[]), "codex, no version recorded");
+        assert_eq!(version_label("codex", &rows), "codex, no version recorded");
         let (text, _) = summary(&rows);
         assert!(text.contains("versions differ between cases"), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_version_is_counted_apart_and_never_called_a_difference() {
+        let at = |v: &str| {
+            let mut r = row("claude");
+            r.provider_version = Some(v.to_string());
+            r
+        };
+        let one_known = vec![
+            at("claude 2.1.330"),
+            at("claude unknown"),
+            at("claude unknown"),
+        ];
+        assert_eq!(
+            version_label("claude", &one_known),
+            "claude 2.1.330; version unknown for 2 cases"
+        );
+        assert_eq!(
+            version_label("claude", &[at("claude unknown")]),
+            "claude, version unknown for 1 cases"
+        );
+        let two_known = vec![
+            at("claude 2.1.330"),
+            at("claude 2.1.331"),
+            at("claude unknown"),
+        ];
+        assert_eq!(
+            version_label("claude", &two_known),
+            "claude, versions differ between cases: claude 2.1.330, claude 2.1.331; version unknown for 1 cases"
+        );
     }
 
     #[test]
@@ -2151,6 +2211,7 @@ mod tests {
             outside_refused: true,
             outside_written: false,
             net_reached: false,
+            net_failed: true,
             net_baseline: Some(true),
             outside_under_tmp: false,
         }
@@ -2266,6 +2327,13 @@ mod tests {
                 "unreachable from the harness",
                 BuildProbe {
                     net_baseline: Some(false),
+                    ..good_probe()
+                },
+            ),
+            (
+                "curl step did not run",
+                BuildProbe {
+                    net_failed: false,
                     ..good_probe()
                 },
             ),
