@@ -155,6 +155,7 @@ fn go(args: &Args, log: &log::Log) -> ExitCode {
     let mut options = ProviderOptions {
         system_paths: super::system_paths(),
         hook: super::guard_command(),
+        keeper: super::keeper_command(),
         origin,
         ..ProviderOptions::default()
     };

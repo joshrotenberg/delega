@@ -22,8 +22,8 @@
 //! The first signal starts the stop. A signal that arrives while it goes on is
 //! acknowledged once on standard error and otherwise ignored, as in `delega
 //! run`, so a second Ctrl-C cannot end the server while workers are still being
-//! stopped. SIGKILL cannot be handled: workers of a server killed that way keep
-//! running, as for `delega run`.
+//! stopped. SIGKILL cannot be handled: each worker's keeper then stops that
+//! worker's tree by itself, as for `delega run`.
 
 use std::process::ExitCode;
 
@@ -38,7 +38,7 @@ use tokio::runtime::Builder;
 
 use super::run::log::Log;
 use super::run::signals::Signals;
-use super::{EXIT_REFUSED, apply_env, guard_command, version};
+use super::{EXIT_REFUSED, apply_env, guard_command, keeper_command, version};
 
 /// What `delega run` exits with for an interrupted run, and so for a signal.
 const EXIT_SIGNALLED: u8 = Outcome::Interrupted.exit_status();
@@ -96,6 +96,7 @@ fn go(args: &Args, executable: Option<delega_mcp::Executable>, log: &Log) -> Exi
     let mut options = ProviderOptions {
         system_paths: super::system_paths(),
         hook: guard_command(),
+        keeper: keeper_command(),
         ..ProviderOptions::default()
     };
     config.apply_to_options(&mut options);
