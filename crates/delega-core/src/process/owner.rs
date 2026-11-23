@@ -606,6 +606,8 @@ pub(super) struct OwnedProcess {
     pub(super) watch_error: Option<String>,
     /// How many processes the keeper found alive in its tree at the reap.
     reap_leftover: usize,
+    /// Whether the keeper's final census at the reap proved its tree empty.
+    reap_proven: bool,
     /// Whether the keeper acknowledged the reap with `reaped`.
     reap_acknowledged: bool,
 }
@@ -785,6 +787,7 @@ impl OwnedProcess {
             exit_rx: None,
             watch_error: None,
             reap_leftover: 0,
+            reap_proven: false,
             reap_acknowledged: false,
         };
         match exit {
@@ -1019,14 +1022,35 @@ impl OwnedProcess {
                     reason: reason.to_string(),
                 };
                 let kept = shared.keeper.is_some();
-                let unverified = lock(&shared.observations).stats.unverified_signals > 0;
+                let (unverified, unverified_marked) = {
+                    let obs = lock(&shared.observations);
+                    (obs.stats.unverified_signals, obs.unverified_marked)
+                };
+                // The narrower Rule A (see "What `Confirmed` means" in the
+                // module documentation): on Linux, with the keeper a child
+                // subreaper, every live descendant is in its tree, so its
+                // final census at the reap, when it proves the tree empty,
+                // supersedes earlier refusals by this owner and by the keeper.
+                // A refusal meant for a process found only by the marker is
+                // not covered: such a process need not be in the tree.
+                let tree_proven_empty = cfg!(target_os = "linux")
+                    && self.reap_acknowledged
+                    && self.reap_proven
+                    && self.reap_leftover == 0
+                    && shared
+                        .keeper
+                        .as_ref()
+                        .is_some_and(|k| k.subreaper() && !k.lost());
+                let keeper = shared.keeper.as_ref();
                 let cleanup = if shared.keeper_lost() {
                     unconfirmed(KEEPER_LOST_REASON)
                 } else if kept && !self.reap_acknowledged {
                     unconfirmed(NO_REAP_ACK_REASON)
-                } else if shared.keeper.as_ref().is_some_and(|k| k.unproven()) {
+                } else if keeper.is_some_and(|k| k.unproven())
+                    || (keeper.is_some_and(|k| k.refused()) && !tree_proven_empty)
+                {
                     unconfirmed(KEEPER_UNPROVEN_REASON)
-                } else if unverified {
+                } else if unverified_marked > 0 || (unverified > 0 && !tree_proven_empty) {
                     unconfirmed(UNVERIFIED_SIGNAL_REASON)
                 } else if self.reap_leftover > 0 {
                     unconfirmed(&format!(
@@ -1166,9 +1190,10 @@ impl OwnedProcess {
                     .map(leader_exit)
                     .map_err(|error| format!("wait failed: {error}"))
             }
-            Some(Leader::Kept(link)) => link.reap().await.map(|(summary, live)| {
+            Some(Leader::Kept(link)) => link.reap().await.map(|(summary, reaped)| {
                 self.reap_acknowledged = true;
-                self.reap_leftover = live;
+                self.reap_leftover = reaped.live;
+                self.reap_proven = reaped.proven;
                 LeaderExit {
                     code: summary.code,
                     signal: summary.signal,

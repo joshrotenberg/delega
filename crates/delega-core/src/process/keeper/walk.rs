@@ -234,14 +234,36 @@ pub(super) struct Walked {
     /// being gone. Unlike a tree that keeps changing, a failed read is a
     /// hole in what the keeper could see.
     pub read_failures: u32,
+    /// Whether the result would be complete if nothing had been refused: for
+    /// a census the same as `complete` (a census holds nothing, so it refuses
+    /// nothing); for a freeze, whether it froze the tree and its census after
+    /// the kill is complete. The owner keeps a refused hold apart from other
+    /// holes, because a later final census can supersede a refusal (see
+    /// [`Walked::proves_empty`]) and nothing supersedes the others.
+    pub complete_apart_from_refusals: bool,
 }
 
 impl Walked {
     pub(super) fn detail(&self) -> String {
         format!(
-            "passes={} complete={} refused={} read_failures={}",
-            self.passes, self.complete, self.refused, self.read_failures
+            "passes={} complete={} refused={} read_failures={} complete_apart_from_refusals={}",
+            self.passes,
+            self.complete,
+            self.refused,
+            self.read_failures,
+            self.complete_apart_from_refusals
         )
+    }
+
+    /// Whether this answer, taken as the final census at the reap, proves the
+    /// keeper's tree empty: it is complete (two passes in a row agreed, the
+    /// full scan of `/proc` found the same set, and the tree was not in flux),
+    /// it found nothing alive, and within this census no hold was refused and
+    /// no read failed. A live process in the tree, held or not, is counted by
+    /// every pass that reads its stat, and a stat that cannot be read is a
+    /// read failure, so a live process never yields this answer.
+    pub(super) fn proves_empty(&self) -> bool {
+        self.complete && self.live == 0 && self.refused == 0 && self.read_failures == 0
     }
 
     /// The count to act on: an unproven result is never zero.
@@ -312,6 +334,7 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
                         complete: true,
                         refused: 0,
                         read_failures,
+                        complete_apart_from_refusals: true,
                     };
                 }
                 previous = Some(walked);
@@ -333,6 +356,7 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
         complete: false,
         refused: 0,
         read_failures,
+        complete_apart_from_refusals: false,
     }
 }
 
@@ -605,6 +629,7 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
                 complete,
                 refused: refused_total,
                 read_failures: read_failures + counted.read_failures,
+                complete_apart_from_refusals: frozen && counted.complete,
             };
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -634,6 +659,7 @@ mod tests {
             complete: freeze_proven(true, 1, true),
             refused: 1,
             read_failures: 0,
+            complete_apart_from_refusals: true,
         };
         assert_eq!(walked.effective_live(), 1);
     }

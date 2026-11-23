@@ -184,8 +184,13 @@ pub(crate) enum FromKeeper {
         detail: String,
     },
     /// The program is reaped; how many processes of the tree were still alive
-    /// after the last freeze (Linux; 0 elsewhere).
-    Reaped(usize),
+    /// after the last freeze (Linux; 0 elsewhere), and whether the final
+    /// census before the reap proved the tree empty (Linux with a subreaper
+    /// only; see `Walked::proves_empty`).
+    Reaped {
+        live: usize,
+        proven: bool,
+    },
     /// The keeper is about to reap the program on its own (a signal, its
     /// ceiling, or a new parent): the owner must send no more signals that
     /// rely on the program's pid and answer `released`.
@@ -210,7 +215,11 @@ impl FromKeeper {
             FromKeeper::Tree { id, live, detail } => {
                 format!("tree {id} {live} {}", one_line(detail))
             }
-            FromKeeper::Reaped(live) => format!("reaped {live}"),
+            FromKeeper::Reaped {
+                live,
+                proven: false,
+            } => format!("reaped {live}"),
+            FromKeeper::Reaped { live, proven: true } => format!("reaped {live} proven"),
             FromKeeper::Releasing => "releasing".into(),
             FromKeeper::Warn(text) => format!("warn {}", one_line(text)),
         }
@@ -243,11 +252,21 @@ impl FromKeeper {
                 live: words.next()?.parse().ok()?,
                 detail: words.collect::<Vec<_>>().join(" "),
             },
-            "reaped" => FromKeeper::Reaped(if rest.is_empty() {
-                0
-            } else {
-                rest.parse().ok()?
-            }),
+            "reaped" => {
+                let live = match words.next() {
+                    None | Some("") => 0,
+                    Some(n) => n.parse().ok()?,
+                };
+                let proven = match words.next() {
+                    None => false,
+                    Some("proven") => true,
+                    Some(_) => return None,
+                };
+                if words.next().is_some() {
+                    return None;
+                }
+                FromKeeper::Reaped { live, proven }
+            }
             "releasing" => FromKeeper::Releasing,
             "warn" => FromKeeper::Warn(rest.to_string()),
             _ => return None,
@@ -378,8 +397,18 @@ mod tests {
                 live: 0,
                 detail: "passes=3 complete=true refused=1".into(),
             },
-            FromKeeper::Reaped(0),
-            FromKeeper::Reaped(3),
+            FromKeeper::Reaped {
+                live: 0,
+                proven: false,
+            },
+            FromKeeper::Reaped {
+                live: 0,
+                proven: true,
+            },
+            FromKeeper::Reaped {
+                live: 3,
+                proven: false,
+            },
             FromKeeper::Releasing,
             FromKeeper::Warn("x y".into()),
         ] {
@@ -394,6 +423,9 @@ mod tests {
             assert_eq!(ToKeeper::parse(&msg.line()), Some(msg));
         }
         assert_eq!(FromKeeper::parse("nonsense"), None);
+        // Only the exact word claims a proof.
+        assert_eq!(FromKeeper::parse("reaped 0 provenx"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 proven extra"), None);
     }
 
     #[test]

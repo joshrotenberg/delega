@@ -150,7 +150,16 @@ enum Owner<'a> {
 async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
     let parent = rustix::process::getppid();
     #[cfg(target_os = "linux")]
-    say(&FromKeeper::Subreaper(sys::become_subreaper()));
+    let subreaper = {
+        let became = sys::become_subreaper();
+        let ok = became.is_ok();
+        say(&FromKeeper::Subreaper(became));
+        ok
+    };
+    // Without a subreaper (and on every system but Linux) an orphan can leave
+    // the keeper's tree, so no census of it proves anything at the reap.
+    #[cfg(not(target_os = "linux"))]
+    let subreaper = false;
 
     let mut fds = fds.into_iter();
     let stdin = if hello.stdin {
@@ -246,7 +255,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Reap)) => {
-                    say(&reap_reply(finish(pid, exited).await));
+                    say(&reap_reply(finish(pid, exited, subreaper).await));
                     drop(child);
                     return 0;
                 }
@@ -346,13 +355,25 @@ async fn wait_exit(pid: i32, limit: Duration) -> bool {
     }
 }
 
+/// What the keeper says when it has reaped the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Finished {
+    /// What the last freeze left alive.
+    live: usize,
+    /// Whether the final census proved the tree empty (Linux, with a
+    /// subreaper).
+    proven: bool,
+}
+
 /// The owner asked for the reap: everything is settled on its side. Anything
 /// still alive in the tree is stopped first (Linux), the program is killed if
 /// it has not exited (the owner reaps only an exited program, so this is a
-/// guard; through a pidfd, never by number), then reaped, and the orphans with
-/// it. Returns what the last freeze left alive, or why the program could not
-/// be killed or reaped; then `reaped` is not sent.
-async fn finish(pid: i32, exited: bool) -> Result<usize, String> {
+/// guard; through a pidfd, never by number), then a final census is taken
+/// (Linux), then the program is reaped, and the orphans with it. Returns what
+/// the last freeze left alive and whether the final census proved the tree
+/// empty, or why the program could not be killed or reaped; then `reaped` is
+/// not sent.
+async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, String> {
     #[cfg(target_os = "linux")]
     let live = if census(pid) > 0 {
         freeze(pid).await
@@ -367,13 +388,28 @@ async fn finish(pid: i32, exited: bool) -> Result<usize, String> {
         }
         let _ = wait_exit(pid, Duration::from_secs(5)).await;
     }
+    // The final census, taken once the program has exited and before it is
+    // reaped. Only its own result counts: an earlier refusal or failed read
+    // does not make it a proof, and does not stop it from being one.
+    #[cfg(target_os = "linux")]
+    let proven = subreaper && {
+        let me = rustix::process::getpid().as_raw_nonzero().get();
+        tokio::task::spawn_blocking(move || super::walk::census(me, pid).proves_empty())
+            .await
+            .unwrap_or(false)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let proven = {
+        let _ = subreaper;
+        false
+    };
     let reaped = tokio::task::spawn_blocking(move || {
         consume_reap(pid, sys::reap_if_exited, Duration::from_secs(5))
     })
     .await
     .unwrap_or_else(|_| Err("the reap panicked".into()));
     reap_orphans(pid);
-    reaped.map(|()| live)
+    reaped.map(|()| Finished { live, proven })
 }
 
 /// Reap `pid` with `reap` until it succeeds or `bound` passes.
@@ -398,9 +434,9 @@ fn consume_reap(
 }
 
 /// The answer to `reap`: `reaped` only when the program was reaped.
-fn reap_reply(finished: Result<usize, String>) -> FromKeeper {
+fn reap_reply(finished: Result<Finished, String>) -> FromKeeper {
     match finished {
-        Ok(live) => FromKeeper::Reaped(live),
+        Ok(Finished { live, proven }) => FromKeeper::Reaped { live, proven },
         Err(why) => FromKeeper::Warn(why),
     }
 }
@@ -604,7 +640,10 @@ mod tests {
     fn a_reap_that_never_succeeds_is_not_acknowledged() {
         let result = consume_reap(1, |_| false, Duration::from_millis(30));
         assert!(result.is_err());
-        let reply = reap_reply(result.map(|()| 0));
+        let reply = reap_reply(result.map(|()| Finished {
+            live: 0,
+            proven: true,
+        }));
         assert!(matches!(reply, FromKeeper::Warn(_)), "{reply:?}");
     }
 
@@ -620,6 +659,15 @@ mod tests {
             Duration::from_secs(5),
         );
         assert_eq!(result, Ok(()));
-        assert_eq!(reap_reply(Ok(2)), FromKeeper::Reaped(2));
+        assert_eq!(
+            reap_reply(Ok(Finished {
+                live: 2,
+                proven: false
+            })),
+            FromKeeper::Reaped {
+                live: 2,
+                proven: false
+            }
+        );
     }
 }

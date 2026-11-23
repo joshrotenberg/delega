@@ -73,7 +73,7 @@ struct State {
     exit_tx: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     exited: Arc<AtomicBool>,
     reaped: AtomicBool,
-    reaped_tx: Mutex<Option<oneshot::Sender<usize>>>,
+    reaped_tx: Mutex<Option<oneshot::Sender<Reaped>>>,
     /// The keeper's end closed before it said `reaped`.
     lost: AtomicBool,
     closed: AtomicBool,
@@ -88,6 +88,18 @@ struct State {
     pin: Arc<GroupPin>,
     /// See [`LinkHandle::unproven`].
     unproven: AtomicBool,
+    /// See [`LinkHandle::refused`].
+    refused: AtomicBool,
+}
+
+/// What the keeper said when it reaped the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reaped {
+    /// How many processes of its tree the last freeze left alive.
+    pub live: usize,
+    /// Whether the final census before the reap proved the tree empty
+    /// (Linux, with a subreaper).
+    pub proven: bool,
 }
 
 /// What the owner's shared state holds of the keeper: the socket, and what the
@@ -118,10 +130,18 @@ impl LinkHandle {
         self.state.subreaper.load(Ordering::SeqCst)
     }
 
-    /// Whether any census or freeze answer of this run was unproven in a way a
-    /// later answer cannot repair (see [`reply_unproven`]). Sticky.
+    /// Whether any census or freeze answer of this run was unproven in a way
+    /// no later answer repairs, a refused hold apart (see [`reply_holes`]).
+    /// Sticky.
     pub(crate) fn unproven(&self) -> bool {
         self.state.unproven.load(Ordering::SeqCst)
+    }
+
+    /// Whether any census or freeze answer of this run refused a hold. Sticky;
+    /// on Linux with a subreaper a final census that proves the tree empty
+    /// supersedes it in the verdict (see `process/mod.rs`).
+    pub(crate) fn refused(&self) -> bool {
+        self.state.refused.load(Ordering::SeqCst)
     }
 
     /// The lock that says whether the program's pid still pins its group
@@ -151,7 +171,11 @@ impl LinkHandle {
         }
         match tokio::time::timeout(KEEPER_REPLY_TIMEOUT, rx).await {
             Ok(Ok((live, detail))) => {
-                if reply_unproven(verb, &detail) {
+                let holes = reply_holes(verb, &detail);
+                if holes.refused {
+                    self.state.refused.store(true, Ordering::SeqCst);
+                }
+                if holes.unproven {
                     self.state.unproven.store(true, Ordering::SeqCst);
                 }
                 self.log(
@@ -205,16 +229,14 @@ impl LinkHandle {
 pub(crate) struct KeeperLink {
     child: tokio::process::Child,
     pub handle: Arc<LinkHandle>,
-    reaped_rx: Option<oneshot::Receiver<usize>>,
+    reaped_rx: Option<oneshot::Receiver<Reaped>>,
 }
 
 impl KeeperLink {
     /// Have the keeper reap the program, wait for it to say so and for the
-    /// keeper to exit, and return how the program ended.
-    /// Have the keeper reap the program, wait for it to say so and for the
-    /// keeper to exit, and return how the program ended and how many
-    /// processes of the keeper's tree were still alive at the reap.
-    pub(crate) async fn reap(&mut self) -> Result<(ExitSummary, usize), String> {
+    /// keeper to exit, and return how the program ended and what the keeper
+    /// said of its tree at the reap.
+    pub(crate) async fn reap(&mut self) -> Result<(ExitSummary, Reaped), String> {
         let state = self.handle.state.clone();
         let sent = !self.handle.lost() && self.handle.send(ToKeeper::Reap);
         let confirmed = match (sent, self.reaped_rx.take()) {
@@ -230,29 +252,43 @@ impl KeeperLink {
         self.handle.shut();
         let exit = *lock(&state.exit);
         match (exit, confirmed) {
-            (Some(exit), Some(live)) => Ok((exit, live)),
+            (Some(exit), Some(reaped)) => Ok((exit, reaped)),
             (Some(_), None) => Err("the keeper did not confirm that it reaped the program".into()),
             (None, _) => Err("the keeper ended without saying how the program ended".into()),
         }
     }
 }
 
-/// Whether a census or freeze answer leaves a hole no later answer repairs:
-/// a refused hold (a process that was never signalled), a failed read of
-/// `/proc`, or a freeze that did not complete. A census that is incomplete
+/// The holes one census or freeze answer leaves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Holes {
+    /// A refused hold: a process that was not signalled because it could not
+    /// be verified. A final census that proves the tree empty supersedes it
+    /// (Linux, with a subreaper).
+    pub refused: bool,
+    /// A hole nothing supersedes: a failed read of `/proc`, or a freeze that
+    /// did not complete for a reason other than a refused hold (or that does
+    /// not say).
+    pub unproven: bool,
+}
+
+/// The holes a census or freeze answer leaves. A census that is incomplete
 /// because the tree keeps changing reports a nonzero count and never claimed
-/// an empty tree, so it is not one. An answer without details (no walk) is
-/// not one.
-pub(crate) fn reply_unproven(verb: &str, detail: &str) -> bool {
+/// an empty tree, so it leaves none. An answer without details (no walk)
+/// leaves none.
+pub(crate) fn reply_holes(verb: &str, detail: &str) -> Holes {
     let field = |name: &str| -> Option<&str> {
         detail
             .split_ascii_whitespace()
             .find_map(|word| word.strip_prefix(name)?.strip_prefix('='))
     };
     let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
-    nonzero("refused")
-        || nonzero("read_failures")
-        || (verb == "freeze" && field("complete") == Some("false"))
+    let incomplete_freeze = verb == "freeze" && field("complete") == Some("false");
+    Holes {
+        refused: nonzero("refused"),
+        unproven: nonzero("read_failures")
+            || (incomplete_freeze && field("complete_apart_from_refusals") != Some("true")),
+    }
 }
 
 /// Wait up to `bound` for the keeper, the owner's own child, to exit; kill it
@@ -562,10 +598,10 @@ fn follow(
                         let _ = tx.send((live, detail));
                     }
                 }
-                FromKeeper::Reaped(live) => {
+                FromKeeper::Reaped { live, proven } => {
                     state.reaped.store(true, Ordering::SeqCst);
                     if let Some(tx) = lock(&state.reaped_tx).take() {
-                        let _ = tx.send(live);
+                        let _ = tx.send(Reaped { live, proven });
                     }
                 }
                 FromKeeper::Releasing => {
@@ -622,45 +658,116 @@ mod tests {
     use super::*;
 
     /// A refused hold in one answer is not repaired by a later clean one: the
-    /// flag the owner keeps is sticky for the run.
+    /// flag the owner keeps is sticky for the run (only a final census at the
+    /// reap can supersede it, in the verdict).
     #[test]
-    fn a_keeper_refusal_followed_by_a_clean_retry_stays_unproven() {
-        let flag = AtomicBool::new(false);
+    fn a_keeper_refusal_followed_by_a_clean_retry_stays_refused() {
+        let refused = AtomicBool::new(false);
+        let unproven = AtomicBool::new(false);
         let answers = [
             (
                 "freeze",
-                "passes=2 complete=false refused=1 read_failures=0",
+                "passes=2 complete=false refused=1 read_failures=0 \
+                 complete_apart_from_refusals=true",
             ),
-            ("freeze", "passes=1 complete=true refused=0 read_failures=0"),
-            ("census", "passes=2 complete=true refused=0 read_failures=0"),
+            (
+                "freeze",
+                "passes=1 complete=true refused=0 read_failures=0 \
+                 complete_apart_from_refusals=true",
+            ),
+            (
+                "census",
+                "passes=2 complete=true refused=0 read_failures=0 \
+                 complete_apart_from_refusals=true",
+            ),
         ];
         for (verb, detail) in answers {
-            if reply_unproven(verb, detail) {
-                flag.store(true, Ordering::SeqCst);
+            let holes = reply_holes(verb, detail);
+            if holes.refused {
+                refused.store(true, Ordering::SeqCst);
+            }
+            if holes.unproven {
+                unproven.store(true, Ordering::SeqCst);
             }
         }
-        assert!(flag.load(Ordering::SeqCst));
+        assert!(refused.load(Ordering::SeqCst));
+        assert!(!unproven.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn which_answers_are_unproven() {
-        assert!(reply_unproven(
-            "census",
-            "passes=3 complete=true refused=0 read_failures=1"
-        ));
-        assert!(reply_unproven(
-            "freeze",
-            "passes=64 complete=false refused=0 read_failures=0"
-        ));
+    fn which_answers_leave_which_holes() {
+        let holes = |verb, detail| reply_holes(verb, detail);
+        // A failed read is a hole nothing supersedes.
+        assert_eq!(
+            holes(
+                "census",
+                "passes=3 complete=true refused=0 read_failures=1 complete_apart_from_refusals=true"
+            ),
+            Holes {
+                refused: false,
+                unproven: true
+            }
+        );
+        // A freeze that ran out without refusing anything.
+        assert_eq!(
+            holes(
+                "freeze",
+                "passes=64 complete=false refused=0 read_failures=0 \
+                 complete_apart_from_refusals=false"
+            ),
+            Holes {
+                refused: false,
+                unproven: true
+            }
+        );
+        // A freeze incomplete only because it refused a hold.
+        assert_eq!(
+            holes(
+                "freeze",
+                "passes=2 complete=false refused=1 read_failures=0 \
+                 complete_apart_from_refusals=true"
+            ),
+            Holes {
+                refused: true,
+                unproven: false
+            }
+        );
+        // A freeze that refused a hold and also did not freeze the tree.
+        assert_eq!(
+            holes(
+                "freeze",
+                "passes=64 complete=false refused=1 read_failures=0 \
+                 complete_apart_from_refusals=false"
+            ),
+            Holes {
+                refused: true,
+                unproven: true
+            }
+        );
+        // An incomplete freeze that does not say why counts as unproven.
+        assert!(
+            holes(
+                "freeze",
+                "passes=2 complete=false refused=1 read_failures=0"
+            )
+            .unproven
+        );
         // A census of a tree that keeps changing never claimed zero.
-        assert!(!reply_unproven(
-            "census",
-            "passes=64 complete=false refused=0 read_failures=0"
-        ));
-        assert!(!reply_unproven(
-            "freeze",
-            "passes=1 complete=true refused=0 read_failures=0"
-        ));
-        assert!(!reply_unproven("census", ""));
+        assert_eq!(
+            holes(
+                "census",
+                "passes=64 complete=false refused=0 read_failures=0 \
+                 complete_apart_from_refusals=false"
+            ),
+            Holes::default()
+        );
+        assert_eq!(
+            holes(
+                "freeze",
+                "passes=1 complete=true refused=0 read_failures=0 complete_apart_from_refusals=true"
+            ),
+            Holes::default()
+        );
+        assert_eq!(holes("census", ""), Holes::default());
     }
 }

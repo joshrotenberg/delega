@@ -334,6 +334,11 @@ pub struct InspectionStats {
 pub(crate) struct Observations {
     pub stats: InspectionStats,
     pub last_success: Option<Instant>,
+    /// Of `stats.unverified_signals`, those meant for a process found only by
+    /// the run marker. Such a process need not be a descendant (a process
+    /// started through a service carries the marker too), so the keeper's
+    /// final census, which covers its own tree only, cannot supersede them.
+    pub unverified_marked: u64,
 }
 
 pub(crate) type SharedObservations = Arc<Mutex<Observations>>;
@@ -959,8 +964,7 @@ impl ProcessTree {
     fn signal_found(&self, pid: i32, found: Found, signal: Signal) {
         #[cfg(test)]
         if self.refuse_signals {
-            let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
-            obs.stats.unverified_signals += 1;
+            self.note_refused(found);
             return;
         }
         let member = matches!(found, Found::Group | Found::Session);
@@ -1004,14 +1008,21 @@ impl ProcessTree {
         drop(held);
         match result {
             Ok(sys::Delivery::Sent | sys::Delivery::Gone) => {}
-            Ok(sys::Delivery::Refused) => {
-                let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
-                obs.stats.unverified_signals += 1;
-            }
+            Ok(sys::Delivery::Refused) => self.note_refused(found),
             Err(error) => push_warning(
                 &self.warnings,
                 format!("Descendant signal failed: {error:?}"),
             ),
+        }
+    }
+
+    /// Count a signal that was not sent because its process could not be
+    /// verified, keeping those meant for a marked process apart.
+    fn note_refused(&self, found: Found) {
+        let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+        obs.stats.unverified_signals += 1;
+        if matches!(found, Found::Marked(..)) {
+            obs.unverified_marked += 1;
         }
     }
 
