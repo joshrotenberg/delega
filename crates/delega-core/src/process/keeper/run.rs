@@ -383,6 +383,8 @@ struct Finished {
     /// Whether the final census proved the tree empty (Linux, with a
     /// subreaper).
     proven: bool,
+    /// Whether the last census or freeze before the reap had a hole (macOS).
+    unproven: bool,
 }
 
 /// The owner asked for the reap: everything is settled on its side. Anything
@@ -404,12 +406,32 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
     } else {
         0
     };
+    // The last answers before the reap: their holes go into the reply, so
+    // a process first seen ambiguous here, or a read that failed here, keeps
+    // the verdict from confirmed.
     #[cfg(target_os = "macos")]
-    let live = if super::track::get().is_some() && census(pid) > 0 {
-        freeze(pid).await
+    let (live, unproven) = if super::track::get().is_some() {
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let (counted, mut detail) = census_report(pid);
+        // Test seam: the final census sees one process it cannot prove.
+        #[cfg(test)]
+        if std::env::var_os(super::AMBIGUOUS_AT_REAP_ENV).is_some() {
+            detail = detail.replace("ambiguous=0", "ambiguous=1");
+        }
+        let mut unproven = super::link::reply_unproven("census", &detail);
+        let live = if counted > 0 {
+            let (left, detail) = freeze_report(pid).await;
+            unproven |= super::link::reply_unproven("freeze", &detail);
+            left
+        } else {
+            0
+        };
+        (live, unproven)
     } else {
-        0
+        (0, false)
     };
+    #[cfg(not(target_os = "macos"))]
+    let unproven = false;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let live = 0;
     if !exited && !sys::leader_has_exited(pid) {
@@ -445,7 +467,11 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
         let _ = subreaper;
         false
     };
-    reaped.map(|()| Finished { live, proven })
+    reaped.map(|()| Finished {
+        live,
+        proven,
+        unproven,
+    })
 }
 
 /// Reap `pid` with `reap` until it succeeds or `bound` passes.
@@ -472,7 +498,15 @@ fn consume_reap(
 /// The answer to `reap`: `reaped` only when the program was reaped.
 fn reap_reply(finished: Result<Finished, String>) -> FromKeeper {
     match finished {
-        Ok(Finished { live, proven }) => FromKeeper::Reaped { live, proven },
+        Ok(Finished {
+            live,
+            proven,
+            unproven,
+        }) => FromKeeper::Reaped {
+            live,
+            proven,
+            unproven,
+        },
         Err(why) => FromKeeper::Warn(why),
     }
 }
@@ -786,6 +820,7 @@ mod tests {
         let reply = reap_reply(result.map(|()| Finished {
             live: 0,
             proven: true,
+            unproven: false,
         }));
         assert!(matches!(reply, FromKeeper::Warn(_)), "{reply:?}");
     }
@@ -805,11 +840,13 @@ mod tests {
         assert_eq!(
             reap_reply(Ok(Finished {
                 live: 2,
-                proven: false
+                proven: false,
+                unproven: false,
             })),
             FromKeeper::Reaped {
                 live: 2,
-                proven: false
+                proven: false,
+                unproven: false,
             }
         );
     }

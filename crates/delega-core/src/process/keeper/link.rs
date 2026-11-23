@@ -101,6 +101,8 @@ pub(crate) struct Reaped {
     /// Whether the final census before the reap proved the tree empty
     /// (Linux, with a subreaper).
     pub proven: bool,
+    /// Whether the keeper's last answer before the reap had a hole (macOS).
+    pub unproven: bool,
 }
 
 /// What the owner's shared state holds of the keeper: the socket, and what the
@@ -248,10 +250,14 @@ impl KeeperLink {
             _ => None,
         };
         if let Some(reaped) = confirmed {
-            self.handle.log(format!(
-                "reaped: live={} proven={}",
-                reaped.live, reaped.proven
-            ));
+            self.handle.log(if reaped.unproven {
+                format!(
+                    "reaped: live={} proven={} unproven=true",
+                    reaped.live, reaped.proven
+                )
+            } else {
+                format!("reaped: live={} proven={}", reaped.live, reaped.proven)
+            });
         }
         // The keeper exits after it said `reaped`; one that does not is
         // killed. It is this process's own child, so its pid is ours.
@@ -602,10 +608,23 @@ fn follow(
                         let _ = tx.send((live, detail));
                     }
                 }
-                FromKeeper::Reaped { live, proven } => {
+                FromKeeper::Reaped {
+                    live,
+                    proven,
+                    unproven,
+                } => {
+                    // A hole in the last answer is as sticky as one in any
+                    // earlier answer.
+                    if unproven {
+                        state.unproven.store(true, Ordering::SeqCst);
+                    }
                     state.reaped.store(true, Ordering::SeqCst);
                     if let Some(tx) = lock(&state.reaped_tx).take() {
-                        let _ = tx.send(Reaped { live, proven });
+                        let _ = tx.send(Reaped {
+                            live,
+                            proven,
+                            unproven,
+                        });
                     }
                 }
                 FromKeeper::Releasing => {

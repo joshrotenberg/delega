@@ -70,6 +70,12 @@ pub(crate) use link::{KeeperLink, LaunchSpec, LinkHandle, StartError, start};
 #[cfg(test)]
 pub(crate) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS";
 
+/// Test seam: a macOS keeper started by the tests with this variable reports
+/// its final census before the reap as having met one process it could not
+/// prove either way, as when an orphan is first seen there.
+#[cfg(test)]
+pub(crate) const AMBIGUOUS_AT_REAP_ENV: &str = "DELEGA_TEST_KEEPER_AMBIGUOUS_AT_REAP";
+
 /// Test seam: a keeper started by the tests with this variable holds every
 /// freeze of its tree (Linux) until the file it names exists, so a test can
 /// order the keeper's freeze after an event of the owner. After 60 s it fails

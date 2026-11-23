@@ -203,6 +203,10 @@ pub(crate) enum FromKeeper {
     Reaped {
         live: usize,
         proven: bool,
+        /// Whether the keeper's last answer before the reap had a hole: a
+        /// process it could not prove either way, a failed read, or a refusal
+        /// (macOS; always false on Linux, where `proven` decides).
+        unproven: bool,
     },
     /// The keeper is about to reap the program on its own (a signal, its
     /// ceiling, or a new parent): the owner must send no more signals that
@@ -232,9 +236,18 @@ impl FromKeeper {
             }
             FromKeeper::Reaped {
                 live,
-                proven: false,
-            } => format!("reaped {live}"),
-            FromKeeper::Reaped { live, proven: true } => format!("reaped {live} proven"),
+                proven,
+                unproven,
+            } => {
+                let mut line = format!("reaped {live}");
+                if *proven {
+                    line.push_str(" proven");
+                }
+                if *unproven {
+                    line.push_str(" unproven");
+                }
+                line
+            }
             FromKeeper::Releasing => "releasing".into(),
             FromKeeper::Warn(text) => format!("warn {}", one_line(text)),
         }
@@ -277,15 +290,19 @@ impl FromKeeper {
                     None | Some("") => 0,
                     Some(n) => n.parse().ok()?,
                 };
-                let proven = match words.next() {
-                    None => false,
-                    Some("proven") => true,
-                    Some(_) => return None,
-                };
-                if words.next().is_some() {
-                    return None;
+                let (mut proven, mut unproven) = (false, false);
+                for word in words {
+                    match word {
+                        "proven" if !proven => proven = true,
+                        "unproven" if !unproven => unproven = true,
+                        _ => return None,
+                    }
                 }
-                FromKeeper::Reaped { live, proven }
+                FromKeeper::Reaped {
+                    live,
+                    proven,
+                    unproven,
+                }
             }
             "releasing" => FromKeeper::Releasing,
             "warn" => FromKeeper::Warn(rest.to_string()),
@@ -423,14 +440,22 @@ mod tests {
             FromKeeper::Reaped {
                 live: 0,
                 proven: false,
+                unproven: false,
             },
             FromKeeper::Reaped {
                 live: 0,
                 proven: true,
+                unproven: false,
             },
             FromKeeper::Reaped {
                 live: 3,
                 proven: false,
+                unproven: false,
+            },
+            FromKeeper::Reaped {
+                live: 0,
+                proven: false,
+                unproven: true,
             },
             FromKeeper::Releasing,
             FromKeeper::Warn("x y".into()),

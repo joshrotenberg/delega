@@ -450,6 +450,46 @@ async fn measure_the_keepers_cost() {
     }
 }
 
+/// Ambiguity first seen in the keeper's last census, the one before the reap
+/// (macOS): no earlier answer had a hole, the reap reply carries it, and the
+/// verdict is Unconfirmed.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn ambiguity_first_seen_at_the_reap_makes_the_verdict_unconfirmed() {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "exit 0", LONG);
+    spec.keeper = Some(test_keeper().env(crate::process::keeper::AMBIGUOUS_AT_REAP_ENV, "1"));
+    let report = ProcessHandle::start(spec).wait().await;
+    let keeper = report.diagnostics.keeper.clone().expect("a keeper");
+    let earlier: Vec<&String> = keeper
+        .tree_reports
+        .iter()
+        .filter(|r| !r.starts_with("reaped"))
+        .collect();
+    assert!(
+        earlier.iter().all(|r| r.contains("ambiguous=0")),
+        "{earlier:?}"
+    );
+    assert!(
+        keeper
+            .tree_reports
+            .last()
+            .is_some_and(|r| r.contains("unproven=true")),
+        "{:?}",
+        keeper.tree_reports
+    );
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => {
+            assert_eq!(
+                reason,
+                crate::process::KEEPER_UNPROVEN_REASON,
+                "{report:#?}"
+            );
+        }
+        other => panic!("{other:?}: {report:#?}"),
+    }
+}
+
 /// A macOS keeper whose fork tracking is off (its self-test failed; here the
 /// test seam) says so: the report has `fork_tracking` false and a warning, and
 /// the run is cleaned up by listings and the marker as before the tracker.
