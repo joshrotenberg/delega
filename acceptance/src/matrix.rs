@@ -705,39 +705,28 @@ mod timing_gap_tests {
 
     #[test]
     fn timing_gap_selection_is_exactly_the_timing_dependent_gap_rows() {
-        // macOS with its programs' environment hidden has the most gap rows;
-        // Linux has none.
-        let linux = all_for(Machine {
-            os: "linux",
-            hides_system_env: false,
-        });
-        assert!(linux.iter().all(|r| !is_timing_gap(r)));
-        let rows = all_for(Machine {
-            os: "macos",
-            hides_system_env: true,
-        });
-        let visible = all_for(Machine {
-            os: "macos",
-            hides_system_env: false,
-        });
-        let count = |rows: &[Row]| rows.iter().filter(|r| is_timing_gap(r)).count();
-        assert!(count(&visible) < count(&rows));
-        assert!(
-            visible
-                .iter()
-                .all(|r| !is_timing_gap(r) || r.variant == "relay")
-        );
-        let expected = rows.iter().filter(|r| r.expect.timing_dependent).count();
-        let selected: Vec<&Row> = rows.iter().filter(|r| is_timing_gap(r)).collect();
-        assert!(expected > 0, "the matrix has timing-dependent gap rows");
-        assert_eq!(selected.len(), expected);
-        assert!(selected.len() < rows.len());
-        for row in &selected {
-            assert!(row.expect.timing_dependent);
-            assert_ne!(row.expect.leak, LeakClass::None, "{}", row.id);
-        }
-        for row in rows.iter().filter(|r| !is_timing_gap(r)) {
-            assert!(!row.expect.timing_dependent, "{}", row.id);
+        // With the keeper's subreaper (Linux) and its fork tracker (macOS) no
+        // row is a timing-dependent gap on any machine, so the selection is
+        // empty; a row that is one again must be selected.
+        for machine in [
+            Machine {
+                os: "linux",
+                hides_system_env: false,
+            },
+            Machine {
+                os: "macos",
+                hides_system_env: true,
+            },
+            Machine {
+                os: "macos",
+                hides_system_env: false,
+            },
+        ] {
+            let rows = all_for(machine);
+            let expected = rows.iter().filter(|r| r.expect.timing_dependent).count();
+            let selected = rows.iter().filter(|r| is_timing_gap(r)).count();
+            assert_eq!(selected, expected, "{machine:?}");
+            assert_eq!(selected, 0, "{machine:?}");
         }
     }
 }
