@@ -210,6 +210,34 @@ pub(super) fn pidfd_exited(fd: &std::os::fd::OwnedFd) -> bool {
     !matches!(poll(&mut fds, Some(&now)), Ok(0))
 }
 
+/// Whether `target` names no live process (Linux): no process holds the pid,
+/// or the one holding it has exited (its pidfd is readable). Used where a
+/// process could not be verified: if whatever holds the pid now has exited,
+/// the process that was found has exited too (it held the pid then, and a pid
+/// is reused only after its holder is reaped), so there is nothing to signal.
+/// A pidfd that cannot be opened for another reason, or a poll that fails,
+/// is not taken as gone.
+#[cfg(target_os = "linux")]
+pub(super) fn pid_gone(target: i32) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    use rustix::process::{PidfdFlags, pidfd_open};
+    let Ok(raw) = pid(target) else {
+        return false;
+    };
+    match pidfd_open(raw, PidfdFlags::empty()) {
+        Err(Errno::SRCH) => true,
+        Err(_) => false,
+        Ok(fd) => {
+            let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+            let now = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            matches!(poll(&mut fds, Some(&now)), Ok(1)) && fds[0].revents().contains(PollFlags::IN)
+        }
+    }
+}
+
 /// The start time of a process in clock ticks (Linux), for checking at
 /// delivery that a pid still names the process it named when it was found.
 #[cfg(target_os = "linux")]
@@ -549,6 +577,33 @@ mod tests {
             session_lookup(std::process::id() as i32),
             SessionLookup::In(_)
         ));
+    }
+
+    /// A live process is never taken as gone, an exited one that is not yet
+    /// reaped is, and so is a pid nothing holds. Not run on macOS; runs in the
+    /// Linux CI job.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_pid_that_names_no_live_process_is_gone() {
+        use crate::test_spawn::Guarded;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .guarded_spawn()
+            .expect("start a child");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        let alive = pid_gone(pid);
+        let _ = child.kill();
+        // Exited but not reaped: a zombie whose pidfd is readable.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !leader_has_exited(pid) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let zombie = pid_gone(pid);
+        let _ = child.wait();
+        assert!(!alive, "a live process was taken as gone");
+        assert!(zombie, "an exited process was not taken as gone");
+        assert!(pid_gone(i32::MAX - 1));
+        assert!(!pid_gone(std::process::id() as i32));
     }
 
     #[test]

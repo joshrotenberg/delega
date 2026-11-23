@@ -981,9 +981,16 @@ impl ProcessTree {
                 Found::Marked(ticks, _) => ticks,
             };
             // A tracked or marked process without a recorded start time
-            // cannot be verified at delivery: it is not signalled.
+            // cannot be verified at delivery: it is not signalled. It is a
+            // refusal only while something may still hold its pid; a pid
+            // that names no live process means it has exited (a relay
+            // generation that ended between the listing and here).
             if matches!(found, Found::Tracked | Found::Marked(..)) && ticks.is_none() {
-                Ok(sys::Delivery::Refused)
+                Ok(if sys::pid_gone(pid) {
+                    sys::Delivery::Gone
+                } else {
+                    sys::Delivery::Refused
+                })
             } else {
                 sys::signal_checked(pid, signal, |stat| match found {
                     Found::Group => stat.group == child,
