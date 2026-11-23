@@ -334,7 +334,7 @@ impl Shared {
         let keeper = self.keeper.clone();
         let keeper_freeze = async move {
             match keeper {
-                Some(k) if k.subreaper() && !k.lost() => k.freeze().await,
+                Some(k) if k.tracks_tree() && !k.lost() => k.freeze().await,
                 _ => None,
             }
         };
@@ -433,6 +433,7 @@ impl Shared {
         let keeper = self.keeper.as_ref().map(|k| KeeperDiagnostics {
             pid: u32::try_from(k.keeper_pid).ok(),
             subreaper: k.subreaper(),
+            fork_tracking: k.tracker(),
             lost: k.lost(),
             freeze_rounds: self.freeze_rounds.load(Ordering::SeqCst),
             freeze_incomplete: self.freeze_incomplete.load(Ordering::SeqCst),
@@ -959,14 +960,15 @@ impl OwnedProcess {
                         if !view.is_empty() {
                             active = true;
                         }
-                        // On Linux the keeper's tree holds every live
+                        // On Linux (subreaper) and on macOS (fork
+                        // tracking) the keeper's tree holds every live
                         // descendant; a sweep that finds nothing counts only
-                        // when the keeper's walk agrees.
+                        // when the keeper's census agrees.
                         let mut tree_live = false;
                         if view.is_empty()
                             && leader_exited
                             && let Some(keeper) = shared.keeper.as_ref()
-                            && keeper.subreaper()
+                            && keeper.tracks_tree()
                             && !keeper.lost()
                         {
                             let live = if signal == Signal::KILL {
@@ -1140,9 +1142,10 @@ impl OwnedProcess {
             tokio::time::sleep_until(next_kill).await;
         }
         shared.signal_group(Signal::KILL);
-        // The keeper's walk needs no process listing (Linux).
+        // The keeper's walk needs no process listing (Linux, and macOS with
+        // fork tracking).
         if let Some(keeper) = shared.keeper.as_ref()
-            && keeper.subreaper()
+            && keeper.tracks_tree()
             && !keeper.lost()
         {
             let _ = keeper.freeze().await;

@@ -28,6 +28,10 @@ toml.workspace = true
 # the keeper's control socket on fd 0, `pipe` makes the provider's pipes.
 rustix = { workspace = true, features = ["fs", "net", "stdio", "pipe", "event"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# libproc (`proc_pidinfo`, `proc_listpids`) for the keeper's fork tracker.
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

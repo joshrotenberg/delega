@@ -78,6 +78,8 @@ struct State {
     lost: AtomicBool,
     closed: AtomicBool,
     subreaper: AtomicBool,
+    /// The keeper tracks forks (macOS).
+    tracker: AtomicBool,
     pending: Mutex<HashMap<u64, oneshot::Sender<(usize, String)>>>,
     /// The latest answers to census and freeze requests, for the diagnostics.
     tree_log: Mutex<Vec<String>>,
@@ -126,6 +128,17 @@ impl LinkHandle {
     /// Whether the keeper is a child subreaper (Linux).
     pub(crate) fn subreaper(&self) -> bool {
         self.state.subreaper.load(Ordering::SeqCst)
+    }
+
+    /// Whether the keeper tracks forks (macOS).
+    pub(crate) fn tracker(&self) -> bool {
+        self.state.tracker.load(Ordering::SeqCst)
+    }
+
+    /// Whether the keeper's census and freeze cover every descendant: it is a
+    /// child subreaper (Linux) or tracks forks (macOS).
+    pub(crate) fn tracks_tree(&self) -> bool {
+        self.subreaper() || self.tracker()
     }
 
     /// Whether any census or freeze answer of this run was unproven in a way a
@@ -254,7 +267,9 @@ impl KeeperLink {
 
 /// Whether a census or freeze answer leaves a hole no later answer repairs:
 /// a refused hold (a process that was never signalled), a failed read of
-/// `/proc`, or a freeze that did not complete. A census that is incomplete
+/// `/proc` (or of libproc on macOS), a process the macOS tracker could
+/// neither prove part of the tree nor rule out (`ambiguous`), or a freeze
+/// that did not complete. A census that is incomplete
 /// because the tree keeps changing reports a nonzero count and never claimed
 /// an empty tree, so it is not one. An answer without details (no walk) is
 /// not one.
@@ -267,6 +282,7 @@ pub(crate) fn reply_unproven(verb: &str, detail: &str) -> bool {
     let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
     nonzero("refused")
         || nonzero("read_failures")
+        || nonzero("ambiguous")
         || (verb == "freeze" && field("complete") == Some("false"))
 }
 
@@ -546,6 +562,13 @@ fn follow(
                         "The keeper could not become a child subreaper: {why}"
                     )),
                 },
+                FromKeeper::Tracker(result) => match result {
+                    Ok(()) => state.tracker.store(true, Ordering::SeqCst),
+                    Err(why) => lock(&state.warnings).push(format!(
+                        "The keeper does not track forks, so cleanup relies on process \
+                         listings and the run marker: {why}"
+                    )),
+                },
                 FromKeeper::Started(pid) => {
                     started = true;
                     handshake(Ok(pid));
@@ -681,5 +704,14 @@ mod tests {
             "passes=1 complete=true refused=0 read_failures=0"
         ));
         assert!(!reply_unproven("census", ""));
+        // The macOS tracker: an ambiguous process is a hole.
+        assert!(reply_unproven(
+            "census",
+            "passes=2 complete=false refused=0 read_failures=0 losses=1 recovered=0 ambiguous=1"
+        ));
+        assert!(!reply_unproven(
+            "census",
+            "passes=2 complete=true refused=0 read_failures=0 losses=3 recovered=3 ambiguous=0"
+        ));
     }
 }

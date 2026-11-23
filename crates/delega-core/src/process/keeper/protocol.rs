@@ -169,6 +169,9 @@ impl Hello {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FromKeeper {
     Subreaper(Result<(), String>),
+    /// Whether the keeper tracks forks (macOS): `tracker on`, or `tracker
+    /// off` with the reason.
+    Tracker(Result<(), String>),
     Started(i32),
     SpawnFailed {
         errno: i32,
@@ -203,6 +206,8 @@ impl FromKeeper {
         match self {
             FromKeeper::Subreaper(Ok(())) => "subreaper on".into(),
             FromKeeper::Subreaper(Err(why)) => format!("subreaper off {}", one_line(why)),
+            FromKeeper::Tracker(Ok(())) => "tracker on".into(),
+            FromKeeper::Tracker(Err(why)) => format!("tracker off {}", one_line(why)),
             FromKeeper::Started(pid) => format!("started {pid}"),
             FromKeeper::SpawnFailed { errno, message } => {
                 format!("spawn-failed {errno} {}", one_line(message))
@@ -232,6 +237,11 @@ impl FromKeeper {
             "subreaper" => match rest.split_once(' ').unwrap_or((rest, "")) {
                 ("on", _) => FromKeeper::Subreaper(Ok(())),
                 ("off", why) => FromKeeper::Subreaper(Err(why.to_string())),
+                _ => return None,
+            },
+            "tracker" => match rest.split_once(' ').unwrap_or((rest, "")) {
+                ("on", _) => FromKeeper::Tracker(Ok(())),
+                ("off", why) => FromKeeper::Tracker(Err(why.to_string())),
                 _ => return None,
             },
             "started" => FromKeeper::Started(rest.parse().ok()?),
@@ -380,6 +390,8 @@ mod tests {
         for msg in [
             FromKeeper::Subreaper(Ok(())),
             FromKeeper::Subreaper(Err("EPERM no".into())),
+            FromKeeper::Tracker(Ok(())),
+            FromKeeper::Tracker(Err("self-test failed".into())),
             FromKeeper::Started(42),
             FromKeeper::SpawnFailed {
                 errno: 2,

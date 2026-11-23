@@ -157,9 +157,14 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
         ok
     };
     // Without a subreaper (and on every system but Linux) an orphan can leave
-    // the keeper's tree, so no census of it proves anything at the reap.
+    // the keeper's tree, so no census of it proves anything at the reap. The
+    // macOS fork tracker does not change that: its reap answer carries no
+    // proof.
     #[cfg(not(target_os = "linux"))]
     let subreaper = false;
+    // Before the program starts, so that it is watched from its first fork.
+    #[cfg(target_os = "macos")]
+    say(&FromKeeper::Tracker(super::track::prepare()));
 
     let mut fds = fds.into_iter();
     let stdin = if hello.stdin {
@@ -211,6 +216,10 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
         });
         return 0;
     };
+    #[cfg(target_os = "macos")]
+    if let Some(tracker) = super::track::get() {
+        tracker.start(pid);
+    }
     say(&FromKeeper::Started(pid));
 
     let watch = tx.clone();
@@ -384,7 +393,13 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
     } else {
         0
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let live = if super::track::get().is_some() && census(pid) > 0 {
+        freeze(pid).await
+    } else {
+        0
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let live = 0;
     if !exited && !sys::leader_has_exited(pid) {
         if !signal_program(pid, Signal::KILL) {
@@ -468,7 +483,7 @@ fn signal_program(pid: i32, signal: Signal) -> bool {
 }
 
 /// The live processes in the keeper's tree.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn census(pid: i32) -> usize {
     census_report(pid).0
 }
@@ -480,15 +495,21 @@ fn census_report(_pid: i32) -> (usize, String) {
         let walked = super::walk::census(rustix::process::getpid().as_raw_nonzero().get(), _pid);
         (walked.effective_live(), walked.detail())
     }
+    #[cfg(target_os = "macos")]
+    if let Some(tracker) = super::track::get() {
+        let report = tracker.census();
+        return (report.effective_live(), report.detail());
+    }
     #[cfg(not(target_os = "linux"))]
     {
         (usize::from(!sys::leader_has_exited(_pid)), String::new())
     }
 }
 
-/// Stop, kill and count the keeper's tree (Linux). Elsewhere the keeper has no
-/// tree beyond the program and answers with the census.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Stop, kill and count the keeper's tree (Linux, and macOS when it tracks
+/// forks). Elsewhere the keeper has no tree beyond the program and answers
+/// with the census.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 async fn freeze(pid: i32) -> usize {
     freeze_report(pid).await.0
 }
@@ -555,6 +576,16 @@ async fn freeze_report(pid: i32) -> (usize, String) {
         .await
         .unwrap_or((usize::MAX, "the freeze panicked".into()))
     }
+    #[cfg(target_os = "macos")]
+    if let Some(tracker) = super::track::get() {
+        let tracker = tracker.clone();
+        return tokio::task::spawn_blocking(move || {
+            let report = tracker.freeze_kill();
+            (report.effective_live(), report.detail())
+        })
+        .await
+        .unwrap_or((usize::MAX, "the freeze panicked".into()));
+    }
     #[cfg(not(target_os = "linux"))]
     {
         census_report(pid)
@@ -580,7 +611,13 @@ async fn stop_alone(hello: &Hello, pid: i32, owner: Owner<'_>) {
         let _ = sys::signal_group(pid, Signal::CONT);
         stop_alone_linux(hello, pid, deadline).await;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    if super::track::get().is_some() {
+        stop_alone_tracked(hello, pid, deadline).await;
+    } else {
+        stop_alone_listed(hello, pid, deadline).await;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     stop_alone_listed(hello, pid, deadline).await;
     // An owner that may still be there must stop relying on the program's
     // pid before the reap frees it: say so and wait for its answer or its end
@@ -636,6 +673,41 @@ async fn stop_alone_linux(hello: &Hello, pid: i32, deadline: Instant) {
         let _ = sys::signal_group(pid, Signal::KILL);
         let live = freeze(pid).await;
         reap_orphans(pid);
+        if live == 0 && sys::leader_has_exited(pid) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            say(&FromKeeper::Warn(format!(
+                "{live} processes were still alive when the cleanup deadline passed"
+            )));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// With the fork tracker (macOS): TERM and SIGCONT to the program's group and
+/// to every process the tracker holds, the grace, then freezes until nothing
+/// is alive or the deadline passes, as on Linux.
+#[cfg(target_os = "macos")]
+async fn stop_alone_tracked(hello: &Hello, pid: i32, deadline: Instant) {
+    let Some(tracker) = super::track::get() else {
+        return;
+    };
+    let _ = sys::signal_group(pid, Signal::TERM);
+    let _ = sys::signal_group(pid, Signal::CONT);
+    let signaller = tracker.clone();
+    let _ = tokio::task::spawn_blocking(move || signaller.signal_all(Signal::TERM)).await;
+    let grace_end = Instant::now() + hello.grace;
+    while Instant::now() < grace_end.min(deadline) {
+        if sys::leader_has_exited(pid) && census(pid) == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    loop {
+        let _ = sys::signal_group(pid, Signal::KILL);
+        let live = freeze(pid).await;
         if live == 0 && sys::leader_has_exited(pid) {
             return;
         }

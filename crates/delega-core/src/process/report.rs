@@ -222,6 +222,11 @@ pub struct KeeperDiagnostics {
     /// Whether the keeper was a child subreaper (Linux), so every orphaned
     /// descendant became its child.
     pub subreaper: bool,
+    /// Whether the keeper tracked forks (macOS), so every descendant was
+    /// followed from its fork and is stopped by the keeper's freeze. `false`
+    /// with a warning when its self-test failed: cleanup then relies on
+    /// process listings and the run marker.
+    pub fork_tracking: bool,
     /// Whether the keeper ended before it reaped the program.
     pub lost: bool,
     /// Listings of every freeze that found a process not yet stopped.
@@ -229,9 +234,10 @@ pub struct KeeperDiagnostics {
     /// Whether a freeze ran out of listings while processes kept appearing.
     pub freeze_incomplete: bool,
     /// The latest answers of the keeper to the owner's census and freeze
-    /// requests (Linux), oldest first, bounded: the live count and how the
-    /// walk went (`passes`, `complete`, `refused`); last, its answer to the
-    /// reap (`reaped: live=<n> proven=<true|false>`).
+    /// requests (Linux, and macOS with fork tracking), oldest first, bounded:
+    /// the live count and how the walk went (`passes`, `complete`,
+    /// `refused`; on macOS also `losses`, `recovered` and `ambiguous`); last,
+    /// its answer to the reap (`reaped: live=<n> proven=<true|false>`).
     pub tree_reports: Vec<String>,
 }
 
@@ -242,6 +248,7 @@ impl KeeperDiagnostics {
         Self {
             pid: None,
             subreaper: false,
+            fork_tracking: false,
             lost: false,
             freeze_rounds: 0,
             freeze_incomplete: false,

@@ -91,6 +91,13 @@ async fn a_kept_run_reports_the_programs_exit_code_and_output() {
     assert!(keeper.pid.is_some() && !keeper.lost, "{keeper:?}");
     #[cfg(target_os = "linux")]
     assert!(keeper.subreaper, "{keeper:?}");
+    // Fails loudly where the tracker's self-test fails on macOS.
+    #[cfg(target_os = "macos")]
+    assert!(
+        keeper.fork_tracking,
+        "{keeper:?} {:?}",
+        report.diagnostics.warnings
+    );
 }
 
 #[tokio::test]

@@ -48,6 +48,8 @@
 mod link;
 mod protocol;
 mod run;
+#[cfg(target_os = "macos")]
+mod track;
 #[cfg(target_os = "linux")]
 mod walk;
 

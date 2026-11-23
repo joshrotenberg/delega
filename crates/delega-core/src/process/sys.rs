@@ -9,6 +9,9 @@ use rustix::process::{Pid, WaitId, WaitIdOptions, WaitIdStatus};
 
 use super::limits::EXIT_POLL_INTERVAL;
 
+#[cfg(target_os = "macos")]
+pub(super) mod darwin;
+
 pub(super) use rustix::process::Signal;
 
 /// Why a signal was not delivered.
