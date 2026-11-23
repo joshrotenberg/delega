@@ -202,12 +202,19 @@ fn settings_json(
 /// approves sandboxed commands without a `Bash` allow rule
 /// (`autoAllowBashIfSandboxed`). No network domain is allowed, so under
 /// `dontAsk` every host is refused.
-fn sandbox_value() -> Value {
+pub(super) fn sandbox_value(uid: u32) -> Value {
+    // Claude Code uses // for absolute paths. On macOS /tmp resolves to /private/tmp.
+    let deny_write = [
+        format!("//tmp/claude-{uid}/-*"),
+        #[cfg(target_os = "macos")]
+        format!("//private/tmp/claude-{uid}/-*"),
+    ];
     json!({
         "enabled": true,
         "failIfUnavailable": true,
         "allowUnsandboxedCommands": false,
         "autoAllowBashIfSandboxed": true,
+        "filesystem": { "denyWrite": deny_write },
     })
 }
 
@@ -353,7 +360,8 @@ fn build_grants(
     notes.extend([
         "build runs Bash inside Claude Code's sandbox, which approves sandboxed commands; \
          commands can write to the working directory and Claude Code's per-user temporary \
-         directory (in a git worktree, git commit also writes the main checkout's .git), \
+         directory except its per-project session folders (observed on macOS; in a git worktree, \
+         git commit also writes the main checkout's .git), \
          permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
          not added to the sandbox, so delega does not make it writable, though one inside a \
          location commands can write stays writable; the network is refused"
@@ -362,8 +370,8 @@ fn build_grants(
          directory and permissions.directories"
             .to_string(),
         "Claude Code sets TMPDIR to its own per-user temporary directory under /tmp; commands can \
-         write anywhere in it, and other Claude Code sessions of the same user also use it; the \
-         rest of /tmp is not writable by commands"
+         write files directly in it, and other Claude Code sessions of the same user also use it; \
+         the rest of /tmp is not writable by commands"
             .to_string(),
         "commands Claude Code does not approve inside the sandbox (for example one starting with \
          a variable assignment, eval, or git -c name=value) are denied and listed in \
@@ -377,7 +385,7 @@ fn build_grants(
         tools,
         allowed,
         guard: None,
-        sandbox: Some(sandbox_value()),
+        sandbox: Some(sandbox_value(rustix::process::geteuid().as_raw())),
         commands: Vec::new(),
         notes,
         unenforceable: vec![
