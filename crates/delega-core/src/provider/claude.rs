@@ -279,8 +279,8 @@ fn grants(inputs: &Inputs<'_>, ask: bool) -> Result<Grants, Refusal> {
     // applies the scoped Read rules above to them.
     if matches!(scope.mode, Mode::Write | Mode::Build) {
         tools.extend(["Edit", "Write"]);
+        // Claude Code uses the Edit rule for both file-editing tools.
         allowed.push(format!("Edit({})", rule_path(&scope.cwd, "cwd_unusable")?));
-        allowed.push(format!("Write({})", rule_path(&scope.cwd, "cwd_unusable")?));
         if ask {
             notes.push("NotebookEdit is offered: the working directory Edit allow rule covers notebook edits there, and edits elsewhere ask unless denied".into());
         } else {

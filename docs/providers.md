@@ -244,7 +244,7 @@ granted is denied at once. Denials come back in the result event's
 | Mode | `--tools` | `--allowedTools` | Settings |
 | --- | --- | --- | --- |
 | `read` | `Read,Glob,Grep` | `Read(//CWD/**)`, one `Read(//DIR/**)` per directory | hooks off |
-| `write` | `Read,Glob,Grep,Edit,Write` | the `read` rules plus `Edit(//CWD/**)`, `Write(//CWD/**)` | hooks off |
+| `write` | `Read,Glob,Grep,Edit,Write` | the `read` rules plus `Edit(//CWD/**)` | hooks off |
 | `build` | `Read,Glob,Grep,Edit,Write,Bash` | the `write` rules; no `Bash` rule | hooks off, `sandbox`; directories without `--add-dir` (see [Build](#build)) |
 | `full` | all nine built-in tools: `Read,Glob,Grep,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch` | the same nine, unscoped | hooks off |
 
@@ -252,6 +252,9 @@ granted is denied at once. Denials come back in the result event's
 let `Grep` read outside the working directory; unlisted, Claude Code applies the
 scoped `Read` rules to them, so they search only the working directory and the
 listed directories.
+
+In `write` and `build`, the scoped `Edit` rule covers both the `Edit` and
+`Write` tools.
 
 ### Build
 
@@ -291,11 +294,10 @@ these grants and restrictions ([Managed settings](#managed-settings)).
   start with `permissions_not_enforceable` instead. Claude Code 2.1.325 or later supports the hook interface. The guard has
   a 5 s timeout and a 2,000,000-byte input limit.
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
-  delega does not make it editable: no `Edit` or `Write` rule names it. One
-  inside the working directory is still covered by the working directory's
-  `Edit` and `Write` rules in `write`. In `build` it gets the `Read` rule only
-  and stays writable by commands when it lies inside a writable location
-  ([Build](#build)).
+  The `Edit` rule covers a listed directory only if it lies inside the working
+  directory. In `build`, listed directories get their `Read` rule without
+  `--add-dir` and stay writable by commands when they lie inside a writable
+  location ([Build](#build)).
 
 ### Text refused because it could change a rule
 

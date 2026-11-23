@@ -330,7 +330,6 @@ fn for_any_accepted_input_the_rules_split_into_exactly_the_expected_rules() {
         expected.extend(dirs.iter().map(|d| rule("Read", &d.to_string_lossy())));
         if mode == Mode::Write {
             expected.push(rule("Edit", &cwd));
-            expected.push(rule("Write", &cwd));
         }
         expected.extend(commands.iter().map(|c| format!("Bash({c})")));
         assert_eq!(

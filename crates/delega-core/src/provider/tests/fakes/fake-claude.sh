@@ -340,18 +340,23 @@ EOF
   return 1
 }
 
-# path_allowed TOOL PATH: an allow rule TOOL(//dir/**) covers PATH.
+# path_allowed TOOL PATH: a bare tool or a scoped allow rule covers PATH.
+# Edit rules cover all file-editing tools.
 path_allowed() {
   denied "$1" "$2" && return 1
+  case "$1" in
+    Edit|Write|NotebookEdit) rule_tool=Edit ;;
+    *) rule_tool=$1 ;;
+  esac
   hit=1
   old=$IFS
   IFS=$split_ifs
   for rule in $allowed; do
     case "$rule" in
       "$1") hit=0 ;;
-      "$1(//**)") hit=0 ;;
-      "$1(//"*"/**)")
-        inner=${rule#"$1(//"}
+      "$rule_tool(//**)") hit=0 ;;
+      "$rule_tool(//"*"/**)")
+        inner=${rule#"$rule_tool(//"}
         inner=${inner%"/**)"}
         case "$2" in "/$inner/"*) hit=0 ;; esac
         ;;
