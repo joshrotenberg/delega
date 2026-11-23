@@ -116,6 +116,23 @@ pub(super) fn find_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option
         .find(|candidate| is_executable(candidate))
 }
 
+/// The first executable file called `name` on `path`, a `PATH` value, the way
+/// a shell or `which` running in `cwd` finds it: an empty entry is `cwd` and a
+/// relative entry is taken from `cwd`. Used for tools a provider looks up
+/// itself, where relative entries count.
+pub(super) fn find_tool(name: &str, path: Option<&std::ffi::OsStr>, cwd: &Path) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .map(|dir| {
+            if dir.as_os_str().is_empty() {
+                cwd.to_path_buf()
+            } else {
+                cwd.join(dir)
+            }
+        })
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
 /// The first line of `--version` output, cut to a bound.
 pub(super) fn version_text(stdout: &str) -> Option<String> {
     let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;

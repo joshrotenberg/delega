@@ -51,7 +51,7 @@ fn full_report() -> Report {
                 }),
                 sandbox: Some(SandboxCheck {
                     system: "linux".to_string(),
-                    available: true,
+                    requirements_met: true,
                     requires: vec!["bwrap".to_string(), "socat".to_string()],
                     missing: Vec::new(),
                 }),
@@ -162,7 +162,7 @@ fn report_without_socat() -> Report {
     let mut report = full_report();
     let sandbox = SandboxCheck {
         system: "linux".to_string(),
-        available: false,
+        requirements_met: false,
         requires: vec!["bwrap".to_string(), "socat".to_string()],
         missing: vec!["socat".to_string()],
     };
@@ -182,22 +182,27 @@ fn the_text_names_a_missing_sandbox_tool_and_that_it_stops_build_runs() {
     let text = report_without_socat().to_text();
     for expected in [
         "claude: ready",
-        "  sandbox for build runs: not available, missing socat",
-        "  claude: sandbox_unavailable (stops build runs): Claude Code's sandbox needs bwrap and \
-         socat on PATH and socat was not found",
+        "  sandbox for build runs: socat not found on PATH",
+        "  claude: sandbox_unavailable (stops build runs): socat not found on PATH; Claude Code's \
+         sandbox needs bwrap and socat on Linux, so build runs with Claude usually fail at \
+         startup. Install socat. Doctor does not check other causes",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
     let available = full_report().to_text();
     assert!(
-        available.contains("  sandbox for build runs: available (bwrap, socat found)"),
+        available.contains(
+            "  sandbox for build runs: bwrap and socat found on PATH; not otherwise checked"
+        ),
         "{available}"
     );
     let mut macos = full_report();
-    macos.providers[0].sandbox = Some(SandboxCheck::of("macos", None));
+    macos.providers[0].sandbox = Some(SandboxCheck::of("macos", None, std::path::Path::new("/")));
     let text = macos.to_text();
     assert!(
-        text.contains("  sandbox for build runs: available (built into the system)"),
+        text.contains(
+            "  sandbox for build runs: no tool needed on this system; not otherwise checked"
+        ),
         "{text}"
     );
 }
@@ -211,8 +216,8 @@ fn the_json_names_a_missing_sandbox_tool_and_satisfies_the_schema() {
     assert_eq!(
         value["providers"][0]["sandbox"],
         json!({
-            "available": false,
             "missing": ["socat"],
+            "requirements_met": false,
             "requires": ["bwrap", "socat"],
             "system": "linux"
         })

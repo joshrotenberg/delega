@@ -624,7 +624,7 @@
           "type": "boolean"
         },
         "sandbox": {
-          "description": "For Claude Code, whether the sandbox `build` runs require can start.\nNull for Codex.",
+          "description": "For Claude Code, the platform and `PATH` dependencies of the sandbox\n`build` runs require, as checked. Null for Codex.",
           "anyOf": [
             {
               "$ref": "#/$defs/SandboxCheck"
@@ -733,22 +733,22 @@
       ]
     },
     "SandboxCheck": {
-      "description": "Whether Claude Code's sandbox, which `build` runs require, can start on this\nsystem, as far as doctor can tell without starting it.",
+      "description": "What doctor checks of the platform and `PATH` dependencies of Claude Code's\nsandbox, which `build` runs require. It looks for files and starts nothing,\nso it is not proof the sandbox starts: a kernel or security policy that\nblocks user namespaces, for example, is not checked.",
       "type": "object",
       "properties": {
-        "available": {
-          "description": "Whether the sandbox is expected to start: on macOS always (it uses the\nbuilt-in Seatbelt framework), on Linux when every tool in `requires` was\nfound, elsewhere never.",
-          "type": "boolean"
-        },
         "missing": {
-          "description": "Those of `requires` not found on the absolute entries of the worker's\n`PATH`.",
+          "description": "Those of `requires` not found on the worker's `PATH`. Relative and\nempty entries are taken from the working directory.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
+        "requirements_met": {
+          "description": "Whether the checked dependencies are met: on macOS always (Claude Code\nuses the built-in Seatbelt framework), on Linux when every tool in\n`requires` was found on the worker's `PATH`, elsewhere never (Claude\nCode has no sandbox there). Other causes of a failed start are not\nchecked.",
+          "type": "boolean"
+        },
         "requires": {
-          "description": "The executables the sandbox needs on this system: `bwrap` and `socat` on\nLinux, none on macOS.",
+          "description": "The executables looked for: `bwrap` and `socat` on Linux, none\nelsewhere.",
           "type": "array",
           "items": {
             "type": "string"
@@ -761,7 +761,7 @@
       },
       "required": [
         "system",
-        "available",
+        "requirements_met",
         "requires",
         "missing"
       ]

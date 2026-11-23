@@ -297,13 +297,24 @@ pub async fn diagnose_at(
     status: &crate::config::Status,
     system: &SystemPaths,
 ) -> Result<Report, Refusal> {
+    diagnose_on(options, status, system, std::env::consts::OS).await
+}
+
+/// [`diagnose_at`] with Claude Code's sandbox dependencies judged for `os`
+/// instead of this system, so a test can build Linux's report on any system.
+pub(crate) async fn diagnose_on(
+    options: &ProviderOptions,
+    status: &crate::config::Status,
+    system: &SystemPaths,
+    os: &str,
+) -> Result<Report, Refusal> {
     let options = ProviderOptions {
         system_paths: system.clone(),
         ..options.clone()
     };
     let (claude, codex) = tokio::join!(
-        doctor::check(Provider::Claude, &options),
-        doctor::check(Provider::Codex, &options)
+        doctor::check_on(Provider::Claude, &options, os),
+        doctor::check_on(Provider::Codex, &options, os)
     );
     let inspection = crate::process::check_inspection().await;
     let mut providers = Vec::new();
@@ -538,16 +549,22 @@ fn provider_text(out: &mut String, found: &ProviderCheck, managed_mcp_blocks_run
     );
 }
 
-/// The line that says whether the sandbox `build` runs require can start.
+/// The line that says what was checked of the sandbox `build` runs require.
 fn sandbox_text(out: &mut String, sandbox: &SandboxCheck) {
-    let detail = if sandbox.available && sandbox.requires.is_empty() {
-        "available (built into the system)".to_string()
-    } else if sandbox.available {
-        format!("available ({} found)", sandbox.requires.join(", "))
+    let detail = if sandbox.requirements_met && sandbox.requires.is_empty() {
+        "no tool needed on this system; not otherwise checked".to_string()
+    } else if sandbox.requirements_met {
+        format!(
+            "{} found on PATH; not otherwise checked",
+            sandbox.requires.join(" and ")
+        )
     } else if sandbox.missing.is_empty() {
-        format!("not available on this system ({})", sandbox.system)
+        format!(
+            "Claude Code has no sandbox on this system ({})",
+            sandbox.system
+        )
     } else {
-        format!("not available, missing {}", sandbox.missing.join(", "))
+        format!("{} not found on PATH", sandbox.missing.join(" and "))
     };
     let _ = writeln!(out, "  sandbox for build runs: {detail}");
 }
