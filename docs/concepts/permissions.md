@@ -54,7 +54,9 @@ Code's [Strict](../providers.md#strict).
 ## Live decisions
 
 Claude Code runs supervised over MCP or Rust can set `on_request: ask`. The
-supervisor can allow or deny each eligible tool use. The view gives bounded,
+caller allows or denies each eligible tool use. Over MCP the caller is usually
+the supervising agent; the plugin's delegate skill tells it to ask the person
+it works for before allowing anything. The view gives bounded,
 redacted arguments needed for a decision and reports file content by size.
 The result records decisions in `permissions.asked`. See
 [Permissions](../api.md#permissions) for the timeout and

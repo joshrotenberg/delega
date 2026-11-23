@@ -106,14 +106,26 @@ need process diagnostics, activity history or every field of the result.
 ## Answer a permission request
 
 For Claude Code, set `permissions.on_request` to `ask` to receive eligible
-tool requests. Inspect the tool and redacted input summary in
-`pending_interactions`. Pass the entry's ID as `interaction` to `respond` and
-choose `allow` or `deny`. Deny a Bash request if its summary has
-`truncated: true` because the full command may be hidden. The request is denied
-if `permissions.ask_timeout`
-expires. Read `permissions.asked` in the final result for the decision and
-whether the response reached the provider pipe. Use `follow_up` for a question
-in the worker's final answer.
+tool requests. A pending request appears in `pending_interactions` with its tool
+and a redacted input summary.
+
+The person you work for decides what a worker may do. For each pending request:
+
+1. Show the person the tool and what the summary says it would do: the command,
+   the file path, the URL or the search.
+2. Answer with their decision: pass the entry's ID as `interaction` to `respond`
+   with `allow` or `deny`.
+
+You may deny a request on your own, for example one that is clearly outside the
+assignment, and tell the person you did. Never allow a request without the
+person's answer. Deny a Bash request whose summary has `truncated: true`,
+because the full command is hidden from both of you.
+
+A request nobody answers is denied when `permissions.ask_timeout` expires (120
+seconds by default). A person may need longer, so set it when you start the
+run, up to 600. Read `permissions.asked` in the final result for each decision
+and whether it reached the provider. Use `follow_up` for a question in the
+worker's final answer.
 
 ## Read a long answer
 
