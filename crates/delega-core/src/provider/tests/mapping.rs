@@ -106,17 +106,12 @@ fn claude_read_mode_grants_reading_the_working_directory_and_nothing_else() {
 }
 
 #[test]
-fn claude_write_mode_adds_edit_and_write_scoped_to_the_working_directory() {
+fn claude_write_mode_scopes_edit_and_write_tools_with_one_edit_rule() {
     let rig = Rig::new();
     let mut request = rig.request(Provider::Claude, "p");
     request.permissions.mode = Mode::Write;
     let plan = dry(&rig, &request);
-    let allowed = format!(
-        "{},{},{}",
-        rule(&rig, "Read"),
-        rule(&rig, "Edit"),
-        rule(&rig, "Write")
-    );
+    let allowed = format!("{},{}", rule(&rig, "Read"), rule(&rig, "Edit"));
     let expected = claude_base(
         &rig,
         "Read,Glob,Grep,Edit,Write",
@@ -124,6 +119,11 @@ fn claude_write_mode_adds_edit_and_write_scoped_to_the_working_directory() {
         &json!({"disableAllHooks": true}),
     );
     assert_eq!(plan.args[..plan.args.len() - 1], expected[..]);
+    assert!(
+        plan.mapping
+            .settings
+            .contains(&format!("allowedTools={allowed}"))
+    );
     assert!(
         plan.notes
             .iter()
@@ -137,12 +137,7 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
     let mut request = rig.request(Provider::Claude, "p");
     request.permissions.mode = Mode::Build;
     let plan = dry(&rig, &request);
-    let allowed = format!(
-        "{},{},{}",
-        rule(&rig, "Read"),
-        rule(&rig, "Edit"),
-        rule(&rig, "Write")
-    );
+    let allowed = format!("{},{}", rule(&rig, "Read"), rule(&rig, "Edit"));
     let settings = json!({
         "disableAllHooks": true,
         "sandbox": {
@@ -154,6 +149,11 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
     });
     let expected = claude_base(&rig, "Read,Glob,Grep,Edit,Write,Bash", &allowed, &settings);
     assert_eq!(plan.args[..plan.args.len() - 1], expected[..]);
+    assert!(
+        plan.mapping
+            .settings
+            .contains(&format!("allowedTools={allowed}"))
+    );
     assert_eq!(plan.mapping.mode, Mode::Build);
     assert!(plan.mapping.commands.is_empty());
     assert!(
