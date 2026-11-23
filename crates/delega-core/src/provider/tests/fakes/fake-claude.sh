@@ -237,7 +237,14 @@ if [ "$input_format" = stream-json ]; then
   IFS= read -r response || exit 74
   case "$response" in *'"type":"control_response"'*'"request_id":"permission-1"'*|*'"request_id":"permission-1"'*'"type":"control_response"'*) ;; *) exit 75 ;; esac
   case "$response" in
-    *'"behavior":"allow"'*'"updatedInput":{"content":"fixture-private-content","file_path":"example.txt"}'*) answer=allowed; denials='[]' ;;
+    *'"behavior":"allow"'*)
+      case "$response" in
+        *'"updatedInput":{"content":"fixture-private-content","file_path":"example.txt"}'*|*'"updatedInput":{"file_path":"example.txt","content":"fixture-private-content"}'*) ;;
+        *) exit 76 ;;
+      esac
+      answer=allowed
+      denials='[]'
+      ;;
     *'"behavior":"deny"'*'"message":'*) answer=denied; denials='[{"tool_name":"Write","tool_use_id":"tool-1","tool_input":{"file_path":"example.txt"}}]' ;;
     *) exit 76 ;;
   esac

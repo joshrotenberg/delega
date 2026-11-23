@@ -57,7 +57,7 @@ async fn an_ask_waits_for_one_answer_and_the_provider_exits_on_eof() {
     }
     let read = read_full(&supervisor, &start.run).await;
     let result = result_of(&supervisor, &start.run).await;
-    assert_eq!(result.text, "allowed");
+    assert_eq!(result.text, "allowed", "{result:#?}");
     assert_eq!(result.permissions.asked.len(), 1);
     assert!(result.permissions.asked[0].written);
     assert!(read.pending_interactions.is_empty());
@@ -99,7 +99,7 @@ async fn an_expired_ask_is_denied_and_cannot_be_answered_later() {
         .unwrap();
     assert_eq!(ack.status, "timed_out");
     let result = result_of(&supervisor, &start.run).await;
-    assert_eq!(result.text, "denied");
+    assert_eq!(result.text, "denied", "{result:#?}");
     assert_eq!(result.permissions.asked[0].decided_by, "timeout");
     assert!(result.permissions.asked[0].written);
     supervisor.shutdown().await;
