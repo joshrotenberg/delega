@@ -19,12 +19,14 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 futures-util.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "signal"] }
 tokio-util.workspace = true
 toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs"] }
+# `net` passes the provider's pipes to the keeper (SCM_RIGHTS), `stdio` reads
+# the keeper's control socket on fd 0, `pipe` makes the provider's pipes.
+rustix = { workspace = true, features = ["fs", "net", "stdio", "pipe", "event"] }
 
 [dev-dependencies]
 tempfile.workspace = true

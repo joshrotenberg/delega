@@ -4,6 +4,7 @@
 mod config;
 mod doctor;
 mod hook;
+mod keeper;
 mod mcp;
 pub(crate) mod output;
 mod plugin;
@@ -49,6 +50,9 @@ pub enum Command {
     /// The command guard Claude Code calls before a Bash tool call
     #[command(name = hook::NAME, hide = true)]
     Guard(hook::Args),
+    /// The keeper between delega and a provider process
+    #[command(name = keeper::NAME, hide = true)]
+    Keeper(keeper::Args),
 }
 
 impl Command {
@@ -63,6 +67,7 @@ impl Command {
             Command::Doctor(a) => doctor::run(a),
             Command::Version(a) => version::run(a),
             Command::Guard(a) => hook::run(a),
+            Command::Keeper(a) => keeper::run(a),
         }
     }
 }
@@ -75,6 +80,15 @@ pub(crate) fn guard_command() -> Option<delega_core::provider::HookCommand> {
     let exe = std::env::current_exe().ok()?;
     exe.is_absolute()
         .then(|| delega_core::provider::HookCommand::new(exe, [hook::NAME]))
+}
+
+/// The command that runs this executable's keeper, so every provider process
+/// is held by a keeper that stops its tree when delega is gone. Without a usable
+/// path to this executable no keeper is configured, and the result says so.
+pub(crate) fn keeper_command() -> Option<delega_core::process::KeeperCommand> {
+    let exe = std::env::current_exe().ok()?;
+    exe.is_absolute()
+        .then(|| delega_core::process::KeeperCommand::new(exe, [keeper::NAME]))
 }
 
 /// Add the `--env NAME` and `--env NAME=VALUE` arguments to the provider

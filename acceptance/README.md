@@ -68,7 +68,7 @@ left and prints how many processes carried its marker; `ps` shows none.
 providers; a normal run, a normal run with a child that ignores TERM, an error, a
 timeout with a child, a signal, a crash, output with no final answer, a closed
 stdout, a run with process listing unavailable that must report cleanup as not
-confirmed, and a SIGKILL of `delega` whose worker the harness must clean up) in
+confirmed, and a SIGKILL of `delega` after which its keeper must leave nothing) in
 about ten seconds. It never runs the matrix. A skipped row fails the run unless
 `--allow-skips` is given.
 
@@ -348,7 +348,8 @@ kept where a row carries over.
 | `fli` | as `fl`, no timeout | SIGINT at 1 s | `interrupted`, exit 130 |
 | `dc` | as `c` | reader closes stdout at 1 s | exit 124, nothing to read |
 | `dca` | finishes after 1.5 s | reader closes stdout at 0.3 s | exit 0, nothing to read |
-| `k` | hangs, no output | SIGKILL of `delega` at 1 s | killed by signal 9, no output |
+| `k` | hangs, no output | SIGKILL of `delega` at 1 s | killed by signal 9, no output; the keeper leaves nothing |
+| `kk` | hangs, no output | SIGKILL of `delega` and of its keeper at 1 s | killed by signal 9, no output; the worker survives (the residual) |
 | `u` | finishes normally | wait, process listing unavailable | `completed`, exit 0, cleanup **not** confirmed |
 | `ud` | hangs, no output | `--timeout 3s`, process listing unavailable | `timed_out`, exit 124, cleanup not confirmed |
 | `ui` | as `c`, no timeout | SIGINT at 1 s, process listing unavailable | `interrupted`, exit 130, cleanup not confirmed |
@@ -393,7 +394,7 @@ machine and a fast one.
 | `j` | The `wait` future is dropped. The CLI has no future; `dc` and `k` are the nearest. |
 | `j2` | The handle is dropped. The CLI has no handle; `k` is the nearest. |
 
-Cases `dt`, `dh`, `fl`, `fli`, `dc`, `dca` and `k`, the `relay` variant, and `a`
+Cases `dt`, `dh`, `fl`, `fli`, `dc`, `dca`, `k` and `kk`, the `relay` variant, and `a`
 with every variant are new.
 
 ## Fake providers
@@ -472,9 +473,19 @@ fails the run.
 output and `cleanup.confirmed`, and a list of expected failures (`GAPS`), each
 with a class, a reason and exactly which roles may survive:
 
-- **documented gap**: the process module's docs list it as known (a descendant
-  that calls `setsid` and whose parent exited before any listing saw it, which
-  is the `orphan` and `bare` rows; a fast fork relay; SIGKILL of `delega`).
+- **documented gap**: the process module's docs list it as a residual of a kept
+  run: on macOS a descendant that left the session, whose parent is gone and
+  whose environment `ps -E` does not show (the `orphan` rows, and `a` with
+  `bare`: the fakes run `sh`, `sleep` and `perl`, Apple's own programs), and a
+  fast fork relay (the `relay` rows); on every platform a SIGKILL of `delega`
+  together with its keeper (`kk`). A gap may apply to one system only; on Linux
+  only `kk` is listed. The macOS `orphan` and `a`-with-`bare` gaps apply only on
+  a system that hides the environment of its own programs from `ps -E` (System
+  Integrity Protection does); the harness probes this once per run (it starts
+  `/bin/sleep` with a marker value and looks for it in `ps -E`), records it in
+  the results metadata as `system_programs_hide_environment`, and expects those
+  rows to pass where the environment is visible. After a SIGKILL of `delega` (`k`) the harness waits up to
+  5 s more for the keeper to stop the tree before it counts survivors.
 - **undocumented gap**: a failure this harness found that the docs do not
   describe. None is listed now.
 - **defect**: a failure that is neither. None is listed now.
@@ -486,7 +497,7 @@ survivor. A known-gap row says a survivor of the listed roles may remain:
 
 - **`expected_failure`**: the listed roles survived, so the gap showed.
 - **`gap_not_shown`**: nothing survived, on a row whose gap depends on timing
-  (`relay`, `orphan` and `bare`, 22 runs of the matrix). Whether `delega` catches a process
+  (on macOS `relay`, `orphan` and `a` with `bare`; Linux has none). Whether `delega` catches a process
   that left the worker's session before any listing saw it depends on timing, so
   on a busy machine a gap that showed on one run may not on the next. This is
   not a failure and not counted as an unexpected pass. The summary says how many

@@ -209,6 +209,44 @@ pub struct Diagnostics {
     /// process group and not tracked, and stopped: descendants that moved to
     /// another group but never called `setsid`. Bounded.
     pub session_members_swept: Vec<u32>,
+    /// The keeper of a kept run; `None` when the run had no keeper and was
+    /// owned directly (see [`crate::process::KeeperCommand`]).
+    pub keeper: Option<KeeperDiagnostics>,
+}
+
+/// What the keeper of a kept run did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeeperDiagnostics {
+    /// The keeper's pid, when it started.
+    pub pid: Option<u32>,
+    /// Whether the keeper was a child subreaper (Linux), so every orphaned
+    /// descendant became its child.
+    pub subreaper: bool,
+    /// Whether the keeper ended before it reaped the program.
+    pub lost: bool,
+    /// Listings of every freeze that found a process not yet stopped.
+    pub freeze_rounds: u64,
+    /// Whether a freeze ran out of listings while processes kept appearing.
+    pub freeze_incomplete: bool,
+    /// The latest answers of the keeper to the owner's census and freeze
+    /// requests (Linux), oldest first, bounded: the live count and how the
+    /// walk went (`passes`, `complete`, `refused`).
+    pub tree_reports: Vec<String>,
+}
+
+impl KeeperDiagnostics {
+    /// A keeper the report knows nothing about: it did not start, or the
+    /// owner was lost before it reported.
+    pub(crate) fn unstarted() -> Self {
+        Self {
+            pid: None,
+            subreaper: false,
+            lost: false,
+            freeze_rounds: 0,
+            freeze_incomplete: false,
+            tree_reports: Vec::new(),
+        }
+    }
 }
 
 /// The terminal report for one child. Every started child produces exactly
@@ -233,8 +271,11 @@ pub struct ProcessReport {
     /// `Confirmed` means a final scan, taken after the leader exited and before
     /// it was reaped, found no live process in the child's process group, none
     /// whose session id is the child's, and no tracked descendant with a
-    /// matching start identity. It does not cover a descendant that called
-    /// `setsid` (or otherwise left the session) and was never seen by a scan.
+    /// matching start identity; for a kept run also no process carrying the
+    /// run marker and, on Linux, no live process in the keeper's tree. Without
+    /// a keeper it does not cover a descendant that called `setsid` (or
+    /// otherwise left the session) and was never seen by a scan. See the
+    /// module documentation of [`crate::process`] for what remains.
     pub cleanup: Cleanup,
     /// Observations behind the report.
     pub diagnostics: Diagnostics,

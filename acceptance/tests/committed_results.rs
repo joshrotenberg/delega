@@ -68,7 +68,31 @@ fn the_committed_reports_are_what_report_generates_from_the_committed_results() 
 
 #[test]
 fn the_committed_results_cover_exactly_the_matrix_rows_with_their_current_expectations() {
-    let matrix: BTreeMap<String, matrix::Row> = matrix::all()
+    // Some expectations differ by system; compare with the ones of the system
+    // the committed results were recorded on.
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(acceptance_dir().join("results.meta.json"))
+            .expect("read results.meta.json"),
+    )
+    .expect("results.meta.json is JSON");
+    let recorded = meta["os"].as_str().unwrap_or_default();
+    let os = if recorded.starts_with("Darwin") {
+        "macos"
+    } else if recorded.starts_with("Linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
+    };
+    // On macOS, whether the system hid the environment of its own programs
+    // when the results were recorded; a run that did not say counts as hidden.
+    let hides_system_env = meta["system_programs_hide_environment"]
+        .as_bool()
+        .unwrap_or(os == "macos");
+    let machine = matrix::Machine {
+        os: if os == "linux" { "linux" } else { "macos" },
+        hides_system_env,
+    };
+    let matrix: BTreeMap<String, matrix::Row> = matrix::all_for(machine)
         .into_iter()
         .map(|r| (r.id.clone(), r))
         .collect();

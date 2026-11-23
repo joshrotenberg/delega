@@ -67,6 +67,7 @@ mod structured;
 #[cfg(test)]
 mod tests;
 
+pub use crate::process::KeeperCommand;
 pub use deny::{DenyFile, SkippedFile};
 pub use dry_run::{DenyReport, DryRun, dry_run};
 pub use hook::HookCommand;
@@ -74,4 +75,4 @@ pub use options::ProviderOptions;
 pub use permissions::Mapping;
 pub use progress::{ProgressEvent, ProgressSink};
 pub use refusal::Refusal;
-pub use run::{RunHandle, RunInterrupter, run, start};
+pub use run::{NO_KEEPER_NOTE, RunHandle, RunInterrupter, run, start};
