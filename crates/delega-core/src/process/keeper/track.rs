@@ -205,7 +205,8 @@ pub(crate) const NO_TRACKING_ENV: &str = "DELEGA_TEST_NO_FORK_TRACKING";
 /// Check the calls the tracker relies on, open its queue and start its
 /// thread, which waits for [`Handle::start`]. The keeper says `tracker on`
 /// only when this succeeds.
-pub(super) fn prepare() -> Result<(), String> {
+/// Returns a note when the tracker runs without the keeper registry.
+pub(super) fn prepare(registry: Option<&std::path::Path>) -> Result<Option<String>, String> {
     if std::env::var_os(NO_TRACKING_ENV).is_some() {
         return Err(format!("{NO_TRACKING_ENV} is set"));
     }
@@ -215,17 +216,37 @@ pub(super) fn prepare() -> Result<(), String> {
         .ok()
         .flatten()
         .ok_or("the keeper's own identity could not be read")?;
+    let (registry, note) = match registry {
+        None => (None, Some("no keeper registry was given".to_string())),
+        Some(dir) => match super::registry::Registry::open(dir, me.pid, me.uniqueid) {
+            Ok(registry) => (Some(registry), None),
+            Err(why) => (
+                None,
+                Some(format!("the keeper registry is unavailable: {why}")),
+            ),
+        },
+    };
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("keeper-track".into())
         .spawn({
             let queue = queue.clone();
-            move || Tracker::new(queue, me.uniqueid).run(&rx)
+            move || {
+                let mut tracker = Tracker::new(queue, me.uniqueid);
+                tracker.registry = registry;
+                tracker.run(&rx);
+            }
         })
         .map_err(|e| format!("the tracker thread could not start: {e}"))?;
     TRACKER
         .set(Handle { tx, queue })
-        .map_err(|_| "the tracker was prepared twice".to_string())
+        .map_err(|_| "the tracker was prepared twice".to_string())?;
+    Ok(note.map(|why| {
+        format!(
+            "{why}; every orphan of a process created during the run counts as possibly this \
+             run's, so another run's orphans can make cleanup unconfirmed"
+        )
+    }))
 }
 
 impl Handle {
@@ -345,6 +366,8 @@ struct Tracker {
     depth: u32,
     /// Where the first failed read since the previous answer happened.
     first_hole: Option<&'static str>,
+    /// This keeper's entry in the keeper registry, when there is one.
+    registry: Option<super::registry::Registry>,
     /// How old each process was when it was taken, in microseconds, for the
     /// measurement in the tests.
     #[cfg(test)]
@@ -377,6 +400,7 @@ impl Tracker {
             saturated: false,
             depth: 0,
             first_hole: None,
+            registry: None,
             #[cfg(test)]
             ages: Vec::new(),
             refused: 0,
@@ -454,7 +478,9 @@ impl Tracker {
             self.recover(self.keeper_start_us, self.floor);
             return;
         };
-        self.known.insert(ident.uniqueid);
+        self.know(ident.uniqueid);
+        // Orphans of processes created before the program cannot be its.
+        self.floor = self.floor.max(ident.uniqueid.saturating_sub(1));
         let start_us = match darwin::bsd_info(program) {
             Ok(Some(info)) => info.start_us,
             Ok(None) | Err(_) => self.keeper_start_us,
@@ -477,6 +503,19 @@ impl Tracker {
             // unique id.
             Err(rustix::io::Errno::SRCH) => self.lost(start_us, ident.uniqueid),
             Err(_) => self.refused += 1,
+        }
+    }
+
+    /// Record a unique id as proven the tree's, and publish it in the keeper
+    /// registry. A registry that cannot be written is dropped: other runs
+    /// then count this run's orphans as possibly theirs, which only makes
+    /// their verdicts more cautious.
+    fn know(&mut self, uniqueid: u64) {
+        if self.known.insert(uniqueid)
+            && let Some(registry) = self.registry.as_mut()
+            && !registry.publish(uniqueid)
+        {
+            self.registry = None;
         }
     }
 
@@ -537,7 +576,7 @@ impl Tracker {
             || (self.in_program_session(pid)
                 && matches!(darwin::identity(pid), Ok(Some(again)) if again.uniqueid == ident.uniqueid));
         if proven {
-            self.known.insert(ident.uniqueid);
+            self.know(ident.uniqueid);
         } else {
             self.suspected.insert(ident.uniqueid);
         }
@@ -889,7 +928,7 @@ impl Tracker {
                     // and exited is in a window.
                     Taken::Gone => {
                         if proven {
-                            self.known.insert(ident.uniqueid);
+                            self.know(ident.uniqueid);
                         } else {
                             self.suspected.insert(ident.uniqueid);
                         }
@@ -921,9 +960,19 @@ impl Tracker {
             }
         }
         self.discover(queue);
+        // Unique ids another live keeper took: their orphans are that run's.
+        // Without the registry nothing is exempt.
+        let others = self
+            .registry
+            .as_ref()
+            .and_then(|r| r.others().ok())
+            .unwrap_or_default();
         let mut queue = Vec::new();
         for ident in &table {
-            if !unseen(self, ident) {
+            if !unseen(self, ident)
+                || others.contains(&ident.puniqueid)
+                || others.contains(&ident.uniqueid)
+            {
                 continue;
             }
             // Reparented to launchd (its parent has exited), this user's,

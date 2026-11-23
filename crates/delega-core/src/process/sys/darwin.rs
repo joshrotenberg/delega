@@ -158,7 +158,11 @@ fn list_pids(kind: u32, arg: u32) -> Result<Vec<i32>, Errno> {
             (filled, *libc::__error())
         };
         if filled < 0 || (filled == 0 && errno != 0) {
-            return Err(Errno::from_raw_os_error(if errno != 0 { errno } else { libc::EIO }));
+            return Err(Errno::from_raw_os_error(if errno != 0 {
+                errno
+            } else {
+                libc::EIO
+            }));
         }
         let filled = usize::try_from(filled).unwrap_or(0);
         if filled >= bytes {

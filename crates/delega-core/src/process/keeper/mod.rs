@@ -47,6 +47,8 @@
 
 mod link;
 mod protocol;
+#[cfg(target_os = "macos")]
+mod registry;
 mod run;
 #[cfg(target_os = "macos")]
 mod track;
@@ -89,6 +91,13 @@ pub struct KeeperCommand {
     /// The keeper's own environment. It is started with this and nothing
     /// else; the program it starts gets the run's environment, not this.
     pub env: Vec<(OsString, OsString)>,
+    /// The keeper registry (macOS): a directory, owned by the user with mode
+    /// 0700, where each keeper publishes the unique ids of the processes it
+    /// took, so that one run does not take another run's orphans for its own.
+    /// It must not be writable by a provider's build worker (not a temporary
+    /// directory). `None`: no registry, and the macOS keeper counts every
+    /// orphan of a parent created during the run as possibly its own.
+    pub registry: Option<PathBuf>,
 }
 
 impl KeeperCommand {
@@ -102,7 +111,16 @@ impl KeeperCommand {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             env: Vec::new(),
+            registry: None,
         }
+    }
+
+    /// Use this directory as the keeper registry (see
+    /// [`KeeperCommand::registry`]).
+    #[must_use]
+    pub fn registry(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.registry = Some(dir.into());
+        self
     }
 
     /// Add a variable to the keeper's own environment.

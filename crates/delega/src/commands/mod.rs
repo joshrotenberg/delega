@@ -87,8 +87,27 @@ pub(crate) fn guard_command() -> Option<delega_core::provider::HookCommand> {
 /// path to this executable no keeper is configured, and the result says so.
 pub(crate) fn keeper_command() -> Option<delega_core::process::KeeperCommand> {
     let exe = std::env::current_exe().ok()?;
-    exe.is_absolute()
-        .then(|| delega_core::process::KeeperCommand::new(exe, [keeper::NAME]))
+    let command = exe
+        .is_absolute()
+        .then(|| delega_core::process::KeeperCommand::new(exe, [keeper::NAME]))?;
+    Some(match keeper_registry() {
+        Some(dir) => command.registry(dir),
+        None => command,
+    })
+}
+
+/// The keeper registry on macOS: `~/Library/Application Support/delega/keepers`,
+/// a per-user directory that no provider's build worker may write (it is
+/// neither a temporary directory nor under the workspace). The keeper checks
+/// it (owner, mode 0700, not a symlink) before use. Elsewhere, and without an
+/// absolute home, there is none.
+fn keeper_registry() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+    home.is_absolute()
+        .then(|| home.join("Library/Application Support/delega/keepers"))
 }
 
 /// Add the `--env NAME` and `--env NAME=VALUE` arguments to the provider

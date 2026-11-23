@@ -20,6 +20,7 @@ const GRACE: u8 = 6;
 const DEADLINE: u8 = 7;
 const CEILING: u8 = 8;
 const MARKER: u8 = 9;
+const REGISTRY: u8 = 10;
 
 /// What the keeper is asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,8 @@ pub(crate) struct Hello {
     pub deadline: Duration,
     pub ceiling: Duration,
     pub marker: String,
+    /// The keeper registry directory (macOS), when the caller gave one.
+    pub registry: Option<PathBuf>,
 }
 
 fn record(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
@@ -71,6 +74,9 @@ impl Hello {
         record(&mut body, DEADLINE, &millis(self.deadline));
         record(&mut body, CEILING, &millis(self.ceiling));
         record(&mut body, MARKER, self.marker.as_bytes());
+        if let Some(registry) = &self.registry {
+            record(&mut body, REGISTRY, registry.as_os_str().as_bytes());
+        }
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_le_bytes());
         out.extend_from_slice(&body);
@@ -109,6 +115,7 @@ impl Hello {
             deadline: Duration::ZERO,
             ceiling: Duration::ZERO,
             marker: String::new(),
+            registry: None,
         };
         let number = |b: &[u8]| -> Result<Duration, String> {
             std::str::from_utf8(b)
@@ -149,6 +156,9 @@ impl Hello {
                 MARKER => {
                     hello.marker = String::from_utf8(value.to_vec())
                         .map_err(|_| "the marker is not text".to_string())?;
+                }
+                REGISTRY => {
+                    hello.registry = Some(PathBuf::from(OsString::from_vec(value.to_vec())));
                 }
                 _ => return Err(format!("unknown hello record {tag}")),
             }
@@ -363,6 +373,7 @@ mod tests {
             deadline: Duration::from_millis(10_000),
             ceiling: Duration::from_millis(70_000),
             marker: "00ff".into(),
+            registry: Some("/var/empty/registry".into()),
         }
     }
 
