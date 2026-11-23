@@ -61,9 +61,10 @@ directories;
 `permissions.commands` must be empty) or `full`. Add `permissions.commands` for
 exact commands the worker may run and `permissions.directories` for extra
 directories it may read. A request
-the worker makes that was not granted is answered no and listed in
-`permissions.denied` in the result, unless the run asks you
-([Answer a permission request](#answer-a-permission-request)). Turn on `permissions.strict` to refuse
+the worker makes that was not granted is answered no; denials the provider
+reports are listed in `permissions.denied`. A run can ask you instead
+([Answer a permission request](#answer-a-permission-request)), and its decisions
+are in `permissions.asked`. Turn on `permissions.strict` to refuse
 the run before it starts when the provider cannot enforce the permissions as
 stated (Codex `read` and `write` cannot confine reads or commands, and `build`
 on either provider cannot confine what commands read); the run is
@@ -85,10 +86,10 @@ Give each its own working directory.
 1. Start the workers you need. Keep each worker's id and run id.
 2. Do your own work.
 3. Call `wait` with the `runs` or `workers` you are waiting on and a short
-   `timeout_secs`. It returns when any of them finishes, when a permission
-   request opens or is resolved, or on timeout, with their current states and a
-   `cursor`. Pass the returned cursor as `after` on the next call and it tells
-   you only of what changed since.
+   `timeout_secs`. It returns when any of them finishes, or on timeout, with
+   their current states and a `cursor`. In an ask run it also returns when a
+   permission request is pending. Pass the returned cursor as `after` on the
+   next call and it tells you only of what changed since.
 4. Call `read` with the `run` to get its result.
 
 Prefer short waits and the cursor to one long wait. A timeout costs nothing: the
@@ -203,7 +204,7 @@ a new session; `stale_server.what_to_do` says the same.
 
 | Outcome | What to do |
 | --- | --- |
-| `completed` | The provider finished. It can still contain denied requests, so check `permissions.denied` and `provider_notes`, then check the work yourself. |
+| `completed` | The provider finished. It can still contain denied requests, so check `permissions.denied`, `permissions.asked` in an ask run, and `provider_notes`, then check the work yourself. |
 | `failed` | Read `error.kind` and `error.message`. Retry only if the cause is fixed. |
 | `timed_out` | The time limit passed. The result states the limit applied. Retry with a larger `timeout_secs` or a smaller assignment. |
 | `interrupted` | You or the connection stopped it, or `close` discarded it. |
