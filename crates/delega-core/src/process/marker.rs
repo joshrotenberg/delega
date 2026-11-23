@@ -131,15 +131,23 @@ pub(crate) async fn marked(
     tokio::task::spawn_blocking(move || {
         candidates
             .into_iter()
-            .filter(|(pid, _, _)| {
-                std::fs::read(format!("/proc/{pid}/environ"))
-                    .is_ok_and(|block| environ_has(&block, &token))
+            .filter_map(|(pid, started, stopped)| {
+                // The start time is read before and after the environment and
+                // kept only when both agree, so the identity recorded is that
+                // of the process whose environment carried the marker; a pid
+                // replaced in between gets no start time, and then no signal.
+                let before = super::sys::start_ticks(pid);
+                let marked = std::fs::read(format!("/proc/{pid}/environ"))
+                    .is_ok_and(|block| environ_has(&block, &token));
+                let after = super::sys::start_ticks(pid);
+                let ticks = before.filter(|t| after == Some(*t));
+                marked.then_some((pid, started, stopped, ticks))
             })
-            .map(|(pid, started, stopped)| MarkedRow {
+            .map(|(pid, started, stopped, ticks)| MarkedRow {
                 pid,
                 started,
                 stopped,
-                ticks: super::sys::start_ticks(pid),
+                ticks,
             })
             .collect()
     })

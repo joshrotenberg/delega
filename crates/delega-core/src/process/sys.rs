@@ -207,16 +207,31 @@ pub(super) fn start_ticks(_pid: i32) -> Option<u64> {
     None
 }
 
+/// What became of one checked signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Delivery {
+    /// The signal was sent to the process meant.
+    Sent,
+    /// The process meant is gone: no such process, or the pid now names
+    /// another one (a different start time, group or session than the one
+    /// it was found with).
+    Gone,
+    /// The process could not be verified (Linux: no pidfd, or no identity to
+    /// check against), so it was not signalled. A verdict that depended on
+    /// signalling it cannot be `Confirmed`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Refused,
+}
+
 /// Signal one process only if it is still the one meant.
 ///
 /// On Linux the process is first held by a pidfd (`pidfd_open`), then its
 /// `/proc/<pid>/stat` is read and given to `check`, and the signal goes
 /// through the pidfd (`pidfd_send_signal`): once the pidfd is open its number
 /// can no longer name another process, so a pid reused between the check and
-/// the signal is never signalled. Where pidfds are missing (Linux before 5.3)
-/// the check is made and the signal sent by pid, which leaves the gap between
-/// the two. Returns whether the signal was sent; a process that is gone or
-/// fails the check is not signalled.
+/// the signal is never signalled. Nothing is ever signalled by pid number on
+/// Linux: without a pidfd (a kernel before 5.3, or a refusal) the process is
+/// [`Delivery::Refused`].
 ///
 /// Elsewhere there is nothing to read the identity from at delivery: `check`
 /// is not called and the signal goes by pid, as the callers' own listing-time
@@ -226,27 +241,23 @@ pub(super) fn signal_checked(
     target: i32,
     signal: Signal,
     check: impl FnOnce(&ProcStat) -> bool,
-) -> Result<bool, SignalError> {
+) -> Result<Delivery, SignalError> {
     use rustix::process::{PidfdFlags, pidfd_open, pidfd_send_signal};
     let pid = pid(target)?;
     let fd = match pidfd_open(pid, PidfdFlags::empty()) {
-        Ok(fd) => Some(fd),
-        Err(Errno::SRCH) => return Ok(false),
-        Err(_) => None,
+        Ok(fd) => fd,
+        Err(Errno::SRCH) => return Ok(Delivery::Gone),
+        Err(_) => return Ok(Delivery::Refused),
     };
     let Some(stat) = proc_stat(target) else {
-        return Ok(false);
+        return Ok(Delivery::Gone);
     };
     if !check(&stat) {
-        return Ok(false);
+        return Ok(Delivery::Gone);
     }
-    let sent = match &fd {
-        Some(fd) => pidfd_send_signal(fd, signal),
-        None => rustix::process::kill_process(pid, signal),
-    };
-    match sent {
-        Ok(()) => Ok(true),
-        Err(Errno::SRCH) => Ok(false),
+    match pidfd_send_signal(&fd, signal) {
+        Ok(()) => Ok(Delivery::Sent),
+        Err(Errno::SRCH) => Ok(Delivery::Gone),
         Err(errno) => Err(SignalError::from(errno)),
     }
 }
@@ -257,10 +268,10 @@ pub(super) fn signal_checked(
     target: i32,
     signal: Signal,
     _check: impl FnOnce(&()) -> bool,
-) -> Result<bool, SignalError> {
+) -> Result<Delivery, SignalError> {
     match signal_process(target, signal) {
-        Ok(()) => Ok(true),
-        Err(SignalError::NoSuchProcess) => Ok(false),
+        Ok(()) => Ok(Delivery::Sent),
+        Err(SignalError::NoSuchProcess) => Ok(Delivery::Gone),
         Err(error) => Err(error),
     }
 }
@@ -366,7 +377,8 @@ pub(super) fn probe_group(pgid: i32) -> GroupProbe {
 /// every descendant that does not call `setsid` itself shares its session id.
 /// Used for the provider and for the keeper alike.
 ///
-/// This is the only `unsafe` in the workspace: `Command::pre_exec` is unsafe
+/// This is the only `unsafe` block in production code (the tests of
+/// `delega-mcp` have one more, for `mkfifo`): `Command::pre_exec` is unsafe
 /// because the closure runs in the forked child before `exec`.
 #[allow(unsafe_code)]
 pub(super) fn new_session(command: &mut std::process::Command) {

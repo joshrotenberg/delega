@@ -487,6 +487,18 @@ pub const PIPES_HELD_REASON: &str = "a process still held the program's output p
      owner closed its ends (at the drain bound, at the cleanup deadline, or on a protocol \
      error), and no sweep found it, so it may still be running";
 
+/// The reason of an `Unconfirmed` verdict when the keeper did not acknowledge
+/// the reap with `reaped`.
+pub const NO_REAP_ACK_REASON: &str = "the keeper did not acknowledge that it reaped the program, \
+     so what it last found in its tree is unknown";
+
+/// The reason of an `Unconfirmed` verdict when a process that had to be
+/// signalled could not be verified (Linux: no pidfd, or no recorded start
+/// time to check), so it was not signalled.
+pub const UNVERIFIED_SIGNAL_REASON: &str = "a process the cleanup had to signal could not be \
+     verified to be the one found (no pidfd, or no recorded start time), so it was not \
+     signalled and may still be running";
+
 /// Follows the count in the reason of an `Unconfirmed` verdict when the
 /// keeper's last freeze at the reap still found processes alive in its tree.
 pub const TREE_LEFT_AT_REAP_REASON: &str = "processes were still alive in the keeper's tree \
@@ -587,6 +599,8 @@ pub(super) struct OwnedProcess {
     pub(super) watch_error: Option<String>,
     /// How many processes the keeper found alive in its tree at the reap.
     reap_leftover: usize,
+    /// Whether the keeper acknowledged the reap with `reaped`.
+    reap_acknowledged: bool,
 }
 
 impl Drop for OwnedProcess {
@@ -607,8 +621,9 @@ impl Drop for OwnedProcess {
             self.shared.signal_group_raw(Signal::KILL);
             for (pid, _ticks) in lock(&self.shared.tracked_mirror).iter() {
                 #[cfg(target_os = "linux")]
+                // No recorded start time, no signal: it cannot be verified.
                 let _ = sys::signal_checked(*pid, Signal::KILL, |stat| {
-                    _ticks.is_none_or(|t| t == stat.start_ticks)
+                    *_ticks == Some(stat.start_ticks)
                 });
                 #[cfg(not(target_os = "linux"))]
                 let _ = sys::signal_checked(*pid, Signal::KILL, |_| true);
@@ -759,6 +774,7 @@ impl OwnedProcess {
             exit_rx: None,
             watch_error: None,
             reap_leftover: 0,
+            reap_acknowledged: false,
         };
         match exit {
             Some(rx) => owner.exit_rx = Some(rx),
@@ -991,8 +1007,14 @@ impl OwnedProcess {
                     process_groups: Vec::new(),
                     reason: reason.to_string(),
                 };
+                let kept = shared.keeper.is_some();
+                let unverified = lock(&shared.observations).stats.unverified_signals > 0;
                 let cleanup = if shared.keeper_lost() {
                     unconfirmed(KEEPER_LOST_REASON)
+                } else if kept && !self.reap_acknowledged {
+                    unconfirmed(NO_REAP_ACK_REASON)
+                } else if unverified {
+                    unconfirmed(UNVERIFIED_SIGNAL_REASON)
                 } else if self.reap_leftover > 0 {
                     unconfirmed(&format!(
                         "{} {}",
@@ -1132,6 +1154,7 @@ impl OwnedProcess {
                     .map_err(|error| format!("wait failed: {error}"))
             }
             Some(Leader::Kept(link)) => link.reap().await.map(|(summary, live)| {
+                self.reap_acknowledged = true;
                 self.reap_leftover = live;
                 LeaderExit {
                     code: summary.code,

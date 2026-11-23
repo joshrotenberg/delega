@@ -411,13 +411,17 @@ pub(crate) async fn start(
     let (stdin, stdout, stderr) = match pipes {
         Ok(pipes) => pipes,
         Err(e) => {
-            // The program runs; closing the owner's end has the keeper stop it.
+            // The program runs; closing the owner's end has the keeper stop it,
+            // within the grace and a margin.
             handle.shut();
-            let _ = child.wait().await;
-            return Err(keeper_error(
-                "could not read the program's output through",
-                &e,
-            ));
+            end_child(&mut child, launch_grace + KEEPER_ABANDON_WAIT).await;
+            return Err(StartError::Keeper {
+                message: format!(
+                    "could not read the program's output through the keeper {}: {e}",
+                    keeper.program.to_string_lossy()
+                ),
+                maybe_started: true,
+            });
         }
     };
     Ok(Started {

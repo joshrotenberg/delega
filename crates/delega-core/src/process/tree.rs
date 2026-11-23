@@ -323,6 +323,9 @@ pub struct InspectionStats {
     /// Marked processes found outside the group, the session and the tracked
     /// descendants, summed over those readings.
     pub marked_rows: u64,
+    /// Signals not sent because the process could not be verified (Linux: no
+    /// pidfd, or no recorded start time). Any makes the verdict `Unconfirmed`.
+    pub unverified_signals: u64,
 }
 
 /// The shared receipts: the public numbers plus the instant of the latest
@@ -450,6 +453,8 @@ pub(crate) struct ProcessTree {
     /// Start times in clock ticks of tracked processes (Linux), checked
     /// through a pidfd when they are signalled.
     ticks: HashMap<i32, u64>,
+    /// The child's start time in ticks, read while it was pinned.
+    root_ticks: Option<u64>,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -523,6 +528,7 @@ impl ProcessTree {
             pinned: true,
             pin: None,
             ticks: HashMap::new(),
+            root_ticks: None,
         }
     }
 
@@ -535,13 +541,38 @@ impl ProcessTree {
 
     /// Record `pid` as tracked with this start, and its start time in ticks
     /// where the system gives one.
-    fn track(&mut self, pid: i32, started: String) {
-        if !self.known.contains_key(&pid)
-            && let Some(ticks) = sys::start_ticks(pid)
+    /// Record `row` as tracked. On Linux its start time in ticks is recorded
+    /// too, but only when `/proc` shows that the process now holding the pid
+    /// is ours: its parent is the keeper (which has only processes of this
+    /// tree as children), the child itself (pinned), or the parent the listing
+    /// showed, whose own recorded start time still matches. Otherwise no start
+    /// time is recorded, and a signal that would rely on one is refused, which
+    /// makes the verdict `Unconfirmed`.
+    fn track(&mut self, row: &ProcessRow) {
+        if !self.known.contains_key(&row.pid)
+            && let Some(ticks) = self.verified_ticks(row)
         {
-            self.ticks.insert(pid, ticks);
+            self.ticks.insert(row.pid, ticks);
         }
-        self.known.insert(pid, started);
+        self.known.insert(row.pid, row.started.clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verified_ticks(&self, row: &ProcessRow) -> Option<u64> {
+        let stat = sys::proc_stat(row.pid)?;
+        let parent_is_ours = Some(stat.parent) == self.keeper
+            || (stat.parent == self.pid && self.pinned)
+            || (stat.parent == row.parent
+                && self
+                    .ticks
+                    .get(&row.parent)
+                    .is_some_and(|t| sys::start_ticks(row.parent) == Some(*t)));
+        parent_is_ours.then_some(stat.start_ticks)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn verified_ticks(&self, _row: &ProcessRow) -> Option<u64> {
+        None
     }
 
     /// The child's pid no longer names its group and session (the keeper that
@@ -552,7 +583,10 @@ impl ProcessTree {
         if self.pinned {
             self.pinned = false;
             if let Some(started) = self.root_started.clone() {
-                self.track(self.pid, started);
+                self.known.insert(self.pid, started);
+                if let Some(ticks) = self.root_ticks {
+                    self.ticks.insert(self.pid, ticks);
+                }
             }
         }
     }
@@ -665,6 +699,13 @@ impl ProcessTree {
         let root = rows.iter().find(|row| row.pid == self.pid);
         if self.root_started.is_none() {
             self.root_started = root.map(|r| r.started.clone());
+            // The child is pinned now (unreaped), so its pid is its own.
+            if self.root_started.is_some() && self.pinned {
+                self.root_ticks = sys::start_ticks(self.pid);
+                if let Some(ticks) = self.root_ticks {
+                    self.ticks.insert(self.pid, ticks);
+                }
+            }
         }
         let mut owned: HashSet<i32> = HashSet::new();
         if let Some(root) = root
@@ -680,7 +721,7 @@ impl ProcessTree {
                     || sessions.get(&row.pid) == Some(&sys::SessionLookup::In(self.pid));
                 if member {
                     owned.insert(row.pid);
-                    self.track(row.pid, row.started.clone());
+                    self.track(row);
                 }
             }
         }
@@ -697,7 +738,7 @@ impl ProcessTree {
                     && !owned.contains(&row.pid)
                 {
                     owned.insert(row.pid);
-                    self.track(row.pid, row.started.clone());
+                    self.track(row);
                 }
             }
             if before == owned.len() {
@@ -893,16 +934,26 @@ impl ProcessTree {
         #[cfg(target_os = "linux")]
         let result = {
             let child = self.pid;
-            let ticks = self.ticks.get(&pid).copied();
-            sys::signal_checked(pid, signal, |stat| match found {
-                Found::Group => stat.group == child,
-                Found::Session => stat.session == child,
-                Found::Tracked => ticks.is_none_or(|t| t == stat.start_ticks),
-                Found::Marked(ticks, stopped) => {
-                    ticks.is_none_or(|t| t == stat.start_ticks)
-                        && (!stopped || matches!(stat.state, 'T' | 't'))
-                }
-            })
+            let ticks = match found {
+                Found::Group | Found::Session => None,
+                Found::Tracked => self.ticks.get(&pid).copied(),
+                Found::Marked(ticks, _) => ticks,
+            };
+            // A tracked or marked process without a recorded start time
+            // cannot be verified at delivery: it is not signalled.
+            if matches!(found, Found::Tracked | Found::Marked(..)) && ticks.is_none() {
+                Ok(sys::Delivery::Refused)
+            } else {
+                sys::signal_checked(pid, signal, |stat| match found {
+                    Found::Group => stat.group == child,
+                    Found::Session => stat.session == child,
+                    Found::Tracked => ticks == Some(stat.start_ticks),
+                    Found::Marked(_, stopped) => {
+                        ticks == Some(stat.start_ticks)
+                            && (!stopped || matches!(stat.state, 'T' | 't'))
+                    }
+                })
+            }
         };
         #[cfg(not(target_os = "linux"))]
         let result = {
@@ -914,11 +965,16 @@ impl ProcessTree {
             sys::signal_checked(pid, signal, |_| true)
         };
         drop(held);
-        if let Err(error) = result {
-            push_warning(
+        match result {
+            Ok(sys::Delivery::Sent | sys::Delivery::Gone) => {}
+            Ok(sys::Delivery::Refused) => {
+                let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+                obs.stats.unverified_signals += 1;
+            }
+            Err(error) => push_warning(
                 &self.warnings,
                 format!("Descendant signal failed: {error:?}"),
-            );
+            ),
         }
     }
 
