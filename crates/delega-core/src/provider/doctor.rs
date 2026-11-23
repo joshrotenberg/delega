@@ -4,8 +4,11 @@
 //! directory with the planning code a run uses, so the executable, the
 //! environment and the deny rules are the ones a run would get. The one
 //! provider process it starts is the `--version` probe, with the run's timeout
-//! and environment. It reports names and counts, never an environment value, a
-//! deny rule or the content of a file.
+//! and environment. For Claude Code it also looks on the worker's `PATH` for the
+//! tools its sandbox needs, without starting them. It reports names and counts,
+//! never an environment value, a deny rule or the content of a file.
+
+use std::ffi::OsStr;
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -35,6 +38,13 @@ pub const VERSION_PROBE_FAILED: &str = "version_probe_failed";
 pub const PROVIDER_NOT_STARTABLE: &str = "provider_not_startable";
 /// Problem kind: the version probe did not answer within its time limit.
 pub const VERSION_PROBE_TIMED_OUT: &str = "version_probe_timed_out";
+/// Problem kind: Claude Code's sandbox, which `build` runs require, cannot start
+/// on this system, because a tool it needs is not on the worker's `PATH` or the
+/// system has no sandbox.
+pub const SANDBOX_UNAVAILABLE: &str = "sandbox_unavailable";
+
+/// The executables Claude Code's sandbox needs on Linux.
+const LINUX_SANDBOX_TOOLS: [&str; 2] = ["bwrap", "socat"];
 
 /// What a problem stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -44,6 +54,8 @@ pub enum Blocks {
     Run,
     /// Only runs that grant exact commands (`permissions.commands`).
     CommandGrants,
+    /// Only runs in the `build` permission mode.
+    Build,
     /// Runs still start, but each would report its cleanup as not confirmed.
     Cleanup,
     /// No run is refused or changed. It is a warning: the provider did not
@@ -56,7 +68,7 @@ pub enum Blocks {
 pub struct Problem {
     /// A stable label: `provider_not_found`, `provider_not_startable`,
     /// `version_probe_failed`, `version_probe_timed_out`,
-    /// `unsupported_provider_version`,
+    /// `unsupported_provider_version`, `sandbox_unavailable`,
     /// `settings_unreadable`, `deny_rules_over_limit`, `managed_mcp_exclusive`,
     /// or another refusal a run would give.
     pub kind: String,
@@ -90,6 +102,86 @@ pub struct CommandHook {
     /// Whether the installed version is that release or later, as a run
     /// decides it.
     pub available: bool,
+}
+
+/// Whether Claude Code's sandbox, which `build` runs require, can start on this
+/// system, as far as doctor can tell without starting it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct SandboxCheck {
+    /// The system, as Rust names it: `macos`, `linux` or another.
+    pub system: String,
+    /// Whether the sandbox is expected to start: on macOS always (it uses the
+    /// built-in Seatbelt framework), on Linux when every tool in `requires` was
+    /// found, elsewhere never.
+    pub available: bool,
+    /// The executables the sandbox needs on this system: `bwrap` and `socat` on
+    /// Linux, none on macOS.
+    pub requires: Vec<String>,
+    /// Those of `requires` not found on the absolute entries of the worker's
+    /// `PATH`.
+    pub missing: Vec<String>,
+}
+
+impl SandboxCheck {
+    /// What doctor reports for `system` (a value of `std::env::consts::OS`)
+    /// with `path` as the worker's `PATH`. Looks for files only and starts
+    /// nothing.
+    pub(crate) fn of(system: &str, path: Option<&OsStr>) -> Self {
+        let requires: Vec<String> = match system {
+            "linux" => LINUX_SANDBOX_TOOLS
+                .iter()
+                .map(|t| (*t).to_string())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let missing: Vec<String> = requires
+            .iter()
+            .filter(|tool| program::find_on_path(tool, path).is_none())
+            .cloned()
+            .collect();
+        let available = match system {
+            "macos" => true,
+            "linux" => missing.is_empty(),
+            _ => false,
+        };
+        Self {
+            system: system.to_string(),
+            available,
+            requires,
+            missing,
+        }
+    }
+
+    /// The problem to report when the sandbox cannot start.
+    pub(crate) fn problem(&self) -> Option<Problem> {
+        if self.available {
+            return None;
+        }
+        let message = if self.missing.is_empty() {
+            format!(
+                "Claude Code has no sandbox on this system ({}), so every build run with Claude \
+                 would fail at startup",
+                self.system
+            )
+        } else {
+            format!(
+                "Claude Code's sandbox needs {} on PATH and {} not found, so every build run \
+                 with Claude would fail at startup; install {}",
+                self.requires.join(" and "),
+                if self.missing.len() == 1 {
+                    format!("{} was", self.missing[0])
+                } else {
+                    format!("{} were", self.missing.join(" and "))
+                },
+                self.missing
+                    .iter()
+                    .map(|tool| if tool == "bwrap" { "bubblewrap" } else { tool })
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )
+        };
+        Some(Problem::new(Blocks::Build, SANDBOX_UNAVAILABLE, message))
+    }
 }
 
 /// How many environment variables a worker would receive, by reason. No names
@@ -138,6 +230,9 @@ pub struct ProviderCheck {
     /// For Claude Code, whether the command hook interface is available. Null
     /// for Codex, which has no minimum version.
     pub command_hook: Option<CommandHook>,
+    /// For Claude Code, whether the sandbox `build` runs require can start.
+    /// Null for Codex.
+    pub sandbox: Option<SandboxCheck>,
     /// The environment a worker would get, or null when the launch could not be
     /// built.
     pub env: Option<EnvCounts>,
@@ -205,6 +300,7 @@ pub async fn check(
         executable_source: None,
         version: None,
         command_hook: None,
+        sandbox: None,
         env: None,
         deny_rules: None,
         managed_settings: Vec::new(),
@@ -217,6 +313,22 @@ pub async fn check(
             found.executable_source = Some(source(provider, options));
             probe_version(plan, &mut found, &mut problems).await;
         }
+    }
+    if provider == Provider::Claude {
+        // The tools are looked for on the PATH the worker would get, which is
+        // where Claude Code looks for them.
+        let parent = options.parent_env();
+        let path = match &planned {
+            Some(plan) => plan.env.value("PATH"),
+            None => parent
+                .iter()
+                .rev()
+                .find(|(n, _)| n.to_str() == Some("PATH"))
+                .map(|(_, v)| v.as_os_str()),
+        };
+        let sandbox = SandboxCheck::of(std::env::consts::OS, path);
+        problems.extend(sandbox.problem());
+        found.sandbox = Some(sandbox);
     }
     found.ready = !problems.iter().any(|p| p.blocks == Blocks::Run);
     Ok((found, problems))

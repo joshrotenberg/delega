@@ -97,20 +97,23 @@ pub(super) fn resolve(
         return explicit(provider, path, "the configuration file");
     }
     let name = default_name(provider);
-    if let Some(path) = lookup("PATH") {
-        for dir in std::env::split_paths(path) {
-            if dir.is_absolute() {
-                let candidate = dir.join(name);
-                if is_executable(&candidate) {
-                    return Ok(candidate);
-                }
-            }
-        }
+    if let Some(found) = find_on_path(name, lookup("PATH").map(OsString::as_os_str)) {
+        return Ok(found);
     }
     Err(not_found(
         provider,
         format!("\"{name}\" was not found on the absolute entries of PATH"),
     ))
+}
+
+/// The first executable file called `name` on the absolute entries of `path`,
+/// a `PATH` value. Relative and empty entries are skipped, as [`resolve`]
+/// skips them.
+pub(super) fn find_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
 }
 
 /// The first line of `--version` output, cut to a bound.

@@ -32,6 +32,7 @@ mod outcomes;
 mod prepare;
 mod progress;
 mod rules;
+mod sandbox;
 mod streams;
 mod strict;
 mod usage;

@@ -84,6 +84,11 @@
           "const": "command_grants"
         },
         {
+          "description": "Only runs in the `build` permission mode.",
+          "type": "string",
+          "const": "build"
+        },
+        {
           "description": "Runs still start, but each would report its cleanup as not confirmed.",
           "type": "string",
           "const": "cleanup"
@@ -618,6 +623,17 @@
           "description": "Whether no problem stops every run with this provider.",
           "type": "boolean"
         },
+        "sandbox": {
+          "description": "For Claude Code, whether the sandbox `build` runs require can start.\nNull for Codex.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "version": {
           "description": "The first line of `--version` output, or null when there was none.",
           "type": [
@@ -637,7 +653,7 @@
       "type": "object",
       "properties": {
         "blocks": {
-          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands) or `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
+          "description": "What the problem stops: `run` (every run with the provider),\n`command_grants` (only runs that grant exact commands), `build` (only\nruns in the `build` permission mode), `cleanup`\n(runs start, but cleanup cannot be confirmed) or `nothing` (a warning: no\nrun is refused).",
           "$ref": "#/$defs/Blocks"
         },
         "kind": {
@@ -714,6 +730,40 @@
         "max_output_bytes",
         "max_stderr_bytes",
         "version_probe_timeout_secs"
+      ]
+    },
+    "SandboxCheck": {
+      "description": "Whether Claude Code's sandbox, which `build` runs require, can start on this\nsystem, as far as doctor can tell without starting it.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Whether the sandbox is expected to start: on macOS always (it uses the\nbuilt-in Seatbelt framework), on Linux when every tool in `requires` was\nfound, elsewhere never.",
+          "type": "boolean"
+        },
+        "missing": {
+          "description": "Those of `requires` not found on the absolute entries of the worker's\n`PATH`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requires": {
+          "description": "The executables the sandbox needs on this system: `bwrap` and `socat` on\nLinux, none on macOS.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "system": {
+          "description": "The system, as Rust names it: `macos`, `linux` or another.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system",
+        "available",
+        "requires",
+        "missing"
       ]
     },
     "SkillDigest": {
