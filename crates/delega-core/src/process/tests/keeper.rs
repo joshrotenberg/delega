@@ -186,14 +186,35 @@ async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     assert_gone("setsid descendant", &[gc]).await;
 }
 
+/// The state letter `ps` shows for a process, empty when it is gone.
+fn state_of(pid: i32) -> String {
+    use crate::test_spawn::Guarded;
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .guarded_output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 /// A process the run did not start, carrying another run's marker value, is
-/// never signalled: the marker matches one run's value exactly.
+/// never signalled, not even stopped: the marker matches one run's value
+/// exactly. The process is this test binary sleeping, whose environment `ps
+/// -E` shows on every machine (Apple's own programs may hide it), and it is
+/// watched through a plain run and through an interrupted one whose hard
+/// stop is a freeze.
 #[tokio::test]
 async fn a_process_with_another_runs_marker_is_never_signalled() {
     use crate::process::MARKER_ENV;
     use crate::test_spawn::Guarded;
-    let mut other = std::process::Command::new("sleep")
-        .arg("60")
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let mut other = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "process::tests::keeper::sleeper_entry",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env(SLEEP_ENV, "60")
         .env(MARKER_ENV, "0123456789abcdef0123456789abcdef")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -202,12 +223,35 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
         .expect("start a foreign process");
     let pid = i32::try_from(other.id()).expect("a pid");
     let _reaper = Reaper(vec![pid]);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watching = done.clone();
+    let watcher = tokio::task::spawn_blocking(move || {
+        let mut states = Vec::new();
+        while !watching.load(std::sync::atomic::Ordering::SeqCst) {
+            states.push(state_of(pid));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        states
+    });
     let s = Scratch::new();
     let report = ProcessHandle::start(kept(sh(&s, "exit 0", LONG)))
         .wait()
         .await;
     assert_confirmed(&report);
+    let mut spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    spec.stop_grace = Duration::from_millis(100);
+    let handle = ProcessHandle::start(spec);
+    let _ = s.pid("leader").await;
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let states = watcher.await.expect("the watcher ended");
     assert!(is_running(pid), "a foreign marked process was signalled");
+    assert!(
+        states.iter().all(|state| !state.starts_with('T')),
+        "a foreign marked process was stopped: {states:?}"
+    );
     let _ = other.kill();
     let _ = other.wait();
 }
@@ -353,4 +397,62 @@ async fn measure_the_keepers_cost() {
             if kept_run { "kept" } else { "direct" }
         );
     }
+}
+
+/// A keeper that ends without saying whether it started the program may have
+/// started it: the run fails to start, and its cleanup is not confirmed.
+#[tokio::test]
+async fn a_keeper_that_ends_before_answering_leaves_cleanup_unconfirmed() {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "exit 0", LONG);
+    // It reads the start of the hello, so the hello was handed over in full,
+    // and exits without a word. (A keeper that exits before the hello is
+    // written cannot have started anything, and that run is `Confirmed`.)
+    spec.keeper = Some(KeeperCommand::new(
+        "/bin/sh",
+        ["-c", "/usr/bin/head -c 1 >/dev/null; exit 0"],
+    ));
+    let report = ProcessHandle::start(spec).wait().await;
+    assert!(
+        matches!(report.ending, Ending::FailedToStart { .. }),
+        "{report:#?}"
+    );
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => {
+            assert_eq!(reason, crate::process::KEEPER_UNANSWERED_REASON);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// SIGTERM to the keeper (`pkill delega` matches it) has it stop the tree by
+/// itself. Before it reaps the program it says `releasing` and waits for the
+/// owner's answer, so no group signal of the owner can follow the reap; the
+/// verdict says the keeper ended before the owner had the program reaped.
+#[tokio::test]
+async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
+    let s = Scratch::new();
+    let spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let handle = ProcessHandle::start(spec);
+    let leader = s.pid("leader").await;
+    let _reaper = Reaper(vec![leader]);
+    let keeper = parent_of(leader).expect("the program's parent");
+    let _ = crate::process::sys::signal_process(keeper, crate::process::sys::Signal::TERM);
+    let report = handle.wait().await;
+    assert_gone("the program", &[leader]).await;
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => {
+            assert_eq!(reason, crate::process::KEEPER_LOST_REASON, "{report:#?}");
+        }
+        other => panic!("a released program must not confirm cleanup: {other:?}"),
+    }
+    assert!(
+        report
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|w| w.contains("stopped the program on its own")),
+        "{:?}",
+        report.diagnostics.warnings
+    );
 }

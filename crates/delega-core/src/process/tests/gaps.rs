@@ -243,8 +243,33 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
     let script = format!(
         "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {detach} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
     );
-    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
+    // The owner's listings never show it: once the leader is known they hide
+    // every group leader but the leader, which the orphan is from its
+    // `setsid` on. Only the keeper's own walk of its tree can find it, so a
+    // broken walk ends Confirmed with the orphan alive and fails here.
+    let marker = s.path("scanned");
+    let leader_file = s.path("leader");
+    let hiding: Lister = Arc::new(move || {
+        let marker = marker.clone();
+        let leader_file = leader_file.clone();
+        Box::pin(async move {
+            let rows = list_processes().await;
+            let _ = std::fs::write(&marker, "scanned");
+            let leader: Option<i32> = std::fs::read_to_string(&leader_file)
+                .ok()
+                .and_then(|t| t.trim().parse().ok());
+            rows.map(|rows| match leader {
+                Some(leader) => rows
+                    .into_iter()
+                    .filter(|r| r.group != r.pid || r.pid == leader)
+                    .collect(),
+                None => rows,
+            })
+        })
+    });
+    let spec = kept(sh(&s, &script, LONG).with_lister(hiding));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     assert_gone("orphan without the marker", &pids).await;
 }
@@ -433,10 +458,15 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
     handle.interrupt();
     let report = handle.wait().await;
     let took = asked.elapsed();
-    // The heartbeat is touched by every generation, so a recent one means a
-    // relay process is alive now, however short each one lives.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let alive = heartbeat_age(&s) < Duration::from_millis(150);
+    // Every generation writes its pid to the heartbeat, so a heartbeat that
+    // changes over 300 ms, or is fresh at either reading, means a relay
+    // process is alive, however short each one lives and however late the
+    // readings are under load.
+    let first = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
+    let fresh_first = heartbeat_age(&s) < Duration::from_millis(150);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let second = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
+    let alive = first != second || fresh_first || heartbeat_age(&s) < Duration::from_millis(150);
     // A relay that survived is ended here, so nothing is left: the last
     // writer of the heartbeat is the live generation, and the relay is
     // killed generation by generation until the heartbeat goes stale.
