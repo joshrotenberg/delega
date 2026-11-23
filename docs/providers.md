@@ -726,6 +726,9 @@ See `crates/delega-core/src/provider/env.rs`.
   `filesystem.denyWrite` blocked a write to
   `/tmp/claude-501/-delega-probe-session/x` with `Operation not permitted`.
   Writing `"$TMPDIR/p3"` and writing in the working directory still succeeded.
+
+### 2026-11-23, Claude Code 2.1.330 on macOS (#176)
+
 - With the branch binary for #176 (model haiku), a write three levels deep in a
   session folder, a `mkdir` inside it, and a write through the
   `/private/tmp/claude-501/` path were all denied.
