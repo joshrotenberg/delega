@@ -1520,20 +1520,23 @@ pub fn judge_build(row: &mut LiveRow, provider: &str, r: &RunResult, probe: &Bui
     }
     if probe.net_reached {
         row.problems.push(format!(
-            "not so: the network was off (the worker reached {PROBE_URL})"
+            "not so: the worker's request failed (the worker reached {PROBE_URL})"
         ));
     } else if !probe.net_failed {
-        row.not_shown
-            .push("that the network was off: the probe's curl step did not run".to_string());
+        row.not_shown.push(
+            "that the worker's request failed: the probe's curl step did not run".to_string(),
+        );
     } else {
         match probe.net_baseline {
-            None => row
-                .not_shown
-                .push(format!("that the network was off: {CURL} is missing")),
-            Some(false) => row.not_shown.push(format!(
-                "that the network was off: the harness itself could not reach {PROBE_URL}"
+            None => row.not_shown.push(format!(
+                "that the worker's request failed: {CURL} is missing"
             )),
-            Some(true) => row.checks.push("the network was off".to_string()),
+            Some(false) => row.not_shown.push(format!(
+                "that the worker's request failed: the harness itself could not reach {PROBE_URL}"
+            )),
+            Some(true) => row.checks.push(format!(
+                "the worker's request to {PROBE_URL} failed while the harness reached it"
+            )),
         }
     }
 }

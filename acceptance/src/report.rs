@@ -977,7 +977,7 @@ mod tests {
         );
         assert!(text.contains("not so: cleanup confirmed"), "{text}");
         assert!(
-            text.contains("not shown: that the network was off: the harness itself could not reach https://example.com; the temporary file was in /tmp"),
+            text.contains("not shown: that the worker's request failed: the harness itself could not reach https://example.com; the temporary file was in /tmp"),
             "{text}"
         );
     }
