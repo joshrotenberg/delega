@@ -153,6 +153,17 @@ fn stat(pid: i32) -> Option<(char, i32)> {
     stat_read(pid).ok().flatten()
 }
 
+/// Every entry of a directory listing, or a failed read if the listing
+/// reported any error, whatever its kind: on Linux an error ends the stream,
+/// so what came before it is not the whole directory. Only a read of an
+/// entry already listed (a pid's stat, a task's children) can show that
+/// entry gone.
+fn listed<T>(entries: impl Iterator<Item = std::io::Result<T>>) -> Result<Vec<T>, ReadFailed> {
+    entries
+        .collect::<std::io::Result<Vec<T>>>()
+        .map_err(|_| read_failed())
+}
+
 /// The children of `pid`; empty when it is gone, an error when a read
 /// failed for another reason.
 pub(super) fn children(pid: i32) -> Result<Vec<i32>, ReadFailed> {
@@ -166,13 +177,7 @@ pub(super) fn children(pid: i32) -> Result<Vec<i32>, ReadFailed> {
             Err(_) => return Err(read_failed()),
         };
         let mut out = Vec::new();
-        for task in tasks {
-            let task = match task {
-                Ok(task) => task,
-                // A task that ends during the listing is gone, not a failure.
-                Err(error) if is_gone(&error) => continue,
-                Err(_) => return Err(read_failed()),
-            };
+        for task in listed(tasks)? {
             match std::fs::read_to_string(task.path().join("children")) {
                 Ok(text) => out.extend(parse_pids(&text)),
                 Err(error) if is_gone(&error) => {}
@@ -214,13 +219,7 @@ fn scan() -> Result<HashMap<i32, i32>, ReadFailed> {
     }
     let entries = std::fs::read_dir("/proc").map_err(|_| read_failed())?;
     let mut table = HashMap::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            // A process that ends during the listing is gone, not a failure.
-            Err(error) if is_gone(&error) => continue,
-            Err(_) => return Err(read_failed()),
-        };
+    for entry in listed(entries)? {
         let Some(pid) = entry
             .file_name()
             .to_str()
@@ -961,6 +960,32 @@ mod tests {
         assert_eq!(running, Some((true, Some(false))));
         // Exited, but its stat could not be read: still not gone.
         assert_eq!(exited, Some(Some(false)));
+    }
+
+    /// An error from a directory listing's iterator is a failed read, also
+    /// one that looks like a vanished entry: the listing ended there.
+    #[test]
+    fn an_error_from_a_directory_listing_is_a_failed_read() {
+        let gone = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        let other = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(listed(vec![Ok(1), Ok(2)].into_iter()), Ok(vec![1, 2]));
+        assert_eq!(
+            listed(vec![Ok(1), Err(gone())].into_iter()),
+            Err(ReadFailed)
+        );
+        assert_eq!(
+            listed(vec![Err(other()), Ok(2)].into_iter()),
+            Err(ReadFailed)
+        );
+        assert_eq!(
+            listed(
+                vec![Err(std::io::Error::from_raw_os_error(
+                    rustix::io::Errno::SRCH.raw_os_error()
+                ))]
+                .into_iter()
+            ),
+            Err::<Vec<i32>, _>(ReadFailed)
+        );
     }
 
     #[test]
