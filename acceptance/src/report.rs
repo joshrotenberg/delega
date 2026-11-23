@@ -3,7 +3,9 @@
 //! Nothing here measures anything. `--report` reads the committed results
 //! (and, when present, `results.meta.json`, `repeats.jsonl` and
 //! `spike-numbers.jsonl`) and writes both documents, so a fresh full run can
-//! be turned into documents with one command.
+//! be turned into documents with one command. When `live.jsonl` is present
+//! (a recorded `--live` run, with `live.meta.json`), RESULTS.md ends with a
+//! "Live suite" section made from it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -11,6 +13,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::live::LiveRow;
 use crate::matrix::{self, LeakClass};
 use crate::runner::Measured;
 
@@ -40,11 +43,19 @@ pub fn regenerate(dir: &Path, results: &Path) -> Result<(), String> {
         .and_then(|t| serde_json::from_str(&t).ok());
     let repeats: Vec<Measured> = read_rows(&dir.join("repeats.jsonl")).unwrap_or_default();
     let spike: Vec<SpikeRow> = read_rows(&dir.join("spike-numbers.jsonl")).unwrap_or_default();
-    std::fs::write(
-        dir.join("RESULTS.md"),
-        results_md(&rows, meta.as_ref(), &repeats),
-    )
-    .map_err(|e| format!("write RESULTS.md: {e}"))?;
+    let live_path = dir.join("live.jsonl");
+    let live: Vec<LiveRow> = if live_path.exists() {
+        read_rows(&live_path)?
+    } else {
+        Vec::new()
+    };
+    let live_meta: Option<serde_json::Value> = std::fs::read_to_string(dir.join("live.meta.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    let mut results = results_md(&rows, meta.as_ref(), &repeats);
+    results.push_str(&live_section(&live, live_meta.as_ref()));
+    std::fs::write(dir.join("RESULTS.md"), results)
+        .map_err(|e| format!("write RESULTS.md: {e}"))?;
     std::fs::write(dir.join("COMPARISON.md"), comparison_md(&rows, &spike))
         .map_err(|e| format!("write COMPARISON.md: {e}"))?;
     Ok(())
@@ -477,6 +488,67 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     out
 }
 
+/// The "Live suite" section: the recorded `--live` run, or a line saying
+/// there is none.
+pub fn live_section(rows: &[LiveRow], meta: Option<&serde_json::Value>) -> String {
+    let mut out = String::from("\n## Live suite\n\n");
+    out.push_str(
+        "Acceptance criterion 6 asks for a small live suite per provider. `--live` runs it against the\n\
+         installed `claude` and `codex` (README.md, \"Live suite\"); this section is generated from the\n\
+         recorded run in `live.jsonl` and `live.meta.json`.\n\n",
+    );
+    if rows.is_empty() {
+        out.push_str("No live run is recorded.\n");
+        return out;
+    }
+    if let Some(meta) = meta {
+        let text = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
+        let _ = writeln!(out, "- Date: {}.", text(&meta["date"]));
+        let _ = writeln!(out, "- Machine: {}.", text(&meta["os"]));
+        let _ = writeln!(out, "- delega: version {}.", text(&meta["delega_version"]));
+        let _ = writeln!(
+            out,
+            "- Harness commit: `{}`.",
+            text(&meta["harness_commit"])
+        );
+        for provider in crate::live::PROVIDERS {
+            if let Some(v) = meta["providers"][provider].as_str() {
+                let _ = writeln!(out, "- {provider}: {v}.");
+            }
+        }
+        let _ = writeln!(
+            out,
+            "- Claude cases used `--model {}`, Codex cases `--effort {}`.",
+            text(&meta["claude_model"]),
+            text(&meta["codex_effort"])
+        );
+        out.push('\n');
+    }
+    let passed = rows.iter().filter(|r| r.verdict == "pass").count();
+    let _ = writeln!(out, "{passed} of {} cases passed.\n", rows.len());
+    out.push_str("| Provider | Case | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            r.provider,
+            r.case,
+            r.verdict,
+            r.outcome.as_deref().unwrap_or("-"),
+            yes(r.cleanup_confirmed),
+            r.denied,
+            r.runs,
+            r.cost_usd.map_or("-".to_string(), |c| format!("${c:.4}")),
+            if r.problems.is_empty() {
+                "none".to_string()
+            } else {
+                r.problems.join("; ").replace('|', "/")
+            },
+        );
+    }
+    out
+}
+
 /// Written by the reviewer of the harness, not measured by it.
 const TIME_BREAKDOWN: &str = "## Where the time goes in a run\n\n\
     Measured by the reviewer on a release build, not by this harness. On an idle machine a plain Claude\n\
@@ -851,6 +923,36 @@ fn differences(rows: &[Measured], spike: &[SpikeRow]) -> String {
 #[cfg(test)]
 mod tests {
     use super::percentile;
+
+    #[test]
+    fn the_live_section_says_when_no_run_is_recorded() {
+        let text = super::live_section(&[], None);
+        assert!(text.contains("## Live suite"), "{text}");
+        assert!(text.contains("No live run is recorded."), "{text}");
+    }
+
+    #[test]
+    fn the_live_section_lists_each_case_with_versions_and_date_from_a_recorded_run() {
+        let rows: Vec<super::LiveRow> = include_str!("../tests/fixtures/live/live.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("a recorded row"))
+            .collect();
+        let meta: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/live/live.meta.json"))
+                .expect("recorded meta");
+        let text = super::live_section(&rows, Some(&meta));
+        assert!(text.contains("- Date: 2026-11-22."), "{text}");
+        assert!(text.contains("- claude: 2.1.400 (Claude Code)."), "{text}");
+        assert!(text.contains("- codex: codex-cli 0.99.0."), "{text}");
+        assert!(text.contains("1 of 2 cases passed."), "{text}");
+        assert!(
+            text.contains(
+                "| claude | plain-answer | pass | completed | yes | 0 | 1 | $0.0010 | none |"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("not so: cleanup confirmed"), "{text}");
+    }
 
     #[test]
     fn percentile_is_nearest_rank() {

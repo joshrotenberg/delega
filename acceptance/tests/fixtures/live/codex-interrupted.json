@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "run": "run-18ea883434d84a98-0",
+  "provider": "codex",
+  "outcome": "interrupted",
+  "text": "",
+  "error": {
+    "kind": "interrupted",
+    "message": "the provider was stopped at the caller's request"
+  },
+  "cleanup": {
+    "confirmed": true
+  },
+  "permissions": {
+    "mode": "read"
+  },
+  "provider_notes": [
+    "Codex does not report denials in its event stream except commands it marks declined; other blocked actions show up as failed commands and are not listed in permissions.denied",
+    "Codex user configuration is ignored (--ignore-user-config), and plugins, apps, hooks and multi-agent are disabled; Codex may still load its own AGENTS.md files",
+    "wider than requested: the read-only sandbox lets Codex read any file this user can read, including outside the working directory and permissions.directories, and run any command that needs no write access and no network access; permissions.commands is not enforced as a list and permissions.directories does not limit reading",
+    "3 environment variables of the caller were withheld; 2 were passed"
+  ],
+  "applied": {
+    "sources": {
+      "cwd": "flag",
+      "effort": "flag",
+      "permissions.mode": "default",
+      "permissions.on_request": "default",
+      "permissions.strict": "default",
+      "prompt": "flag",
+      "provider": "flag",
+      "session.ephemeral": "flag",
+      "timeout_secs": "default"
+    },
+    "env": {
+      "passed": {
+        "total": 2,
+        "base": 2,
+        "network": 0,
+        "provider": 0,
+        "named_by_caller": 0,
+        "set_by_caller": 0,
+        "set_by_delega": 0
+      },
+      "withheld": {
+        "total": 3,
+        "never_passed": 3,
+        "not_allowlisted": 0
+      },
+      "named": []
+    }
+  },
+  "timing": {
+    "queued_at": "2026-11-23T01:25:59.266Z",
+    "started_at": "2026-11-23T01:25:59.438Z",
+    "finished_at": "2026-11-23T01:26:02.414Z",
+    "duration_ms": 2976,
+    "timeout_secs": 600
+  },
+  "provenance": {
+    "delega_version": "0.1.0-dev",
+    "provider_executable": "/fakes/fake-codex.sh",
+    "provider_version": "codex-cli 0.99.0"
+  }
+}

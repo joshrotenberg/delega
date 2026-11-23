@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-22",
+  "os": "Darwin 27.2.0 arm64",
+  "delega_version": "0.1.0-dev",
+  "harness_commit": "abc1234",
+  "providers": {"claude": "2.1.400 (Claude Code)", "codex": "codex-cli 0.99.0"},
+  "claude_model": "haiku",
+  "codex_effort": "low",
+  "wall_secs": 13
+}

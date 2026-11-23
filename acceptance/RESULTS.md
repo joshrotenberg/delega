@@ -405,3 +405,11 @@ No row changed verdict, outcome, exit status, survivors or cleanup report betwee
 | codex-ui-child | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 27 ms | pass |
 | codex-ui-setsid | SIGINT at 1000 ms | interrupted | 130 | yes | NO | leaf-setsid | yes | 29 ms | pass |
 | codex-ui-ignore | SIGINT at 1000 ms | interrupted | 130 | yes | NO | none | yes | 30 ms | pass |
+
+## Live suite
+
+Acceptance criterion 6 asks for a small live suite per provider. `--live` runs it against the
+installed `claude` and `codex` (README.md, "Live suite"); this section is generated from the
+recorded run in `live.jsonl` and `live.meta.json`.
+
+No live run is recorded.

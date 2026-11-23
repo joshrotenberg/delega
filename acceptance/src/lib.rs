@@ -5,6 +5,7 @@
 //! result says what may remain. See `acceptance/README.md`.
 
 pub mod delega_bin;
+pub mod live;
 pub mod matrix;
 pub mod procs;
 pub mod report;
