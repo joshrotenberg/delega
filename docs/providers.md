@@ -343,7 +343,7 @@ claude -p --output-format stream-json --verbose
   --permission-mode dontAsk --permission-prompts none
   --strict-mcp-config --mcp-config '{"mcpServers":{}}'
   --setting-sources "" --settings <json>
-  --add-dir <cwd> [--add-dir <directory> ...]
+  --add-dir <cwd> [--add-dir <directory> ...]   (directories: not in build)
   --disable-slash-commands --no-chrome
   --tools <names> --allowedTools <rules>
   [--resume <id>] [--no-session-persistence]
@@ -375,7 +375,7 @@ granted is denied at once. Denials come back in the result event's
 | --- | --- | --- | --- |
 | `read` | `Read,Glob,Grep` | `Read(//CWD/**)`, one `Read(//DIR/**)` per directory | hooks off |
 | `write` | `Read,Glob,Grep,Edit,Write` | the `read` rules plus `Edit(//CWD/**)`, `Write(//CWD/**)` | hooks off |
-| `build` | `Read,Glob,Grep,Edit,Write,Bash` | the `write` rules; no `Bash` rule | hooks off, `sandbox` (see [Build](#build)) |
+| `build` | `Read,Glob,Grep,Edit,Write,Bash` | the `write` rules; no `Bash` rule | hooks off, `sandbox`; directories without `--add-dir` (see [Build](#build)) |
 | `full` | all nine built-in tools: `Read,Glob,Grep,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch` | the same nine, unscoped | hooks off |
 
 `Glob` and `Grep` are in `--tools` and are not allow rules. Listed bare they
@@ -394,8 +394,7 @@ carries:
     "enabled": true,
     "failIfUnavailable": true,
     "allowUnsandboxedCommands": false,
-    "autoAllowBashIfSandboxed": true,
-    "filesystem": { "denyWrite": ["//DIR"] }
+    "autoAllowBashIfSandboxed": true
   }
 }
 ```
@@ -410,20 +409,27 @@ carries:
   starts with a variable assignment, `eval`, or
   `git -c user.name=x -c user.email=y commit`) is denied and listed in
   `permissions.denied`.
-- `filesystem.denyWrite`: one `//DIR` entry per resolved
-  `permissions.directories` entry, present only when there are any. The sandbox
-  treats every `--add-dir` directory as writable, and delega passes those
-  directories with `--add-dir`.
 - No network domain is allowed, so under `dontAsk` every host is refused.
 
-Commands write to the working directory and to Claude Code's per-user temporary
-directory: Claude Code sets `TMPDIR` to it (`/tmp/claude-<uid>`), and the rest
-of `/tmp` is not writable. Commands can write anywhere in that directory, which
-other Claude Code sessions of the same user also use. In a git worktree, a
-`build` worker could run `git add` and `git commit`. Commands can read files outside the working
-directory, so a `build` run carries a `wider than requested` note.
-`permissions.commands` must be empty with `build`; the request is refused as
-invalid otherwise.
+`permissions.directories` gets its `Read(//DIR/**)` rule and no `--add-dir`:
+the sandbox lets commands write to every `--add-dir` directory. Live, the
+`Read` tool read a file in such a directory and a command's write to it was
+denied ([Verified](#verified-against-the-real-cli)).
+
+Commands can write to the working directory and to Claude Code's per-user
+temporary directory: Claude Code sets `TMPDIR` to it (`/tmp/claude-<uid>`), and
+the rest of `/tmp` was not writable live. Commands can write anywhere in that
+directory, which other Claude Code sessions of the same user also use. In a git
+worktree, a `build` worker ran `git add` and `git commit`, which write the main
+checkout's `.git`. Commands can read files outside the working directory, so a
+`build` run carries a `wider than requested` note. `permissions.commands` must
+be empty with `build`; the request is refused as invalid otherwise.
+
+Managed settings take precedence over the sandbox settings delega passes: a
+managed `sandbox.enabled: false` together with a managed `Bash` allow rule, for
+example, would run commands unsandboxed. `delega doctor` lists the managed
+sandbox keys it finds ([Managed settings](#managed-settings)); planning does
+not refuse a run for them.
 
 ### Commands and directories
 
@@ -444,7 +450,7 @@ invalid otherwise.
   interface.
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
   It is readable, not editable: no `Edit` or `Write` rule names it. In `build`
-  it is also listed in the sandbox's `filesystem.denyWrite`.
+  it gets the `Read` rule only ([Build](#build)).
 
 ### Text refused because it could change a rule
 
@@ -648,15 +654,15 @@ Claude Code settings and its dry run has an empty `deny_rules`.
 
 With `permissions.strict`, Claude Code refuses before start in two cases. In
 `build`, reads by commands are not confined to the working directory and
-`permissions.directories`. Otherwise, when `permissions.commands` is set and no
-command guard hook is configured, because the commands cannot be granted
-exactly. The commands are not granted at all, so
-the run would be narrower than asked, not wider; strict refuses it because the
+`permissions.directories`. In `read` and `write`, when `permissions.commands`
+is set and no command guard hook is configured, because the commands cannot be
+granted exactly. The commands are not granted at all, so the run would be
+narrower than asked, not wider; strict refuses it because the
 request cannot be carried out as stated. The `delega` binary configures the hook
 from its own executable, so this arises only when delega
 cannot locate its own executable as an absolute path, or for an embedder that
-sets no `ProviderOptions::hook`. With a hook, and in `full`, nothing is
-refused. The run's other notes (settings not applied, instruction files) do not
+sets no `ProviderOptions::hook`. In `read` and `write` with a hook, and in
+`full`, nothing is refused. The run's other notes (settings not applied, instruction files) do not
 describe a part of the permissions the provider fails to enforce, so strict
 ignores them.
 
@@ -832,9 +838,9 @@ preparation failures. The differences:
 - Writes are stricter than `write` strictly needs: temporary directories and the
   network are excluded. `build` includes the temporary directories, which test
   runners and build tools use, and keeps the network off.
-- In `build`, commands can write anywhere under `/tmp` and `$TMPDIR`, including
-  a `permissions.directories` entry that lies there, which the request asks to
-  be read-only.
+- In `build`, commands can write under `/tmp` and `$TMPDIR` (except `.git`),
+  including a `permissions.directories` entry that lies there, which the
+  request asks to be read-only.
 - In `build`, the sandbox keeps `.git` unwritable, so `git add` and
   `git commit` fail and the worker cannot commit; the caller commits its
   changes. A `build` run carries a note saying so.
@@ -1048,7 +1054,8 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
 - A scoped `Read(//dir/**)` allow rule scopes reads under `dontAsk`.
 - `Grep` and `Glob` follow the scoped `Read` rules when they are not listed as
   allow rules. Listed bare, `Grep` read a file outside the working directory.
-- `--add-dir` makes a directory readable and not writable.
+- `--add-dir` makes a directory readable and not writable by the tools. Inside
+  Claude Code's sandbox (`build`), commands can write to it (2026-11-22, below).
 - The hook settings shape works: the guard is called and its denial is honoured.
 - The `--version` output of both CLIs is parsed.
 - `--effort low` and the Codex effort key are accepted.
@@ -1151,11 +1158,22 @@ Verified on 2026-11-18 with Claude Code 2.1.328 and codex-cli 0.170.0:
     scratch directory there. In a git worktree outside that directory, writing
     a file, `git add` and `git commit` succeeded; writing the main checkout's
     `.git/hooks/x`, a file in the main checkout, and a
-    `permissions.directories` entry were denied, and `git config --local`
+    `permissions.directories` entry (which that binary passed with `--add-dir`
+    and listed in `filesystem.denyWrite`) were denied, and `git config --local`
     failed to lock `.git/config`. `git -c user.name=x -c user.email=y commit`
     was denied under `dontAsk` ("Permission to use Bash has been denied
     because Claude Code is running in don't ask mode") and listed in
     `permissions.denied`; the same commit without `-c` succeeded.
+- Two more Claude Code 2.1.330 probes on 2026-11-22, which led `build` to drop
+  `--add-dir` and `filesystem.denyWrite` for `permissions.directories`:
+  - With that branch binary, a `permissions.directories` entry that contained
+    the working directory (working directory `P/cwd`, directory `P`) became
+    `denyWrite` `["//P"]`, and then `touch ./inside` in the working directory
+    was denied too: the worker could write nowhere.
+  - Raw `claude` with the same sandbox settings, no `--add-dir` for an extra
+    directory `SIDE` and only a `Read(//SIDE/**)` allow rule: the `Read` tool
+    read `SIDE/readme.txt`, a command's write to `SIDE` was denied, the working
+    directory stayed writable, and the `Read` tool on `/etc/hosts` was denied.
 
 ## Unverified against the real CLI
 
@@ -1264,7 +1282,7 @@ the key does is in Claude Code's
 | `hooks` | `allowManagedHooksOnly`, `disableAllHooks` |
 | `plugins` | `strictPluginOnlyCustomization` |
 | `mcp` | `disableSideloadFlags`, `allowManagedMcpServersOnly`, `allowedMcpServers`, `deniedMcpServers` |
-| `sandbox` | `sandbox.enabled`, `sandbox.filesystem.allowManagedReadPathsOnly`, `sandbox.network.allowManagedDomainsOnly` |
+| `sandbox` | `sandbox.enabled`, `sandbox.autoAllowBashIfSandboxed`, `sandbox.allowUnsandboxedCommands`, `sandbox.failIfUnavailable`, `sandbox.excludedCommands`, `sandbox.filesystem.allowWrite`, `sandbox.network.allowedDomains`, `sandbox.filesystem.allowManagedReadPathsOnly`, `sandbox.network.allowManagedDomainsOnly` |
 | `authentication` | `forceLoginMethod`, `forceLoginOrgUUID`, `enforceAnthropicSignIn`, `allowedProviders`, `apiKeyHelper` |
 | `environment` | `env` (the variable names in it are not listed) |
 | `model` | `availableModels`, `deniedModels`, `modelOverrides` |

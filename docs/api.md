@@ -92,7 +92,7 @@ result reports what happened.
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `permissions.mode` | `read` (default), `write`, `build`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `build`: may also run any command inside the provider's OS sandbox, where commands write only to the working directory and temporary directories and have no network. `full`: no path or command scope and no sandbox from delega. The provider mappings are in [providers](providers.md). |
+| `permissions.mode` | `read` (default), `write`, `build`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `build`: may also run any command inside the provider's OS sandbox, which lets commands write to the working directory and temporary directories, with exceptions per provider (see [Build](providers.md#build), for example git in a worktree), and gives them no network. `full`: no path or command scope and no sandbox from delega. The provider mappings are in [providers](providers.md). |
 | `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`. With `build` the list must be empty, or the request is refused `invalid_request`. In `full` the provider mapping does not use them; the request still validates the list. |
 | `permissions.directories` | list of paths | Extra directories the worker may read, at most 64. Each must exist, or the run is refused `directory_unusable`. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
 | `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
@@ -105,9 +105,10 @@ in `provider_notes`, or, with `permissions.strict`, the run is refused before it
 starts. The refusal kind is `permissions_not_enforceable`; the message reads
 `permissions.strict is set and <provider> cannot enforce these permissions as
 stated: <part>; <part>`. A dry run reports the same refusal. With Codex,
-`strict` refuses every `read` and `write` request, because Codex confines
-neither reads nor commands. With Claude Code it refuses only
-`permissions.commands` when no command guard is configured.
+`strict` refuses every `read`, `write` and `build` request, because Codex does
+not confine reads. With Claude Code it refuses a `build` request, because reads
+by commands are not confined, and `permissions.commands` when no command guard
+is configured.
 
 `--strict` only turns the field on: a profile's `strict: true` stays on for
 `delega run`, because there is no flag to turn it off. MCP `start` can pass

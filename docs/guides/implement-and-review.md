@@ -40,8 +40,9 @@ not see the supervising conversation, so the prompt must stand alone.
 
 **Permissions.** Give an implementer that builds and runs tests
 `permissions.mode: build`. It may edit the working directory and run any command
-inside the provider's sandbox; commands write only to the working directory and
-temporary directories, and have no network. `write` allows only the exact
+inside the provider's sandbox, which lets commands write to the working
+directory and temporary directories and gives them no network
+([Build](../providers.md#build) has the exceptions seen live). `write` allows only the exact
 commands listed in `permissions.commands`, which cannot cover the varying
 commands a build runs. Use `full` only when the build needs the network (to
 fetch dependencies, for example) or writes outside the working directory and

@@ -55,7 +55,8 @@ working directory, so prefer absolute paths.
 
 Set `permissions.mode` to the narrowest value that works: `read` (default),
 `write`, `build` (edit and run any command inside the provider's sandbox, with
-no network and writes only to the working directory and temporary directories;
+no network, where commands can write to the working directory and temporary
+directories;
 `permissions.commands` must be empty) or `full`. Add `permissions.commands` for
 exact commands the worker may run and `permissions.directories` for extra
 directories it may read. A request

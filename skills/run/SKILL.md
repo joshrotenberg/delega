@@ -37,7 +37,7 @@ The worker starts with the narrowest permission and gets only what you grant.
 | --- | --- | --- |
 | `--read` (default) | `permissions.mode` = `read` | Read the working directory. No writes. No commands except those allowed with `--allow-command`. |
 | `--write` | `permissions.mode` = `write` | Also edit files in the working directory. Commands as for `--read`. |
-| `--build` | `permissions.mode` = `build` | Also edit files and run any command inside the provider's sandbox: writes only to the working directory and temporary directories, no network. Not combined with `--allow-command`. |
+| `--build` | `permissions.mode` = `build` | Also edit files and run any command inside the provider's sandbox: commands can write to the working directory and temporary directories, no network. Not combined with `--allow-command`. |
 | `--full` | `permissions.mode` = `full` | No sandbox and no scope from delega. |
 | `--allow-command CMD` | `permissions.commands` | One exact shell command the worker may run. Repeat the flag for more. |
 | `--add-dir DIR` | `permissions.directories` | One extra directory the worker may read. Repeat for more. |

@@ -9,9 +9,9 @@ enforces part of it. The fields are in [Permissions](../api.md#permissions).
 - **`read`**, the built-in default: read the working directory and any extra
   directories.
 - **`write`**: also edit files in the working directory.
-- **`build`**: also run any command inside the provider's OS sandbox. Commands
-  write only to the working directory and temporary directories, and have no
-  network. `permissions.commands` must be empty.
+- **`build`**: also run any command inside the provider's OS sandbox, which
+  lets commands write to the working directory and temporary directories and
+  gives them no network. `permissions.commands` must be empty.
 - **`full`**: for Claude Code, the nine built-in tools without directory
   scopes or a sandbox, with eligible deny rules still applied; for Codex, the
   sandbox is off.

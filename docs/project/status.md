@@ -22,9 +22,9 @@ stands. This page lists the limits a user meets.
   [remaining assumptions](../providers.md#unverified-against-the-real-cli).
 - **Permission modes.** `read` (default), `write`, `build` and `full`, plus
   exact commands (`--allow-command`) and extra readable directories. `build`
-  runs any command inside the provider's OS sandbox, with writes limited to the
-  working directory and temporary directories and no network, for workers that
-  build and run tests
+  runs any command inside the provider's OS sandbox, which lets commands write
+  to the working directory and temporary directories and gives them no
+  network, for workers that build and run tests
   ([#98](https://github.com/joshrotenberg/delega/issues/98)). A fixed command
   can be granted with `--allow-command` in `read` and `write`.
   Codex confines neither reads nor commands, so a `read`, `write` or `build`

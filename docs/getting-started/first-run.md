@@ -73,9 +73,9 @@ delega run --provider claude -p "Plan the change" --dry-run
 
 - `--stdin` reads the assignment from standard input.
 - `--write` allows editing files in the working directory, `--build` also runs
-  any command inside the provider's sandbox (no network, writes only to the
-  working directory and temporary directories), and `--full` removes delega's
-  restrictions. `--allow-command` grants one shell command, matched
+  any command inside the provider's sandbox (no network; commands can write
+  to the working directory and temporary directories), and `--full` removes
+  delega's restrictions. `--allow-command` grants one shell command, matched
   exactly. Codex confines neither reads nor commands, so a `read`, `write` or `build`
   Codex run is wider than requested and says so in `provider_notes`; `--strict`
   refuses it instead ([Permissions](../api.md#permissions),
