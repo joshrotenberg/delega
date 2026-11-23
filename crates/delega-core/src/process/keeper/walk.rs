@@ -49,6 +49,9 @@ thread_local! {
     /// Test seam: make every children and scan read on this thread fail, as
     /// descriptor exhaustion would.
     static FAIL_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test seam: make the stat of this pid read as missing on this thread,
+    /// as `hidepid` would for a process listed in a children file.
+    static MISSING_STAT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 fn forced_failure() -> bool {
@@ -71,6 +74,10 @@ fn is_gone(error: &std::io::Error) -> bool {
 /// The state letter and parent of one process, from `/proc/<pid>/stat`:
 /// `Ok(None)` when it is gone, an error when it could not be read.
 fn stat_read(pid: i32) -> Result<Option<(char, i32)>, ReadFailed> {
+    #[cfg(test)]
+    if MISSING_STAT.with(std::cell::Cell::get) == pid {
+        return Ok(None);
+    }
     let bytes = match std::fs::read(format!("/proc/{pid}/stat")) {
         Ok(bytes) => bytes,
         Err(error) if is_gone(&error) => return Ok(None),
@@ -183,9 +190,28 @@ fn scanned_descendants(root: i32) -> Result<BTreeSet<i32>, ReadFailed> {
     Ok(out)
 }
 
-/// Whether a process is alive, failing when its stat cannot be read.
-fn alive_read(pid: i32) -> Result<bool, ReadFailed> {
-    Ok(stat_read(pid)?.is_some_and(|(state, _)| state != 'Z' && state != 'X'))
+/// Whether a process listed in a children file is alive. A stat that reads
+/// as missing is absence only when the process's pidfd shows it gone; a
+/// process the kernel lists but hides (`hidepid`) is a failed read, so the
+/// pass that met it is incomplete.
+fn alive_listed(pid: i32) -> Result<bool, ReadFailed> {
+    match stat_read(pid)? {
+        Some((state, _)) => Ok(state != 'Z' && state != 'X'),
+        None if gone_by_pidfd(pid) => Ok(false),
+        None => Err(ReadFailed),
+    }
+}
+
+/// Whether the pidfd of `pid` shows it gone: no such process, or exited.
+fn gone_by_pidfd(pid: i32) -> bool {
+    let Some(raw) = Pid::from_raw(pid) else {
+        return true;
+    };
+    match pidfd_open(raw, PidfdFlags::empty()) {
+        Err(rustix::io::Errno::SRCH) => true,
+        Ok(fd) => sys::pidfd_exited(&fd),
+        Err(_) => false,
+    }
 }
 
 /// What a census or a freeze found, for the answer and the diagnostics.
@@ -204,13 +230,17 @@ pub(super) struct Walked {
     /// Live processes a freeze could not hold: no pidfd, or a parent that had
     /// changed since they were found. They were not signalled.
     pub refused: u32,
+    /// Reads of `/proc` that failed for a reason other than the process
+    /// being gone. Unlike a tree that keeps changing, a failed read is a
+    /// hole in what the keeper could see.
+    pub read_failures: u32,
 }
 
 impl Walked {
     pub(super) fn detail(&self) -> String {
         format!(
-            "passes={} complete={} refused={}",
-            self.passes, self.complete, self.refused
+            "passes={} complete={} refused={} read_failures={}",
+            self.passes, self.complete, self.refused, self.read_failures
         )
     }
 
@@ -251,7 +281,7 @@ fn in_flux(root: i32, keep: i32) -> bool {
 fn census_pass(root: i32) -> Result<(BTreeSet<i32>, BTreeSet<i32>), ReadFailed> {
     let mut walked = BTreeSet::new();
     for pid in descendants(root)? {
-        if alive_read(pid)? {
+        if alive_listed(pid)? {
             walked.insert(pid);
         }
     }
@@ -266,6 +296,7 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
     let mut previous: Option<BTreeSet<i32>> = None;
     let mut passes = 0;
     let mut last = 0;
+    let mut read_failures = 0;
     for _ in 0..KEEPER_FREEZE_PASSES {
         passes += 1;
         let flux_before = in_flux(root, keep);
@@ -280,6 +311,7 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
                         passes,
                         complete: true,
                         refused: 0,
+                        read_failures,
                     };
                 }
                 previous = Some(walked);
@@ -288,7 +320,10 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
                 last = walked.len().max(scanned.len());
                 previous = None;
             }
-            Err(ReadFailed) => previous = None,
+            Err(ReadFailed) => {
+                read_failures += 1;
+                previous = None;
+            }
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -297,6 +332,7 @@ pub(super) fn census(root: i32, keep: i32) -> Walked {
         passes,
         complete: false,
         refused: 0,
+        read_failures,
     }
 }
 
@@ -378,6 +414,23 @@ impl Held {
     }
 }
 
+/// Hold a queued child found in the children list of `parent`, whose hold
+/// is `parent_hold` (`None` for the keeper itself). The child is taken under
+/// that parent only while the parent's pidfd shows it alive: once it has
+/// exited its pid may name a foreign process, so the child counts only if it
+/// is now the keeper's own child (reparented); anything else is refused.
+fn take_queued(
+    pid: i32,
+    parent: i32,
+    parent_hold: Option<&Held>,
+    root: i32,
+) -> Result<Held, NotHeld> {
+    match parent_hold {
+        Some(hold) if sys::pidfd_exited(&hold.fd) => Held::take(pid, root),
+        _ => Held::take(pid, parent),
+    }
+}
+
 /// Wait until `until` for a SIGSTOP to take effect: a stopped process forks
 /// nothing more and reaps none of its children, so its children list is then
 /// complete and their pids stay theirs. `Some(true)` stopped, `Some(false)`
@@ -404,20 +457,23 @@ fn wait_stopped(held: &Held, until: Instant) -> Option<bool> {
 /// kept only while the parent has not exited.
 pub(super) fn signal_tree(root: i32, signal: Signal) {
     let mut seen = HashSet::new();
-    let mut queue: VecDeque<(i32, i32)> = children(root)
+    // Each queued child carries its parent's hold, so it is taken under that
+    // parent only while the parent is still alive (see `take_queued`).
+    let mut queue: VecDeque<(i32, i32, Option<std::rc::Rc<Held>>)> = children(root)
         .unwrap_or_default()
         .into_iter()
-        .map(|c| (c, root))
+        .map(|c| (c, root, None))
         .collect();
-    while let Some((pid, parent)) = queue.pop_front() {
+    while let Some((pid, parent, parent_hold)) = queue.pop_front() {
         if pid == root || !seen.insert(pid) {
             continue;
         }
-        if let Ok(held) = Held::take(pid, parent) {
+        if let Ok(held) = take_queued(pid, parent, parent_hold.as_deref(), root) {
             held.send(signal);
             held.send(Signal::CONT);
             if let Ok(Some(kids)) = held.children() {
-                queue.extend(kids.into_iter().map(|c| (c, pid)));
+                let held = std::rc::Rc::new(held);
+                queue.extend(kids.into_iter().map(|c| (c, pid, Some(held.clone()))));
             }
         }
     }
@@ -465,6 +521,7 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
     let mut passes = 0;
     let mut frozen = false;
     let mut refused_total = 0;
+    let mut read_failures = 0;
     for _ in 0..KEEPER_FREEZE_PASSES {
         passes += 1;
         let mut sound = !in_flux(root, keep);
@@ -472,6 +529,7 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
         let mut queue: VecDeque<(i32, i32)> = match children(root) {
             Ok(kids) => kids.into_iter().map(|c| (c, root)).collect(),
             Err(ReadFailed) => {
+                read_failures += 1;
                 sound = false;
                 VecDeque::new()
             }
@@ -485,11 +543,11 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
             if pid == root || !seen.insert(pid) {
                 continue;
             }
-            if let std::collections::hash_map::Entry::Vacant(slot) = held.entry(pid) {
-                match Held::take(pid, parent) {
+            if !held.contains_key(&pid) {
+                match take_queued(pid, parent, held.get(&parent), root) {
                     Ok(process) => {
                         process.send(Signal::STOP);
-                        slot.insert(process);
+                        held.insert(pid, process);
                         new += 1;
                     }
                     Err(NotHeld::Gone) => continue,
@@ -510,7 +568,11 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
             match wait_stopped(process, until) {
                 Some(true) => match process.children() {
                     Ok(Some(kids)) => queue.extend(kids.into_iter().map(|c| (c, pid))),
-                    Ok(None) | Err(ReadFailed) => sound = false,
+                    Ok(None) => sound = false,
+                    Err(ReadFailed) => {
+                        read_failures += 1;
+                        sound = false;
+                    }
                 },
                 Some(false) => sound = false,
                 None => {}
@@ -542,6 +604,7 @@ pub(super) fn freeze_kill(root: i32, keep: i32) -> Walked {
                 passes,
                 complete,
                 refused: refused_total,
+                read_failures: read_failures + counted.read_failures,
             };
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -570,6 +633,7 @@ mod tests {
             passes: 3,
             complete: freeze_proven(true, 1, true),
             refused: 1,
+            read_failures: 0,
         };
         assert_eq!(walked.effective_live(), 1);
     }
@@ -582,6 +646,53 @@ mod tests {
         FAIL_READS.with(|fail| fail.set(false));
         assert!(!walked.complete, "{walked:?}");
         assert!(walked.effective_live() >= 1, "{walked:?}");
+    }
+
+    #[test]
+    fn a_queued_child_of_an_exited_parent_is_refused_unless_reparented_to_the_keeper() {
+        use crate::test_spawn::Guarded;
+        let mut parent = std::process::Command::new("sleep")
+            .arg("0.1")
+            .guarded_spawn()
+            .expect("start a stand-in parent");
+        let parent_pid = i32::try_from(parent.id()).expect("a pid");
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let Ok(hold) = Held::take(parent_pid, me) else {
+            let _ = parent.wait();
+            panic!("the stand-in parent could not be held");
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        while !sys::pidfd_exited(&hold.fd) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The parent has exited, so a child read from its pid is taken only
+        // as the keeper's own child: init's child (pid 1's parent is 0) is
+        // refused, not taken as the exited parent's.
+        assert!(matches!(
+            take_queued(1, parent_pid, Some(&hold), me),
+            Err(NotHeld::Refused)
+        ));
+        let _ = parent.wait();
+    }
+
+    #[test]
+    fn a_listed_child_whose_stat_is_hidden_makes_the_pass_incomplete() {
+        use crate::test_spawn::Guarded;
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .guarded_spawn()
+            .expect("start a child");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        MISSING_STAT.with(|missing| missing.set(pid));
+        let hidden = alive_listed(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        let gone = alive_listed(pid);
+        MISSING_STAT.with(|missing| missing.set(0));
+        // Alive but unreadable is a failed read, not absence.
+        assert_eq!(hidden, Err(ReadFailed));
+        // Once its pidfd shows it gone, the missing stat is absence.
+        assert_eq!(gone, Ok(false));
     }
 
     #[test]

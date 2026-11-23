@@ -86,6 +86,8 @@ struct State {
     /// the keeper says `releasing` or its end closes. Group and member signals
     /// are sent while holding this lock.
     pin: Arc<GroupPin>,
+    /// See [`LinkHandle::unproven`].
+    unproven: AtomicBool,
 }
 
 /// What the owner's shared state holds of the keeper: the socket, and what the
@@ -116,6 +118,12 @@ impl LinkHandle {
         self.state.subreaper.load(Ordering::SeqCst)
     }
 
+    /// Whether any census or freeze answer of this run was unproven in a way a
+    /// later answer cannot repair (see [`reply_unproven`]). Sticky.
+    pub(crate) fn unproven(&self) -> bool {
+        self.state.unproven.load(Ordering::SeqCst)
+    }
+
     /// The lock that says whether the program's pid still pins its group
     /// and session.
     pub(crate) fn pin(&self) -> Arc<GroupPin> {
@@ -143,6 +151,9 @@ impl LinkHandle {
         }
         match tokio::time::timeout(KEEPER_REPLY_TIMEOUT, rx).await {
             Ok(Ok((live, detail))) => {
+                if reply_unproven(verb, &detail) {
+                    self.state.unproven.store(true, Ordering::SeqCst);
+                }
                 self.log(
                     format!("{verb}: live={live} {detail}")
                         .trim_end()
@@ -224,6 +235,24 @@ impl KeeperLink {
             (None, _) => Err("the keeper ended without saying how the program ended".into()),
         }
     }
+}
+
+/// Whether a census or freeze answer leaves a hole no later answer repairs:
+/// a refused hold (a process that was never signalled), a failed read of
+/// `/proc`, or a freeze that did not complete. A census that is incomplete
+/// because the tree keeps changing reports a nonzero count and never claimed
+/// an empty tree, so it is not one. An answer without details (no walk) is
+/// not one.
+pub(crate) fn reply_unproven(verb: &str, detail: &str) -> bool {
+    let field = |name: &str| -> Option<&str> {
+        detail
+            .split_ascii_whitespace()
+            .find_map(|word| word.strip_prefix(name)?.strip_prefix('='))
+    };
+    let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
+    nonzero("refused")
+        || nonzero("read_failures")
+        || (verb == "freeze" && field("complete") == Some("false"))
 }
 
 /// Wait up to `bound` for the keeper, the owner's own child, to exit; kill it
@@ -585,5 +614,53 @@ fn exited(state: &State, summary: ExitSummary) {
     state.exited.store(true, Ordering::SeqCst);
     if let Some(tx) = lock(&state.exit_tx).take() {
         let _ = tx.send(Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused hold in one answer is not repaired by a later clean one: the
+    /// flag the owner keeps is sticky for the run.
+    #[test]
+    fn a_keeper_refusal_followed_by_a_clean_retry_stays_unproven() {
+        let flag = AtomicBool::new(false);
+        let answers = [
+            (
+                "freeze",
+                "passes=2 complete=false refused=1 read_failures=0",
+            ),
+            ("freeze", "passes=1 complete=true refused=0 read_failures=0"),
+            ("census", "passes=2 complete=true refused=0 read_failures=0"),
+        ];
+        for (verb, detail) in answers {
+            if reply_unproven(verb, detail) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn which_answers_are_unproven() {
+        assert!(reply_unproven(
+            "census",
+            "passes=3 complete=true refused=0 read_failures=1"
+        ));
+        assert!(reply_unproven(
+            "freeze",
+            "passes=64 complete=false refused=0 read_failures=0"
+        ));
+        // A census of a tree that keeps changing never claimed zero.
+        assert!(!reply_unproven(
+            "census",
+            "passes=64 complete=false refused=0 read_failures=0"
+        ));
+        assert!(!reply_unproven(
+            "freeze",
+            "passes=1 complete=true refused=0 read_failures=0"
+        ));
+        assert!(!reply_unproven("census", ""));
     }
 }
