@@ -79,90 +79,102 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
     assert_gone("stopped descendant", &[gc]).await;
 }
 
-#[tokio::test]
-async fn the_child_leads_a_new_session_and_has_no_controlling_terminal() {
-    let s = Scratch::new();
-    let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
-    let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
-    assert_eq!(
-        sys::session_of(leader),
-        Some(leader),
-        "it leads its own session"
-    );
-    assert_ne!(sys::session_of(std::process::id() as i32), Some(leader));
-    let tty = std::process::Command::new("/bin/ps")
-        .args(["-o", "tty=", "-p", &leader.to_string()])
-        .guarded_output()
-        .expect("run ps");
-    let tty = String::from_utf8_lossy(&tty.stdout);
-    assert!(tty.trim().starts_with('?'), "controlling terminal: {tty:?}");
-    handle.interrupt();
-    let report = handle.wait().await;
-    assert_confirmed(&report);
-}
+both!(
+    the_child_leads_a_new_session_and_has_no_controlling_terminal,
+    the_child_leads_a_new_session_and_has_no_controlling_terminal_kept,
+    async {
+        let s = Scratch::new();
+        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+        let leader = s.pid("leader").await;
+        let _reaper = Reaper(vec![leader]);
+        assert_eq!(
+            sys::session_of(leader),
+            Some(leader),
+            "it leads its own session"
+        );
+        assert_ne!(sys::session_of(std::process::id() as i32), Some(leader));
+        let tty = std::process::Command::new("/bin/ps")
+            .args(["-o", "tty=", "-p", &leader.to_string()])
+            .guarded_output()
+            .expect("run ps");
+        let tty = String::from_utf8_lossy(&tty.stdout);
+        assert!(tty.trim().starts_with('?'), "controlling terminal: {tty:?}");
+        handle.interrupt();
+        let report = handle.wait().await;
+        assert_confirmed(&report);
+    }
+);
 
-#[tokio::test]
-async fn a_child_that_exits_while_the_stop_waits_for_its_scan_is_reported_as_exited() {
-    let s = Scratch::new();
-    let held = Held::new(false);
-    // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
-    let script = "trap 'exit 0' USR1; echo $$ > leader; echo ready > ready; \
+both!(
+    a_child_that_exits_while_the_stop_waits_for_its_scan_is_reported_as_exited,
+    a_child_that_exits_while_the_stop_waits_for_its_scan_is_reported_as_exited_kept,
+    async {
+        let s = Scratch::new();
+        let held = Held::new(false);
+        // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
+        let script = "trap 'exit 0' USR1; echo $$ > leader; echo ready > ready; \
                   while :; do sleep 0.02; done";
-    let spec = sh(&s, script, LONG).with_lister(held.lister());
-    let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
-    await_event("the child being ready", || s.path("ready").exists()).await;
-    held.armed.store(true, Ordering::SeqCst);
-    // The stop begins and waits for a listing that is held; the child exits
-    // during that wait, before any stop signal is sent. The listing is released
-    // only once the child is gone, so the order does not depend on speed.
-    handle.interrupt();
-    await_event("the stop asking for its listing", || {
-        held.waiting.load(Ordering::SeqCst) >= 1
-    })
-    .await;
-    sys::signal_process(leader, Signal::USR1).expect("signal the child");
-    assert_gone("the child after its exit signal", &[leader]).await;
-    held.release();
-    let report = handle.wait().await;
-    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
-    assert_confirmed(&report);
-}
+        let spec = sh(&s, script, LONG).with_lister(held.lister());
+        let handle = ProcessHandle::start(spec);
+        let leader = s.pid("leader").await;
+        let _reaper = Reaper(vec![leader]);
+        await_event("the child being ready", || s.path("ready").exists()).await;
+        held.armed.store(true, Ordering::SeqCst);
+        // The stop begins and waits for a listing that is held; the child exits
+        // during that wait, before any stop signal is sent. The listing is released
+        // only once the child is gone, so the order does not depend on speed.
+        handle.interrupt();
+        await_event("the stop asking for its listing", || {
+            held.waiting.load(Ordering::SeqCst) >= 1
+        })
+        .await;
+        sys::signal_process(leader, Signal::USR1).expect("signal the child");
+        assert_gone("the child after its exit signal", &[leader]).await;
+        held.release();
+        let report = handle.wait().await;
+        assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+        assert_confirmed(&report);
+    }
+);
 
-#[tokio::test]
-async fn a_panic_in_the_owner_loop_stops_the_child_and_still_reports() {
-    let s = Scratch::new();
-    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
-    spec.panic_in_loop = true;
-    let report = run(spec).await;
-    assert!(
-        matches!(&report.ending, Ending::WaitFailed { message } if message.contains("panicked")),
-        "{report:#?}"
-    );
-    assert_confirmed(&report);
-    let pid = report.pid.expect("it started") as i32;
-    let _reaper = Reaper(vec![pid]);
-    assert_gone("child after a loop panic", &[pid]).await;
-}
+both!(
+    a_panic_in_the_owner_loop_stops_the_child_and_still_reports,
+    a_panic_in_the_owner_loop_stops_the_child_and_still_reports_kept,
+    async {
+        let s = Scratch::new();
+        let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+        spec.panic_in_loop = true;
+        let report = run(spec).await;
+        assert!(
+            matches!(&report.ending, Ending::WaitFailed { message } if message.contains("panicked")),
+            "{report:#?}"
+        );
+        assert_confirmed(&report);
+        let pid = report.pid.expect("it started") as i32;
+        let _reaper = Reaper(vec![pid]);
+        assert_gone("child after a loop panic", &[pid]).await;
+    }
+);
 
-#[tokio::test]
-async fn a_failing_inspector_factory_is_a_warning_not_a_crash() {
-    let s = Scratch::new();
-    let lister: Lister = Arc::new(|| panic!("factory"));
-    let report = run(sh(&s, "exit 0", Duration::from_secs(30)).with_lister(lister)).await;
-    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
-    assert!(
-        report
-            .diagnostics
-            .inspection
-            .last_error
-            .as_deref()
-            .is_some_and(|e| e.contains("factory panicked")),
-        "{report:#?}"
-    );
-}
+both!(
+    a_failing_inspector_factory_is_a_warning_not_a_crash,
+    a_failing_inspector_factory_is_a_warning_not_a_crash_kept,
+    async {
+        let s = Scratch::new();
+        let lister: Lister = Arc::new(|| panic!("factory"));
+        let report = run(sh(&s, "exit 0", Duration::from_secs(30)).with_lister(lister)).await;
+        assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+        assert!(
+            report
+                .diagnostics
+                .inspection
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("factory panicked")),
+            "{report:#?}"
+        );
+    }
+);
 
 #[test]
 fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session() {

@@ -88,8 +88,9 @@ anything; it leaves out the prompt and instruction text. See
 
 Stop `delega` with SIGTERM or SIGINT, which let it stop the worker and clean
 up. The result can be missing or incomplete if the signal interrupts writing
-it; the script above already handles that. SIGKILL cannot be handled and leaves the worker running with no
-time limit enforced, so a CI job's cancel step should send SIGTERM first.
+it; the script above already handles that. SIGKILL cannot be handled: delega writes no result, and the worker's
+keeper stops the worker by itself (TERM, then KILL after the stop grace). A CI job's cancel step should
+still send SIGTERM first, to get a result.
 
 ## What to check
 

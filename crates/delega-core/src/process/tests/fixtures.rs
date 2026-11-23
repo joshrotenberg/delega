@@ -97,6 +97,12 @@ impl Drop for Reaper {
     }
 }
 
+tokio::task_local! {
+    /// Whether the test runs its children through the test keeper; set by
+    /// `both!`, read by [`sh`].
+    pub(super) static KEEP: bool;
+}
+
 /// A shell script as a child, in the scratch directory, and only `PATH`
 /// inherited. The grace, the drain bound and the cleanup deadline are long
 /// compared with anything a loaded machine adds, so a run does not end by one
@@ -110,6 +116,9 @@ pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpe
     spec.stop_grace = Duration::from_secs(1);
     spec.drain_bound = Duration::from_secs(10);
     spec.cleanup_deadline = Duration::from_secs(120);
+    if KEEP.try_with(|keep| *keep).unwrap_or(false) {
+        spec.keeper = Some(super::keeper::test_keeper());
+    }
     spec
 }
 
@@ -169,6 +178,40 @@ pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sle
 
 /// `sleep 60` in a session of its own, beyond what the session sweep reaches.
 pub(super) const OWN_SESSION: &str = "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)'";
+
+/// Whether the run marker shows for Apple's own programs here: `ps -E` shows
+/// the environment of a `/bin/sleep` started with a marker value. macOS hides
+/// it under System Integrity Protection; a machine without it shows it, and
+/// Linux reads `/proc` instead. Probed once.
+pub(super) fn marker_visible_for_system_programs() -> bool {
+    static VISIBLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VISIBLE.get_or_init(|| {
+        if cfg!(target_os = "linux") {
+            return true;
+        }
+        let value = format!("{:x}feed", std::process::id());
+        let Ok(mut sleeper) = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .env_clear()
+            .env(crate::process::MARKER_ENV, &value)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .guarded_spawn()
+        else {
+            return false;
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        let shown = std::process::Command::new("/bin/ps")
+            .args(["-Eww", "-o", "command=", "-p", &sleeper.id().to_string()])
+            .env("LC_ALL", "C")
+            .guarded_output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&value));
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        shown
+    })
+}
 
 pub(super) fn perl_available() -> bool {
     std::process::Command::new("perl")
@@ -269,5 +312,199 @@ impl Held {
 
     pub(super) fn release(&self) {
         self.open.send_replace(true);
+    }
+}
+
+/// The live processes started during this test whose command line names
+/// `dir` (Linux, from `/proc/<pid>/cmdline`): what a case started there and
+/// left running, found independently of any heartbeat or listing delega used.
+/// The scripts of a case pass its directory on their command lines (see
+/// `gaps::long_relay`), and a fork keeps the command line. The command line is
+/// read, as bytes, because it needs no ptrace rights, unlike the working
+/// directory, which a process that is not dumpable denies. A failed
+/// enumeration, or a process started during the test whose stat or command
+/// line cannot be read for a reason other than the process being gone, is an
+/// error, never absence.
+#[cfg(target_os = "linux")]
+pub(super) fn case_processes(dir: &std::path::Path) -> Result<Vec<i32>, String> {
+    let gone = |e: &std::io::Error| {
+        e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3)
+    };
+    let names = path_names(dir)?;
+    let own_start = std::fs::read("/proc/self/stat")
+        .ok()
+        .and_then(|stat| stat_state_and_start(&stat))
+        .map(|(_, started)| started)
+        .ok_or("unreadable /proc/self/stat")?;
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").map_err(|e| format!("read /proc: {e}"))? {
+        let entry = entry.map_err(|e| format!("read /proc entry: {e}"))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        // A process older than this test process cannot be one of its own,
+        // so it is skipped before its command line is read.
+        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(format!("read /proc/{pid}/stat: {e}")),
+        };
+        let (state, started) =
+            stat_state_and_start(&stat).ok_or_else(|| format!("unreadable /proc/{pid}/stat"))?;
+        if started < own_start || state == "Z" || state == "X" {
+            continue;
+        }
+        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(format!("read /proc/{pid}/cmdline: {e}")),
+        };
+        if names.iter().any(|name| holds_path(&cmdline, name)) {
+            found.push(pid);
+        }
+    }
+    Ok(found)
+}
+
+/// The ways a command line can name `dir`: as given, and canonical.
+#[cfg(target_os = "linux")]
+fn path_names(dir: &std::path::Path) -> Result<Vec<Vec<u8>>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let canonical = std::fs::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
+    let mut names = vec![dir.as_os_str().as_bytes().to_vec()];
+    let canonical = canonical.as_os_str().as_bytes().to_vec();
+    if !names.contains(&canonical) {
+        names.push(canonical);
+    }
+    Ok(names)
+}
+
+/// Whether `bytes` holds `path` as a whole path: followed by the end, a `/`,
+/// or a byte that cannot continue a file name the scripts use (a NUL between
+/// arguments, a quote, a space), so one directory does not match another
+/// whose name it begins.
+#[cfg(any(target_os = "linux", test))]
+fn holds_path(bytes: &[u8], path: &[u8]) -> bool {
+    if path.is_empty() || bytes.len() < path.len() {
+        return false;
+    }
+    (0..=bytes.len() - path.len()).any(|at| {
+        bytes[at..].starts_with(path)
+            && bytes
+                .get(at + path.len())
+                .is_none_or(|next| !(next.is_ascii_alphanumeric() || b"._-".contains(next)))
+    })
+}
+
+#[test]
+fn a_command_line_names_a_directory_only_as_a_whole_path() {
+    let dir = b"/tmp/.tmpAbC123";
+    assert!(holds_path(b"perl\0-e\0code\0/tmp/.tmpAbC123\0", dir));
+    assert!(holds_path(
+        b"sh\0-c\0exec perl -e 'x' '/tmp/.tmpAbC123'",
+        dir
+    ));
+    assert!(holds_path(b"/tmp/.tmpAbC123/beat", dir));
+    assert!(holds_path(b"/tmp/.tmpAbC123", dir));
+    assert!(!holds_path(b"/tmp/.tmpAbC1234\0", dir));
+    assert!(!holds_path(b"/tmp/.tmpAbC12\0", dir));
+    assert!(!holds_path(b"", dir));
+}
+
+/// The state letter and the start time in clock ticks (field 22) of one
+/// `/proc/<pid>/stat` line, counted from the last `)`. The line is bytes: the
+/// kernel writes the task name as it is, which need not be UTF-8 and can hold
+/// `)`; only the fields after the last `)` are read as text.
+#[cfg(any(target_os = "linux", test))]
+fn stat_state_and_start(stat: &[u8]) -> Option<(String, u64)> {
+    let end = stat.iter().rposition(|&byte| byte == b')')?;
+    let rest = std::str::from_utf8(&stat[end + 1..]).ok()?;
+    let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
+    Some((fields.first()?.to_string(), fields.get(19)?.parse().ok()?))
+}
+
+#[test]
+fn a_stat_line_with_a_name_that_is_not_utf8_and_holds_a_parenthesis_is_read() {
+    // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt
+    // majflt cmajflt utime stime cutime cstime priority nice threads
+    // itrealvalue starttime ...
+    let line = b"4242 (a\xff) b\xfe) S 1 4242 4242 0 -1 0 1 2 3 4 5 6 7 8 20 0 1 0 987654 9";
+    assert_eq!(stat_state_and_start(line), Some(("S".to_string(), 987_654)));
+    assert_eq!(stat_state_and_start(b"4242 (a\xff"), None);
+}
+
+/// End what a relay case left in `dir`, without signalling a foreign process:
+/// on Linux every process [`case_processes`] finds, each through a pidfd
+/// opened and then checked to still name `dir` on its command line; elsewhere the pid in the heartbeat file,
+/// only while `ps` shows it is the relay's `perl`. Repeats until nothing is
+/// left or 5 s pass.
+pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(5) {
+        #[cfg(target_os = "linux")]
+        {
+            // An unknown answer is retried; the test has failed already
+            // when this runs, so the teardown only does what it can.
+            let left = case_processes(dir).unwrap_or_default();
+            if left.is_empty() && case_processes(dir).is_ok() {
+                return;
+            }
+            let names = path_names(dir).unwrap_or_default();
+            for pid in left {
+                let Some(raw) = rustix::process::Pid::from_raw(pid) else {
+                    continue;
+                };
+                let Ok(fd) = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())
+                else {
+                    continue;
+                };
+                let still_here = std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .is_some_and(|cmdline| names.iter().any(|name| holds_path(&cmdline, name)));
+                if still_here {
+                    let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let beat = dir.join("beat");
+            let fresh = std::fs::metadata(&beat)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_millis(300));
+            if !fresh {
+                return;
+            }
+            if let Some(pid) = std::fs::read_to_string(&beat)
+                .ok()
+                .and_then(|t| t.trim().parse::<i32>().ok())
+            {
+                let command = std::process::Command::new("/bin/ps")
+                    .args(["-o", "command=", "-p", &pid.to_string()])
+                    .guarded_output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+                if command.contains("perl") {
+                    let _ = sys::signal_process(pid, Signal::KILL);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Sets a flag when dropped, so a watcher thread stops even when an
+/// assertion fails first.
+pub(super) struct SetOnDrop(pub(super) Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }

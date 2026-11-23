@@ -20,6 +20,12 @@
 //!
 //! # How a child is owned
 //!
+//! A spec with a [`KeeperCommand`] is a kept run: the owner starts the keeper,
+//! and the keeper starts the child as its own child, exactly as below, and
+//! holds it unreaped until the owner says `reap` (see "The keeper"). Everything
+//! in this section holds for both; where a kept run differs, the section says
+//! so.
+//!
 //! The child is started as the leader of a new session (`setsid`), so its pid
 //! is also its process group id and its session id, and it has no controlling
 //! terminal. One owner task holds the child until a single reap at the end and
@@ -62,7 +68,10 @@
 //! macOS), and every tracked descendant with a
 //! matching start time. The sweep signals what it finds. A descendant that
 //! keeps the output pipes open after the kill does not hold the report: the
-//! owner closes its ends after the drain bound and says so in the diagnostics.
+//! owner closes its ends after the drain bound and says so in the diagnostics,
+//! and the verdict is `Unconfirmed` ([`PIPES_HELD_REASON`]) even when every
+//! sweep afterwards found nothing, because a process that none of them saw
+//! held the output. This holds with or without a keeper.
 //! If process listing is unavailable (no `ps`, or repeated failures) cleanup
 //! does not wait out its deadline: it kills the group, reaps the leader,
 //! checks the group with `kill(-pgid, 0)`, and reports `Unconfirmed` saying
@@ -70,16 +79,179 @@
 //!
 //! Dropping a [`ProcessHandle`] interrupts the run. If the owner is dropped (the
 //! runtime shuts down) its `Drop` sends SIGKILL to the group and to the
-//! descendants seen at the latest scan; a panic in the owner loop is followed by
-//! a hard stop and a report.
+//! descendants seen at the latest scan, and, in a kept run, closes its end of
+//! the keeper's socket, so the keeper stops what is left; a panic in the owner
+//! loop is followed by a hard stop and a report.
+//!
+//! # The keeper
+//!
+//! A kept run has a keeper process between the owner and the child (module
+//! `keeper`). The caller names the program that runs [`keeper_main`]; the
+//! `delega` binary does so with a hidden `process-keeper` subcommand, and the
+//! CLI and the MCP server always supply it. A spec without one is owned
+//! directly, as before the keeper existed, and its report has
+//! `diagnostics.keeper` `None`; a spec whose keeper cannot be started ends
+//! `FailedToStart` with nothing started.
+//!
+//! - The keeper leads a session of its own. Its standard input is one end of a
+//!   Unix socket pair whose other end only the owner holds, close-on-exec; the
+//!   child's standard input, output and error are pipes the owner made, passed
+//!   to the keeper with `SCM_RIGHTS`, so the owner reads and writes them as it
+//!   does for a child of its own. Both ends of every pipe are close-on-exec, made
+//!   under the spawn lock.
+//! - The keeper starts the child in a session of the child's own, so the
+//!   child's pid is its group id and session id as above. It watches the child
+//!   with `waitid(WEXITED | WNOWAIT)` and tells the owner how it ended, and it
+//!   reaps the child only when the owner says `reap`, after the owner's last
+//!   signal. The child's pid therefore keeps naming its group and session while
+//!   the owner signals them.
+//! - On Linux the keeper calls `prctl(PR_SET_CHILD_SUBREAPER)`, so a descendant
+//!   whose parent exits becomes a child of the keeper instead of init. The
+//!   keeper reaps such orphans by pid (never with a wait for any child, which
+//!   would take the child's status first), and its children are owned by every
+//!   listing. It also walks its own tree from `/proc` without `ps`
+//!   (`/proc/<pid>/task/<tid>/children`, or the parent field of every
+//!   `/proc/<pid>/stat` where that file is missing). Two rules govern it.
+//!   Nothing is signalled by pid number: a process is signalled only through a
+//!   pidfd opened after it was found and checked to be a live child of the
+//!   parent it was found under, with its start time kept so the pid is checked
+//!   again before its children are read; a process that cannot be held (no
+//!   pidfd, or a parent that changed) is not signalled and nothing below it is
+//!   walked. And no zero is trusted without proof: `census` counts the tree as
+//!   empty only when two passes in a row agree, a full scan of every
+//!   `/proc/*/stat` finds the same set (the children files can omit a live
+//!   child while another exits during the read), and no exited, unreaped child
+//!   of the keeper other than the program showed the tree in flux (checked
+//!   before the walk reaps it). `freeze` stops each process and reads its
+//!   children only once the stop has taken effect, and is complete only when a
+//!   pass from the keeper's own children found nothing new, held and stopped
+//!   everything, refused nothing, saw no flux, and the full scan finds no live
+//!   process outside the held set below the keeper or a held process (with
+//!   everything stopped nothing can fork or exit, so the scan is a real
+//!   second source); then SIGKILL and SIGCONT go through the pidfds and a
+//!   complete census must find nothing. Its budget is checked for every
+//!   process. An answer that is not complete is never zero, so neither the
+//!   owner's verdict nor the keeper's own cleanup ends on an unproven empty
+//!   tree. Once any answer of a run was unproven in a way a later one cannot
+//!   repair (a refused hold, a failed read, a freeze that did not complete),
+//!   the verdict stays `Unconfirmed` ([`KEEPER_UNPROVEN_REASON`]); no later
+//!   proof supersedes it. A census that is incomplete only because the tree
+//!   keeps changing never claimed zero and does not count. A process listed in a children file whose stat
+//!   reads as missing is gone only if its pidfd says so (`hidepid` can hide a
+//!   live one). A queued child is taken under its parent only while the
+//!   parent's pidfd shows it alive, and otherwise only as the keeper's own
+//!   child. The owner reads a start time while holding the pin's lock, so
+//!   the child cannot be reaped mid-read. A read of `/proc` that fails for any
+//!   reason but the process being gone (ENOENT, ESRCH) makes the pass
+//!   incomplete, never counts as absence (the stat of a held process
+//!   included), and so does any error from a directory listing of `/proc`;
+//!   a children read is kept only if the parent's pidfd shows it had not
+//!   exited by the end of the read; a refused hold anywhere in a freeze leaves
+//!   it unproven whatever later passes find; and the freeze releases its
+//!   pidfds before the final census. Each answer carries its passes and
+//!   whether it completed, in `diagnostics.keeper.tree_reports`. On Linux an owner's sweep that
+//!   finds nothing counts only when the keeper's census agrees, and a keeper
+//!   that still finds processes alive when it reaps the child makes the verdict
+//!   `Unconfirmed` ([`TREE_LEFT_AT_REAP_REASON`]). A keeper that could not
+//!   become a child subreaper starts the child anyway, and every such run is
+//!   `Unconfirmed` ([`NO_SUBREAPER_REASON`]): the guarantee is missing, so the
+//!   verdict says so rather than refusing runs on such a system.
+//! - When the owner's end of the socket closes (the owner exited, crashed or
+//!   was killed with SIGKILL), on SIGTERM, SIGINT, SIGHUP or SIGQUIT to the
+//!   keeper, when its parent changes, and at a ceiling of the time limit plus
+//!   the cleanup deadline plus `KEEPER_CEILING_MARGIN` (10 s), the keeper stops
+//!   the tree by itself: on Linux TERM to the child's group and to its tree, the
+//!   grace, then freezes until nothing is alive; elsewhere one listing first,
+//!   then TERM to the group and to what a sweep finds (group, session,
+//!   ancestry, run marker), the grace, then KILL until two sweeps in a row find
+//!   nothing. Either way within the cleanup deadline; then it reaps the child
+//!   and exits. When the owner may still be there (a signal, the ceiling, a new
+//!   parent), the keeper first says `releasing` and waits up to
+//!   `KEEPER_RELEASE_WAIT` (2 s) for `released`: the owner sends its group and
+//!   member signals while holding a lock that its answer also takes, so none of
+//!   them is in flight, and none follows, once the keeper frees the child's
+//!   pid. Without `released` (or the owner's end closing with a real end of
+//!   file; a failed read of the socket is not one) the keeper does not reap
+//!   the child: it exits and leaves it to the reaper above it (init or
+//!   another subreaper), which frees the pid when it reaps it. The keeper
+//!   installs its signal handlers before it starts the child.
+//!   `PR_SET_PDEATHSIG` is not used: it fires when the thread that forked the
+//!   child exits, which in a multi-threaded owner is not the owner's
+//!   end. End of file on a socket comes when the last descriptor of the owner's
+//!   end closes, whichever thread held it.
+//! - The run marker: a kept child's environment has `DELEGA_RUN_MARKER`
+//!   ([`MARKER_ENV`]), a list of random values separated by `:` (the one in the
+//!   owner's own environment, if any, then a new one), so a descendant that left
+//!   the child's session and whose parent is gone can still be found. Cleanup
+//!   sweeps read it from `/proc/<pid>/environ` on Linux and from one `ps -U
+//!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both show
+//!   the environment as it was at `exec`. A marked process that is in the
+//!   child's session when it is read (it started after the ordinary listing)
+//!   is a member and is signalled as one. A process found only by the marker is
+//!   never signalled by number alone: it is stopped with SIGSTOP when first
+//!   seen, and receives SIGKILL and SIGCONT only from a KILL sweep whose reading
+//!   shows it still stopped with the same start time; a stopped process cannot
+//!   exit by itself, so its pid cannot have been reused.
+//! - The hard stop of a kept run is a freeze: everything a listing finds outside
+//!   the group is stopped with SIGSTOP and the listing is taken again, up to
+//!   `FREEZE_MAX_ROUNDS` (6) listings, until one finds nothing that was not
+//!   already stopped; then SIGKILL and SIGCONT. On Linux the keeper's own freeze
+//!   runs at the same time. A freeze that ran out of listings while processes
+//!   kept appearing, and whose keeper did not report its tree empty, makes the
+//!   verdict `Unconfirmed` ([`FREEZE_INCOMPLETE_REASON`]).
+//! - A keeper that does not say whether it started the child within
+//!   `KEEPER_START_TIMEOUT`, or ends before saying so, is not killed at once:
+//!   the owner closes its end, so a keeper that did start the child stops it,
+//!   and waits the grace plus `KEEPER_ABANDON_WAIT` for the keeper to exit
+//!   before it kills it. The run ends `FailedToStart` with cleanup
+//!   `Unconfirmed` ([`KEEPER_UNANSWERED_REASON`]); only a keeper that could not
+//!   be started, or that said the child could not be, gives `Confirmed`.
+//! - If the keeper ends before it reaped the child (it was killed), the child's
+//!   pid no longer pins its group or session. The owner sends no group signal
+//!   after that, follows the child by its recorded start time like a tracked
+//!   descendant, and the verdict is `Unconfirmed`
+//!   ([`KEEPER_LOST_REASON`]).
+//!
+//! What a keeper costs, measured on macOS arm64 (macOS 27.2, about 960
+//! processes, load average about 16, release build): starting
+//! `delega process-keeper` and letting it exit took a median of 6.3 to 6.4 ms
+//! over two rounds of 60 runs (`/usr/bin/true`, measured the same way, 4.6 to
+//! 5.0 ms). A whole run of `/usr/bin/true` from start to report took a median of
+//! 87 ms kept and 62 ms owned directly, 40 runs each
+//! (`measure_the_keepers_cost` in `tests/keeper.rs`); most of the difference is
+//! the marker listing of each cleanup sweep. That listing, `ps -U <uid> -Eww -o
+//! pid=,stat=,lstart=,command=`, took a median of 30 ms against 20 ms for the
+//! ordinary listing in one round of 40 runs at about 940 processes, and both
+//! 56 ms in a round under heavier load; it printed about 300 KB. On Linux the
+//! marker is read from `/proc` and costs no extra listing; it has not been
+//! measured.
 //!
 //! # What `Confirmed` means
 //!
 //! `Cleanup::Confirmed` means a final sweep, taken after the leader exited and
 //! before it was reaped, found no live process in the child's group, none in
-//! its session, and no tracked descendant. The sweep runs once for a plain exit
-//! where nothing but the leader was ever seen, and twice in a row when any
-//! descendant was observed or signalled. It does not cover the gaps below.
+//! its session, and no tracked descendant; in a kept run also no process
+//! carrying the run marker and, on Linux, no live process in the keeper's tree
+//! by the keeper's census. The sweep runs once for a plain exit where nothing
+//! but the leader was ever seen, and twice in a row when any descendant was
+//! observed or signalled. It does not cover what "What remains possible" lists.
+//!
+//! Rule A: cleanup is `Confirmed` only with proof. A signal the cleanup had to
+//! send and did not, because the process could not be verified (see "Why the
+//! owner never signals a foreign process"), leaves the verdict `Unconfirmed`
+//! ([`UNVERIFIED_SIGNAL_REASON`]), and so does any hold the keeper refused or
+//! read it failed in an answer ([`KEEPER_UNPROVEN_REASON`]), whatever later
+//! sweeps find. One exception, the narrower Rule A for Linux kept runs: the
+//! keeper is a child subreaper, so every live descendant is in its tree. At
+//! the reap the keeper takes a final census after the child has exited, and
+//! says in its `reaped` line whether it proves the tree empty: complete (two
+//! passes agree and the scan of every `/proc/*/stat` confirms), nothing alive,
+//! no hold refused, and no read of `/proc` failed in the keeper at any point
+//! of the run, decided after its last walk. That proof supersedes the owner's
+//! refusals of group and session members and tracked processes, which while
+//! alive are in the keeper's tree, and nothing else: a refusal meant for a
+//! process found only by the run marker and anything the keeper reported stay
+//! sticky. macOS has no subreaper, and its keeper never reports a proof.
 //!
 //! It also requires that the listing taken before the first signal completed
 //! (see "How a child is owned"). That listing is the only one that can see a
@@ -124,9 +296,8 @@
 //!
 //! # What remains possible
 //!
-//! Two gaps remain. Both end with `Confirmed` while a descendant runs, and both
-//! have an ignored test in `tests/gaps.rs` that states the wanted behaviour
-//! (the relay, and a descendant whose parent was the child itself):
+//! Without a keeper, two gaps remain, and both end with `Confirmed` while a
+//! descendant runs:
 //!
 //! - A descendant that calls `setsid` and whose parent exited before any
 //!   listing saw the two together. The parent is the child itself (it exits, or
@@ -164,20 +335,82 @@
 //!   process that short-lived is far more often unrelated, and treating each as
 //!   possibly ours kept honest runs unconfirmed on a machine with churn.
 //!
+//! And if the owner is killed with SIGKILL, nothing stops the child (see "What
+//! no in-process code can do").
+//!
+//! A kept run closes these on Linux. On macOS it closes the SIGKILL of the
+//! owner, and the two gaps remain in part; tracking forks on macOS is
+//! delega issue 167. In detail:
+//!
+//! - On Linux the keeper is the reaper of every orphan, so the `setsid`
+//!   descendant and every generation of the relay are the keeper's descendants
+//!   by parent links; the keeper's census keeps the verdict from being
+//!   `Confirmed` while one lives, and its freeze stops the relay, which cannot
+//!   fork once stopped. The tests `a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run`,
+//!   `an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux` and
+//!   `a_fork_relay_is_stopped_in_a_kept_run` in `tests/gaps.rs` run in the Linux
+//!   CI job; they have not run on a developer machine.
+//! - On macOS there is no subreaper, and the run marker is the only tie. A
+//!   descendant that left the session, whose parent is gone, and that does not
+//!   show the marker is not found. That covers a process started with an
+//!   environment that leaves the marker out, and, measured on macOS 27.2 with
+//!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
+//!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
+//!   for a Homebrew binary and for this crate's test binary. Whether this applies
+//!   depends on the machine: a macOS system that does not hide the environment
+//!   of its own programs shows the marker of `sleep` too, and a run on GitHub's
+//!   macos-latest runner found such an orphan by its marker. The tests probe
+//!   it (start `/bin/sleep` with a marker value and look for it in `ps -E`) and
+//!   expect accordingly, and so does the acceptance harness, which records the
+//!   answer in its results. Where it is hidden, such a descendant
+//!   ends with `Confirmed` while it runs, as without a keeper, unless it holds
+//!   the output pipes past the drain bound, which makes the verdict
+//!   `Unconfirmed`.
+//! - On macOS a fast fork relay is not stopped. In 50 interrupted kept runs of
+//!   the relay in `tests/gaps.rs` (perl, a new generation about every 5 ms, 4000
+//!   generations), measured on macOS 27.2 arm64 at a load average of about 15
+//!   (`measure_the_relay_freeze`), the freeze stopped it in none: each listing
+//!   takes 20 ms or more, so the generation it shows has exited before its
+//!   SIGSTOP, and the relay runs perl, whose environment `ps -E` does not show.
+//!   That relay holds the output pipes, and with the held-pipe verdict all 50
+//!   runs of a second measurement (load average about 20) ended `Unconfirmed`
+//!   and none `Confirmed`; before it, all 50 had ended `Confirmed` with a relay
+//!   process alive. A relay that does not hold the output still ends
+//!   `Confirmed` while it runs.
+//! - On Linux, two windows remain. The keeper is started with a synchronous
+//!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
+//!   example) holds the owner's start without a bound. And a keeper that stops
+//!   the tree on its own (a signal, its ceiling, a new parent) and gets no
+//!   `released` from the owner within 2 s, or whose read of the socket fails,
+//!   exits without reaping the child (and a `reap` it cannot complete is not
+//!   acknowledged, which makes the verdict `Unconfirmed`):
+//!   from then until the reaper above it reaps the child, an owner that wakes
+//!   (it was stopped) and has not seen the keeper's end close could still send
+//!   a group signal by the child's pid; once the child is reaped that pid can
+//!   name another group.
+//! - In one line each, the residuals the keeper accepts:
+//!   - a stalled `exec` of the keeper at spawn holds the owner's start without
+//!     a bound;
+//!   - a keeper that is lost, or that exits without the owner's `released`,
+//!     leaves the child unreaped to the reaper above it, and the verdict is
+//!     `Unconfirmed`;
+//!   - on macOS, a detached orphan whose environment the system hides from
+//!     `ps -E` (Apple's programs under SIP), and a fast fork relay, can be
+//!     missed;
+//!   - a process the kernel prevents inspecting or signalling (`hidepid`,
+//!     another user's, no pidfd) leaves the verdict `Unconfirmed`, and the
+//!     keeper's own cleanup keeps going until its deadline and then exits.
+//! - SIGKILL aimed at the keeper itself, on every platform. The owner notices
+//!   (the keeper's end of the socket closes before `reaped`) and reports
+//!   `Unconfirmed`; if the owner is killed with the keeper, nothing stops the
+//!   child.
+//! - The owner and the keeper both stopped for good (SIGSTOP) until after the
+//!   keeper's ceiling, a power loss, or the machine's own limits.
+//!
 //! A descendant that stays in the session, even in a group of its own, is not
-//! part of either gap. Neither is a descendant that left the session while a
+//! part of any of these. Neither is a descendant that left the session while a
 //! scan or the listing at the exit saw its parent as a member or as a tracked
 //! process.
-//!
-//! What would close the first gap is something a process table cannot supply: a kernel
-//! facility that reparents orphans to the owner (a child subreaper on Linux,
-//! which would make the host process the reaper of every orphan and is not done
-//! here) or reports each fork as it happens (`kqueue` process events on macOS).
-//! Marking descendants through their environment would follow them past
-//! `setsid` but not past a program that clears its environment. Reporting
-//! `Unconfirmed` whenever a process of the right age is a child of init was
-//! rejected: on a machine that starts daemons it would make ordinary runs
-//! unconfirmed.
 //!
 //! # Pipes when several children start at once
 //!
@@ -199,36 +432,75 @@
 //! # Why the owner never signals a foreign process
 //!
 //! A process is signalled only if it is a live member of the child's group (the
-//! group id is the child's pid, which the unreaped child pins), a live member of
-//! its session (read as above and read again just before the signal), or a
-//! tracked process whose pid and start time match what was recorded. A process
-//! becomes tracked only by being a member, or by having a parent that is owned
-//! at that listing: the child itself, a member, or a tracked process with a
-//! matching start time. Init and the process that runs the owner are never
-//! owned, so a process reparented to init is not adopted through its parent, and
-//! it is signalled only if it was tracked earlier and still has the same start
-//! time. No process can join another session or group, so a member is a
-//! descendant of the child by construction. What remains is a pid recycled
-//! between the two rows of one listing (the child's `ppid` names the pid of a
-//! process that died and whose number a new member took within the run of one
-//! `ps`), a pid reused between the listing and the per-row session read (a foreign
-//! row would then read as a member and be signalled, after the session member
-//! is read once more just before the signal, which narrows it to the time
-//! between those two calls), and two processes with one pid and one start time
-//! within the resolution of `ps` (one second on macOS). Each needs a pid to wrap
-//! within a few milliseconds to one run of `ps`.
+//! group id is the child's pid, which the unreaped child pins: unreaped by the
+//! owner, or in a kept run by the keeper until the owner says `reap`), a live
+//! member of its session (read as above and read again just before the
+//! signal), a tracked process whose pid and start time match what was recorded,
+//! or a process carrying the run marker, which is stopped first and killed only
+//! when a later reading shows it still stopped with the same start time (see
+//! "The keeper"). A process becomes tracked only by being a member, or by having
+//! a parent that is owned at that listing: the child itself, a member, a tracked
+//! process with a matching start time, or, in a kept run, the keeper. The keeper
+//! is the owner's own unreaped child, so its pid cannot name another process,
+//! and it starts nothing but the child, so its children are the child and, on
+//! Linux, the orphans of the child's tree. Init, the process that runs the owner
+//! and the keeper are never owned, so a process reparented to init is not
+//! adopted through its parent, and it is signalled only if it was tracked
+//! earlier and still has the same start time. When the keeper of a kept run is
+//! gone before the reap, the child's pid pins nothing: no group signal is sent
+//! from then on, and nothing is a member by its group or session id. A process
+//! that carries the run marker without being a descendant (a process a worker
+//! started through a service, or one that copied another run's value from `ps
+//! -E`) is treated as the run's; only a process that has the value can be
+//! one. No process can join another session or group, so a member is a
+//! descendant of the child by construction.
+//!
+//! On Linux each such signal is delivered through a pidfd, opened first and
+//! checked against `/proc/<pid>/stat` before the signal: a group member must
+//! still have the child's group id, a session member its session id, a tracked
+//! process the start time in clock ticks recorded when it was first tracked,
+//! and a marked process its recorded start time (and, for SIGKILL, be
+//! stopped). A pid reused between the listing and the signal is therefore
+//! never signalled; this also covers the SIGKILL that `Drop` sends to the
+//! tracked processes of the latest scan. Nothing is ever signalled by pid
+//! number on Linux: a process without a pidfd (a kernel before 5.3, or a
+//! refusal), or a tracked or marked process with no recorded start time (one
+//! is recorded only when `/proc` shows the process now holding the pid has
+//! the keeper, the pinned child, or the verified listed parent as its parent;
+//! a marked process's start time must read the same before and after its
+//! environment), is not signalled, and the verdict is `Unconfirmed`
+//! ([`UNVERIFIED_SIGNAL_REASON`]) unless the narrower Rule A of "What
+//! `Confirmed` means" supersedes it. Such a process counts as refused only
+//! while its pid may still name a live process: a pidfd opened for the pid
+//! that fails with ESRCH, or that shows its process exited, means the process
+//! found has exited (its pid could be reused only after it was reaped), so
+//! there is nothing to signal; nothing is signalled to find this out. A
+//! keeper that does not acknowledge the reap makes the verdict `Unconfirmed`
+//! too ([`NO_REAP_ACK_REASON`]).
+//!
+//! What remains is a pid recycled between the two rows of one listing (the
+//! child's `ppid` names the pid of a process that died and whose number a new
+//! member took within the run of one `ps`), and elsewhere (no
+//! pidfds, no `/proc`) a pid reused between the listing and the signal: a
+//! session member is read once more just before its signal, which narrows it
+//! to the time between those two calls, but a tracked or group member is
+//! signalled by the identity its listing showed, and two processes can share a
+//! pid and a start time within the resolution of `ps` (one second on macOS).
+//! Each needs a pid to wrap within a few milliseconds to one run of `ps`.
 //!
 //! # What no in-process code can do
 //!
 //! If the process that owns the child is killed with SIGKILL, or is stopped
-//! for good, no code of this crate runs: the owner's `Drop`, the time limit and
-//! the cleanup all go with it. The child, which leads a session of its own and
-//! so does not receive the signals its owner's terminal sends, keeps running
-//! with nothing left to enforce its time limit. The same holds for a crash that
-//! skips destructors, a power loss, and `exit` called from another thread. A
-//! caller that must survive this needs a supervisor outside the owning process;
-//! this crate has none. A graceful signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT) is
-//! the caller's to turn into an interrupt, as `delega run` does.
+//! for good, no code of the owner runs: its `Drop`, the time limit and the
+//! cleanup all go with it. The same holds for a crash that skips destructors
+//! and `exit` called from another thread. Without a keeper the child, which
+//! leads a session of its own and so does not receive the signals its owner's
+//! terminal sends, keeps running with nothing left to enforce its time limit.
+//! The keeper is the supervisor outside the owning process that covers this: it
+//! stops the tree when the owner's end of its socket closes, or at its ceiling
+//! when the owner is stopped for good. A graceful signal (SIGINT, SIGTERM,
+//! SIGHUP, SIGQUIT) is the caller's to turn into an interrupt, as `delega run`
+//! does.
 //!
 //! # Platform
 //!
@@ -244,8 +516,10 @@
 //! `getsid` answered 0 there, rustix would hit the same undefined behaviour in a
 //! release build. macOS and Linux are the supported systems; on other Unix
 //! systems (FreeBSD, where kernel processes can share session 0) the same path
-//! is compiled but has not been checked. It has the workspace's one
-//! `unsafe`: a `pre_exec` hook in `sys.rs` that calls only `setsid`.
+//! is compiled but has not been checked. It has the only `unsafe` block in
+//! production code (the tests of `delega-mcp` have one more, for `mkfifo`): a
+//! `pre_exec` hook in `sys.rs` that calls only `setsid`, used for the child and
+//! for the keeper.
 //!
 //! Verified on macOS only. Not yet verified on Linux, for the Linux run to
 //! check:
@@ -269,13 +543,19 @@
 //!   can fail there if the SIGCONT is removed; on macOS it cannot fail.
 //! - Fixtures use `perl` to start descendants in their own group or session and
 //!   skip with a printed message when it is missing.
+//! - The keeper's subreaper, its `/proc` walk and freeze, the reaping of
+//!   orphans, and the marker read from `/proc/<pid>/environ` run only on Linux;
+//!   their tests run in the Linux CI job and compile and pass clippy locally
+//!   for `x86_64-unknown-linux-gnu`.
 
 #![cfg(unix)]
 
 mod capture;
 pub(crate) mod dialogue;
 mod handle;
+mod keeper;
 pub mod limits;
+mod marker;
 mod owner;
 mod report;
 mod run;
@@ -291,11 +571,18 @@ mod tests;
 
 pub use capture::Captured;
 pub use handle::{Interrupter, ProcessHandle, run};
-pub use owner::{LATE_LISTING_REASON, is_late_listing_only};
-pub use report::{
-    Diagnostics, Ending, LeaderExit, ProcessReport, ProcessTiming, SignalRecord, SignalTarget,
+pub use keeper::{KeeperCommand, keeper_main};
+pub use marker::MARKER_ENV;
+pub use owner::{
+    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON,
+    NO_REAP_ACK_REASON, NO_SUBREAPER_REASON, PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON,
+    UNVERIFIED_SIGNAL_REASON, is_late_listing_only,
 };
-pub use run::PIPE_WARNING;
+pub use report::{
+    Diagnostics, Ending, KeeperDiagnostics, LeaderExit, ProcessReport, ProcessTiming, SignalRecord,
+    SignalTarget,
+};
+pub use run::{KEEPER_UNANSWERED_REASON, PIPE_WARNING};
 pub use spawn::{SpawnGuard, spawn_guard};
 pub use spec::{CaptureSpec, EnvPolicy, Keep, OutputTap, ProcessSpec};
 pub use timestamp::rfc3339_utc;
