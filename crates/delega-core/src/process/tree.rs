@@ -547,17 +547,30 @@ impl ProcessTree {
     /// Record `pid` as tracked with this start, and its start time in ticks
     /// where the system gives one.
     /// Record `row` as tracked. On Linux its start time in ticks is recorded
-    /// too, but only when `/proc` shows that the process now holding the pid
-    /// is ours: its parent is the keeper (which has only processes of this
-    /// tree as children), the child itself (pinned), or the parent the listing
-    /// showed, whose own recorded start time still matches. Otherwise no start
+    /// too, read from `/proc` when the row is classified, but only when that
+    /// read shows the process now holding the pid is ours: it is in the
+    /// child's session or group (pinned), or its parent is the keeper (which
+    /// has only processes of this tree as children), the child itself
+    /// (pinned), or the parent the listing showed, whose own recorded start
+    /// time still matches. Otherwise no start
     /// time is recorded, and a signal that would rely on one is refused, which
     /// makes the verdict `Unconfirmed`.
     fn track(&mut self, row: &ProcessRow) {
-        if !self.known.contains_key(&row.pid)
+        // Tried again on a later listing while the listing still shows the
+        // same process (same start), so one read that could not verify it is
+        // not final.
+        let same = self
+            .known
+            .get(&row.pid)
+            .is_none_or(|started| *started == row.started);
+        if same
+            && !self.ticks.contains_key(&row.pid)
             && let Some(ticks) = self.verified_ticks(row)
         {
             self.ticks.insert(row.pid, ticks);
+        }
+        if !same {
+            self.ticks.remove(&row.pid);
         }
         self.known.insert(row.pid, row.started.clone());
     }
@@ -565,6 +578,10 @@ impl ProcessTree {
     #[cfg(target_os = "linux")]
     fn verified_ticks(&self, row: &ProcessRow) -> Option<u64> {
         let stat = sys::proc_stat(row.pid)?;
+        // A member of the child's session or group is ours by that alone
+        // while the child's pid pins them; this covers a member first seen
+        // after the child exited and it was reparented.
+        let member = self.pinned && (stat.session == self.pid || stat.group == self.pid);
         let parent_is_ours = Some(stat.parent) == self.keeper
             || (stat.parent == self.pid && self.pinned)
             || (stat.parent == row.parent
@@ -572,7 +589,7 @@ impl ProcessTree {
                     .ticks
                     .get(&row.parent)
                     .is_some_and(|t| sys::start_ticks(row.parent) == Some(*t)));
-        parent_is_ours.then_some(stat.start_ticks)
+        (member || parent_is_ours).then_some(stat.start_ticks)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -733,6 +750,9 @@ impl ProcessTree {
         for row in rows {
             if self.known.get(&row.pid) == Some(&row.started) {
                 owned.insert(row.pid);
+                if !row.zombie && !self.ticks.contains_key(&row.pid) {
+                    self.track(row);
+                }
             }
         }
         for _ in 0..rows.len() {
@@ -1194,6 +1214,33 @@ mod tests {
         });
         assert_eq!(view.session, vec![own]);
         assert!(view.marked.is_empty());
+    }
+
+    /// Not run on macOS; runs in the Linux CI job. A member of the child's
+    /// session gets its start time recorded when it is classified even when
+    /// its parent cannot be verified (the leader exited and it was
+    /// reparented), so the pidfd check can verify it when it is signalled.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_member_with_an_unverified_parent_still_gets_a_start_time() {
+        let own = i32::try_from(std::process::id()).expect("a pid");
+        let Some(session) = sys::session_of(own).filter(|s| *s > 1 && *s != own) else {
+            eprintln!("this process leads its own session or it cannot be read; skipped");
+            return;
+        };
+        let lister: Lister = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let tree = ProcessTree::new(session, lister, true);
+        let row = ProcessRow {
+            pid: own,
+            // A parent with no recorded start time, as init after a reparent.
+            parent: 1,
+            started: "now".into(),
+            group: own,
+            zombie: false,
+            stopped: false,
+        };
+        assert_eq!(tree.verified_ticks(&row), sys::start_ticks(own));
+        assert!(tree.verified_ticks(&row).is_some());
     }
 
     #[test]
