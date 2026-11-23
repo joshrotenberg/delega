@@ -68,7 +68,22 @@ fn the_committed_reports_are_what_report_generates_from_the_committed_results() 
 
 #[test]
 fn the_committed_results_cover_exactly_the_matrix_rows_with_their_current_expectations() {
-    let matrix: BTreeMap<String, matrix::Row> = matrix::all()
+    // Some expectations differ by system; compare with the ones of the system
+    // the committed results were recorded on.
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(acceptance_dir().join("results.meta.json"))
+            .expect("read results.meta.json"),
+    )
+    .expect("results.meta.json is JSON");
+    let recorded = meta["os"].as_str().unwrap_or_default();
+    let os = if recorded.starts_with("Darwin") {
+        "macos"
+    } else if recorded.starts_with("Linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
+    };
+    let matrix: BTreeMap<String, matrix::Row> = matrix::all_for(os)
         .into_iter()
         .map(|r| (r.id.clone(), r))
         .collect();

@@ -32,6 +32,14 @@ pub struct Proc {
     pub command: String,
 }
 
+/// The keepers `delega` started: its children that run `process-keeper`.
+pub fn keepers_of(delega: i32) -> Vec<i32> {
+    ps().into_iter()
+        .filter(|p| p.ppid == delega && p.command.contains("process-keeper"))
+        .map(|p| p.pid)
+        .collect()
+}
+
 pub fn ps() -> Vec<Proc> {
     let Ok(out) = Command::new("/bin/ps")
         .args(["-axww", "-o", "pid=,ppid=,stat=,command="])

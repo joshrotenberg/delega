@@ -170,6 +170,11 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    if rows.is_empty() && args.timing_gaps && args.filter.is_empty() {
+        // Linux has no timing-dependent gap rows since the keeper closed them.
+        println!("delega-acceptance: no timing-dependent gap rows on this system");
+        return ExitCode::SUCCESS;
+    }
     if rows.is_empty() {
         eprintln!("delega-acceptance: no row matches");
         return ExitCode::from(2);
