@@ -132,6 +132,106 @@ fn claude_write_mode_adds_edit_and_write_scoped_to_the_working_directory() {
 }
 
 #[test]
+fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.permissions.mode = Mode::Build;
+    let plan = dry(&rig, &request);
+    let allowed = format!(
+        "{},{},{}",
+        rule(&rig, "Read"),
+        rule(&rig, "Edit"),
+        rule(&rig, "Write")
+    );
+    let settings = json!({
+        "disableAllHooks": true,
+        "sandbox": {
+            "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": true,
+            "enabled": true,
+            "failIfUnavailable": true
+        }
+    });
+    let expected = claude_base(&rig, "Read,Glob,Grep,Edit,Write,Bash", &allowed, &settings);
+    assert_eq!(plan.args[..plan.args.len() - 1], expected[..]);
+    assert_eq!(plan.mapping.mode, Mode::Build);
+    assert!(plan.mapping.commands.is_empty());
+    assert!(
+        !plan
+            .env_names
+            .contains(&"DELEGA_EXACT_BASH_GRANTS".to_string()),
+        "build needs no command guard"
+    );
+    assert!(
+        plan.mapping
+            .settings
+            .iter()
+            .any(|s| s.starts_with("sandbox=") && s.contains("\"failIfUnavailable\":true")),
+        "{:?}",
+        plan.mapping.settings
+    );
+    for part in [
+        "wider than requested: commands inside the sandbox can read",
+        "commands can write anywhere in it, and other Claude Code sessions",
+        "permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
+         not added to the sandbox, so delega does not make it writable, though one inside a \
+         location commands can write stays writable",
+        "bubblewrap and socat",
+        "git -c name=value) are denied and listed in permissions.denied",
+    ] {
+        assert!(
+            plan.notes.iter().any(|n| n.contains(part)),
+            "missing note {part}: {:?}",
+            plan.notes
+        );
+    }
+}
+
+#[test]
+fn claude_build_mode_grants_extra_directories_as_read_rules_without_add_dir() {
+    let rig = Rig::new();
+    let extra = rig.home.join("docs");
+    std::fs::create_dir(&extra).unwrap();
+    let resolved = std::fs::canonicalize(&extra).unwrap();
+    // The parent of the working directory too: listing it must not make the
+    // working directory read-only or writable beyond the sandbox.
+    let parent = std::fs::canonicalize(rig.work.parent().unwrap()).unwrap();
+    let mut request = rig.request(Provider::Claude, "p");
+    request.permissions.mode = Mode::Build;
+    request.permissions.directories = vec![extra.clone(), parent.clone()];
+    let plan = dry(&rig, &request);
+    let adds: Vec<&String> = plan
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--add-dir")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(
+        adds,
+        [&std::fs::canonicalize(&rig.work)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()],
+        "only the working directory is added; the sandbox makes --add-dir writable"
+    );
+    let at = plan
+        .args
+        .iter()
+        .position(|a| a == "--allowedTools")
+        .unwrap();
+    for dir in [&resolved, &parent] {
+        let read = format!("Read(//{}/**)", dir.to_string_lossy().trim_matches('/'));
+        assert!(plan.args[at + 1].contains(&read), "{}", plan.args[at + 1]);
+    }
+    let settings = settings_of(&plan.args);
+    assert!(
+        settings["sandbox"].get("filesystem").is_none(),
+        "no denyWrite: {settings}"
+    );
+    assert!(!plan.args.join("\n").contains("denyWrite"));
+}
+
+#[test]
 fn claude_full_mode_grants_the_nine_builtin_tools_unscoped_and_no_hook() {
     let rig = Rig::new();
     let mut request = rig.request(Provider::Claude, "p");
@@ -221,7 +321,7 @@ fn every_claude_launch_turns_off_memory_files_and_auto_memory() {
     // Without these the worker can get the user's auto-memory index from their
     // home directory, whatever --setting-sources says (#106).
     let rig = Rig::new();
-    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+    for mode in [Mode::Read, Mode::Write, Mode::Build, Mode::Full] {
         let mut request = rig.request(Provider::Claude, "p");
         request.permissions.mode = mode;
         let scope = permissions::scope(&request).unwrap();
@@ -427,6 +527,35 @@ fn codex_write_mode_is_workspace_write_without_network_or_temporary_directories(
         plan.notes
             .iter()
             .any(|n| n.contains("wider than requested: the workspace-write sandbox"))
+    );
+}
+
+#[test]
+fn codex_build_mode_is_workspace_write_without_network_but_with_temporary_directories() {
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Codex, "p");
+    request.permissions.mode = Mode::Build;
+    let plan = dry(&rig, &request);
+    let extra = [
+        "sandbox_workspace_write.network_access=false",
+        "sandbox_workspace_write.exclude_slash_tmp=false",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=false",
+    ];
+    assert_eq!(
+        normalized(&plan.args),
+        codex_expected("workspace-write", &extra)
+    );
+    assert_eq!(plan.mapping.mode, Mode::Build);
+    assert!(plan.notes.iter().any(|n| {
+        n.contains("wider than requested: the workspace-write sandbox")
+            && n.contains("under /tmp and $TMPDIR, including a permissions.directories entry there, except .git")
+    }));
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains(".git unwritable") && n.contains("commit the worker's changes")),
+        "{:?}",
+        plan.notes
     );
 }
 

@@ -386,7 +386,7 @@ fn assert_deny_only_in_settings(args: &[String], deny: &[String]) {
     let top = settings.as_object().unwrap();
     for key in top.keys() {
         assert!(
-            ["disableAllHooks", "hooks", "permissions"].contains(&key.as_str()),
+            ["disableAllHooks", "hooks", "permissions", "sandbox"].contains(&key.as_str()),
             "unexpected settings key {key}"
         );
     }
@@ -424,7 +424,7 @@ fn deny_rules_with_commas_brackets_quotes_spaces_and_tool_names_are_kept_and_nev
     assert!(dry_run(&request, &options).is_ok());
     let scope = crate::provider::permissions::scope(&request).unwrap();
     let hook = hook();
-    for mode in [Mode::Read, Mode::Write, Mode::Full] {
+    for mode in [Mode::Read, Mode::Write, Mode::Build, Mode::Full] {
         request.permissions.mode = mode;
         let mut scope = scope.clone();
         scope.mode = mode;

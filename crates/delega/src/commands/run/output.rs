@@ -49,6 +49,7 @@ fn mode_name(mode: Mode) -> &'static str {
     match mode {
         Mode::Read => "read",
         Mode::Write => "write",
+        Mode::Build => "build",
         Mode::Full => "full",
     }
 }

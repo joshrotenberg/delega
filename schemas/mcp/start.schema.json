@@ -228,7 +228,22 @@
             ]
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "not": {
+          "properties": {
+            "mode": {
+              "const": "build"
+            },
+            "commands": {
+              "type": "array",
+              "minItems": 1
+            }
+          },
+          "required": [
+            "mode",
+            "commands"
+          ]
+        }
       },
       "Mode": {
         "description": "How much a worker may do in its working directory.",
@@ -244,7 +259,12 @@
             "const": "write"
           },
           {
-            "description": "No restriction from delega.",
+            "description": "May edit files in the working directory and run any command inside the\nprovider's OS sandbox. The sandbox lets commands write to the working\ndirectory and temporary directories, with provider exceptions such as\ngit in a worktree, and gives them no network. `permissions.commands`\nmust be empty: every command already runs inside the sandbox.",
+            "type": "string",
+            "const": "build"
+          },
+          {
+            "description": "No sandbox and no scope from delega. For Claude Code the user's deny\nrules still apply and tools beyond the nine built-ins stay off.",
             "type": "string",
             "const": "full"
           }

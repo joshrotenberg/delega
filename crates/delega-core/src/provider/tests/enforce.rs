@@ -138,10 +138,10 @@ async fn claude_reads_the_working_directory_and_listed_directories_but_not_elsew
 }
 
 #[tokio::test]
-async fn claude_grep_and_glob_follow_the_scoped_read_rules_in_read_and_write_modes() {
+async fn claude_grep_and_glob_follow_the_scoped_read_rules_in_read_write_and_build_modes() {
     let rig = Rig::new();
     let extra = std::fs::canonicalize(&rig.config).unwrap();
-    for mode in [Mode::Read, Mode::Write] {
+    for mode in [Mode::Read, Mode::Write, Mode::Build] {
         for tool in ["grep", "glob"] {
             for (path, listed, expect_denied) in [
                 (rig.work.join("src"), false, false),

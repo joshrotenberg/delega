@@ -301,6 +301,20 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_accepts_build_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = profile_file(
+            &dir,
+            r#"{"schema_version": 1, "permissions": {"mode": "build"}}"#,
+        );
+        let mut problems = Vec::new();
+        let profile = read_profile(&path, &mut problems, ErrorDetail::Full);
+        let profile = profile.unwrap_or_else(|| panic!("{problems:?}"));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(profile.permissions.and_then(|p| p.mode), Some(Mode::Build));
+    }
+
+    #[test]
     fn a_profile_error_without_a_position_does_not_report_line_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = profile_file(&dir, r#"{"model": "m"}"#);

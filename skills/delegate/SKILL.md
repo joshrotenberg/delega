@@ -54,12 +54,17 @@ list, it is not added to it. A relative path resolves against the server's
 working directory, so prefer absolute paths.
 
 Set `permissions.mode` to the narrowest value that works: `read` (default),
-`write` or `full`. Add `permissions.commands` for exact commands the worker may
-run and `permissions.directories` for extra directories it may read. A request
+`write`, `build` (edit and run any command inside the provider's sandbox, with
+no network, where commands can write to the working directory and temporary
+directories;
+`permissions.commands` must be empty) or `full`. Add `permissions.commands` for
+exact commands the worker may run and `permissions.directories` for extra
+directories it may read. A request
 the worker makes that was not granted is answered no and listed in
 `permissions.denied` in the result. Turn on `permissions.strict` to refuse
 the run before it starts when the provider cannot enforce the permissions as
-stated (Codex `read` and `write` cannot confine reads or commands); the run is
+stated (Codex `read` and `write` cannot confine reads or commands, and `build`
+on either provider cannot confine what commands read); the run is
 `refused` with `permissions_not_enforceable`, naming each part. Without it, the
 run goes ahead and `provider_notes` says what is wider than requested.
 

@@ -74,8 +74,8 @@ anything; it leaves out the prompt and instruction text. See
 
 ## Permissions and environment
 
-- Use the narrowest mode: `--read`, `--write` or `--full`, and
-  `--allow-command CMD` for exact commands. See
+- Use the narrowest mode: `--read`, `--write`, `--build` or `--full`, and
+  `--allow-command CMD` for exact commands in `--read` and `--write`. See
   [Permissions](../api.md#permissions).
 - A worker does not inherit the job's environment. Pass what it needs with
   `--env NAME`, which passes the variable's value without putting it on the
@@ -97,4 +97,4 @@ time limit enforced, so a CI job's cancel step should send SIGTERM first.
 - `cleanup.confirmed`.
 - `permissions.denied` and `provider_notes`: a run can be `completed` with
   denied requests.
-- After `--write` or `--full`, the changes themselves, with your own tests.
+- After `--write`, `--build` or `--full`, the changes themselves, with your own tests.

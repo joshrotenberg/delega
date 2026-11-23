@@ -307,6 +307,17 @@ fn the_empty_configuration_changes_nothing() {
 }
 
 #[test]
+fn build_is_accepted_as_the_default_mode() {
+    let config =
+        config_of("schema_version = 1\n[defaults.permissions]\nmode = \"build\"\n").expect("valid");
+    let permissions = config.request_defaults().permissions.expect("permissions");
+    assert_eq!(
+        permissions.mode,
+        Some(crate::contract::permissions::Mode::Build)
+    );
+}
+
+#[test]
 fn the_version_is_required_and_must_be_one() {
     let missing = refusal_of("[defaults]\nmodel = \"m\"\n");
     assert_eq!(missing.kind, INVALID);

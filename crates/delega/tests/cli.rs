@@ -285,6 +285,9 @@ fn conflicting_permission_flags_are_a_usage_error_with_exit_two() {
     assert_eq!(out.status.code(), Some(2));
     let err = text(&out.stderr);
     assert!(err.contains("cannot be used with"), "{err}");
+    let out = delega(&["run", "--build", "--write"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("cannot be used with"));
 }
 
 #[test]

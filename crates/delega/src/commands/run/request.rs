@@ -218,6 +218,8 @@ fn read_schema(path: &Path, problems: &mut Vec<Problem>) -> Option<Value> {
 fn mode(args: &Args) -> Option<Mode> {
     if args.full {
         Some(Mode::Full)
+    } else if args.build {
+        Some(Mode::Build)
     } else if args.write {
         Some(Mode::Write)
     } else if args.read {

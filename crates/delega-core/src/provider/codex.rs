@@ -37,7 +37,7 @@ fn toml_string(text: &str) -> String {
 fn sandbox(mode: Mode) -> &'static str {
     match mode {
         Mode::Read => "read-only",
-        Mode::Write => "workspace-write",
+        Mode::Write | Mode::Build => "workspace-write",
         Mode::Full => "danger-full-access",
     }
 }
@@ -60,11 +60,14 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         // user's shell profile and see only the environment delega passed.
         "allow_login_shell=false".to_string(),
     ];
-    if scope.mode == Mode::Write {
+    // `write` keeps the temporary directories out of the sandbox; `build`
+    // lets commands such as test runners create files there.
+    if matches!(scope.mode, Mode::Write | Mode::Build) {
+        let exclude_tmp = scope.mode == Mode::Write;
         settings.extend([
             "sandbox_workspace_write.network_access=false".to_string(),
-            "sandbox_workspace_write.exclude_slash_tmp=true".to_string(),
-            "sandbox_workspace_write.exclude_tmpdir_env_var=true".to_string(),
+            format!("sandbox_workspace_write.exclude_slash_tmp={exclude_tmp}"),
+            format!("sandbox_workspace_write.exclude_tmpdir_env_var={exclude_tmp}"),
         ]);
     }
     if let Some(e) = request.effort {
@@ -121,6 +124,17 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
              list and permissions.directories does not limit reading"
                 .to_string(),
         ),
+        Mode::Build => notes.extend([
+            "wider than requested: the workspace-write sandbox lets Codex read any file this user \
+             can read, including outside the working directory and permissions.directories, and \
+             run any command that works inside the sandbox (writes in the working directory and \
+             under /tmp and $TMPDIR, including a permissions.directories entry there, except \
+             .git; no network); permissions.directories does not limit reading"
+                .to_string(),
+            "the workspace-write sandbox keeps .git unwritable, so git add and git commit fail; \
+             commit the worker's changes yourself"
+                .to_string(),
+        ]),
         Mode::Full => notes.push("full runs Codex with no sandbox".to_string()),
     }
     let mut unenforceable = Vec::new();
@@ -129,16 +143,20 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
             "reads are not confined to the working directory and permissions.directories"
                 .to_string(),
         );
-        unenforceable.push(
-            if scope.mode == Mode::Write {
+        match scope.mode {
+            Mode::Write => unenforceable.push(
                 "commands that write inside the working directory or need no write access and no \
                  network access can run although the request allows only the commands it lists"
-            } else {
+                    .to_string(),
+            ),
+            Mode::Read => unenforceable.push(
                 "commands that need no write access and no network access can run although the \
                  request allows only the commands it lists"
-            }
-            .to_string(),
-        );
+                    .to_string(),
+            ),
+            // `build` lets every command run inside the sandbox, as requested.
+            Mode::Build | Mode::Full => {}
+        }
         if !scope.commands.is_empty() {
             unenforceable.push("permissions.commands has no effect".to_string());
         }
