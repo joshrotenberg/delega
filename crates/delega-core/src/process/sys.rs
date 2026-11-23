@@ -143,6 +143,128 @@ pub(super) fn become_subreaper() -> Result<(), String> {
         .map_err(|errno| std::io::Error::from(errno).to_string())
 }
 
+/// What `/proc/<pid>/stat` says about one process (Linux).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProcStat {
+    pub state: char,
+    pub parent: i32,
+    pub group: i32,
+    pub session: i32,
+    /// Start time in clock ticks after boot: with the pid, an identity that a
+    /// reused pid does not share.
+    pub start_ticks: u64,
+}
+
+/// Read `/proc/<pid>/stat` (Linux). `None` when the process is gone or the
+/// line cannot be read.
+#[cfg(target_os = "linux")]
+pub(super) fn proc_stat(pid: i32) -> Option<ProcStat> {
+    if pid <= 0 {
+        return None;
+    }
+    let bytes = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    parse_proc_stat(&bytes)
+}
+
+/// Fields after the command name, counted from the last `)`: state (3), ppid
+/// (4), pgrp (5), session (6), ..., starttime (22).
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_stat_fields(stat: &[u8]) -> Option<(char, i32, i32, i32, u64)> {
+    let end = stat.iter().rposition(|&byte| byte == b')')?;
+    let rest = std::str::from_utf8(&stat[end + 1..]).ok()?;
+    let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
+    let state = fields.first()?.chars().next()?;
+    let parent = fields.get(1)?.parse().ok()?;
+    let group = fields.get(2)?.parse().ok()?;
+    let session = fields.get(3)?.parse().ok()?;
+    let start_ticks = fields.get(19)?.parse().ok()?;
+    Some((state, parent, group, session, start_ticks))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat(stat: &[u8]) -> Option<ProcStat> {
+    let (state, parent, group, session, start_ticks) = parse_proc_stat_fields(stat)?;
+    Some(ProcStat {
+        state,
+        parent,
+        group,
+        session,
+        start_ticks,
+    })
+}
+
+/// The start time of a process in clock ticks (Linux), for checking at
+/// delivery that a pid still names the process it named when it was found.
+#[cfg(target_os = "linux")]
+pub(super) fn start_ticks(pid: i32) -> Option<u64> {
+    proc_stat(pid).map(|s| s.start_ticks)
+}
+
+/// The start time of a process in clock ticks; only Linux can say.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn start_ticks(_pid: i32) -> Option<u64> {
+    None
+}
+
+/// Signal one process only if it is still the one meant.
+///
+/// On Linux the process is first held by a pidfd (`pidfd_open`), then its
+/// `/proc/<pid>/stat` is read and given to `check`, and the signal goes
+/// through the pidfd (`pidfd_send_signal`): once the pidfd is open its number
+/// can no longer name another process, so a pid reused between the check and
+/// the signal is never signalled. Where pidfds are missing (Linux before 5.3)
+/// the check is made and the signal sent by pid, which leaves the gap between
+/// the two. Returns whether the signal was sent; a process that is gone or
+/// fails the check is not signalled.
+///
+/// Elsewhere there is nothing to read the identity from at delivery: `check`
+/// is not called and the signal goes by pid, as the callers' own listing-time
+/// checks decided (the residual in the module documentation).
+#[cfg(target_os = "linux")]
+pub(super) fn signal_checked(
+    target: i32,
+    signal: Signal,
+    check: impl FnOnce(&ProcStat) -> bool,
+) -> Result<bool, SignalError> {
+    use rustix::process::{PidfdFlags, pidfd_open, pidfd_send_signal};
+    let pid = pid(target)?;
+    let fd = match pidfd_open(pid, PidfdFlags::empty()) {
+        Ok(fd) => Some(fd),
+        Err(Errno::SRCH) => return Ok(false),
+        Err(_) => None,
+    };
+    let Some(stat) = proc_stat(target) else {
+        return Ok(false);
+    };
+    if !check(&stat) {
+        return Ok(false);
+    }
+    let sent = match &fd {
+        Some(fd) => pidfd_send_signal(fd, signal),
+        None => rustix::process::kill_process(pid, signal),
+    };
+    match sent {
+        Ok(()) => Ok(true),
+        Err(Errno::SRCH) => Ok(false),
+        Err(errno) => Err(SignalError::from(errno)),
+    }
+}
+
+/// See the Linux version: here `check` is not called.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn signal_checked(
+    target: i32,
+    signal: Signal,
+    _check: impl FnOnce(&()) -> bool,
+) -> Result<bool, SignalError> {
+    match signal_process(target, signal) {
+        Ok(()) => Ok(true),
+        Err(SignalError::NoSuchProcess) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// The session id of a process, when it can be read.
 #[cfg(test)]
 pub(super) fn session_of(target: i32) -> Option<i32> {
@@ -250,7 +372,8 @@ pub(super) fn probe_group(pgid: i32) -> GroupProbe {
 pub(super) fn new_session(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     // SAFETY: the closure calls only `setsid(2)`, which is async-signal-safe,
-    // through rustix's direct syscall. It allocates nothing, takes no locks and
+    // through rustix (a direct syscall on Linux, libc's `setsid` wrapper on
+    // macOS and other systems, which is async-signal-safe as POSIX requires). It allocates nothing, takes no locks and
     // touches no state of the parent; a failure becomes an `io::Error` built
     // from the raw errno, which does not allocate either. Nothing else of ours
     // runs between fork and exec (std does its own setup there, outside this
@@ -331,6 +454,19 @@ mod tests {
         assert_eq!(parse_stat_session(b"1 (x) S 1 1 abc 0"), None);
         assert_eq!(parse_stat_session(b"1 (x) S 1 1 -4 0"), None);
         assert_eq!(parse_stat_session(b"1 (x\xff) S 1 1 7 0"), Some(7));
+    }
+
+    #[test]
+    fn a_stat_line_gives_state_parent_group_session_and_start_ticks() {
+        // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt
+        // majflt cmajflt utime stime cutime cstime priority nice threads
+        // itrealvalue starttime ...
+        let line = b"77 (a) b (c d) ) S 5 66 88 0 -1 0 1 2 3 4 5 6 7 8 20 0 1 0 123456 9";
+        assert_eq!(
+            parse_proc_stat_fields(line),
+            Some(('S', 5, 66, 88, 123_456))
+        );
+        assert_eq!(parse_proc_stat_fields(b"1 (x) S 1 1 1"), None);
     }
 
     #[test]

@@ -6,13 +6,19 @@
 //! kernel built without that file, from the parent field of every
 //! `/proc/<pid>/stat`.
 //!
-//! A freeze stops a process before it reads its children, so every pid it then
-//! signals belongs to a child of a stopped process or of the keeper: neither
-//! reaps while the walk runs, so none of those pids can have been reused.
+//! Every process is held by a pidfd once found, checked to be a live child of
+//! the parent it was found under (a pid reused between the read and the pidfd
+//! has another parent), and signalled through the pidfd, so a reused pid is
+//! never signalled. A freeze reads a process's children only once its SIGSTOP
+//! has taken effect, and ends only when a pass starting again from the
+//! keeper's own children finds nothing new and every process stopped.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::os::fd::OwnedFd;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use rustix::process::{Pid, PidfdFlags, pidfd_open, pidfd_send_signal};
 
 use crate::process::limits::KEEPER_FREEZE_PASSES;
 use crate::process::sys::{self, Signal};
@@ -71,7 +77,7 @@ fn alive(pid: i32) -> bool {
     stat(pid).is_some_and(|(state, _)| state != 'Z' && state != 'X')
 }
 
-/// Every descendant of `root`, by parent links.
+/// Every descendant of `root` in one pass, by parent links.
 pub(super) fn descendants(root: i32) -> Vec<i32> {
     let mut seen = HashSet::new();
     let mut queue: VecDeque<i32> = children(root).into();
@@ -86,41 +92,136 @@ pub(super) fn descendants(root: i32) -> Vec<i32> {
     out
 }
 
-/// How many descendants of `root` are alive (not zombies).
+/// How many descendants of `root` are alive (not zombies). One pass reads the
+/// keeper's children once, so a process reparented to the keeper after that
+/// read is missed; the walk is repeated until two passes in a row find the
+/// same live set, within `KEEPER_FREEZE_PASSES`. A tree that keeps changing
+/// (a relay) is reported with the last pass's count, which is not zero while
+/// it lives.
 pub(super) fn live_descendants(root: i32) -> usize {
-    descendants(root).into_iter().filter(|p| alive(*p)).count()
+    let mut previous: Option<BTreeSet<i32>> = None;
+    for _ in 0..KEEPER_FREEZE_PASSES {
+        let live: BTreeSet<i32> = descendants(root)
+            .into_iter()
+            .filter(|p| alive(*p))
+            .collect();
+        if previous.as_ref() == Some(&live) {
+            return live.len();
+        }
+        previous = Some(live);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    previous.map_or(0, |live| live.len().max(1))
 }
 
-/// Stop every descendant of `root` (SIGSTOP), walking again until a pass finds
-/// none it had not stopped, then SIGKILL and SIGCONT them all. Returns how many
-/// are still alive a moment later.
+/// A process held for signalling: a pidfd when the kernel has them, so the
+/// signal reaches this process or none, never one that took its pid.
+struct Held {
+    pid: i32,
+    fd: Option<OwnedFd>,
+}
+
+impl Held {
+    /// Hold `pid` if it is still a live child of `parent`. The check comes
+    /// after the pidfd is open: a pid reused between the children read and
+    /// here has another parent and is not held.
+    fn take(pid: i32, parent: i32) -> Option<Self> {
+        let fd = Pid::from_raw(pid).and_then(|p| pidfd_open(p, PidfdFlags::empty()).ok());
+        let (state, actual) = stat(pid)?;
+        (actual == parent && state != 'Z' && state != 'X').then_some(Self { pid, fd })
+    }
+
+    fn send(&self, signal: Signal) {
+        match &self.fd {
+            Some(fd) => {
+                let _ = pidfd_send_signal(fd, signal);
+            }
+            // Before Linux 5.3: by pid, right after the parent check.
+            None => {
+                let _ = sys::signal_process(self.pid, signal);
+            }
+        }
+    }
+}
+
+/// Wait up to `bound` for a SIGSTOP to take effect: a stopped process forks
+/// nothing more and reaps none of its children, so its children list is then
+/// complete and theirs pids stay theirs. `false` if it is still running (an
+/// uninterruptible wait, for example).
+fn wait_stopped(pid: i32, bound: Duration) -> bool {
+    let until = Instant::now() + bound;
+    loop {
+        match stat(pid) {
+            None => return true,
+            Some(('T' | 't' | 'Z' | 'X', _)) => return true,
+            Some(_) => {}
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Send `signal` (then SIGCONT, so a stopped process receives it) to every
+/// descendant of `root` one pass finds, each held and checked as in a freeze.
+pub(super) fn signal_tree(root: i32, signal: Signal) {
+    let mut seen = HashSet::new();
+    let mut queue: VecDeque<(i32, i32)> = children(root).into_iter().map(|c| (c, root)).collect();
+    while let Some((pid, parent)) = queue.pop_front() {
+        if pid == root || !seen.insert(pid) {
+            continue;
+        }
+        if let Some(held) = Held::take(pid, parent) {
+            held.send(signal);
+            held.send(Signal::CONT);
+        }
+        queue.extend(children(pid).into_iter().map(|c| (c, pid)));
+    }
+}
+
+/// Stop every descendant of `root` (SIGSTOP), walking again from the keeper's
+/// own children until a pass finds nothing new and every process it found has
+/// stopped, then SIGKILL and SIGCONT them all through their pidfds. Returns how
+/// many are still alive a moment later, by [`live_descendants`]; not zero when
+/// the freeze could not complete within its bound.
 pub(super) fn freeze_kill(root: i32) -> usize {
     let started = Instant::now();
-    let mut stopped: HashSet<i32> = HashSet::new();
+    let mut held: HashMap<i32, Held> = HashMap::new();
     for _ in 0..KEEPER_FREEZE_PASSES {
         let mut new = 0;
-        let mut queue: VecDeque<i32> = children(root).into();
+        let mut all_stopped = true;
+        let mut queue: VecDeque<(i32, i32)> =
+            children(root).into_iter().map(|c| (c, root)).collect();
         let mut seen = HashSet::new();
-        while let Some(pid) = queue.pop_front() {
+        while let Some((pid, parent)) = queue.pop_front() {
             if pid == root || !seen.insert(pid) {
                 continue;
             }
-            if !stopped.contains(&pid) {
-                let _ = sys::signal_process(pid, Signal::STOP);
-                stopped.insert(pid);
+            if let std::collections::hash_map::Entry::Vacant(slot) = held.entry(pid) {
+                let Some(process) = Held::take(pid, parent) else {
+                    continue;
+                };
+                process.send(Signal::STOP);
+                slot.insert(process);
                 new += 1;
             }
-            // Read only after the stop: the children of a stopped process
-            // keep their pids, since it cannot reap them.
-            queue.extend(children(pid));
+            // Read the children only once the stop has taken effect.
+            if !wait_stopped(pid, Duration::from_millis(50)) {
+                all_stopped = false;
+            }
+            queue.extend(children(pid).into_iter().map(|c| (c, pid)));
         }
-        if new == 0 || started.elapsed() > Duration::from_secs(1) {
+        if new == 0 && all_stopped {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(1) {
             break;
         }
     }
-    for pid in &stopped {
-        let _ = sys::signal_process(*pid, Signal::KILL);
-        let _ = sys::signal_process(*pid, Signal::CONT);
+    for process in held.values() {
+        process.send(Signal::KILL);
+        process.send(Signal::CONT);
     }
     let until = Instant::now() + Duration::from_millis(500);
     loop {

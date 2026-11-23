@@ -34,7 +34,7 @@ use tokio::time::Instant;
 
 use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
 use super::marker::MarkedRow;
-use super::sys::{self, Signal, SignalError};
+use super::sys::{self, Signal};
 
 /// Why a process table could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,12 +336,61 @@ pub(crate) struct Observations {
 pub(crate) type SharedObservations = Arc<Mutex<Observations>>;
 pub(crate) type Warnings = Arc<Mutex<Vec<String>>>;
 
+/// The tracked descendants alive at the latest snapshot, each with its start
+/// time in clock ticks where the system gives one.
+pub(crate) type Mirror = Arc<Mutex<Vec<(i32, Option<u64>)>>>;
+
 /// Add a warning once.
 pub(crate) fn push_warning(warnings: &Warnings, warning: String) {
     let mut guard = warnings.lock().unwrap_or_else(|e| e.into_inner());
     if !guard.contains(&warning) {
         guard.push(warning);
     }
+}
+
+/// Whether the child's pid still names its group and session, shared between
+/// the owner's group signals, the tree's member signals and the keeper link,
+/// which releases it when the keeper says it reaps the child on its own or
+/// its end closes. Signals that rely on the pin are sent while holding the
+/// lock, so none is in flight once it is released.
+#[derive(Debug)]
+pub(crate) struct GroupPin(Mutex<bool>);
+
+impl Default for GroupPin {
+    fn default() -> Self {
+        Self(Mutex::new(true))
+    }
+}
+
+impl GroupPin {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, bool> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn release(&self) {
+        *self.lock() = false;
+    }
+
+    pub(crate) fn pinned(&self) -> bool {
+        *self.lock()
+    }
+}
+
+/// How a pid was found, which decides what it must still be when it is
+/// signalled.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum Found {
+    /// A member of the child's group: its group id must still be the child's.
+    Group,
+    /// A member of the child's session: its session id must still be the
+    /// child's.
+    Session,
+    /// A tracked descendant: its start time, when recorded, must match.
+    Tracked,
+    /// Found by the run marker: its start time, when recorded, must match,
+    /// and with `true` it must still be stopped.
+    Marked(Option<u64>, bool),
 }
 
 /// Whether a pid may ever be owned: not the child (it seeds the set), not init
@@ -376,7 +425,7 @@ pub(crate) struct ProcessTree {
     /// The tracked descendants alive at the latest snapshot, readable without
     /// the tree lock, for the paths that cannot run a scan (an owner that is
     /// dropped, a report written after the owner was lost).
-    mirror: Arc<Mutex<Vec<i32>>>,
+    mirror: Mirror,
     lister: Lister,
     enabled: bool,
     /// The keeper, a direct child of this process and the program's parent.
@@ -396,6 +445,11 @@ pub(crate) struct ProcessTree {
     /// the child is unreaped by this process or by the keeper. When the keeper
     /// is lost it is false, and only recorded identities are followed.
     pinned: bool,
+    /// The pin shared with the keeper link, for a kept run.
+    pin: Option<Arc<GroupPin>>,
+    /// Start times in clock ticks of tracked processes (Linux), checked
+    /// through a pidfd when they are signalled.
+    ticks: HashMap<i32, u64>,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -467,7 +521,27 @@ impl ProcessTree {
             frozen: HashSet::new(),
             last_freeze: None,
             pinned: true,
+            pin: None,
+            ticks: HashMap::new(),
         }
+    }
+
+    /// The pin shared with the keeper link.
+    #[must_use]
+    pub fn with_pin(mut self, pin: Arc<GroupPin>) -> Self {
+        self.pin = Some(pin);
+        self
+    }
+
+    /// Record `pid` as tracked with this start, and its start time in ticks
+    /// where the system gives one.
+    fn track(&mut self, pid: i32, started: String) {
+        if !self.known.contains_key(&pid)
+            && let Some(ticks) = sys::start_ticks(pid)
+        {
+            self.ticks.insert(pid, ticks);
+        }
+        self.known.insert(pid, started);
     }
 
     /// The child's pid no longer names its group and session (the keeper that
@@ -478,7 +552,7 @@ impl ProcessTree {
         if self.pinned {
             self.pinned = false;
             if let Some(started) = self.root_started.clone() {
-                self.known.insert(self.pid, started);
+                self.track(self.pid, started);
             }
         }
     }
@@ -499,7 +573,7 @@ impl ProcessTree {
 
     /// Publish the live tracked descendants to `mirror` after each snapshot.
     #[must_use]
-    pub fn with_mirror(mut self, mirror: Arc<Mutex<Vec<i32>>>) -> Self {
+    pub fn with_mirror(mut self, mirror: Mirror) -> Self {
         self.mirror = mirror;
         self
     }
@@ -606,7 +680,7 @@ impl ProcessTree {
                     || sessions.get(&row.pid) == Some(&sys::SessionLookup::In(self.pid));
                 if member {
                     owned.insert(row.pid);
-                    self.known.insert(row.pid, row.started.clone());
+                    self.track(row.pid, row.started.clone());
                 }
             }
         }
@@ -623,7 +697,7 @@ impl ProcessTree {
                     && !owned.contains(&row.pid)
                 {
                     owned.insert(row.pid);
-                    self.known.insert(row.pid, row.started.clone());
+                    self.track(row.pid, row.started.clone());
                 }
             }
             if before == owned.len() {
@@ -647,6 +721,10 @@ impl ProcessTree {
         #[cfg(target_os = "linux")]
         let (rows, early): (_, Option<Result<Vec<MarkedRow>, InspectError>>) =
             (self.rows().await?, None);
+        // The keeper may have let go of the child while the listing ran.
+        if self.pin.as_ref().is_some_and(|pin| !pin.pinned()) {
+            self.unpin();
+        }
         let sessions = self.read_sessions(&rows);
         self.adopt(&rows, &sessions);
         let marked = match token {
@@ -675,10 +753,10 @@ impl ProcessTree {
             }
             None => Vec::new(),
         };
-        let tracked: Vec<i32> = rows
+        let tracked: Vec<(i32, Option<u64>)> = rows
             .iter()
             .filter(|r| !r.zombie && self.known.get(&r.pid) == Some(&r.started))
-            .map(|r| r.pid)
+            .map(|r| (r.pid, self.ticks.get(&r.pid).copied()))
             .collect();
         *self.mirror.lock().unwrap_or_else(|e| e.into_inner()) = tracked;
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
@@ -767,10 +845,11 @@ impl ProcessTree {
         self.note_view(&view);
         if let Some(signal) = signal {
             for pid in view.owned() {
-                if !self.still_member(&view, pid) {
-                    continue;
+                let found = Self::found(&view, pid);
+                self.signal_found(pid, found, signal);
+                if signal == Signal::TERM {
+                    self.signal_found(pid, found, Signal::CONT);
                 }
-                self.deliver(pid, signal);
             }
             for marked in snapshot
                 .marked
@@ -789,9 +868,58 @@ impl ProcessTree {
         obs.stats.marked_rows += view.marked.len() as u64;
     }
 
-    /// A session member is checked again just before it is signalled.
-    fn still_member(&self, view: &SweepView, pid: i32) -> bool {
-        !view.session.contains(&pid) || sys::session_lookup(pid) == sys::SessionLookup::In(self.pid)
+    fn found(view: &SweepView, pid: i32) -> Found {
+        if view.group.contains(&pid) {
+            Found::Group
+        } else if view.session.contains(&pid) {
+            Found::Session
+        } else {
+            Found::Tracked
+        }
+    }
+
+    /// Signal one process if it is still what it was found as. On Linux the
+    /// check is made through a pidfd (see [`sys::signal_checked`]), so a pid
+    /// reused since the listing is never signalled. Elsewhere a session member
+    /// is checked again just before the signal and the rest go by pid, the
+    /// residual in the module documentation. A group or session member is
+    /// signalled only while the child's pid pins them, holding the pin's lock.
+    fn signal_found(&self, pid: i32, found: Found, signal: Signal) {
+        let member = matches!(found, Found::Group | Found::Session);
+        let held = self.pin.as_ref().map(|pin| pin.lock());
+        if member && (!self.pinned || held.as_ref().is_some_and(|pinned| !**pinned)) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let result = {
+            let child = self.pid;
+            let ticks = self.ticks.get(&pid).copied();
+            sys::signal_checked(pid, signal, |stat| match found {
+                Found::Group => stat.group == child,
+                Found::Session => stat.session == child,
+                Found::Tracked => ticks.is_none_or(|t| t == stat.start_ticks),
+                Found::Marked(ticks, stopped) => {
+                    ticks.is_none_or(|t| t == stat.start_ticks)
+                        && (!stopped || matches!(stat.state, 'T' | 't'))
+                }
+            })
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = {
+            if matches!(found, Found::Session)
+                && sys::session_lookup(pid) != sys::SessionLookup::In(self.pid)
+            {
+                return;
+            }
+            sys::signal_checked(pid, signal, |_| true)
+        };
+        drop(held);
+        if let Err(error) = result {
+            push_warning(
+                &self.warnings,
+                format!("Descendant signal failed: {error:?}"),
+            );
+        }
     }
 
     /// Stop a marked process, or kill one this tree stopped earlier that is
@@ -800,25 +928,16 @@ impl ProcessTree {
         let known = self.marked_stopped.get(&marked.pid) == Some(&marked.started);
         if known && marked.stopped {
             if kill {
-                self.send(marked.pid, Signal::KILL);
-                self.send(marked.pid, Signal::CONT);
+                let found = Found::Marked(marked.ticks, true);
+                self.signal_found(marked.pid, found, Signal::KILL);
+                self.signal_found(marked.pid, Found::Marked(marked.ticks, false), Signal::CONT);
             }
             return false;
         }
-        self.send(marked.pid, Signal::STOP);
+        self.signal_found(marked.pid, Found::Marked(marked.ticks, false), Signal::STOP);
         self.marked_stopped
             .insert(marked.pid, marked.started.clone());
         true
-    }
-
-    fn send(&self, pid: i32, signal: Signal) {
-        match sys::signal_process(pid, signal) {
-            Ok(()) | Err(SignalError::NoSuchProcess) => {}
-            Err(error) => push_warning(
-                &self.warnings,
-                format!("Descendant signal failed: {error:?}"),
-            ),
-        }
     }
 
     /// One round of a freeze: a fresh snapshot, and SIGSTOP to every process
@@ -837,10 +956,7 @@ impl ProcessTree {
             if stopped && self.frozen.contains(&pid) {
                 continue;
             }
-            if !self.still_member(&view, pid) {
-                continue;
-            }
-            self.send(pid, Signal::STOP);
+            self.signal_found(pid, Self::found(&view, pid), Signal::STOP);
             self.frozen.insert(pid);
             new += 1;
         }
@@ -874,10 +990,9 @@ impl ProcessTree {
             .copied()
             .collect::<Vec<_>>()
         {
-            if self.still_member(&view, pid) {
-                self.send(pid, Signal::KILL);
-                self.send(pid, Signal::CONT);
-            }
+            let found = Self::found(&view, pid);
+            self.signal_found(pid, found, Signal::KILL);
+            self.signal_found(pid, found, Signal::CONT);
         }
         for m in snapshot
             .marked
@@ -885,30 +1000,12 @@ impl ProcessTree {
             .filter(|m| view.marked.contains(&m.pid))
         {
             if self.marked_stopped.get(&m.pid) == Some(&m.started) && m.stopped {
-                self.send(m.pid, Signal::KILL);
-                self.send(m.pid, Signal::CONT);
+                self.signal_found(m.pid, Found::Marked(m.ticks, true), Signal::KILL);
+                self.signal_found(m.pid, Found::Marked(m.ticks, false), Signal::CONT);
             }
         }
         self.frozen.clear();
         view
-    }
-
-    fn deliver(&self, pid: i32, signal: Signal) {
-        for signal in [
-            Some(signal),
-            (signal == Signal::TERM).then_some(Signal::CONT),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            match sys::signal_process(pid, signal) {
-                Ok(()) | Err(SignalError::NoSuchProcess) => {}
-                Err(error) => push_warning(
-                    &self.warnings,
-                    format!("Descendant signal failed: {error:?}"),
-                ),
-            }
-        }
     }
 
     #[cfg(test)]
@@ -1021,6 +1118,7 @@ mod tests {
             pid: own,
             started: "now".into(),
             stopped: false,
+            ticks: None,
         }];
         let view = tree.view(&Snapshot {
             rows: Vec::new(),

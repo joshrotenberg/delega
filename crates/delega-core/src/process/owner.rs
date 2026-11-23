@@ -29,8 +29,8 @@ use super::report::{Diagnostics, KeeperDiagnostics, LeaderExit, SignalRecord, Si
 use super::spec::ProcessSpec;
 use super::sys::{self, Signal, SignalError};
 use super::tree::{
-    CaptureOutcome, InspectError, InspectionStats, ProcessTree, SharedObservations, SweepView,
-    Warnings, push_warning, system_lister,
+    CaptureOutcome, InspectError, InspectionStats, Mirror, ProcessTree, SharedObservations,
+    SweepView, Warnings, push_warning, system_lister,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -44,7 +44,8 @@ pub(super) struct Registry {
     /// The child's pid, 0 until it has started.
     pub pid: std::sync::atomic::AtomicU32,
     /// Tracked descendants alive at the latest scan.
-    pub tracked: Arc<Mutex<Vec<i32>>>,
+    /// With the start time in clock ticks where the system gives it.
+    pub tracked: Mirror,
 }
 
 impl Registry {
@@ -52,7 +53,7 @@ impl Registry {
     pub(super) fn tracked_pids(&self) -> Vec<u32> {
         lock(&self.tracked)
             .iter()
-            .filter_map(|p| u32::try_from(*p).ok())
+            .filter_map(|(p, _)| u32::try_from(*p).ok())
             .collect()
     }
 }
@@ -89,7 +90,7 @@ pub(super) struct Shared {
     pub(super) leader_exited: Arc<AtomicBool>,
     last_view: Mutex<Option<Result<SweepView, String>>>,
     swept: Mutex<Vec<u32>>,
-    tracked_mirror: Arc<Mutex<Vec<i32>>>,
+    tracked_mirror: Mirror,
     #[cfg(test)]
     swallow_kills: std::sync::atomic::AtomicU32,
     descendant_signal_budget: Duration,
@@ -108,6 +109,11 @@ impl Shared {
 
     pub(super) fn note_pipes_closed(&self) {
         self.pipes_closed_by_owner.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the owner closed an output pipe that was still open.
+    pub(super) fn pipes_closed_by_owner(&self) -> bool {
+        self.pipes_closed_by_owner.load(Ordering::SeqCst)
     }
 
     /// Whether the leader has exited, by the watcher's flag or a direct check.
@@ -176,7 +182,16 @@ impl Shared {
             }
         }
         let already_exited = self.leader_has_exited();
-        match sys::signal_group(self.pid, signal) {
+        // Held across the signal, so the keeper's `releasing` cannot be
+        // answered while a group signal is in flight.
+        let pin = self.keeper.as_ref().map(|k| k.pin());
+        let held = pin.as_ref().map(|p| p.lock());
+        if held.as_ref().is_some_and(|pinned| !**pinned) {
+            return;
+        }
+        let sent = sys::signal_group(self.pid, signal);
+        drop(held);
+        match sent {
             Ok(()) => {
                 if already_exited {
                     self.post_exit_group_signal.store(true, Ordering::SeqCst);
@@ -194,6 +209,16 @@ impl Shared {
                 self.warn(format!("Process-group signal failed: {message}"));
             }
         }
+    }
+
+    /// SIGKILL to the group for `Drop`: no records, but the same pin.
+    fn signal_group_raw(&self, signal: Signal) {
+        let pin = self.keeper.as_ref().map(|k| k.pin());
+        let held = pin.as_ref().map(|p| p.lock());
+        if self.keeper_lost() || held.as_ref().is_some_and(|pinned| !**pinned) {
+            return;
+        }
+        let _ = sys::signal_group(self.pid, signal);
     }
 
     /// Give a fresh fast snapshot one bounded chance to capture newly
@@ -452,12 +477,25 @@ pub const FREEZE_INCOMPLETE_REASON: &str = "processes kept appearing while they 
      stopped, through every listing of the freeze, so one may have been started after the last \
      listing";
 
-/// The reason of an `Unconfirmed` verdict when the owner had to close its
-/// ends of the output pipes because something still held them when the drain
-/// bound ran out: a process that inherited them was alive after the kill and
-/// no sweep found it.
+/// The reason of an `Unconfirmed` verdict when the owner closed its ends of
+/// the output pipes while they were still open: something held them when the
+/// drain bound or the cleanup deadline ran out, or the owner stopped reading
+/// (an oversized protocol frame). A process that held them was alive and no
+/// sweep found it.
 pub const PIPES_HELD_REASON: &str = "a process still held the program's output pipes when the \
-     drain bound ran out, and no sweep found it, so it may still be running";
+     owner closed its ends (at the drain bound, at the cleanup deadline, or on a protocol \
+     error), and no sweep found it, so it may still be running";
+
+/// Follows the count in the reason of an `Unconfirmed` verdict when the
+/// keeper's last freeze at the reap still found processes alive in its tree.
+pub const TREE_LEFT_AT_REAP_REASON: &str = "processes were still alive in the keeper's tree \
+     after its last freeze at the reap";
+
+/// The reason of an `Unconfirmed` verdict on Linux when the keeper could not
+/// become a child subreaper: an orphaned descendant could reparent to init,
+/// beyond what the keeper's tree shows.
+pub const NO_SUBREAPER_REASON: &str = "the keeper could not become a child subreaper, so a \
+     descendant whose parent exited could have left its tree unseen";
 
 #[doc(hidden)]
 pub const LATE_LISTING_REASON: &str = "the process listing taken before the first signal did not \
@@ -530,8 +568,9 @@ pub(super) struct ChildIo {
 pub(super) enum SpawnFailure {
     /// The program could not be started.
     Program(std::io::Error),
-    /// The keeper the spec names could not be started, or did not answer.
-    Keeper(String),
+    /// The keeper the spec names could not be started, or did not answer;
+    /// with `true` it may have started the program before that.
+    Keeper(String, bool),
 }
 
 /// Owns the direct child until the final signal and reap.
@@ -545,6 +584,8 @@ pub(super) struct OwnedProcess {
     pub(super) exit_rx: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
     /// Why the exit watcher could not be started, when it could not.
     pub(super) watch_error: Option<String>,
+    /// How many processes the keeper found alive in its tree at the reap.
+    reap_leftover: usize,
 }
 
 impl Drop for OwnedProcess {
@@ -556,15 +597,20 @@ impl Drop for OwnedProcess {
         if self.child.is_some() && !self.shared.signals_closed.load(Ordering::SeqCst) {
             // Runtime shutdown or a panic is best effort, not a settlement.
             // The child is still unreaped here (by this process or by the
-            // keeper), so the group id is still ours and no other task can
-            // send a later group signal. Descendants that were alive at the
-            // latest scan are signalled too; a scan cannot run here, so a pid
-            // that was reused since is a risk this accepts.
-            if !self.shared.keeper_lost() {
-                let _ = sys::signal_group(self.shared.pid, Signal::KILL);
-            }
-            for pid in lock(&self.shared.tracked_mirror).iter() {
-                let _ = sys::signal_process(*pid, Signal::KILL);
+            // keeper, which the pin's lock confirms), so the group id is still
+            // ours and no other task can send a later group signal.
+            // Descendants that were alive at the latest scan are signalled
+            // too: on Linux only if their start time is still the recorded
+            // one (checked through a pidfd); elsewhere a scan cannot run here,
+            // so a pid reused since is a risk this accepts.
+            self.shared.signal_group_raw(Signal::KILL);
+            for (pid, _ticks) in lock(&self.shared.tracked_mirror).iter() {
+                #[cfg(target_os = "linux")]
+                let _ = sys::signal_checked(*pid, Signal::KILL, |stat| {
+                    _ticks.is_none_or(|t| t == stat.start_ticks)
+                });
+                #[cfg(not(target_os = "linux"))]
+                let _ = sys::signal_checked(*pid, Signal::KILL, |_| true);
             }
         }
         // Closing the owner's end of the socket has the keeper stop whatever
@@ -617,7 +663,7 @@ impl OwnedProcess {
             }
             Some(keeper) => {
                 let marker = Marker::new().map_err(|e| {
-                    SpawnFailure::Keeper(format!("could not make the run marker: {e}"))
+                    SpawnFailure::Keeper(format!("could not make the run marker: {e}"), false)
                 })?;
                 let mut env = spec.env.resolve(std::env::vars_os());
                 env.retain(|(name, _)| name != MARKER_ENV);
@@ -638,7 +684,10 @@ impl OwnedProcess {
                     .await
                     .map_err(|e| match e {
                         StartError::Program(e) => SpawnFailure::Program(e),
-                        StartError::Keeper(why) => SpawnFailure::Keeper(why),
+                        StartError::Keeper {
+                            message,
+                            maybe_started,
+                        } => SpawnFailure::Keeper(message, maybe_started),
                     })?;
                 let pid = started.link.handle.provider_pid;
                 let handle = started.link.handle.clone();
@@ -665,7 +714,8 @@ impl OwnedProcess {
         if let (Some(keeper), Some(marker)) = (&keeper, &marker) {
             tree = tree
                 .with_keeper(keeper.keeper_pid)
-                .with_marker(marker.token().to_string());
+                .with_marker(marker.token().to_string())
+                .with_pin(keeper.pin());
         }
         let shared = Arc::new(Shared {
             pid,
@@ -707,6 +757,7 @@ impl OwnedProcess {
             stdin_task: None,
             exit_rx: None,
             watch_error: None,
+            reap_leftover: 0,
         };
         match exit {
             Some(rx) => owner.exit_rx = Some(rx),
@@ -941,6 +992,15 @@ impl OwnedProcess {
                 };
                 let cleanup = if shared.keeper_lost() {
                     unconfirmed(KEEPER_LOST_REASON)
+                } else if self.reap_leftover > 0 {
+                    unconfirmed(&format!(
+                        "{} {}",
+                        self.reap_leftover, TREE_LEFT_AT_REAP_REASON
+                    ))
+                } else if cfg!(target_os = "linux")
+                    && shared.keeper.as_ref().is_some_and(|k| !k.subreaper())
+                {
+                    unconfirmed(NO_SUBREAPER_REASON)
                 } else if missed {
                     unconfirmed(LATE_LISTING_REASON)
                 } else if shared.freeze_incomplete.load(Ordering::SeqCst) {
@@ -1007,7 +1067,7 @@ impl OwnedProcess {
         let pid = u32::try_from(shared.pid).unwrap_or(0);
         let mut pids: Vec<u32> = lock(&shared.tracked_mirror)
             .iter()
-            .filter_map(|p| u32::try_from(*p).ok())
+            .filter_map(|(p, _)| u32::try_from(*p).ok())
             .collect();
         let mut groups = Vec::new();
         let (exit, checked) = if leader_gone {
@@ -1070,10 +1130,13 @@ impl OwnedProcess {
                     .map(leader_exit)
                     .map_err(|error| format!("wait failed: {error}"))
             }
-            Some(Leader::Kept(link)) => link.reap().await.map(|summary| LeaderExit {
-                code: summary.code,
-                signal: summary.signal,
-                signal_name: summary.signal.map(sys::signal_name),
+            Some(Leader::Kept(link)) => link.reap().await.map(|(summary, live)| {
+                self.reap_leftover = live;
+                LeaderExit {
+                    code: summary.code,
+                    signal: summary.signal,
+                    signal_name: summary.signal.map(sys::signal_name),
+                }
             }),
             None => return Err("the child was already reaped".into()),
         };

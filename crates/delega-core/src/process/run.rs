@@ -26,6 +26,12 @@ use super::tap::TapWorker;
 const MAX_DIALOGUE_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const DIALOGUE_STOP_WRITE_BUDGET: Duration = Duration::from_millis(50);
 
+/// The reason of an `Unconfirmed` verdict when the keeper stopped answering
+/// before it said whether it started the program.
+pub const KEEPER_UNANSWERED_REASON: &str = "the keeper did not say whether it started the \
+     program before it ended or stopped answering; it was told to stop anything it started, and \
+     nothing checked that it did";
+
 /// Warning recorded when the owner closed pipes that something still held.
 pub const PIPE_WARNING: &str =
     "Output pipes remained open after process-group cleanup; the owner closed its ends";
@@ -77,7 +83,17 @@ pub(super) async fn run_owned(
             let program = spec.program.to_string_lossy();
             return failed_to_start(&spec, format!("could not start {program}: {error}"));
         }
-        Err(SpawnFailure::Keeper(why)) => return failed_to_start(&spec, why),
+        Err(SpawnFailure::Keeper(why, maybe_started)) => {
+            let mut report = failed_to_start(&spec, why);
+            if maybe_started {
+                report.cleanup = Cleanup::Unconfirmed {
+                    pids: Vec::new(),
+                    process_groups: Vec::new(),
+                    reason: KEEPER_UNANSWERED_REASON.to_string(),
+                };
+            }
+            return report;
+        }
     };
     let shared = owner.shared.clone();
     registry
@@ -257,6 +273,8 @@ async fn drive(
     let mut kill_retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
         None;
 
+    // Whether the owner stopped reading a pipe that was still open.
+    let mut abandoned = false;
     loop {
         if exited && stdout.is_none() && stderr.is_none() {
             break;
@@ -377,7 +395,10 @@ async fn drive(
                                 ending = Some(Ending::WaitFailed {
                                     message: "Claude Code stream frame exceeded the size limit".into(),
                                 });
+                                // Closed while the program may still write
+                                // to it: what holds it can no longer be seen.
                                 stdout = None;
+                                abandoned = true;
                                 break;
                             }
                             pending_line.extend_from_slice(part);
@@ -414,6 +435,14 @@ async fn drive(
             },
         }
     }
+    // The cleanup deadline ended the loop with a pipe still open, or the
+    // owner gave one up: either way a process may hold it that no sweep sees.
+    if (abandoned || stdout.is_some() || stderr.is_some()) && !shared.pipes_closed_by_owner() {
+        shared.note_pipes_closed();
+        shared.warn(PIPE_WARNING.into());
+    }
+    drop(stdout);
+    drop(stderr);
     if let Some(listing) = exit_listing.take() {
         // The pipes closed before the listing finished; the signals still wait.
         listing.await;

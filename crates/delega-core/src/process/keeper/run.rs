@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::protocol::{FromKeeper, Hello, Lines, ToKeeper};
-use crate::process::limits::KEEPER_TICK;
+use crate::process::limits::{KEEPER_RELEASE_WAIT, KEEPER_TICK};
 use crate::process::sys::{self, Signal};
 
 /// Serialises writes to the socket from the keeper's threads.
@@ -149,6 +149,10 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
         });
         return 2;
     };
+    // The handlers come first: a terminating signal that arrives once the
+    // program exists must stop it, not end the keeper by default action.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    spawn_signal_watch(tx.clone());
     let mut command = std::process::Command::new(&hello.program);
     command
         .args(&hello.args)
@@ -184,7 +188,6 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
     };
     say(&FromKeeper::Started(pid));
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
     let watch = tx.clone();
     let _ = std::thread::Builder::new()
         .name("keeper-exit".into())
@@ -195,7 +198,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
     let _ = std::thread::Builder::new()
         .name("keeper-read".into())
         .spawn(move || read_commands(&commands));
-    spawn_signal_watch(tx);
+    drop(tx);
 
     let ceiling = Instant::now() + hello.ceiling;
     let mut exited = false;
@@ -226,13 +229,21 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     say(&FromKeeper::Tree { id, live });
                 }
                 Some(Event::Command(ToKeeper::Reap)) => {
-                    finish(pid, exited).await;
-                    say(&FromKeeper::Reaped);
+                    let live = finish(pid, exited).await;
+                    say(&FromKeeper::Reaped(live));
                     drop(child);
                     return 0;
                 }
-                Some(Event::Closed | Event::Signal) | None => {
-                    stop_alone(&hello, pid).await;
+                // Only an answer to `releasing` means anything; one that comes
+                // late is ignored.
+                Some(Event::Command(ToKeeper::Released)) => {}
+                Some(Event::Closed) | None => {
+                    stop_alone(&hello, pid, None).await;
+                    drop(child);
+                    return 0;
+                }
+                Some(Event::Signal) => {
+                    stop_alone(&hello, pid, Some(&mut rx)).await;
                     drop(child);
                     return 0;
                 }
@@ -240,7 +251,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
             _ = tick.tick() => {
                 reap_orphans(pid);
                 if rustix::process::getppid() != parent || Instant::now() >= ceiling {
-                    stop_alone(&hello, pid).await;
+                    stop_alone(&hello, pid, Some(&mut rx)).await;
                     drop(child);
                     return 0;
                 }
@@ -315,11 +326,15 @@ async fn wait_exit(pid: i32, limit: Duration) -> bool {
 /// still alive in the tree is stopped first (Linux), the program is killed if
 /// it has not exited (the owner reaps only an exited program, so this is a
 /// guard), then reaped, and the orphans with it.
-async fn finish(pid: i32, exited: bool) {
+async fn finish(pid: i32, exited: bool) -> usize {
     #[cfg(target_os = "linux")]
-    if census(pid) > 0 {
-        let _ = freeze(pid).await;
-    }
+    let live = if census(pid) > 0 {
+        freeze(pid).await
+    } else {
+        0
+    };
+    #[cfg(not(target_os = "linux"))]
+    let live = 0;
     if !exited && !sys::leader_has_exited(pid) {
         let _ = sys::signal_process(pid, Signal::KILL);
         let _ = wait_exit(pid, Duration::from_secs(5)).await;
@@ -332,6 +347,7 @@ async fn finish(pid: i32, exited: bool) {
     })
     .await;
     reap_orphans(pid);
+    live
 }
 
 /// The live processes in the keeper's tree.
@@ -375,7 +391,7 @@ fn reap_orphans(_pid: i32) {
 /// The owner is gone (or asked nothing in time): stop the tree by itself,
 /// TERM, the grace, then KILL until nothing is left or the cleanup deadline
 /// passes, then reap the program and exit.
-async fn stop_alone(hello: &Hello, pid: i32) {
+async fn stop_alone(hello: &Hello, pid: i32, owner: Option<&mut mpsc::UnboundedReceiver<Event>>) {
     let deadline = Instant::now() + hello.deadline.max(hello.grace);
     #[cfg(target_os = "linux")]
     {
@@ -385,6 +401,21 @@ async fn stop_alone(hello: &Hello, pid: i32) {
     }
     #[cfg(not(target_os = "linux"))]
     stop_alone_listed(hello, pid, deadline).await;
+    // An owner that may still be there must stop relying on the program's
+    // pid before the reap frees it: say so and wait for its answer, its end
+    // closing, or a bound.
+    if let Some(rx) = owner {
+        say(&FromKeeper::Releasing);
+        let _ = tokio::time::timeout(KEEPER_RELEASE_WAIT, async {
+            loop {
+                match rx.recv().await {
+                    Some(Event::Command(ToKeeper::Released) | Event::Closed) | None => break,
+                    Some(_) => {}
+                }
+            }
+        })
+        .await;
+    }
     let _ = tokio::task::spawn_blocking(move || {
         let until = std::time::Instant::now() + Duration::from_secs(2);
         while !sys::reap_if_exited(pid) && std::time::Instant::now() < until {
@@ -398,10 +429,7 @@ async fn stop_alone(hello: &Hello, pid: i32) {
 #[cfg(target_os = "linux")]
 async fn stop_alone_linux(hello: &Hello, pid: i32, deadline: Instant) {
     let me = rustix::process::getpid().as_raw_nonzero().get();
-    for descendant in super::walk::descendants(me) {
-        let _ = sys::signal_process(descendant, Signal::TERM);
-        let _ = sys::signal_process(descendant, Signal::CONT);
-    }
+    super::walk::signal_tree(me, Signal::TERM);
     let grace_end = Instant::now() + hello.grace;
     while Instant::now() < grace_end.min(deadline) {
         reap_orphans(pid);

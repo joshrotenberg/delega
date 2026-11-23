@@ -18,8 +18,9 @@ use tokio::sync::oneshot;
 
 use super::KeeperCommand;
 use super::protocol::{FromKeeper, Hello, Lines, ToKeeper};
-use crate::process::limits::{KEEPER_REPLY_TIMEOUT, KEEPER_START_TIMEOUT};
+use crate::process::limits::{KEEPER_ABANDON_WAIT, KEEPER_REPLY_TIMEOUT, KEEPER_START_TIMEOUT};
 use crate::process::sys::{self, ExitSummary};
+use crate::process::tree::GroupPin;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -41,8 +42,14 @@ pub(crate) struct LaunchSpec<'a> {
 /// Why a kept run did not start.
 #[derive(Debug)]
 pub(crate) enum StartError {
-    /// The keeper itself could not be started or did not answer.
-    Keeper(String),
+    /// The keeper itself could not be started or did not answer. With
+    /// `maybe_started` the keeper may have started the program before it
+    /// stopped answering: it was told to stop whatever it started, and the
+    /// run's cleanup cannot be confirmed.
+    Keeper {
+        message: String,
+        maybe_started: bool,
+    },
     /// The keeper started and the program could not be: what the operating
     /// system said.
     Program(std::io::Error),
@@ -63,13 +70,17 @@ struct State {
     exit_tx: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     exited: Arc<AtomicBool>,
     reaped: AtomicBool,
-    reaped_tx: Mutex<Option<oneshot::Sender<()>>>,
+    reaped_tx: Mutex<Option<oneshot::Sender<usize>>>,
     /// The keeper's end closed before it said `reaped`.
     lost: AtomicBool,
     closed: AtomicBool,
     subreaper: AtomicBool,
     pending: Mutex<HashMap<u64, oneshot::Sender<usize>>>,
     warnings: Mutex<Vec<String>>,
+    /// Whether the program's pid still names its group and session: until
+    /// the keeper says `releasing` or its end closes. Group and member signals
+    /// are sent while holding this lock.
+    pin: Arc<GroupPin>,
 }
 
 /// What the owner's shared state holds of the keeper: the socket, and what the
@@ -98,6 +109,12 @@ impl LinkHandle {
     /// Whether the keeper is a child subreaper (Linux).
     pub(crate) fn subreaper(&self) -> bool {
         self.state.subreaper.load(Ordering::SeqCst)
+    }
+
+    /// The lock that says whether the program's pid still pins its group
+    /// and session.
+    pub(crate) fn pin(&self) -> Arc<GroupPin> {
+        self.state.pin.clone()
     }
 
     /// What the keeper reported as warnings.
@@ -150,37 +167,45 @@ impl LinkHandle {
 pub(crate) struct KeeperLink {
     child: tokio::process::Child,
     pub handle: Arc<LinkHandle>,
-    reaped_rx: Option<oneshot::Receiver<()>>,
+    reaped_rx: Option<oneshot::Receiver<usize>>,
 }
 
 impl KeeperLink {
     /// Have the keeper reap the program, wait for it to say so and for the
     /// keeper to exit, and return how the program ended.
-    pub(crate) async fn reap(&mut self) -> Result<ExitSummary, String> {
+    /// Have the keeper reap the program, wait for it to say so and for the
+    /// keeper to exit, and return how the program ended and how many
+    /// processes of the keeper's tree were still alive at the reap.
+    pub(crate) async fn reap(&mut self) -> Result<(ExitSummary, usize), String> {
         let state = self.handle.state.clone();
         let sent = !self.handle.lost() && self.handle.send(ToKeeper::Reap);
         let confirmed = match (sent, self.reaped_rx.take()) {
             (true, Some(rx)) => tokio::time::timeout(KEEPER_REPLY_TIMEOUT * 2, rx)
                 .await
-                .is_ok_and(|r| r.is_ok()),
-            _ => state.reaped.load(Ordering::SeqCst),
+                .ok()
+                .and_then(Result::ok),
+            _ => None,
         };
         // The keeper exits after it said `reaped`; one that does not is
         // killed. It is this process's own child, so its pid is ours.
-        if tokio::time::timeout(KEEPER_REPLY_TIMEOUT, self.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = self.child.start_kill();
-            let _ = self.child.wait().await;
-        }
+        end_child(&mut self.child, KEEPER_REPLY_TIMEOUT).await;
         self.handle.shut();
         let exit = *lock(&state.exit);
         match (exit, confirmed) {
-            (Some(exit), true) => Ok(exit),
-            (Some(_), false) => Err("the keeper did not confirm that it reaped the program".into()),
+            (Some(exit), Some(live)) => Ok((exit, live)),
+            (Some(_), None) => Err("the keeper did not confirm that it reaped the program".into()),
             (None, _) => Err("the keeper ended without saying how the program ended".into()),
         }
+    }
+}
+
+/// Wait up to `bound` for the keeper, the owner's own child, to exit; kill it
+/// if it has not, and wait up to `bound` again. A keeper still not reaped then
+/// is left to the runtime's reaping of dropped children.
+async fn end_child(child: &mut tokio::process::Child, bound: Duration) {
+    if tokio::time::timeout(bound, child.wait()).await.is_err() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(bound, child.wait()).await;
     }
 }
 
@@ -225,9 +250,12 @@ pub(crate) async fn start(
     keeper: &KeeperCommand,
     launch: LaunchSpec<'_>,
 ) -> Result<Started, StartError> {
-    let keeper_error = |what: &str, e: &dyn std::fmt::Display| {
-        StartError::Keeper(format!("{what} {}: {e}", keeper.program.to_string_lossy()))
+    let keeper_error = |what: &str, e: &dyn std::fmt::Display| StartError::Keeper {
+        message: format!("{what} {}: {e}", keeper.program.to_string_lossy()),
+        maybe_started: false,
     };
+    // One bound for the whole start, the keeper's own spawn included.
+    let started_at = tokio::time::Instant::now();
     let ends = ends(launch.stdin).map_err(|e| keeper_error("could not prepare the keeper", &e))?;
     let Ends {
         owner,
@@ -259,10 +287,12 @@ pub(crate) async fn start(
     let keeper_pid = child
         .id()
         .and_then(|id| i32::try_from(id).ok())
-        .ok_or_else(|| {
-            StartError::Keeper("the keeper exited before its pid could be read".into())
+        .ok_or_else(|| StartError::Keeper {
+            message: "the keeper exited before its pid could be read".into(),
+            maybe_started: false,
         })?;
 
+    let launch_grace = launch.grace;
     let hello = Hello {
         program: launch.program.to_os_string(),
         args: launch.args.to_vec(),
@@ -291,6 +321,8 @@ pub(crate) async fn start(
     let (reaped_tx, reaped_rx) = oneshot::channel();
     *lock(&state.reaped_tx) = Some(reaped_tx);
     let (hand_tx, hand_rx) = oneshot::channel::<Result<i32, StartError>>();
+    // A write to a keeper that stopped reading must not block the owner.
+    let _ = owner.set_write_timeout(Some(KEEPER_REPLY_TIMEOUT));
     let reader = owner
         .try_clone()
         .map_err(|e| keeper_error("could not prepare the keeper", &e))?;
@@ -300,29 +332,35 @@ pub(crate) async fn start(
         .spawn(move || follow(reader, hello, give, thread_state, hand_tx));
     let mut child = child;
     if let Err(e) = spawned {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        // No hello was sent, so the keeper started nothing.
+        let _ = owner.shutdown(std::net::Shutdown::Both);
+        end_child(&mut child, KEEPER_REPLY_TIMEOUT).await;
         return Err(keeper_error("could not follow the keeper", &e));
     }
 
-    let handshake = tokio::time::timeout(KEEPER_START_TIMEOUT, hand_rx).await;
+    let handshake = tokio::time::timeout_at(started_at + KEEPER_START_TIMEOUT, hand_rx).await;
     let pid = match handshake {
         Ok(Ok(Ok(pid))) => pid,
         other => {
+            // Closing the owner's end has a keeper that did start the program
+            // stop it by itself; it gets the grace and a margin for that
+            // before it is killed.
             let _ = owner.shutdown(std::net::Shutdown::Both);
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            end_child(&mut child, launch_grace + KEEPER_ABANDON_WAIT).await;
+            let name = keeper.program.to_string_lossy();
             return Err(match other {
                 Ok(Ok(Err(error))) => error,
-                Err(_) => StartError::Keeper(format!(
-                    "the keeper {} did not start the program within {} s",
-                    keeper.program.to_string_lossy(),
-                    KEEPER_START_TIMEOUT.as_secs()
-                )),
-                _ => StartError::Keeper(format!(
-                    "the keeper {} ended before it started the program",
-                    keeper.program.to_string_lossy()
-                )),
+                Err(_) => StartError::Keeper {
+                    message: format!(
+                        "the keeper {name} did not start the program within {} s",
+                        KEEPER_START_TIMEOUT.as_secs()
+                    ),
+                    maybe_started: true,
+                },
+                _ => StartError::Keeper {
+                    message: format!("the keeper {name} ended before it started the program"),
+                    maybe_started: true,
+                },
             });
         }
     };
@@ -406,9 +444,12 @@ fn follow(
     // The keeper has its copies now; the owner's go.
     drop(give);
     if let Err(e) = sent {
-        handshake(Err(StartError::Keeper(format!(
-            "could not hand the program to the keeper: {e}"
-        ))));
+        // The keeper cannot decode a hello that was not written in full, so
+        // it started nothing.
+        handshake(Err(StartError::Keeper {
+            message: format!("could not hand the program to the keeper: {e}"),
+            maybe_started: false,
+        }));
         return;
     }
     let mut lines = Lines::default();
@@ -461,11 +502,26 @@ fn follow(
                         let _ = tx.send(live);
                     }
                 }
-                FromKeeper::Reaped => {
+                FromKeeper::Reaped(live) => {
                     state.reaped.store(true, Ordering::SeqCst);
                     if let Some(tx) = lock(&state.reaped_tx).take() {
-                        let _ = tx.send(());
+                        let _ = tx.send(live);
                     }
+                }
+                FromKeeper::Releasing => {
+                    // From here the keeper reaps the program on its own. No
+                    // group or member signal is in flight once the pin is
+                    // released under its lock, so the answer is true when
+                    // sent.
+                    state.pin.release();
+                    state.lost.store(true, Ordering::SeqCst);
+                    lock(&state.warnings).push(
+                        "The keeper stopped the program on its own (a signal, its ceiling, or a \
+                         new parent) before the owner had it reaped"
+                            .into(),
+                    );
+                    let _ =
+                        (&stream).write_all(format!("{}\n", ToKeeper::Released.line()).as_bytes());
                 }
                 FromKeeper::Warn(text) => lock(&state.warnings).push(format!("Keeper: {text}")),
             }
@@ -473,6 +529,7 @@ fn follow(
     }
     state.closed.store(true, Ordering::SeqCst);
     if !state.reaped.load(Ordering::SeqCst) {
+        state.pin.release();
         state.lost.store(true, Ordering::SeqCst);
         if started {
             lock(&state.warnings).push(
@@ -482,9 +539,10 @@ fn follow(
             );
         }
     }
-    handshake(Err(StartError::Keeper(
-        "the keeper ended before it started the program".into(),
-    )));
+    handshake(Err(StartError::Keeper {
+        message: "the keeper ended before it started the program".into(),
+        maybe_started: true,
+    }));
     if let Some(tx) = lock(&state.exit_tx).take() {
         let _ = tx.send(Err("the keeper ended before the program did".into()));
     }

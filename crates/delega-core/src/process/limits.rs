@@ -85,6 +85,12 @@ pub const KEEPER_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// ceiling: if the owner has not had the program reaped by then, the keeper
 /// stops the tree by itself, as when the owner is gone.
 pub const KEEPER_CEILING_MARGIN: Duration = Duration::from_secs(10);
+/// How long a keeper that stops the tree on its own (a signal, its ceiling)
+/// waits for the owner to answer `released` before it reaps the program.
+pub const KEEPER_RELEASE_WAIT: Duration = Duration::from_secs(2);
+/// How long the owner waits for a keeper that did not answer the handshake to
+/// stop whatever it started and exit, after closing its end of the socket.
+pub const KEEPER_ABANDON_WAIT: Duration = Duration::from_secs(5);
 /// How often the keeper reaps adopted orphans and checks that its parent is
 /// still the owner.
 pub const KEEPER_TICK: Duration = Duration::from_millis(100);

@@ -111,11 +111,23 @@
 //!   would take the child's status first), and its children are owned by every
 //!   listing. It also walks its own tree from `/proc` without `ps`
 //!   (`/proc/<pid>/task/<tid>/children`, or the parent field of every
-//!   `/proc/<pid>/stat` where that file is missing): `census` counts the live
-//!   processes in it, and `freeze` stops every one with SIGSTOP before it reads
-//!   its children, walks again until a pass finds nothing new, then sends
-//!   SIGKILL and SIGCONT to all of them. A cleanup sweep that finds nothing
-//!   counts only when the keeper's census agrees.
+//!   `/proc/<pid>/stat` where that file is missing). Every process the walk
+//!   signals is first held by a pidfd and checked to be a live child of the
+//!   parent it was found under, and signalled through the pidfd, so a pid
+//!   reused meanwhile is never signalled. `census` counts the live processes in
+//!   the tree, repeating the walk until two passes in a row agree (a process
+//!   reparented to the keeper after one pass read its children is found by the
+//!   next; a tree that keeps changing is reported nonzero). `freeze` stops each
+//!   process with SIGSTOP and reads its children only once the stop has taken
+//!   effect, walks again from the keeper's own children until a pass finds
+//!   nothing new and every process stopped, then sends SIGKILL and SIGCONT
+//!   through the pidfds, and reports what is still alive. A cleanup sweep that
+//!   finds nothing counts only when the keeper's census agrees, and a keeper
+//!   that still finds processes alive when it reaps the child makes the verdict
+//!   `Unconfirmed` ([`TREE_LEFT_AT_REAP_REASON`]). A keeper that could not
+//!   become a child subreaper starts the child anyway, and every such run is
+//!   `Unconfirmed` ([`NO_SUBREAPER_REASON`]): the guarantee is missing, so the
+//!   verdict says so rather than refusing runs on such a system.
 //! - When the owner's end of the socket closes (the owner exited, crashed or
 //!   was killed with SIGKILL), on SIGTERM, SIGINT, SIGHUP or SIGQUIT to the
 //!   keeper, when its parent changes, and at a ceiling of the time limit plus
@@ -125,7 +137,12 @@
 //!   then TERM to the group and to what a sweep finds (group, session,
 //!   ancestry, run marker), the grace, then KILL until two sweeps in a row find
 //!   nothing. Either way within the cleanup deadline; then it reaps the child
-//!   and exits. `PR_SET_PDEATHSIG` is not used: it fires when the thread that
+//!   and exits. When the owner may still be there (a signal, the ceiling, a new
+//!   parent), the keeper first says `releasing` and waits up to
+//!   `KEEPER_RELEASE_WAIT` (2 s) for `released`: the owner sends its group and
+//!   member signals while holding a lock that its answer also takes, so none of
+//!   them is in flight, and none follows, once the keeper frees the child's
+//!   pid. The keeper installs its signal handlers before it starts the child. `PR_SET_PDEATHSIG` is not used: it fires when the thread that
 //!   forked the child exits, which in a multi-threaded owner is not the owner's
 //!   end. End of file on a socket comes when the last descriptor of the owner's
 //!   end closes, whichever thread held it.
@@ -149,6 +166,13 @@
 //!   runs at the same time. A freeze that ran out of listings while processes
 //!   kept appearing, and whose keeper did not report its tree empty, makes the
 //!   verdict `Unconfirmed` ([`FREEZE_INCOMPLETE_REASON`]).
+//! - A keeper that does not say whether it started the child within
+//!   `KEEPER_START_TIMEOUT`, or ends before saying so, is not killed at once:
+//!   the owner closes its end, so a keeper that did start the child stops it,
+//!   and waits the grace plus `KEEPER_ABANDON_WAIT` for the keeper to exit
+//!   before it kills it. The run ends `FailedToStart` with cleanup
+//!   `Unconfirmed` ([`KEEPER_UNANSWERED_REASON`]); only a keeper that could not
+//!   be started, or that said the child could not be, gives `Confirmed`.
 //! - If the keeper ends before it reaped the child (it was killed), the child's
 //!   pid no longer pins its group or session. The owner sends no group signal
 //!   after that, follows the child by its recorded start time like a tracked
@@ -356,15 +380,28 @@
 //! started through a service, or one that copied another run's value from `ps
 //! -E`) is treated as the run's; only a process that has the value can be
 //! one. No process can join another session or group, so a member is a
-//! descendant of the child by construction. What remains is a pid recycled
-//! between the two rows of one listing (the child's `ppid` names the pid of a
-//! process that died and whose number a new member took within the run of one
-//! `ps`), a pid reused between the listing and the per-row session read (a foreign
-//! row would then read as a member and be signalled, after the session member
-//! is read once more just before the signal, which narrows it to the time
-//! between those two calls), and two processes with one pid and one start time
-//! within the resolution of `ps` (one second on macOS). Each needs a pid to wrap
-//! within a few milliseconds to one run of `ps`.
+//! descendant of the child by construction.
+//!
+//! On Linux each such signal is delivered through a pidfd, opened first and
+//! checked against `/proc/<pid>/stat` before the signal: a group member must
+//! still have the child's group id, a session member its session id, a tracked
+//! process the start time in clock ticks recorded when it was first tracked,
+//! and a marked process its recorded start time (and, for SIGKILL, be
+//! stopped). A pid reused between the listing and the signal is therefore
+//! never signalled; this also covers the SIGKILL that `Drop` sends to the
+//! tracked processes of the latest scan. On a kernel without pidfds (before
+//! 5.3) the same check is made and the signal sent by pid right after it.
+//!
+//! What remains is a pid recycled between the two rows of one listing (the
+//! child's `ppid` names the pid of a process that died and whose number a new
+//! member took within the run of one `ps`), on Linux a tracked process whose
+//! start time could not be read when it was first tracked, and elsewhere (no
+//! pidfds, no `/proc`) a pid reused between the listing and the signal: a
+//! session member is read once more just before its signal, which narrows it
+//! to the time between those two calls, but a tracked or group member is
+//! signalled by the identity its listing showed, and two processes can share a
+//! pid and a start time within the resolution of `ps` (one second on macOS).
+//! Each needs a pid to wrap within a few milliseconds to one run of `ps`.
 //!
 //! # What no in-process code can do
 //!
@@ -451,14 +488,14 @@ pub use handle::{Interrupter, ProcessHandle, run};
 pub use keeper::{KeeperCommand, keeper_main};
 pub use marker::MARKER_ENV;
 pub use owner::{
-    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, LATE_LISTING_REASON, PIPES_HELD_REASON,
-    is_late_listing_only,
+    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, LATE_LISTING_REASON, NO_SUBREAPER_REASON,
+    PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON, is_late_listing_only,
 };
 pub use report::{
     Diagnostics, Ending, KeeperDiagnostics, LeaderExit, ProcessReport, ProcessTiming, SignalRecord,
     SignalTarget,
 };
-pub use run::PIPE_WARNING;
+pub use run::{KEEPER_UNANSWERED_REASON, PIPE_WARNING};
 pub use spawn::{SpawnGuard, spawn_guard};
 pub use spec::{CaptureSpec, EnvPolicy, Keep, OutputTap, ProcessSpec};
 pub use timestamp::rfc3339_utc;

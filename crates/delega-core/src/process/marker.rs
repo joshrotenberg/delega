@@ -110,6 +110,8 @@ pub(crate) struct MarkedRow {
     /// The start time, compared only with other marker readings.
     pub started: String,
     pub stopped: bool,
+    /// The start time in clock ticks where the system gives it (Linux).
+    pub ticks: Option<u64>,
 }
 
 /// Every live process in `rows` that carries `token`, read from
@@ -137,6 +139,7 @@ pub(crate) async fn marked(
                 pid,
                 started,
                 stopped,
+                ticks: super::sys::start_ticks(pid),
             })
             .collect()
     })
@@ -203,6 +206,7 @@ pub(crate) fn parse_marked(
                 pid,
                 started,
                 stopped: state.starts_with('T'),
+                ticks: None,
             });
         }
     }
@@ -283,12 +287,14 @@ mod tests {
                 MarkedRow {
                     pid: 10,
                     started: "Sun Nov 22 17:41:03 2026".into(),
-                    stopped: false
+                    stopped: false,
+                    ticks: None
                 },
                 MarkedRow {
                     pid: 11,
                     started: "Sun Nov 22 17:41:04 2026".into(),
-                    stopped: true
+                    stopped: true,
+                    ticks: None
                 },
             ]
         );

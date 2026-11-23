@@ -170,11 +170,23 @@ impl Hello {
 pub(crate) enum FromKeeper {
     Subreaper(Result<(), String>),
     Started(i32),
-    SpawnFailed { errno: i32, message: String },
+    SpawnFailed {
+        errno: i32,
+        message: String,
+    },
     ExitedCode(i32),
     ExitedSignal(i32),
-    Tree { id: u64, live: usize },
-    Reaped,
+    Tree {
+        id: u64,
+        live: usize,
+    },
+    /// The program is reaped; how many processes of the tree were still alive
+    /// after the last freeze (Linux; 0 elsewhere).
+    Reaped(usize),
+    /// The keeper is about to reap the program on its own (a signal, its
+    /// ceiling, or a new parent): the owner must send no more signals that
+    /// rely on the program's pid and answer `released`.
+    Releasing,
     Warn(String),
 }
 
@@ -190,7 +202,8 @@ impl FromKeeper {
             FromKeeper::ExitedCode(code) => format!("exited code {code}"),
             FromKeeper::ExitedSignal(signal) => format!("exited signal {signal}"),
             FromKeeper::Tree { id, live } => format!("tree {id} {live}"),
-            FromKeeper::Reaped => "reaped".into(),
+            FromKeeper::Reaped(live) => format!("reaped {live}"),
+            FromKeeper::Releasing => "releasing".into(),
             FromKeeper::Warn(text) => format!("warn {}", one_line(text)),
         }
     }
@@ -221,7 +234,12 @@ impl FromKeeper {
                 id: words.next()?.parse().ok()?,
                 live: words.next()?.parse().ok()?,
             },
-            "reaped" => FromKeeper::Reaped,
+            "reaped" => FromKeeper::Reaped(if rest.is_empty() {
+                0
+            } else {
+                rest.parse().ok()?
+            }),
+            "releasing" => FromKeeper::Releasing,
             "warn" => FromKeeper::Warn(rest.to_string()),
             _ => return None,
         })
@@ -234,6 +252,9 @@ pub(crate) enum ToKeeper {
     Census(u64),
     Freeze(u64),
     Reap,
+    /// The answer to `releasing`: the owner sends no more signals that rely on
+    /// the program's pid.
+    Released,
 }
 
 impl ToKeeper {
@@ -242,6 +263,7 @@ impl ToKeeper {
             ToKeeper::Census(id) => format!("census {id}"),
             ToKeeper::Freeze(id) => format!("freeze {id}"),
             ToKeeper::Reap => "reap".into(),
+            ToKeeper::Released => "released".into(),
         }
     }
 
@@ -251,6 +273,7 @@ impl ToKeeper {
             "census" => ToKeeper::Census(rest.parse().ok()?),
             "freeze" => ToKeeper::Freeze(rest.parse().ok()?),
             "reap" => ToKeeper::Reap,
+            "released" => ToKeeper::Released,
             _ => return None,
         })
     }
@@ -337,12 +360,19 @@ mod tests {
             FromKeeper::ExitedCode(3),
             FromKeeper::ExitedSignal(9),
             FromKeeper::Tree { id: 7, live: 2 },
-            FromKeeper::Reaped,
+            FromKeeper::Reaped(0),
+            FromKeeper::Reaped(3),
+            FromKeeper::Releasing,
             FromKeeper::Warn("x y".into()),
         ] {
             assert_eq!(FromKeeper::parse(&msg.line()), Some(msg.clone()), "{msg:?}");
         }
-        for msg in [ToKeeper::Census(1), ToKeeper::Freeze(2), ToKeeper::Reap] {
+        for msg in [
+            ToKeeper::Census(1),
+            ToKeeper::Freeze(2),
+            ToKeeper::Reap,
+            ToKeeper::Released,
+        ] {
             assert_eq!(ToKeeper::parse(&msg.line()), Some(msg));
         }
         assert_eq!(FromKeeper::parse("nonsense"), None);
