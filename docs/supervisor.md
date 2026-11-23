@@ -101,7 +101,7 @@ lower values from the `[mcp]` section of the
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | `wait_default` | 30 s | `wait` with no `timeout_secs`. `list` reports it as `default_wait_secs`. |
 | `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Waiting and cursors](#waiting-and-cursors)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
-| preflight bound | 10 s | After request validation, the longest `start` waits for a check slot and the dry run together. Then it is refused, kind `preflight_timeout`. |
+| preflight bound | 10 s | How long `start` waits for its request checks. A start that runs past it can be refused, kind `preflight_timeout`. |
 | outstanding request checks | 16 | Checks running at once. A `start` beyond it waits for a slot within the preflight bound. Not in `list`. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer. |
 | compact structured answer | 16 KiB | A compact read leaves out a larger structured answer. |
@@ -109,16 +109,16 @@ lower values from the `[mcp]` section of the
 | `interrupt_bound` | 30 s | The longest `interrupt` or `close` waits for a running run to settle. |
 
 `SupervisorConfig::provider` is the base `ProviderOptions` every run inherits
-(executable overrides, hook command, environment options). Per run the
-supervisor replaces `run_id`, `worker` and `progress`, and turns on
-`progress_text`.
+(executable overrides, hook command, environment options). The supervisor sets
+some fields per run, for example `run_id`, `worker` and `progress`
+([`supervisor/config.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/config.rs)).
 
 ## Starting and refusing
 
-`start` checks the request, the name and the live-worker limit, and runs the
-provider layer's dry run (working directory, `native_args`, executable, answer
-schema) off the supervisor's task. A slow filesystem delays only that `start`,
-not other calls.
+`start` checks the request, the name, the live-worker limit and a dry run of
+the provider layer (working directory, `native_args`, executable, answer
+schema), and can refuse the run with one of the kinds below. A slow filesystem
+delays only that `start`, not other calls.
 
 A start that is refused is still a run: the response is `finished`, the outcome
 `refused`, the error says why, and `read` returns the result. **A refused start
@@ -140,7 +140,7 @@ An admitted run starts at once if a running slot is free. The provider layer
 checks the request again when the run starts; a refusal there ends that run
 `refused` and leaves the worker.
 
-How the checks run: `crates/delega-core/src/supervisor/preflight.rs`.
+How the checks run: [`supervisor/preflight.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/preflight.rs).
 
 ## Follow-ups
 
@@ -160,7 +160,7 @@ A follow-up is refused as a finished run, not an error:
 | --- | --- |
 | `worker_closed` | The worker is closed. |
 | `queue_full` | The worker's queue is full. |
-| `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one. Checked again when the run is dispatched, so a follow-up can return `queued` and later end `no_session`. |
+| `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one. A follow-up can return `queued` and later end `no_session`. |
 | `invalid_request` | The prompt is not valid. |
 
 A response that says a run is `finished` carries its `outcome` and `error`. An
@@ -179,12 +179,10 @@ reported them. A resumed Codex follow-up has no `usage`, and has
 One counter numbers every finished run and every activity entry. A response
 carries its value as `cursor`.
 
-- `wait` returns when something named finishes or a permission request needs
-  attention. Without `after_cursor` that is a named run or a named worker's
-  current run; a worker with nothing running returns at once.
-- With `after_cursor`, it returns at once if something named changed after that
-  cursor. Pass each response's cursor back. Each run and worker says whether it
-  `changed`; several finishes on one worker between calls show as one change.
+- `wait` returns when a named run finishes or needs attention, or on timeout.
+- Passing the response's `cursor` back as `after_cursor` lets the next call
+  report only what changed since. How waits are answered:
+  [`supervisor/core/waits.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/core/waits.rs).
 - A timeout is a response with `timed_out: true` and the current states.
 - Ids that name nothing are listed in `unknown`; the rest are still waited for.
   If all are unknown the call returns at once. No ids at all is
@@ -198,11 +196,10 @@ carries its value as `cursor`.
 
 ## Reading
 
-A finished run returns its result: compact by default (run, worker, provider,
-outcome, text, structured answer, error, cleanup, denied requests, provider
-notes, session id, timing, and [`applied`](api.md#applied)) or whole with
-`Detail::Full`. The fields are in
-`crates/delega-core/src/supervisor/views.rs`.
+A finished run returns its result: compact by default (for example outcome,
+text, structured answer, error, cleanup, session id and
+[`applied`](api.md#applied)) or whole with `Detail::Full`. The fields are in
+[`supervisor/views.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/views.rs).
 
 | Field | Meaning |
 | --- | --- |
@@ -228,15 +225,15 @@ time limit, partial text and recent activity.
 
 `after_cursor` returns only entries after it. Consecutive provider `system`
 events with the same summary, such as Claude Code's `thinking_tokens`, are one
-entry whose summary ends in ` (N in a row)`. `activity_total` and
-`activity_omitted` say how much was left out.
+entry whose summary ends in ` (N in a row)`. The response carries
+`activity_total` and `activity_omitted`.
 
 Full detail adds the whole kept history and diagnostics: provider, permission
 mode, queued and started times, whether and why a stop was requested, and how
 many entries were dropped. The child process's own diagnostics are not
 included; `cleanup` in the result is the process layer's verdict.
 
-How activity is kept: `crates/delega-core/src/supervisor/activity.rs`.
+How activity is kept and counted: [`supervisor/activity.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/activity.rs).
 
 ## Stopping
 
@@ -247,12 +244,12 @@ How activity is kept: `crates/delega-core/src/supervisor/activity.rs`.
 | `interrupt` of a finished run | Returns its result unchanged. |
 | `interrupt` of a worker | Acts on its current run. |
 | `close` | Marks the worker closed, ends each queued run `interrupted` with `discarded by close`, stops the running run as `interrupt` does (it can return `settled: false`), and frees the live-worker slot at once; the running slot frees when the run ends. Finished results stay readable. Closing again reports `already_closed`, the current state and nothing discarded. |
-| `shutdown` | Closes every live worker the same way with `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits up to `shutdown_bound`. The report's `unsettled` lists runs still running; `failed` reports a failure of the supervisor's task. Waits registered when it begins are released with the current states. Reads and `list` keep working. |
+| `shutdown` | Closes every live worker the same way with `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits up to `shutdown_bound`. The report's `unsettled` lists runs still running; `failed` reports a failure of the supervisor's task. It releases waits registered when it begins. Reads and `list` keep working. |
 | Drop of the last clone | Signals every provider to stop and returns without waiting. The processes end shortly after. |
 
 **Drop does not wait.** `shutdown().await` (or `connection_closed().await`,
-the same bounded shutdown) waits for every run and reports what could not be
-confirmed. An embedder such as an MCP server should call one and let it finish
+the same bounded shutdown) waits up to `shutdown_bound`, and its report lists
+runs still unsettled and any failure of the supervisor's task. An embedder such as an MCP server should call one and let it finish
 before its runtime drops.
 
 A panic in a run's task ends that run `failed`, kind `internal_error`, with an
@@ -261,15 +258,15 @@ own task stops every provider; calls that need that task return
 `Error::Failed`, and `shutdown()` returns a report with `failed` set.
 
 How drop works: the `Drop` impl in
-`crates/delega-core/src/supervisor/mod.rs`.
+[`supervisor/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/mod.rs).
 
 ## Retention
 
 Finished results are kept for `retention`, at most `retained_results` and
-about `retained_bytes` (the newest result is kept even if it alone is larger),
-oldest dropped first. A result past its time is not returned. A closed worker
-is listed while any of its results is kept, then disappears; an id that has
-gone is unknown. Live workers are not dropped, but their old results are.
+`retained_bytes`, oldest dropped first; the newest result is kept even when it
+alone is larger than `retained_bytes`. A result past its time is not returned,
+and an id that has gone is unknown. Live workers are not dropped, but their old
+results are.
 
 ## Timing
 
@@ -290,7 +287,7 @@ A run's own time limit counts awake time only: a run paused by sleep has not
 used its time. The preflight bound, `shutdown_bound` and retention also count
 awake time.
 
-How the check works: `crates/delega-core/src/supervisor/bound.rs`.
+How the check works: [`supervisor/bound.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/bound.rs).
 
 ## Ids
 
