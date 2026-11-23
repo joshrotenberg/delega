@@ -687,6 +687,7 @@ async fn a_session_relay_that_holds_no_pipe_is_never_confirmed_while_it_runs_in_
     );
 }
 
+#[cfg(target_os = "macos")]
 /// One kept run, with the keeper's first fork event dropped (the test seam),
 /// of a perl program that waits half a second without forking (so the
 /// tracker has started), then forks a short-lived intermediate: it starts a
@@ -713,6 +714,7 @@ async fn dropped_fork_run(grandchild: &str) -> (crate::process::ProcessReport, b
     (report, alive)
 }
 
+#[cfg(target_os = "macos")]
 /// What a dropped-fork run may end in: never `Confirmed` while the
 /// grandchild runs. Where `ps -E` hides the environment of Apple's programs
 /// (System Integrity Protection), only the strict check can tie it to the
