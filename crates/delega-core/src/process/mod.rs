@@ -133,10 +133,12 @@
 //!   process. An answer that is not complete is never zero, so neither the
 //!   owner's verdict nor the keeper's own cleanup ends on an unproven empty
 //!   tree. Once any answer of a run was unproven in a way a later one cannot
-//!   repair (a refused hold, a failed read, a freeze that did not complete),
-//!   the verdict stays `Unconfirmed` ([`KEEPER_UNPROVEN_REASON`]); a census
-//!   that is incomplete only because the tree keeps changing never claimed
-//!   zero and does not count. A process listed in a children file whose stat
+//!   repair (a failed read, or a freeze that did not complete for a reason
+//!   other than a refused hold), the verdict stays `Unconfirmed`
+//!   ([`KEEPER_UNPROVEN_REASON`]). A refused hold does the same unless the
+//!   final census at the reap proves the tree empty (the narrower Rule A in
+//!   "What `Confirmed` means"). A census that is incomplete only because the
+//!   tree keeps changing never claimed zero and does not count. A process listed in a children file whose stat
 //!   reads as missing is gone only if its pidfd says so (`hidepid` can hide a
 //!   live one). A queued child is taken under its parent only while the
 //!   parent's pidfd shows it alive, and otherwise only as the keeper's own
@@ -147,8 +149,9 @@
 //!   a children read is kept only if the parent's pidfd shows it had not
 //!   exited by the end of the read; a refused hold anywhere in a freeze leaves
 //!   it unproven whatever later passes find; and the freeze releases its
-//!   pidfds before the final census. Each answer carries its passes and
-//!   whether it completed, in `diagnostics.keeper.tree_reports`.
+//!   pidfds before the final census. Each answer carries its passes, whether
+//!   it completed, and whether it would have completed but for refused holds,
+//!   in `diagnostics.keeper.tree_reports`. On Linux an owner's sweep that
 //!   finds nothing counts only when the keeper's census agrees, and a keeper
 //!   that still finds processes alive when it reaps the child makes the verdict
 //!   `Unconfirmed` ([`TREE_LEFT_AT_REAP_REASON`]). A keeper that could not
@@ -234,6 +237,40 @@
 //! by the keeper's census. The sweep runs once for a plain exit where nothing
 //! but the leader was ever seen, and twice in a row when any descendant was
 //! observed or signalled. It does not cover what "What remains possible" lists.
+//!
+//! Rule A: cleanup is `Confirmed` only with proof. A signal the cleanup had to
+//! send and did not, because the process could not be verified (see "Why the
+//! owner never signals a foreign process"), and a hold the keeper refused,
+//! leave the verdict `Unconfirmed` for the rest of the run, whatever later
+//! sweeps find, with one exception, the narrower Rule A for Linux kept runs:
+//!
+//! - The keeper is a child subreaper, so every live descendant of the child is
+//!   in the keeper's tree. When the owner says `reap`, the keeper takes a final
+//!   census after the child has exited and before it reaps it. That census
+//!   proves the tree empty when it is complete (two passes in a row found the
+//!   same live set, the independent scan of every `/proc/*/stat` found the same
+//!   set, and the tree was not in flux), found nothing alive, and within itself
+//!   refused no hold and met no failed read. The keeper says so in its
+//!   `reaped` line.
+//! - Such a proof supersedes every earlier refusal by the owner
+//!   ([`UNVERIFIED_SIGNAL_REASON`]) and every earlier refused hold of the
+//!   keeper ([`KEEPER_UNPROVEN_REASON`]), and only those: earlier failed reads
+//!   and freezes that did not complete for another reason stay sticky, and so
+//!   does a refusal meant for a process found only by the run marker, which
+//!   need not be a descendant and so need not be in the keeper's tree.
+//! - A refused process that is still alive cannot produce that proof. The
+//!   census holds nothing and so refuses nothing; it counts every live process
+//!   whose stat it reads, in the children files and in the scan, and a stat
+//!   that cannot be read is a failed read. A process the owner refused is a
+//!   member of the child's group or session, or a tracked process; while it
+//!   lives it descends from the child, or, once reparented, from the keeper,
+//!   and so is in the keeper's tree (or the pid now names a process that is
+//!   not ours, which needs no signal).
+//! - Without that proof (no subreaper, a lost keeper, a reap that was not
+//!   acknowledged, a census that was incomplete, found anything alive, or met
+//!   a refusal or failed read of its own) refusals stay sticky. macOS keeps the
+//!   strict rule: without a subreaper an orphan can leave the keeper's tree, so
+//!   the keeper never reports a proof there.
 //!
 //! It also requires that the listing taken before the first signal completed
 //! (see "How a child is owned"). That listing is the only one that can see a
@@ -451,8 +488,14 @@
 //! the keeper, the pinned child, or the verified listed parent as its parent;
 //! a marked process's start time must read the same before and after its
 //! environment), is not signalled, and the verdict is `Unconfirmed`
-//! ([`UNVERIFIED_SIGNAL_REASON`]). A keeper that does not acknowledge the reap
-//! makes it `Unconfirmed` too ([`NO_REAP_ACK_REASON`]).
+//! ([`UNVERIFIED_SIGNAL_REASON`]) unless the narrower Rule A of "What
+//! `Confirmed` means" supersedes it. Such a process counts as refused only
+//! while its pid may still name a live process: a pidfd opened for the pid
+//! that fails with ESRCH, or that shows its process exited, means the process
+//! found has exited (its pid could be reused only after it was reaped), so
+//! there is nothing to signal; nothing is signalled to find this out. A
+//! keeper that does not acknowledge the reap makes the verdict `Unconfirmed`
+//! too ([`NO_REAP_ACK_REASON`]).
 //!
 //! What remains is a pid recycled between the two rows of one listing (the
 //! child's `ppid` names the pid of a process that died and whose number a new

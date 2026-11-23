@@ -39,9 +39,11 @@
 //!
 //! - keeper: `subreaper on`, `subreaper off <why>`, `started <pid>`,
 //!   `spawn-failed <errno> <message>`, `exited code <n>`, `exited signal <n>`,
-//!   `tree <id> <live>`, `reaped`, `warn <text>`.
+//!   `tree <id> <live> [<details>]`, `reaped <live> [proven]` (`proven` when
+//!   the final census before the reap proved the tree empty, Linux with a
+//!   subreaper only), `releasing`, `warn <text>`.
 //! - owner: `census <id>` (count the live processes in the keeper's tree),
-//!   `freeze <id>` (stop, kill and count them), `reap`.
+//!   `freeze <id>` (stop, kill and count them), `reap`, `released`.
 
 mod link;
 mod protocol;
