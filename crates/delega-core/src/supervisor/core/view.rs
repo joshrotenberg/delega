@@ -30,9 +30,15 @@ impl Core {
 
     pub(super) fn worker_brief(&self, worker: &Worker) -> WorkerBrief {
         let last = worker.last_run.as_ref().and_then(|r| self.runs.get(r));
+        let pending_interactions = worker
+            .current
+            .as_ref()
+            .and_then(|id| self.runs.get(id))
+            .map_or_else(Vec::new, |run| run.pending());
         WorkerBrief {
+            state: permission_state(worker.state, &pending_interactions),
+            pending_interactions,
             worker: worker.id.clone(),
-            state: worker.state,
             current_run: worker
                 .current
                 .clone()
@@ -70,13 +76,14 @@ impl Core {
             }
         };
         let worker_state = match target {
-            Target::Worker(_) => worker.map(|w| w.state),
+            Target::Worker(_) => worker.map(|w| self.worker_brief(w).state),
             Target::Run(_) => None,
         };
         let worker_id = worker.map(|w| w.id.clone());
         let cursor = self.current_cursor();
         let Some(run) = run_id.as_ref().and_then(|id| self.runs.get(id)) else {
             return Ok(ReadResponse {
+                pending_interactions: Vec::new(),
                 worker: worker_id,
                 worker_state,
                 run: None,
@@ -97,6 +104,7 @@ impl Core {
             .as_ref()
             .map(|r| ResultView::windowed(r, detail, text_offset));
         Ok(ReadResponse {
+            pending_interactions: run.pending(),
             worker: worker_id.or_else(|| run.worker.clone()),
             worker_state,
             run: Some(run.id.clone()),
@@ -212,4 +220,16 @@ fn tail_chars(text: &str, max: usize) -> (String, bool) {
     }
     let cut = text.char_indices().nth(chars - max).map_or(0, |(i, _)| i);
     (text[cut..].to_string(), true)
+}
+
+fn permission_state(
+    state: crate::supervisor::WorkerState,
+    pending: &[crate::contract::result::PermissionInteraction],
+) -> crate::supervisor::WorkerState {
+    use crate::supervisor::WorkerState;
+    if state == WorkerState::Running && !pending.is_empty() {
+        WorkerState::WaitingForAnswer
+    } else {
+        state
+    }
 }

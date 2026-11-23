@@ -273,6 +273,7 @@
 #![cfg(unix)]
 
 mod capture;
+pub(crate) mod dialogue;
 mod handle;
 pub mod limits;
 mod owner;

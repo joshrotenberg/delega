@@ -101,6 +101,9 @@ pub type FollowUpResponse = StartResponse;
 /// One run in a `wait` response.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct RunBrief {
+    /// Live permission requests awaiting a decision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_interactions: Vec<crate::contract::result::PermissionInteraction>,
     /// The run.
     pub run: String,
     /// Its worker, if it has one.
@@ -119,6 +122,9 @@ pub struct RunBrief {
 /// One worker in a `wait` or `list` response.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WorkerBrief {
+    /// Live permission requests awaiting a decision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_interactions: Vec<crate::contract::result::PermissionInteraction>,
     /// The worker.
     pub worker: String,
     /// Where it is.
@@ -240,6 +246,9 @@ pub struct CompactResult {
     /// Requests answered no.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub denied: Vec<DeniedRequest>,
+    /// Resolved live permission requests.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<crate::contract::result::AskedPermission>,
     /// Where the provider did not do what was asked.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub provider_notes: Vec<String>,
@@ -352,6 +361,7 @@ impl ResultView {
                     error: result.error.clone(),
                     cleanup: result.cleanup.clone(),
                     denied: result.permissions.denied.clone(),
+                    asked: result.permissions.asked.clone(),
                     provider_notes: result.provider_notes.clone(),
                     applied: result.applied.clone(),
                     session_id: result.session_id.clone(),
@@ -416,6 +426,9 @@ pub struct RunDiagnostics {
 /// The answer to `read`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ReadResponse {
+    /// Live permission requests awaiting a decision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_interactions: Vec<crate::contract::result::PermissionInteraction>,
     /// The worker, when the run has one or the target was one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,

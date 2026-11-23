@@ -86,6 +86,11 @@
             "const": "running"
           },
           {
+            "description": "The current run has a pending permission interaction.",
+            "type": "string",
+            "const": "waiting_for_answer"
+          },
+          {
             "description": "Nothing is running or queued. A follow-up can be given.",
             "type": "string",
             "const": "idle"
@@ -213,6 +218,13 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/DeniedRequest"
+            }
+          },
+          "asked": {
+            "description": "Resolved live permission requests.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AskedPermission"
             }
           },
           "provider_notes": {
@@ -426,6 +438,58 @@
         },
         "required": [
           "request"
+        ]
+      },
+      "AskedPermission": {
+        "description": "The recorded disposition of an interaction.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Opaque ID to pass to respond.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Tool requesting permission.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Bounded and redacted input details."
+          },
+          "decision": {
+            "description": "The answer delega committed.",
+            "$ref": "#/$defs/PermissionDecision"
+          },
+          "decided_by": {
+            "description": "Who or what resolved the interaction.",
+            "type": "string"
+          },
+          "written": {
+            "description": "Whether the response was written to the provider pipe.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "summary",
+          "decision",
+          "decided_by",
+          "written"
+        ]
+      },
+      "PermissionDecision": {
+        "description": "A one-use answer to a live permission request.",
+        "oneOf": [
+          {
+            "description": "Permit this use.",
+            "type": "string",
+            "const": "allow"
+          },
+          {
+            "description": "Refuse this use.",
+            "type": "string",
+            "const": "deny"
+          }
         ]
       },
       "Applied": {
@@ -1010,6 +1074,13 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/DeniedRequest"
+            }
+          },
+          "asked": {
+            "description": "Resolved live permission requests.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AskedPermission"
             }
           }
         },

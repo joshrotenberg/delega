@@ -29,6 +29,7 @@ pub(super) fn provenance() -> Provenance {
 
 fn permissions(run: &Run) -> AppliedPermissions {
     AppliedPermissions {
+        asked: Vec::new(),
         mode: run.mode,
         denied: Vec::new(),
     }

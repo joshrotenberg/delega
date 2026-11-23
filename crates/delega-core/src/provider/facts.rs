@@ -67,6 +67,7 @@ impl Facts {
 
     pub fn applied(&self, denied: Vec<DeniedRequest>) -> AppliedPermissions {
         AppliedPermissions {
+            asked: Vec::new(),
             mode: self.mode,
             denied,
         }

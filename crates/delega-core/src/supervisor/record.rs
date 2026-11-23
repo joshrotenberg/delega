@@ -33,6 +33,7 @@ pub(super) enum StopReason {
     Interrupt,
     Close,
     Shutdown,
+    ConnectionClosed,
 }
 
 impl StopReason {
@@ -41,6 +42,7 @@ impl StopReason {
             StopReason::Interrupt => "interrupt",
             StopReason::Close => "close",
             StopReason::Shutdown => "shutdown",
+            StopReason::ConnectionClosed => "connection_closed",
         }
     }
 }
@@ -48,6 +50,8 @@ impl StopReason {
 /// One run: queued, running or finished.
 pub(super) struct Run {
     pub id: String,
+    pub asks: Option<Arc<crate::provider::ask::Asks>>,
+    pub ask_seq: Arc<std::sync::atomic::AtomicU64>,
     pub worker: Option<String>,
     pub kind: Kind,
     pub state: RunState,
@@ -81,9 +85,47 @@ pub(super) struct Run {
 }
 
 impl Run {
+    pub fn respond(
+        &self,
+        id: &str,
+        decision: crate::contract::result::PermissionDecision,
+    ) -> (
+        &'static str,
+        Option<crate::contract::result::AskedPermission>,
+    ) {
+        if let Some(asks) = &self.asks {
+            return asks.respond(id, decision);
+        }
+        let answer = self.result.as_ref().and_then(|result| {
+            result
+                .permissions
+                .asked
+                .iter()
+                .find(|answer| answer.interaction.id == id)
+        });
+        answer.map_or(("unknown_interaction", None), |answer| {
+            (
+                crate::provider::ask::resolved_status(answer),
+                Some(answer.clone()),
+            )
+        })
+    }
+
+    pub fn pending(&self) -> Vec<crate::contract::result::PermissionInteraction> {
+        self.asks
+            .as_ref()
+            .map_or_else(Vec::new, |asks| asks.pending())
+    }
+
+    pub fn ask_changed(&self, after: u64) -> bool {
+        self.ask_seq.load(std::sync::atomic::Ordering::SeqCst) > after
+    }
+
     pub fn new(id: String, kind: Kind, request: &Request) -> Self {
         Self {
             id,
+            asks: None,
+            ask_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             worker: None,
             kind,
             state: RunState::Queued,

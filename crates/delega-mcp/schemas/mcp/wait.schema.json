@@ -127,6 +127,13 @@
         "description": "One run in a `wait` response.",
         "type": "object",
         "properties": {
+          "pending_interactions": {
+            "description": "Live permission requests awaiting a decision.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/PermissionInteraction"
+            }
+          },
           "run": {
             "description": "The run.",
             "type": "string"
@@ -164,6 +171,28 @@
         "required": [
           "run",
           "state"
+        ]
+      },
+      "PermissionInteraction": {
+        "description": "An action Claude Code asked the caller to authorize.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Opaque ID to pass to respond.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Tool requesting permission.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Bounded and redacted input details."
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "summary"
         ]
       },
       "RunState": {
@@ -220,6 +249,13 @@
         "description": "One worker in a `wait` or `list` response.",
         "type": "object",
         "properties": {
+          "pending_interactions": {
+            "description": "Live permission requests awaiting a decision.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/PermissionInteraction"
+            }
+          },
           "worker": {
             "description": "The worker.",
             "type": "string"
@@ -285,6 +321,11 @@
             "description": "A run is running. More may be queued behind it.",
             "type": "string",
             "const": "running"
+          },
+          {
+            "description": "The current run has a pending permission interaction.",
+            "type": "string",
+            "const": "waiting_for_answer"
           },
           {
             "description": "Nothing is running or queued. A follow-up can be given.",

@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Supervise several Claude Code or Codex workers over MCP with start, follow_up, wait, read, list, interrupt and close.
+description: Supervise several Claude Code or Codex workers over MCP with start, follow_up, wait, read, list, interrupt, respond and close.
 ---
 
 # Supervise workers with the delega MCP tools
@@ -25,10 +25,11 @@ An argument a tool does not have is rejected.
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides | At once: `worker`, `run` and `state`, `queued` or `running`. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the new `run`. It queues behind a running run. |
-| `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When any named run finishes, or on timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` means too many waits were already open and this one returned at once without waiting. |
+| `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When a named run finishes, needs a permission decision, or reaches the wait timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` means too many waits were already open and this one returned at once without waiting. |
 | `read` | `run` or `worker`, `detail`, `after` (a cursor), `text_offset` | The `result` if finished; otherwise `state`, partial text and recent activity. |
 | `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. `stale_server` is present only when the executable this server started from was replaced or removed since. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: the `result`, with the outcome `interrupted`. |
+| `respond` | `interaction`, `decision`, optional `note` | Commits an allow or deny for one pending permission interaction. |
 | `close` | `worker` | After its running run has stopped: the worker is `closed`, its queued runs are discarded and its slot is free. |
 
 `start` and `follow_up` return at once. Only `wait`, `interrupt` and `close`
@@ -102,6 +103,16 @@ let an open wait return, then call `wait` again with the `cursor`. A `wait` with
 Responses are compact by default. Pass `detail: "full"` to `read` only when you
 need process diagnostics, activity history or every field of the result.
 
+## Answer a permission request
+
+For Claude Code, set `permissions.on_request` to `ask` to receive eligible
+tool requests. Inspect the tool and redacted input summary in
+`pending_interactions`. Pass the entry's ID as `interaction` to `respond` and
+choose `allow` or `deny`. The request is denied if `permissions.ask_timeout`
+expires. Read `permissions.asked` in the final result for the decision and
+whether the response reached the provider pipe. Use `follow_up` for a question
+in the worker's final answer.
+
 ## Read a long answer
 
 A compact `read` returns the first 20000 characters of the answer and says so:
@@ -130,7 +141,7 @@ between two pages, and the offsets would then belong to different answers.
   discards queued assignments. Workers also stop when the connection that
   started them closes, so a worker does not outlive your session.
 
-Worker states are `queued`, `running`, `idle` and `closed`. A run is `queued`,
+Worker states are `queued`, `running`, `waiting_for_answer`, `idle` and `closed`. A run is `queued`,
 `running`, or finished with an outcome.
 
 ## Refusals and errors

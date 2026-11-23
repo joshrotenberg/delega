@@ -428,11 +428,19 @@ holds the last clone), paging and the compact bounds, a
 panic in a run's task and one in the supervisor's own task, and fifty runs
 across ten workers.
 
+## Permission interactions
+
+With Claude Code and `on_request: ask`, `wait` and `read` show
+`pending_interactions`. The worker reports `waiting_for_answer`. Its run stays
+`running` and keeps its slot. Opening or resolving a request changes the cursor
+for that run and worker. Call `respond` with the interaction ID and a decision.
+The first decision wins. A permission timeout sends a deny and the run can
+continue. Interrupt, close, shutdown and transport closure deny pending requests
+and stop the worker. The run deadline includes time spent waiting.
+
 ## Not built
 
 - Persisting workers across a restart.
-- `waiting_for_answer`, `respond` and `permissions.asked`, which depend on a
-  long-lived provider session.
 - Review layers: roles, owners and barriers on a worker.
 - Process diagnostics from the child in a full read.
 - A timer for retention. Pruning is lazy, so memory is bounded by the count, not

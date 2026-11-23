@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use crate::contract::result::Cleanup;
 
 use super::capture::{Bounded, Captured};
+use super::dialogue::End;
 use super::handle::Stop;
 use super::limits::{FAR_FUTURE, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
 use super::owner::{OwnedProcess, Registry, Settled, Shared};
@@ -21,6 +22,9 @@ use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
 use super::sys::Signal;
 use super::tap::TapWorker;
+
+const MAX_DIALOGUE_FRAME_BYTES: usize = 4 * 1024 * 1024;
+const DIALOGUE_STOP_WRITE_BUDGET: Duration = Duration::from_millis(50);
 
 /// Warning recorded when the owner closed pipes that something still held.
 pub const PIPE_WARNING: &str =
@@ -174,14 +178,40 @@ async fn drive(
     let child = owner.child.as_mut().expect("a new owner holds its child");
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
+    let dialogue = spec.dialogue.as_ref();
+    let limit_at = started + spec.time_limit;
+    if let Some(dialogue) = dialogue {
+        dialogue.started(limit_at);
+    }
+    let mut pending_line = Vec::new();
     if let (Some(content), Some(mut stdin)) = (spec.stdin.clone(), child.stdin.take()) {
         let task_shared = shared.clone();
+        let dialogue = dialogue.cloned();
         owner.stdin_task = Some(tokio::spawn(async move {
             let result = async {
                 stdin.write_all(&content).await?;
+                if let Some(dialogue) = &dialogue {
+                    loop {
+                        let notified = dialogue.changed().notified();
+                        let (responses, close) = dialogue.responses();
+                        for (key, bytes) in responses {
+                            stdin.write_all(&bytes).await?;
+                            dialogue.written(key);
+                        }
+                        if close {
+                            break;
+                        }
+                        notified.await;
+                    }
+                }
                 stdin.shutdown().await
             }
             .await;
+            if result.is_err()
+                && let Some(dialogue) = dialogue
+            {
+                dialogue.end(End::ProviderClosed);
+            }
             if let Err(error) = result
                 && error.kind() != std::io::ErrorKind::BrokenPipe
             {
@@ -198,7 +228,6 @@ async fn drive(
     let mut err = Bounded::new(spec.stderr);
     let mut out_buf = vec![0u8; STDOUT_READ_CHUNK];
     let mut err_buf = vec![0u8; STDERR_READ_CHUNK];
-    let limit_at = started + spec.time_limit;
     let far = || Instant::now() + FAR_FUTURE;
 
     let mut ending: Option<Ending> = None;
@@ -229,6 +258,13 @@ async fn drive(
         tokio::select! {
             _ = stop.stop.cancelled(), if !stop_seen => {
                 stop_seen = true;
+                if let Some(dialogue) = dialogue {
+                    dialogue.end(End::Interrupted);
+                    if !exited && term_at.is_none() && !shared.leader_has_exited() {
+                        ending = Some(Ending::Interrupted);
+                    }
+                    finish_dialogue_write(owner).await;
+                }
                 if !exited && term_at.is_none() && !shared.leader_has_exited() {
                     let listed = shared.before_stop(spec.timings.stop_listing, &stop.hurry).await;
                     // The child may have exited while the scan ran. Then it
@@ -245,6 +281,13 @@ async fn drive(
             },
             _ = tokio::time::sleep_until(limit_at), if !limit_seen && !exited => {
                 limit_seen = true;
+                if let Some(dialogue) = dialogue {
+                    dialogue.end(End::TimedOut);
+                    if !exited && term_at.is_none() && !shared.leader_has_exited() {
+                        ending = Some(Ending::TimedOut { limit: spec.time_limit });
+                    }
+                    finish_dialogue_write(owner).await;
+                }
                 if term_at.is_none() && !shared.leader_has_exited() {
                     let listed = shared.before_stop(spec.timings.stop_listing, &stop.hurry).await;
                     if !shared.leader_has_exited() {
@@ -302,11 +345,45 @@ async fn drive(
             },
             n = async { stdout.as_mut().expect("guarded").read(&mut out_buf).await },
                 if stdout.is_some() => match n {
-                Ok(0) | Err(_) => stdout = None,
+                Ok(0) | Err(_) => {
+                    stdout = None;
+                    if let Some(dialogue) = dialogue {
+                        if !pending_line.is_empty() && dialogue.line(&pending_line) {
+                            out.push(&pending_line);
+                            if let Some(tap) = tap {
+                                tap.offer(&pending_line);
+                            }
+                        }
+                        dialogue.end(End::ProviderClosed);
+                    }
+                },
                 Ok(n) => {
-                    out.push(&out_buf[..n]);
-                    if let Some(tap) = tap {
-                        tap.offer(&out_buf[..n]);
+                    let mut keep = |bytes: &[u8]| {
+                        out.push(bytes);
+                        if let Some(tap) = tap {
+                            tap.offer(bytes);
+                        }
+                    };
+                    if let Some(dialogue) = dialogue {
+                        for part in out_buf[..n].split_inclusive(|byte| *byte == b'\n') {
+                            if pending_line.len() + part.len() > MAX_DIALOGUE_FRAME_BYTES {
+                                dialogue.end(End::ProtocolError);
+                                ending = Some(Ending::WaitFailed {
+                                    message: "Claude Code stream frame exceeded the size limit".into(),
+                                });
+                                stdout = None;
+                                break;
+                            }
+                            pending_line.extend_from_slice(part);
+                            if part.ends_with(b"\n") {
+                                if dialogue.line(&pending_line) {
+                                    keep(&pending_line);
+                                }
+                                pending_line.clear();
+                            }
+                        }
+                    } else {
+                        keep(&out_buf[..n]);
                     }
                 }
             },
@@ -336,6 +413,9 @@ async fn drive(
         listing.await;
         term_at = Some(Instant::now());
         let _ = shared.terminate().await;
+    }
+    if let Some(dialogue) = dialogue {
+        dialogue.end(End::ProviderClosed);
     }
     drop(term_retry);
     drop(kill_retry);
@@ -449,5 +529,18 @@ fn failed_to_start(spec: &ProcessSpec, error: std::io::Error) -> ProcessReport {
             pipes_closed_by_owner: false,
             session_members_swept: Vec::new(),
         },
+    }
+}
+
+async fn finish_dialogue_write(owner: &mut OwnedProcess) {
+    if let Some(task) = &mut owner.stdin_task {
+        if tokio::time::timeout(DIALOGUE_STOP_WRITE_BUDGET, &mut *task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        } else {
+            owner.stdin_task = None;
+        }
     }
 }

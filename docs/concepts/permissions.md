@@ -51,6 +51,15 @@ only what the adapter reports; managed settings, for example, can take
 precedence without a note. See [Permissions](../api.md#permissions) and Claude
 Code's [Strict](../providers.md#strict).
 
+## Live decisions
+
+Claude Code runs supervised over MCP or Rust can set `on_request: ask`. The
+supervisor can allow or deny each eligible tool use. The view gives bounded,
+redacted arguments needed for a decision and reports file content by size.
+The result records decisions in `permissions.asked`. See
+[Permissions](../api.md#permissions) for the timeout and
+[Run independent workers over MCP](../guides/mcp-workers.md) for how to answer.
+
 ## Denials
 
 The adapters record the denials they recognise in `permissions.denied` (a long

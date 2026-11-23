@@ -71,6 +71,7 @@ fn context(facts: &Facts) -> RefusalContext {
         permissions: AppliedPermissions {
             mode: facts.mode,
             denied: Vec::new(),
+            asked: Vec::new(),
         },
         timing: Timing {
             queued_at: now.clone(),

@@ -1,0 +1,130 @@
+{
+  "name": "respond",
+  "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "RespondArgs",
+    "type": "object",
+    "properties": {
+      "interaction": {
+        "type": "string"
+      },
+      "decision": {
+        "$ref": "#/$defs/PermissionDecision"
+      },
+      "note": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 256
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "interaction",
+      "decision"
+    ],
+    "$defs": {
+      "PermissionDecision": {
+        "description": "A one-use answer to a live permission request.",
+        "oneOf": [
+          {
+            "description": "Permit this use.",
+            "type": "string",
+            "const": "allow"
+          },
+          {
+            "description": "Refuse this use.",
+            "type": "string",
+            "const": "deny"
+          }
+        ]
+      }
+    }
+  },
+  "outputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "RespondResponse",
+    "description": "Result of a request to answer an interaction.",
+    "type": "object",
+    "properties": {
+      "interaction": {
+        "description": "Interaction ID passed by the caller.",
+        "type": "string"
+      },
+      "status": {
+        "description": "Whether the answer was accepted or the interaction had already resolved.",
+        "type": "string"
+      },
+      "answer": {
+        "description": "The committed decision, when the interaction is known.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AskedPermission"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "interaction",
+      "status"
+    ],
+    "$defs": {
+      "AskedPermission": {
+        "description": "The recorded disposition of an interaction.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Opaque ID to pass to respond.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Tool requesting permission.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Bounded and redacted input details."
+          },
+          "decision": {
+            "description": "The answer delega committed.",
+            "$ref": "#/$defs/PermissionDecision"
+          },
+          "decided_by": {
+            "description": "Who or what resolved the interaction.",
+            "type": "string"
+          },
+          "written": {
+            "description": "Whether the response was written to the provider pipe.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "summary",
+          "decision",
+          "decided_by",
+          "written"
+        ]
+      },
+      "PermissionDecision": {
+        "description": "A one-use answer to a live permission request.",
+        "oneOf": [
+          {
+            "description": "Permit this use.",
+            "type": "string",
+            "const": "allow"
+          },
+          {
+            "description": "Refuse this use.",
+            "type": "string",
+            "const": "deny"
+          }
+        ]
+      }
+    }
+  }
+}

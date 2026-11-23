@@ -773,6 +773,25 @@ kind. In order:
 
 Both `--flag value` and `--flag=value` are accepted.
 
+### Live asking
+
+An ask run adds `--input-format stream-json --permission-prompt-tool stdio`
+and uses `--permission-mode manual --permission-prompts host`. Claude Code
+2.1.330 reports the mode as `default` in its init event. It needs the stdio
+flag to send `can_use_tool` control requests.
+
+The nine built-in tools are available for requests. Mode grants still apply
+automatically. Explicit denies, the exact-command guard and build's sandbox
+still apply. Use `Edit(path)` for path-specific file edit denies, including
+writes. Claude Code 2.1.330 did not apply `Write(path)` to the probed write
+([#157](https://github.com/joshrotenberg/delega/issues/157)).
+
+The host sends the assembled prompt as one JSON user message, then answers
+permission requests over stdin. stdin closes on the first result or during
+teardown. Each run can have up to 32 pending requests and process at most 256.
+A permission frame over 256 KiB, any stream frame over 4 MiB, or a request
+beyond the lifetime limit ends the run with a protocol failure. Pending overflow is denied.
+
 ## Codex CLI
 
 Command shape, in order:
@@ -1349,7 +1368,6 @@ Code, `/status` names the managed sources in force.
   fetches from its server cannot be seen.
 - **Command shape in the result.** The contract's `provenance` has no field for
   it. `dry_run` reports the shape; a run records the executable and version.
-- **Live asking** (`on_request: ask`), as in [api.md](api.md).
 - **Stopping at the final result.** A provider that writes its result and then
   does not exit holds the run until the time limit.
 - **Usage during a run.** Usage is taken from the terminal event only.

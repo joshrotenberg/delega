@@ -168,6 +168,9 @@ resume=""
 tools=""
 allowed=""
 settings=""
+input_format=""
+permission_mode=""
+prompt_tool=""
 prev=""
 for arg in "$@"; do
   case "$prev" in
@@ -175,6 +178,9 @@ for arg in "$@"; do
     --tools) tools="$arg" ;;
     --allowedTools) allowed="$arg" ;;
     --settings) settings="$arg" ;;
+    --input-format) input_format="$arg" ;;
+    --permission-mode) permission_mode="$arg" ;;
+    --permission-prompt-tool) prompt_tool="$arg" ;;
   esac
   prev="$arg"
 done
@@ -222,6 +228,24 @@ END {
 }')
 
 IFS= read -r mode || true
+if [ "$input_format" = stream-json ]; then
+  [ "$permission_mode" = manual ] && [ "$prompt_tool" = stdio ] || exit 71
+  case "$mode" in *'"type":"user"'*) ;; *) exit 72 ;; esac
+  case "$mode" in *'"role":"user"'*) ;; *) exit 72 ;; esac
+  case ",$tools," in *,Write,*) ;; *) exit 73 ;; esac
+  printf '%s\n' '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Write","tool_use_id":"tool-1","input":{"file_path":"example.txt","content":"fixture-private-content"}}}'
+  IFS= read -r response || exit 74
+  case "$response" in *'"type":"control_response"'*'"request_id":"permission-1"'*|*'"request_id":"permission-1"'*'"type":"control_response"'*) ;; *) exit 75 ;; esac
+  case "$response" in
+    *'"behavior":"allow"'*'"updatedInput":{"content":"fixture-private-content","file_path":"example.txt"}'*) answer=allowed; denials='[]' ;;
+    *'"behavior":"deny"'*'"message":'*) answer=denied; denials='[{"tool_name":"Write","tool_use_id":"tool-1","tool_input":{"file_path":"example.txt"}}]' ;;
+    *) exit 76 ;;
+  esac
+  printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"%s","permission_denials":%s}\n' "$sid" "$answer" "$denials"
+  printf '%s\n' '{"type":"control_request","request_id":"late","request":{"subtype":"can_use_tool","tool_name":"Write","input":{}}}'
+  if IFS= read -r extra; then exit 77; fi
+  exit 0
+fi
 rest=$(cat)
 
 if [ -n "$FAKE_RECORD_DIR" ]; then

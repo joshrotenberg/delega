@@ -20,7 +20,7 @@ use super::stream::{Parsed, Terminal, cost, count, for_each_event, non_empty, st
 
 /// The built-in tools `full` grants. Anything else a Claude Code install offers
 /// (sub-agents, MCP tools, background tasks) stays off.
-const BUILTINS: [&str; 9] = [
+pub(super) const BUILTINS: [&str; 9] = [
     "Read",
     "Glob",
     "Grep",
@@ -396,7 +396,12 @@ pub(super) const OWNED_ENV: [(&str, &str); 3] = [
 pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let request = inputs.request;
     let scope = inputs.scope;
-    let g = grants(inputs)?;
+    let ask = request.permissions.on_request == crate::contract::permissions::OnRequest::Ask;
+    let mut g = grants(inputs)?;
+    if ask {
+        g.tools = BUILTINS.to_vec();
+    }
+    let mode = if ask { "manual" } else { "dontAsk" };
     let settings =
         settings_json(g.guard.as_ref(), &inputs.deny.rules, g.sandbox.as_ref()).to_string();
     if settings.len() > SETTINGS_ARGUMENT_LIMIT {
@@ -421,9 +426,9 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
         "stream-json",
         "--verbose",
         "--permission-mode",
-        "dontAsk",
+        mode,
         "--permission-prompts",
-        "none",
+        if ask { "host" } else { "none" },
         "--strict-mcp-config",
         "--mcp-config",
         "{\"mcpServers\":{}}",
@@ -434,6 +439,17 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     .map(String::from)
     .to_vec();
     args.push(settings);
+    if ask {
+        args.extend(
+            [
+                "--input-format",
+                "stream-json",
+                "--permission-prompt-tool",
+                "stdio",
+            ]
+            .map(String::from),
+        );
+    }
     let cwd = scope.cwd.to_string_lossy().into_owned();
     args.extend(["--add-dir".to_string(), cwd]);
     // In `build` the extra directories are reached through their `Read` rules
@@ -493,7 +509,7 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
             .to_string(),
     );
     let mut mapping = vec![
-        "permission-mode=dontAsk".to_string(),
+        format!("permission-mode={mode}"),
         format!("tools={}", g.tools.join(",")),
         format!("allowedTools={}", g.allowed.join(",")),
         format!("denyRules={}", inputs.deny.rules.len()),

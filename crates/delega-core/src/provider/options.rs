@@ -74,6 +74,9 @@ pub struct ProviderOptions {
     /// [`ProgressEvent::Message`](super::ProgressEvent::Message). Off by
     /// default, so a sink sees message lengths only. Needs `progress`.
     pub progress_text: bool,
+    /// Internal endpoint installed by the supervisor.
+    #[doc(hidden)]
+    pub asks: super::ask::AskEndpoint,
     /// Test seam: chunks queued for the progress tap, in place of the process
     /// layer's, so a test decides how many chunks are dropped.
     #[cfg(test)]

@@ -469,6 +469,7 @@ fn closing_standard_input_stops_every_worker_and_exits_zero() {
             "interrupt",
             "list",
             "read",
+            "respond",
             "start",
             "wait"
         ]

@@ -151,9 +151,14 @@
       "description": "What happens when the provider asks for something that was not granted.",
       "oneOf": [
         {
-          "description": "Answer no at once and record the request in the result. The only\nchoice in this version; asking the caller comes later.",
+          "description": "Answer no at once and record the request in the result.",
           "type": "string",
           "const": "deny"
+        },
+        {
+          "description": "Ask the supervising caller for a one-use decision.",
+          "type": "string",
+          "const": "ask"
         }
       ]
     },
@@ -161,6 +166,16 @@
       "description": "The permissions part of a request.",
       "type": "object",
       "properties": {
+        "ask_timeout": {
+          "description": "Seconds allowed for each live permission request. Defaults to 120.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 600,
+          "minimum": 1
+        },
         "commands": {
           "description": "Shell commands the worker may run, matched exactly. Must be empty in\n`build` mode.",
           "type": "array",
@@ -193,6 +208,16 @@
         }
       },
       "additionalProperties": false,
+      "if": {
+        "properties": {
+          "ask_timeout": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ask_timeout"
+        ]
+      },
       "not": {
         "properties": {
           "commands": {
@@ -206,6 +231,16 @@
         "required": [
           "mode",
           "commands"
+        ]
+      },
+      "then": {
+        "properties": {
+          "on_request": {
+            "const": "ask"
+          }
+        },
+        "required": [
+          "on_request"
         ]
       }
     },

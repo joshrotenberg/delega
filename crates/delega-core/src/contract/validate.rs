@@ -159,6 +159,20 @@ impl Request {
 
     fn validate_permissions(&self, problems: &mut Vec<Problem>) {
         let perms = &self.permissions;
+        if let Some(timeout) = perms.ask_timeout {
+            if !(1..=600).contains(&timeout) {
+                problems.push(Problem::new(
+                    "permissions.ask_timeout",
+                    "must be between 1 and 600",
+                ));
+            }
+            if perms.on_request != super::permissions::OnRequest::Ask {
+                problems.push(Problem::new(
+                    "permissions.ask_timeout",
+                    "requires on_request: ask",
+                ));
+            }
+        }
 
         if perms.commands.len() > MAX_COMMANDS {
             problems.push(too_many(

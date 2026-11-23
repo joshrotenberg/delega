@@ -5,7 +5,7 @@
 //! [`follow_up`](Supervisor::follow_up) queues another assignment on the same
 //! provider session; [`wait`](Supervisor::wait), [`read`](Supervisor::read) and
 //! [`list`](Supervisor::list) report; [`interrupt`](Supervisor::interrupt) and
-//! [`close`](Supervisor::close) stop. The seven operations are the MCP tools of
+//! [`close`](Supervisor::close) stop. The eight operations are the MCP tools of
 //! `docs/api.md`, one to one. `docs/supervisor.md` describes the states, the
 //! limits and what is deferred.
 //!
@@ -85,6 +85,18 @@ pub use views::{
     StartResponse, Target, TextWindow, WaitLimit, WaitResponse, WaitTargets, WorkerBrief,
     WorkerView,
 };
+
+/// Result of a request to answer an interaction.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct RespondResponse {
+    /// Interaction ID passed by the caller.
+    pub interaction: String,
+    /// Whether the answer was accepted or the interaction had already resolved.
+    pub status: &'static str,
+    /// The committed decision, when the interaction is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<crate::contract::result::AskedPermission>,
+}
 
 use command::{Closing, Command, Stopping, WaitStart, Wake};
 
@@ -231,6 +243,20 @@ impl Supervisor {
             Some(why) => Error::Failed(why),
             None => Error::Stopped,
         }
+    }
+
+    /// Commit a one-use permission decision for a live interaction.
+    pub async fn respond(
+        &self,
+        interaction: String,
+        decision: crate::contract::result::PermissionDecision,
+    ) -> Result<RespondResponse, Error> {
+        self.call(|reply| Command::Respond {
+            interaction,
+            decision,
+            reply,
+        })
+        .await
     }
 
     async fn call<T>(&self, make: impl FnOnce(oneshot::Sender<T>) -> Command) -> Result<T, Error> {
@@ -594,9 +620,23 @@ impl Supervisor {
     /// task had panicked, the report says so in `failed` instead of looking
     /// clean.
     pub async fn shutdown(&self) -> ShutdownReport {
+        self.shutdown_with_reason(false).await
+    }
+
+    /// Shut down after the supervising transport has closed.
+    pub async fn connection_closed(&self) -> ShutdownReport {
+        self.shutdown_with_reason(true).await
+    }
+
+    async fn shutdown_with_reason(&self, connection_closed: bool) -> ShutdownReport {
         // A start still waiting on a request check is released with `ShutDown`.
         self.shared.preflight.close();
-        let started = self.call(|reply| Command::Shutdown { reply }).await;
+        let started = self
+            .call(|reply| Command::Shutdown {
+                connection_closed,
+                reply,
+            })
+            .await;
         let Ok(started) = started else {
             return ShutdownReport {
                 workers_closed: 0,

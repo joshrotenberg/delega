@@ -80,6 +80,13 @@
     "description": "The answer to `read`.",
     "type": "object",
     "properties": {
+      "pending_interactions": {
+        "description": "Live permission requests awaiting a decision.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/PermissionInteraction"
+        }
+      },
       "worker": {
         "description": "The worker, when the run has one or the target was one.",
         "type": [
@@ -178,6 +185,28 @@
       "cursor"
     ],
     "$defs": {
+      "PermissionInteraction": {
+        "description": "An action Claude Code asked the caller to authorize.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Opaque ID to pass to respond.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Tool requesting permission.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Bounded and redacted input details."
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "summary"
+        ]
+      },
       "WorkerState": {
         "description": "Where a worker is. Derived from its runs: see the module documentation.",
         "oneOf": [
@@ -190,6 +219,11 @@
             "description": "A run is running. More may be queued behind it.",
             "type": "string",
             "const": "running"
+          },
+          {
+            "description": "The current run has a pending permission interaction.",
+            "type": "string",
+            "const": "waiting_for_answer"
           },
           {
             "description": "Nothing is running or queued. A follow-up can be given.",
@@ -369,6 +403,13 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/DeniedRequest"
+            }
+          },
+          "asked": {
+            "description": "Resolved live permission requests.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AskedPermission"
             }
           },
           "provider_notes": {
@@ -552,6 +593,58 @@
         },
         "required": [
           "request"
+        ]
+      },
+      "AskedPermission": {
+        "description": "The recorded disposition of an interaction.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Opaque ID to pass to respond.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Tool requesting permission.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Bounded and redacted input details."
+          },
+          "decision": {
+            "description": "The answer delega committed.",
+            "$ref": "#/$defs/PermissionDecision"
+          },
+          "decided_by": {
+            "description": "Who or what resolved the interaction.",
+            "type": "string"
+          },
+          "written": {
+            "description": "Whether the response was written to the provider pipe.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "summary",
+          "decision",
+          "decided_by",
+          "written"
+        ]
+      },
+      "PermissionDecision": {
+        "description": "A one-use answer to a live permission request.",
+        "oneOf": [
+          {
+            "description": "Permit this use.",
+            "type": "string",
+            "const": "allow"
+          },
+          {
+            "description": "Refuse this use.",
+            "type": "string",
+            "const": "deny"
+          }
         ]
       },
       "Applied": {
@@ -1136,6 +1229,13 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/DeniedRequest"
+            }
+          },
+          "asked": {
+            "description": "Resolved live permission requests.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AskedPermission"
             }
           }
         },

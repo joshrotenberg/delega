@@ -113,6 +113,23 @@ impl Core {
             return;
         };
         options.origin = run.origin.clone();
+        if request.permissions.on_request == crate::contract::permissions::OnRequest::Ask {
+            use std::sync::atomic::Ordering::SeqCst;
+            let cursor = self.cursor.clone();
+            let seq = run.ask_seq.clone();
+            let tx = self.tx.clone();
+            let asks = crate::provider::ask::Asks::new(
+                id.to_string(),
+                request.permissions.ask_timeout.unwrap_or(120),
+                stop.clone(),
+                move || {
+                    seq.store(cursor.fetch_add(1, SeqCst) + 1, SeqCst);
+                    let _ = tx.send(crate::supervisor::Command::InteractionChanged);
+                },
+            );
+            options.asks.0 = Some(asks.clone());
+            run.asks = Some(asks);
+        }
         let activity = run.activity.clone();
         let cursor = self.cursor.clone();
         let sink: ProgressSink = Arc::new(move |event| activity.record(event, &cursor));
@@ -226,11 +243,15 @@ impl Core {
     /// Make a run finished with `result`: the one place a run ends. Frees its
     /// running slot, tells whoever waits on it, records the session, and lines
     /// up the worker's next run.
-    pub(super) fn finish_run(&mut self, id: &str, result: RunResult) {
+    pub(super) fn finish_run(&mut self, id: &str, mut result: RunResult) {
         let seq = self.next_cursor();
         let Some(run) = self.runs.get_mut(id) else {
             return;
         };
+        if let Some(asks) = run.asks.take() {
+            asks.close("provider_finished");
+            result.permissions.asked = asks.audit();
+        }
         let was = run.state;
         match run.state.transition(RunState::Finished) {
             Ok(state) => run.state = state,

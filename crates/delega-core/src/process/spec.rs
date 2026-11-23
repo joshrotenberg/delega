@@ -132,6 +132,7 @@ pub struct ProcessSpec {
     /// Bytes written to the child's standard input, which is then closed. With
     /// `None` the child's standard input is the null device.
     pub stdin: Option<Vec<u8>>,
+    pub(crate) dialogue: Option<super::dialogue::DialogueHandle>,
     /// How long the child may run before it is stopped and the ending is
     /// [`Ending::TimedOut`](super::Ending::TimedOut).
     pub time_limit: Duration,
@@ -233,6 +234,7 @@ impl ProcessSpec {
             env: EnvPolicy::inherit_all(),
             cwd: None,
             stdin: None,
+            dialogue: None,
             time_limit,
             stdout: CaptureSpec {
                 limit: DEFAULT_STDOUT_CAPTURE_BYTES,

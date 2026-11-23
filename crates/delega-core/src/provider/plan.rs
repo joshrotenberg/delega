@@ -32,6 +32,7 @@ pub(super) struct Plan {
     pub env: ResolvedEnv,
     pub scope: Scope,
     pub stdin: Vec<u8>,
+    pub asks: Option<std::sync::Arc<super::ask::Asks>>,
     pub mapping: Mapping,
     pub notes: Vec<String>,
     /// What this plan applies, for the result and the dry run.
@@ -95,6 +96,13 @@ fn build_with(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(Refusal::new("invalid_request", message));
+    }
+    let ask = request.permissions.on_request == crate::contract::permissions::OnRequest::Ask;
+    if ask && request.provider == Provider::Codex {
+        return Err(Refusal::new(
+            "permissions_not_supported",
+            "permissions.on_request: ask requires live permission prompts, which codex exec does not support. Use deny. Codex app-server support is tracked in #164.",
+        ));
     }
     let native = native_args::check(request.provider, &request.native_args)?;
     let validator = match &request.answer_schema {
@@ -177,7 +185,7 @@ fn build_with(
             .map(|d| d.to_string_lossy().into_owned())
             .collect(),
         settings: built.settings,
-        on_request: "deny".to_string(),
+        on_request: if ask { "ask" } else { "deny" }.to_string(),
     };
     Ok(Plan {
         provider: request.provider,
@@ -185,7 +193,12 @@ fn build_with(
         args: built.args,
         env,
         scope,
-        stdin: assembled.stdin,
+        stdin: if ask {
+            super::ask::user_line(&assembled.stdin)
+        } else {
+            assembled.stdin
+        },
+        asks: options.asks.0.clone(),
         mapping,
         notes,
         applied,

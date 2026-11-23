@@ -95,7 +95,8 @@ result reports what happened.
 | `permissions.mode` | `read` (default), `write`, `build`, `full` | `read`: may read the working directory, no writes, no commands except those listed in `permissions.commands`. `write`: may also edit files in the working directory; commands are still only those listed. `build`: may also run any command inside the provider's OS sandbox, which lets commands write to the working directory and temporary directories, with exceptions per provider (see [Build](providers.md#build), for example git in a worktree), and gives them no network. `full`: no path or command scope and no sandbox from delega. The provider mappings are in [providers](providers.md). |
 | `permissions.commands` | list of exact command strings | Shell commands the worker may run, matched exactly, at most 256 of 4096 bytes each. They add to `read` and `write`. With `build` the list must be empty, or the request is refused `invalid_request`. In `full` the provider mapping does not use them; the request still validates the list. |
 | `permissions.directories` | list of paths | Extra directories the worker may read, at most 64. Each must exist, or the run is refused `directory_unusable`. A relative entry is relative to the caller's working directory for `delega run`, and to `cwd` for MCP `start`. |
-| `permissions.on_request` | `deny` | What happens when the provider asks for something not granted: answered no at once and recorded in the result. **Later:** `ask`, which surfaces the request to the caller as a pending interaction, with `permissions.ask_timeout` for how long it waits before it is answered no. |
+| `permissions.on_request` | `deny` (default), `ask` | `deny` answers no to ungranted actions. `ask` surfaces eligible Claude Code requests to the MCP or Rust supervisor caller. |
+| `permissions.ask_timeout` | Integer from 1 to 600 seconds, default 120 | Per-interaction deadline, available with `on_request: ask`. Time spent waiting counts toward the run limit. |
 | `permissions.strict` | `false` (default), `true` | `true`: when the provider cannot enforce part of the request as stated, the run is `refused` before start with `error.kind` `permissions_not_enforceable`, and the message names each part (see [providers](providers.md) for what each provider cannot enforce). `false`: this check does not refuse the run; when the plan reaches the result, a `provider_notes` entry says what is wider than requested. `full` is not refused by this check. |
 
 Each mode maps to concrete provider settings (Claude tool lists, hooks and
@@ -145,9 +146,9 @@ malformed tool input before the supervisor sees it.
 means what it meant before and `schema_version` stays 1. The result does not
 echo it.
 
-The first version only denies. Asking needs a long-lived provider session,
-which is due's resident engine and the subject of issue 1; `deny` works with
-one process per run.
+Live asking uses Claude Code's stream-JSON control channel for one run.
+`codex exec` and `delega run` refuse `ask` with `permissions_not_supported`.
+The Rust supervisor exposes `Supervisor::respond`.
 
 ## The result
 
@@ -165,7 +166,7 @@ One JSON object, versioned, the same from every surface.
 | `structured_valid` | Whether `structured` satisfied the schema; present with `structured`. |
 | `error` | `kind`, `message`, and `provider_exit_code` when the provider process exited with one. Present unless `completed`. |
 | `cleanup` | The combined verdict for the run's processes, the provider and any preparation probes. `confirmed: true` when the final sweeps found nothing left in their process groups, sessions or tracked descendants; otherwise unconfirmed, which can also happen when no process is known to have started (for example when the task following the run ended abnormally). Unconfirmed cleanup has `confirmed: false` and a `reason`. It includes `pids` and `process_groups` when the corresponding lists are nonempty. Two gaps can still report `confirmed: true` while a descendant runs; they are described in `crates/delega-core/src/process/mod.rs`. |
-| `permissions` | `mode` applied, and `denied`: the denials delega recognised (see [Outcomes](#outcomes)). **Later:** `asked`, requests the caller answered. |
+| `permissions` | `mode` applied, and `denied`: the denials delega recognised (see [Outcomes](#outcomes)). `asked`, resolved live requests with their redacted input summary, decision, reason and whether the response was written. |
 | `provider_notes` | Where this provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied: the configuration file, which layer set each request field, the environment, the deny rules and the context mode, as names, counts, paths and digests. Optional; see [`applied`](#applied). |
 | `session_id` | The provider's own session id, for the provider's `resume`. |
@@ -994,18 +995,17 @@ carries no `config` or `sources`.
 ## MCP
 
 The MCP server is for a caller that supervises several workers at once: start
-them, keep working, collect results. Seven tools in the first version, and an
-eighth, `respond`, when live asking is added.
+them, keep working, collect results.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides; an absolute `cwd` is required, from the call or the profile | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, `worker` always present. Queues behind a running run. |
-| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When any of them finishes, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` is present, and otherwise absent, when the wait would have blocked and as many waits as the server allows were blocked already: it returned at once with `timeout_secs: 0`, `timed_out: true` and the current states. A wait asked with `timeout_secs: 0` never gets it. |
-| `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
+| `wait` | `runs` or `workers` (list), `timeout_secs`, `after` (cursor) | When a run finishes, a permission interaction needs attention, or on timeout: `timed_out`, the `timeout_secs` applied, the current state of each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Never an error on timeout. `released_by_shutdown: true` is present, and otherwise absent, when the server's shutdown released the wait: nothing named need have finished, and a named run can still be `running` while it is stopped, so `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` is present, and otherwise absent, when the wait would have blocked and as many waits as the server allows were blocked already: it returned at once with `timeout_secs: 0`, `timed_out: true` and the current states. A wait asked with `timeout_secs: 0` never gets it. |
+| `read` | `run` or `worker`, `detail`, `after` (cursor), `text_offset` (characters) | The result if finished; otherwise state, pending interactions and `progress` (partial text, recent activity, times). `text_window` when `text_offset` was given, and a `cursor`. |
 | `list` | none | Live workers, then closed ones whose results are still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; the limits in force (including the default and ceiling of `wait`, and `max_waits_in_flight`) and in use (including `waits_in_flight`); a `cursor`; and `stale_server` only when the executable the server started from was replaced or removed since ([Stale server](#stale-server)). |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup has been attempted, at most 30 s: `settled`, `was_queued` and the compact result, `interrupted` (or unchanged if the run had already finished). |
-| `respond` (**Later**) | `interaction`, `decision` (`allow`, `deny`), optional `note` | Acknowledgement. Only with `on_request: ask`. |
+| `respond` | `interaction`, `decision` (`allow`, `deny`), optional `note` (up to 256 UTF-8 bytes, discarded) | `accepted`, `unknown_interaction`, `already_answered`, `timed_out` or `closed`. `accepted` commits the decision for dispatch. The final audit reports pipe delivery. |
 | `close` | `worker` | Stops the worker's running run (at most 30 s), discards queued runs and frees its slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. Results already produced stay readable for the retention time. Closing again answers the same way. |
 
 `start` requires an absolute `cwd`. The MCP server's own working directory is
@@ -1044,7 +1044,7 @@ Rules that hold for every tool:
   sleep has not used its time.
   [supervisor.md](supervisor.md#how-the-bounds-count-time) has the detail.
 - **States** a worker can be in: `queued`, `running`, `idle`, `closed`, and
-  **later** `waiting_for_answer`. A run is `queued`, `running`, or finished with
+  `waiting_for_answer` while its current run has a pending permission interaction. A run is `queued`, `running`, or finished with
   an outcome. A worker is `queued` when nothing is running and a run waits for a
   running slot, `running` while a run goes (more may wait behind it), `idle` when
   nothing is running or queued, and `closed` for good after `close`. The
@@ -1392,10 +1392,10 @@ every run waits for it.
 | Outcome set | `succeeded`, `failed`, `timed_out`, `cancelled`, `planned` | `completed`, `failed`, `interrupted`, `closed`, plus timeouts as errors | The five above; `planned` becomes dry-run output, not an outcome. |
 | Cleanup report | Settlement reporting; limits documented | `cleanup` field, descendant identity tracking, repeated signalling | Counterpart's model, built: process group and session sweeps, descendant tracking by start time, repeated signalling, and an unconfirmed verdict that names pids, groups and the reason. |
 | Permissions, stated up front | Provider options passed through, allowlisted | Tool lists, exact Bash guard hook, sandbox mode, deny rules | Provider-neutral modes over counterpart's enforcement. |
-| Permissions, asked live | `respond`, interaction references, `Reject` mode | none | Later: take due's, behind `on_request: ask`. |
+| Permissions, asked live | `respond`, interaction references, `Reject` mode | none | Claude Code, behind `on_request: ask`. |
 | Long-lived provider session | Resident engine | One process per run, resumed by session id | At most one provider session process per run (preparation can also start short probes), continued by provider session id (`session.resume`, `follow_up`); a resident session is deferred (issue 1). |
 | Queue and limits | Admission limits, 16 sessions | Queue, pool of 4 running, lifetime cap of 64 | Queue with admission limits (16 live workers, 4 running runs, 16 queued per worker); no lifetime cap. |
-| MCP tools | `spawn`, `follow_up`, `inspect`, `wait`, `interrupt`, `respond`, `release_run`, `release_session`, `read_items` | `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `read_agent`, `list_agents`, `interrupt_agent`, `close_agent` | The seven above, then `respond`. |
+| MCP tools | `spawn`, `follow_up`, `inspect`, `wait`, `interrupt`, `respond`, `release_run`, `release_session`, `read_items` | `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `read_agent`, `list_agents`, `interrupt_agent`, `close_agent` | The eight above. |
 | Compact and full responses | none | `detail: summary\|full` with a field audit | Take counterpart's idea, simpler. |
 | Trace files and summaries | `--trace`, `--trace-file`, `due trace summarize` | Activity history in `read_agent` | Start with stderr progress and `read`. |
 | Install into hosts | `due init` | `counterpart init` | One `delega plugin install` and one `delega plugin uninstall`, through the hosts' commands. |
@@ -1409,10 +1409,10 @@ Settled by Josh on 2026-11-18.
 
 | Question | Decision |
 | --- | --- |
-| Live permission asking in the first version | No. The first version only denies; asking comes later. |
+| Live permission asking | Claude Code over MCP or the Rust supervisor. |
 | Default `timeout_secs` | 600 (10 minutes), stated in the result. |
 | A run denied a permission that still finished | A recorded denial does not by itself decide the outcome. `refused` only when the run stopped because of it. |
-| Names | `worker` and `run`; tools `start`, `follow_up`, `wait`, `read`, `list`, `interrupt`, `close`, and later `respond`. |
+| Names | `worker` and `run`; tools `start`, `follow_up`, `wait`, `read`, `list`, `interrupt`, `close`, and `respond`. |
 | Permission modes | `read`, `write`, `full`; `build` added on 2026-11-22 ([#98](https://github.com/joshrotenberg/delega/issues/98)). |
 | CLI scope | Foreground `run` only. |
 | Tracing | Stderr progress only in the first version. |
@@ -1431,9 +1431,6 @@ Settled by Josh on 2026-11-19 (issue 25, built under issue 84):
 Not in the first version, to be taken up once the core meets the six points in
 the README:
 
-- Live asking: `on_request: ask`, `ask_timeout`, the `respond` tool, the
-  `waiting_for_answer` state and `permissions.asked`. Depends on a long-lived
-  provider session (issue 1).
 - Trace files, heartbeats and trace summaries.
 - Listing or stopping, from the CLI, runs started by another process.
 - The review layer (issue 5).

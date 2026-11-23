@@ -55,6 +55,8 @@ pub enum WorkerState {
     Queued,
     /// A run is running. More may be queued behind it.
     Running,
+    /// The current run has a pending permission interaction.
+    WaitingForAnswer,
     /// Nothing is running or queued. A follow-up can be given.
     Idle,
     /// Closed. Final. Its results stay readable for the retention time.

@@ -60,8 +60,8 @@ its `running_revision` with `installed_revision` when both are present
 
 ## Use it
 
-The plugin gives a host session seven tools: `start`, `follow_up`, `wait`,
-`read`, `list`, `interrupt` and `close`. The
+The plugin gives a host session eight tools: `start`, `follow_up`, `wait`,
+`read`, `list`, `interrupt`, `respond` and `close`. The
 [`delegate` skill](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/skills/delegate/SKILL.md)
 and the [tool table](../api.md#mcp) describe the arguments and responses.
 

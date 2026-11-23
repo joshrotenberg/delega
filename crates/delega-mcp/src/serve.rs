@@ -109,7 +109,12 @@ pub async fn serve(
     };
     // The transport keeps draining calls that are still running while the
     // workers are stopped, so both are driven together.
-    let shutdown = supervisor.shutdown();
+    let shutdown = async {
+        match ended {
+            Ended::EndOfInput => supervisor.connection_closed().await,
+            Ended::Stopped => supervisor.shutdown().await,
+        }
+    };
     tokio::pin!(shutdown);
     let report = loop {
         tokio::select! {
