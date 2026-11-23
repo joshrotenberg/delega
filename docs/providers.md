@@ -719,7 +719,7 @@ See `crates/delega-core/src/provider/env.rs`.
   `can_use_tool` requests. A path-specific `Write(path)` deny did not
   apply to the probed write (#157).
 
-### Claude Code 2.1.330, 2026-11-22
+### 2026-11-22, Claude Code 2.1.330 (#157)
 
 - With only `Edit(//<cwd>/**)` allowed under `dontAsk` (model haiku, the branch
   binary for #157), the Write tool created a file in the working directory,
