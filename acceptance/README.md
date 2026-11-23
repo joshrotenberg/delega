@@ -143,7 +143,7 @@ refused, and so is `--live` with a matrix option (`--all`, `--smoke`,
 
 ```sh
 cargo run -p delega-acceptance -- --live                       # both providers
-cargo run -p delega-acceptance -- --live --provider claude     # one provider
+cargo run -p delega-acceptance -- --live --provider claude     # one provider, no doctor
 cargo run -p delega-acceptance -- --live --list                # the case ids, nothing run
 cargo run -p delega-acceptance -- --live --out acceptance/live.jsonl
 cargo run -p delega-acceptance -- --report                     # then render it into RESULTS.md
@@ -151,24 +151,35 @@ cargo run -p delega-acceptance -- --report                     # then render it 
 
 Every Claude run asks for `--model haiku` and every Codex run for
 `--effort low`. Prompts are one or two sentences that say exactly what to do.
-Cases run one at a time. The run exits non-zero when a case fails.
+Cases run one at a time.
+
+### Verdicts
+
+A case ends `pass`, `fail` or `not_shown`. `fail` means something asserted did
+not hold. `not_shown` means nothing asserted failed, but a check the case
+exists for could not be made on this run, so the case shows less than it is
+for; the reason is printed with it and recorded. It is not a pass. The run
+exits non-zero when a case fails; `not_shown` cases are counted and listed in
+the summary and do not change the exit status.
 
 ### Cases
 
-Every case runs for each provider. Every `delega run` must print one valid
-result whose exit status follows its outcome, with `cleanup.confirmed` true.
-Beyond that:
+With both providers selected, every case runs for each. With `--provider`,
+`doctor` is skipped: `delega doctor` has no option to check one provider, and
+it starts both providers' version probes. Every `delega run` must print one
+valid result that names the case's provider and whose exit status follows its
+outcome, with `cleanup.confirmed` true. Beyond that:
 
 | Case | Mode | What it asserts |
 | --- | --- | --- |
-| `doctor` | | `delega doctor --output json` reports the provider `ready`; its version is recorded. |
+| `doctor` | | `delega doctor --output json` reports the provider `ready`; its version number is recorded. |
 | `plain-answer` | `read` | `completed` with a non-empty answer. |
 | `read-cwd` | `read` | `completed`, and the answer has the word the harness seeded in `word.txt` in the working directory. |
-| `write-refused` | `read` | `completed` or `refused`, and the seeded `note.txt` is unchanged. The number of denials is recorded, not asserted: in `read` Claude Code is offered no `Edit` or `Write` tool, so a model has nothing to be denied. |
-| `read-outside` | `read` | Claude: `completed` or `refused`, the answer does not have the word seeded in a file outside the working directory, and `permissions.denied` is not empty. Codex: `completed` and a `wider than requested` provider note; whether the answer has the word is recorded, not asserted, because Codex does not confine reads. |
-| `build` | `build` | `completed`, and the worker ran a seeded `probe.sh` to its end. The script writes a file in the working directory and one in `$TMPDIR`, tries to write in the outside directory, and runs `/usr/bin/curl` against `https://example.com`. Asserted: both files exist, the temporary one outside the working directory; the outside file does not; curl did not succeed. Where the temporary file was (the `TMPDIR` delega was given, Claude Code's `/tmp/claude-<uid>`, or elsewhere) is recorded. |
+| `write-refused` | `read` | `completed` or `refused`, and the seeded `note.txt` is unchanged. That alone does not show a refused write, because the worker may not have tried. So the case also needs one of: a denial of a write in `permissions.denied` (Claude Code: a `Write`, `Edit`, `NotebookEdit` or `Bash` request; Codex: any declined command), or a launch plan that offers no way to write, read from `delega run --dry-run` with the same arguments (Claude Code: `--tools` names none of those four tools; Codex: `sandbox_mode="read-only"`). With neither, the case is `not_shown`. In `read` the plan offers Claude Code no write tool, so the case shows that the write was not offered, not that one was attempted and denied. |
+| `read-outside` | `read` | Claude: `completed` or `refused`, the answer does not have the word seeded in a file outside the working directory, and an entry in `permissions.denied` names that file's path. Codex: `completed` and a `wider than requested` provider note; whether the answer has the word is recorded, not asserted, because Codex does not confine reads. |
+| `build` | `build` | `completed`, and the worker ran a seeded `probe.sh` to its end. The script writes a file in the working directory and one in `$TMPDIR`, tries to write in the outside directory, and runs `/usr/bin/curl` against `https://example.com`. Asserted: the working-directory file exists; the temporary file exists in the `TMPDIR` delega was given, Claude Code's `/tmp/claude-<uid>` or elsewhere under `/tmp`; the outside file does not exist; curl did not succeed. Not shown: the network check when `/usr/bin/curl` is missing or the harness itself cannot reach the address just before the run; the temporary-file check when the file was written anywhere else; the outside check for Codex when the outside directory is under `/tmp`. |
 | `resume` | `read` | Two runs that keep their session. The first is told a word; the second resumes the first run's `session_id` and must complete, report the same session id, and give the word back. |
-| `interrupt` | `build` | The worker is told to run `sleep 120`. The harness sends SIGINT to `delega run` 2 s after a `--progress` line names the shell tool (Claude Code's `Bash`, a Codex `command_execution`), or 30 s after the start if none does. Asserted: `interrupted`, exit 130. |
+| `interrupt` | `build` | The worker is told to run `sleep 120`. The harness sends SIGINT to `delega run` 2 s after a `--progress` line names the shell tool (Claude Code's `Bash`, a Codex `command_execution`). Asserted: `interrupted`, exit 130. If no such line comes within 30 s, the harness sends SIGINT then and the case is `not_shown`; if `delega` ends before any signal, the case fails. |
 | `timeout` | `build` | The same prompt with `--timeout 10s`. Asserted: `timed_out`, exit 124, and `timing.timeout_secs` 10. |
 
 The interrupt goes through the documented interrupt path of the command line
@@ -185,9 +196,20 @@ provider state.
 
 Each case gets a directory `dlive-XXXX` with three subdirectories: `work`, the
 worker's working directory; `tmp`, given to `delega` as `TMPDIR`; and
-`outside`, given to no run. It is removed when the case ends, and the one file
-the build probe writes in a temporary directory outside it (a name unique to
-the run) is removed too.
+`outside`, given to no run. It is removed when the case ends.
+
+The build probe's temporary file has a random name made for each case
+(`dlive-probe-` and 16 hex digits from `/dev/urandom`). The script records the
+file's path in `work` before it makes the file, and makes it with `set -C`, so
+a file already at that path is never written. Afterwards the harness removes
+only a regular file (not a link) with that name at the recorded path; it
+removes nothing else outside the case directory. If the script is stopped
+before it makes the file, nothing is left; if the harness itself is killed, the
+file can remain.
+
+After a run the harness reads what the worker could have changed (`note.txt`,
+the recorded path) only when it is a regular file, opened without blocking and
+without following a link, so a FIFO left in its place cannot stall the case.
 
 The directories are made on macOS under the per-user temporary directory that
 `getconf DARWIN_USER_TEMP_DIR` names (under `/var/folders`), and elsewhere under
@@ -198,49 +220,71 @@ Code points its commands' `TMPDIR`), not under `/tmp` (which Codex's `build`
 includes), and not the `TMPDIR` delega was given (which Codex also includes).
 On a system with no `XDG_RUNTIME_DIR` the directories fall back under `/tmp`;
 then the outside write is still asserted for Claude Code, whose sandbox does not
-let commands write the rest of `/tmp`, and is recorded as not asserted for
-Codex. Whether Claude Code's sandbox lets commands write under `/var/folders`
-had not been run live when this suite was written; the first live run shows it.
+let commands write the rest of `/tmp`, and is `not_shown` for Codex.
 
 ### Bounds
 
 Every run has `--timeout 120s` (the timeout case 10 s). If `delega` has not
-exited 45 s past its time limit (`doctor`, 60 s after it starts), the harness sends SIGTERM,
-and SIGKILL 15 s later, and the case fails with a problem saying so. So each
-run ends, and the suite with it. `delega` runs in a process group of its own; a
-Ctrl-C at the harness's terminal does not reach it, and a `delega` left by a
-killed harness ends at its own time limit.
+exited 45 s past its time limit (`doctor` and the dry run, 60 s after they
+start), the harness sends SIGTERM, and SIGKILL 15 s later, and the case fails
+with a problem saying so. After `delega` exits the harness waits at most 5 s
+for its standard output and standard error to close; a process it started that
+still holds one fails the case, with what was already written kept. Each case
+has a bound of 450 s, enough for the two runs of `resume` with every
+escalation: a run is given at most what is left of it, and none starts after
+it. So each case ends, and the suite with it.
+
+A SIGKILL of `delega` is a last resort: it cannot stop its worker, so the
+harness prints on standard error that the provider may still be running
+(delega issue 163). The harness does not look for or kill provider processes.
+
+### Ctrl-C
+
+`delega` runs in a process group of its own, so a Ctrl-C at the terminal
+reaches only the harness. The harness catches SIGINT and SIGTERM and passes the
+current `delega` its documented interrupt, SIGINT. If `delega` has not exited
+20 s later, it gets SIGTERM, and SIGKILL 15 s after that, announced as above.
+The case then fails, its directory is removed, no results are written, and the
+harness exits 130. Further Ctrl-Cs change nothing; the stop is already bounded.
 
 ### Output
 
 One line per case (provider, case, verdict, outcome, seconds) with the
-problems of a failed case, then per provider the number of runs, the version,
-the cost Claude Code reports in `usage.cost_usd` and the token counts. Codex
-reports no cost. Nothing printed or recorded holds a model's answer, the content
-of a file other than the words the harness seeded, or an environment value.
+problems and the not-shown checks of a case that is not a pass, then counts of
+each verdict, then per provider the version number, the number of runs, the
+cost Claude Code reports in `usage.cost_usd` (or that no cost was reported, as
+for Codex) and the token counts. Nothing printed or recorded holds a model's
+answer, a denial's text, the content of a file other than the words the
+harness seeded, a provider's version line (only the provider name and the
+first version number in it, such as `claude 2.1.330`), or an environment value.
 Problems name what was asserted; an error is named by its `error.kind` only.
 
-`--out FILE` writes one JSON line per case (verdict, outcome, exit status,
-`cleanup.confirmed`, the number of denials, whether a `wider than requested`
-note was present, `error.kind`, provider version, seconds, reported cost and
-tokens, and the checks, notes and problems) and `FILE` with the extension
-`meta.json` (date, machine, delega version, harness commit, provider versions,
-model and effort). `--report` renders `acceptance/live.jsonl` and
-`live.meta.json`, when present, into a "Live suite" section at the end of
-`RESULTS.md`; without them the section says no live run is recorded.
+`--out FILE` writes one file: first a line `{"meta": {...}}` (date, machine,
+delega version, harness commit, provider version numbers, the number of cases,
+model, effort and seconds), then one JSON line per case (verdict, outcome,
+exit status, `cleanup.confirmed`, the number of denials, whether a
+`wider than requested` note was present, `error.kind`, provider version number,
+seconds, reported cost and tokens, and the checks, notes, not-shown checks and
+problems). It is written to a temporary file beside `FILE` and renamed into
+place. `--report` renders `acceptance/live.jsonl`, when present, into a "Live
+suite" section at the end of `RESULTS.md`, with the not-shown checks and notes
+of each case. It refuses a file whose first line is not the metadata, or whose
+metadata does not match its rows (the number of cases, a provider's version).
+Without the file the section says no live run is recorded.
 
 ### Cost
 
-An estimate, not a measurement: a full run makes 9 model runs per provider
-(none for `doctor`, two for `resume`), of which `interrupt` and `timeout` are
-stopped early. For Claude Code, two start runs in #115 (default model) reported
-$0.011 and $0.028 each, so 9 runs cost at most about $0.25 at those figures;
-haiku costs less per token, so expect less. For Codex, a start run in #115
-reported about 16,000 input tokens, 13,000 of them cached, and about 600 output
-tokens; with a ChatGPT login that counts against the plan's usage limits and
-has no per-run charge, and with an API key it is billed at the model's token
-prices. The summary line prints what the providers reported, so a recorded run
-replaces this estimate.
+A full run makes 9 model runs per provider (none for `doctor`, two for
+`resume`), of which `interrupt` and `timeout` are stopped early. One run of an
+earlier revision of this suite on macOS on 2026-11-22, with Claude Code 2.1.330
+and codex-cli 0.171.0, passed 18 of 18 cases in 91 s; Claude Code reported
+$0.0049 for its runs in all, and Codex reported no cost. That run is not
+recorded in `live.jsonl`. Before it, the estimate was at most about $0.25 for
+Claude Code, from two start runs in #115 (default model) that reported $0.011
+and $0.028 each. For Codex, a start run in #115 reported about 16,000 input
+tokens, 13,000 of them cached, and about 600 output tokens; with a ChatGPT
+login that counts against the plan's usage limits and has no per-run charge,
+and with an API key it is billed at the model's token prices.
 
 ## The matrix
 
