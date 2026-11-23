@@ -259,8 +259,8 @@ Behaviour:
   `invalid_env_name`; a calling-session variable, a `DELEGA_*` variable or a
   name delega sets for the provider is `forbidden_env_name`. The message gives
   the position, not the name. A secret-looking name is allowed and named in
-  `provider_notes`, and a run that reaches environment resolution carries one
-  note with the counts withheld and passed. A profile cannot carry `env`. The configuration file's `[env]`
+  `provider_notes`, and a result can carry a note with the counts withheld and
+  passed. A profile cannot carry `env`. The configuration file's `[env]`
   applies first, so a flag that sets the same variable wins.
 - **Output.** `--output text` prints the answer to standard output only for
   `completed`, with a trailing newline added. A run that did not complete
@@ -336,8 +336,8 @@ Behaviour:
 
 `delega doctor` reports what a run in the current directory would meet, with
 the [configuration file](#configuration-file) applied and no `--env`. It starts
-no worker and writes nothing. It starts each provider's `--version` probe (5 s
-limit) and one `ps` listing. It prints no environment value, deny rule or
+no worker and writes nothing. It may start each found provider's `--version`
+probe (5 s limit) and attempts one `ps` listing. It prints no environment value, deny rule or
 file content.
 
 For `claude` and `codex` each it reports:
@@ -427,9 +427,10 @@ Options for both: `--host claude|codex` (repeatable), `--install-dir DIR`,
   reused only if it is empty or holds a valid marker.
 - **Hosts.** `DELEGA_CLAUDE_BIN` or `DELEGA_CODEX_BIN`, else the absolute
   entries of `PATH` (`find_host` in `crates/delega/src/commands/plugin/mod.rs`);
-  the configuration file is not used. Every host named with `--host` must be
-  found. Without `--host`, missing hosts are skipped and at least one must be
-  found.
+  the configuration file is not used. For install, every host named with
+  `--host` must be found; without `--host`, missing hosts are skipped and at
+  least one must be found. Uninstall needs the CLI only of selected hosts the
+  marker records.
 - **Files written** under the managed directory:
 
   | Path | Content |
@@ -601,9 +602,9 @@ supervisor behind it is described in [supervisor.md](supervisor.md).
 | `wait` | `runs`, `workers` or both (at most 256 ids together), `timeout_secs`, `after` (cursor) | When a run finishes, an interaction needs an answer, or on timeout: `timed_out`, the `timeout_secs` applied, each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Also `released_by_shutdown: true` when shutdown released it, and `limit_reached: "max_waits_in_flight"` when too many waits were open. |
 | `read` | `run` or `worker`, `detail`, `after`, `text_offset` | The result if finished; otherwise state, pending interactions and `progress`. `text_window` with `text_offset`, and a `cursor`. |
 | `list` | none | Live workers, then closed ones still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; limits in force and in use (including `default_wait_secs`, `wait_ceiling_secs`, `max_waits_in_flight`, `waits_in_flight`); a `cursor`; and [`stale_server`](#stale-server) when it applies. |
-| `interrupt` | `run` or `worker` | When the run stops, or after 30 s with `settled: false`: `settled`, `was_queued` and the compact result. |
+| `interrupt` | `run` or `worker` | When the run stops: `settled`, `was_queued` and the compact result. After 30 s without stopping: `settled: false` and no result. |
 | `respond` | `interaction`, `decision` (`allow`, `deny`), optional `note` (at most 256 bytes, discarded) | `accepted`, `unknown_interaction`, `already_answered`, `timed_out` or `closed`. |
-| `close` | `worker` | Stops the running run (waits at most 30 s; `settled: false` if it has not stopped), discards queued ones, frees the slot: `already_closed`, `discarded`, `stopped_run`, `settled` and the stopped run's compact result. |
+| `close` | `worker` | Stops the running run (waits at most 30 s; `settled: false` if it has not stopped), discards queued ones, frees the slot: `already_closed`, `discarded`, `stopped_run`, `settled`, and the stopped run's compact result when settled. |
 
 Rules:
 
@@ -672,10 +673,10 @@ Rules:
 ### Stale server
 
 A running host session keeps the server it started with. After `delega plugin
-install` or `uninstall` replaces or removes that executable, `list` and
-`delega://identity` carry a `stale_server` object until the server is
-reconnected or a new session starts. A call whose check times out (2 s) or
-finds too many checks pending omits it.
+install` or `uninstall` replaces or removes that executable, a `stale_server`
+object is usually present in `list` and `delega://identity` until the server is
+reconnected or a new session starts. It can be absent, for example when a check
+times out.
 
 | Field | Meaning |
 | --- | --- |

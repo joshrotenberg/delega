@@ -12,7 +12,8 @@
 //! `plugin update` refreshes its cached copy, which a repeated `plugin install`
 //! alone leaves stale; Codex's `plugin add` copies the plugin into its cache
 //! each time. The first command that fails skips the rest of that host's
-//! sequence; the other host is still installed and the files stay in place. No host cache is deleted.
+//! sequence; the other selected, available host is still attempted and can
+//! fail on its own, and the files stay in place. No host cache is deleted.
 //! `files` and `hosts` in the marker accumulate across repeated installs.
 //!
 //! When the running executable is itself the managed copy, writing it is
