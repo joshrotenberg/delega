@@ -147,8 +147,8 @@ fn a_real_run_reports_the_file_and_the_layer_that_set_each_field() {
     assert_eq!(passed["total"].as_u64(), Some(parts), "{env}");
     let withheld = &env["withheld"];
     assert_eq!(
-        withheld["never_passed"], 4,
-        "provider binaries, test system root and the shared keeper registry: {env}"
+        withheld["never_passed"], 3,
+        "provider binaries and test system root: {env}"
     );
     assert!(withheld["not_allowlisted"].as_u64() >= Some(1), "{env}");
     assert_eq!(

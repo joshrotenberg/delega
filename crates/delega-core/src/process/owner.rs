@@ -736,7 +736,6 @@ impl OwnedProcess {
                     deadline,
                     ceiling: spec.time_limit + deadline + KEEPER_CEILING_MARGIN,
                     marker: marker.token(),
-                    registry: keeper.registry.as_deref(),
                 };
                 let started = super::keeper::start(keeper, launch)
                     .await

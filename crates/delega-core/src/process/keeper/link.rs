@@ -40,7 +40,6 @@ pub(crate) struct LaunchSpec<'a> {
     pub deadline: Duration,
     pub ceiling: Duration,
     pub marker: &'a str,
-    pub registry: Option<&'a Path>,
 }
 
 /// Why a kept run did not start.
@@ -397,7 +396,6 @@ pub(crate) async fn start(
         deadline: launch.deadline,
         ceiling: launch.ceiling,
         marker: launch.marker.to_string(),
-        registry: launch.registry.map(Path::to_path_buf),
     };
     let (stdin_keep, stdin_give) = match stdin {
         Some((read, write)) => (Some(write), Some(read)),

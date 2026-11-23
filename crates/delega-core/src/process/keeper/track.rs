@@ -214,8 +214,7 @@ pub(crate) const NO_TRACKING_ENV: &str = "DELEGA_TEST_NO_FORK_TRACKING";
 /// Check the calls the tracker relies on, open its queue and start its
 /// thread, which waits for [`Handle::start`]. The keeper says `tracker on`
 /// only when this succeeds.
-/// Returns a note when the tracker runs without the keeper registry.
-pub(super) fn prepare(registry: Option<&std::path::Path>) -> Result<Option<String>, String> {
+pub(super) fn prepare() -> Result<(), String> {
     if std::env::var_os(NO_TRACKING_ENV).is_some() {
         return Err(format!("{NO_TRACKING_ENV} is set"));
     }
@@ -225,37 +224,17 @@ pub(super) fn prepare(registry: Option<&std::path::Path>) -> Result<Option<Strin
         .ok()
         .flatten()
         .ok_or("the keeper's own identity could not be read")?;
-    let (registry, note) = match registry {
-        None => (None, Some("no keeper registry was given".to_string())),
-        Some(dir) => match super::registry::Registry::open(dir, me.pid, me.uniqueid) {
-            Ok(registry) => (Some(registry), None),
-            Err(why) => (
-                None,
-                Some(format!("the keeper registry is unavailable: {why}")),
-            ),
-        },
-    };
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("keeper-track".into())
         .spawn({
             let queue = queue.clone();
-            move || {
-                let mut tracker = Tracker::new(queue, me.uniqueid);
-                tracker.registry = registry;
-                tracker.run(&rx);
-            }
+            move || Tracker::new(queue, me.uniqueid).run(&rx)
         })
         .map_err(|e| format!("the tracker thread could not start: {e}"))?;
     TRACKER
         .set(Handle { tx, queue })
-        .map_err(|_| "the tracker was prepared twice".to_string())?;
-    Ok(note.map(|why| {
-        format!(
-            "{why}; every orphan of a process created during the run counts as possibly this \
-             run's, so another run's orphans can make cleanup unconfirmed"
-        )
-    }))
+        .map_err(|_| "the tracker was prepared twice".to_string())
 }
 
 impl Handle {
@@ -375,8 +354,6 @@ struct Tracker {
     depth: u32,
     /// Where the first failed read since the previous answer happened.
     first_hole: Option<&'static str>,
-    /// This keeper's entry in the keeper registry, when there is one.
-    registry: Option<super::registry::Registry>,
     /// When the current request or batch of events must end. Past it, the
     /// tracker stops listing and scanning and counts a hole once.
     until: Option<Instant>,
@@ -415,7 +392,6 @@ impl Tracker {
             saturated: false,
             depth: 0,
             first_hole: None,
-            registry: None,
             until: None,
             expired: false,
             #[cfg(test)]
@@ -572,17 +548,9 @@ impl Tracker {
         }
     }
 
-    /// Record a unique id as proven the tree's, and publish it in the keeper
-    /// registry. A registry that cannot be written is dropped: other runs
-    /// then count this run's orphans as possibly theirs, which only makes
-    /// their verdicts more cautious.
+    /// Record a unique id as proven the tree's.
     fn know(&mut self, uniqueid: u64) {
-        if self.known.insert(uniqueid)
-            && let Some(registry) = self.registry.as_mut()
-            && !registry.publish(uniqueid)
-        {
-            self.registry = None;
-        }
+        self.known.insert(uniqueid);
     }
 
     /// Whether `pid` is in the program's session, which proves it the
@@ -1046,19 +1014,9 @@ impl Tracker {
             }
         }
         self.discover(queue);
-        // Unique ids another live keeper took: their orphans are that run's.
-        // Without the registry nothing is exempt.
-        let others = self
-            .registry
-            .as_ref()
-            .and_then(|r| r.others().ok())
-            .unwrap_or_default();
         let mut queue = Vec::new();
         for ident in &table {
-            if !unseen(self, ident)
-                || others.contains(&ident.puniqueid)
-                || others.contains(&ident.uniqueid)
-            {
+            if !unseen(self, ident) {
                 continue;
             }
             // Reparented to launchd (its parent has exited), this user's,

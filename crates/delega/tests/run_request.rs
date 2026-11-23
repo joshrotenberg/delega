@@ -1218,11 +1218,10 @@ fn a_dry_run_groups_the_names_counts_the_withheld_and_prints_no_value() {
                 .contains(&"NAMED_ONE".into())
         );
         assert_eq!(env["named_not_set"][0], "NOT_SET_ANYWHERE");
-        // Eleven withheld: the other provider's key and config path, a token,
+        // Ten withheld: the other provider's key and config path, a token,
         // EDITOR, JAVA_HOME, DATABASE_URL, NAMED_TOKEN, the two provider
-        // binary overrides, the test system root and the tests' shared keeper
-        // registry.
-        assert_eq!(env["withheld_count"], 11, "{env}");
+        // binary overrides and the test system root.
+        assert_eq!(env["withheld_count"], 10, "{env}");
         assert!(!text(&out.stdout).contains(CANARY));
         assert!(!rig.record.join("argv").exists(), "{provider} was started");
     }

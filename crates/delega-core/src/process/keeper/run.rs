@@ -120,8 +120,6 @@ pub fn keeper_main() -> i32 {
         }
     };
     let code = runtime.block_on(keep(hello, fds));
-    #[cfg(target_os = "macos")]
-    super::registry::unpublish();
     code
 }
 
@@ -167,15 +165,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
     let subreaper = false;
     // Before the program starts, so that it is watched from its first fork.
     #[cfg(target_os = "macos")]
-    match super::track::prepare(hello.registry.as_deref()) {
-        Ok(note) => {
-            say(&FromKeeper::Tracker(Ok(())));
-            if let Some(note) = note {
-                say(&FromKeeper::Warn(note));
-            }
-        }
-        Err(why) => say(&FromKeeper::Tracker(Err(why))),
-    }
+    say(&FromKeeper::Tracker(super::track::prepare()));
 
     let mut fds = fds.into_iter();
     let stdin = if hello.stdin {

@@ -16,39 +16,8 @@ use crate::process::{Ending, KeeperCommand, ProcessHandle, ProcessSpec};
 const ENTRY_ENV: &str = "DELEGA_TEST_KEEPER_ENTRY";
 
 /// The keeper for tests: this test binary, running [`keeper_entry`] only.
-/// The keeper registry the tests' keepers share: a temporary directory of
-/// this test process (mode 0700), never one under the real home.
-/// A test process this one starts as an owner (see [`owner_entry`]) finds
-/// the shared registry in [`REGISTRY_ENV`], so its keeper's orphans are
-/// published where this process's keepers look.
-pub(super) fn test_registry() -> &'static std::path::Path {
-    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    static OWNED: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| match std::env::var_os(REGISTRY_ENV) {
-        Some(dir) => std::path::PathBuf::from(dir),
-        None => OWNED
-            .get_or_init(|| {
-                tempfile::Builder::new()
-                    .prefix("delega-keepers-")
-                    .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
-                    .tempdir()
-                    .expect("a registry directory")
-            })
-            .path()
-            .to_path_buf(),
-    })
-}
-
-/// The registry directory of the test process that started this one.
-pub(super) const REGISTRY_ENV: &str = "DELEGA_TEST_KEEPER_REGISTRY";
-
 pub(super) fn test_keeper() -> KeeperCommand {
     let exe = std::env::current_exe().expect("the test binary's path");
-    test_keeper_without_registry(exe).registry(test_registry())
-}
-
-/// The test keeper with no registry.
-pub(super) fn test_keeper_without_registry(exe: std::path::PathBuf) -> KeeperCommand {
     KeeperCommand::new(
         exe,
         [
@@ -367,7 +336,6 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
             "-q",
         ])
         .env(OWNER_ENV, s.dir())
-        .env(REGISTRY_ENV, test_registry())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -701,7 +669,6 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
                 "-q",
             ])
             .env(OWNER_ENV, s.dir())
-            .env(REGISTRY_ENV, test_registry())
             .env(OWNER_RELAY_ENV, "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
