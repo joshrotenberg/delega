@@ -88,6 +88,61 @@ pub(super) fn wait_for_exit(child: i32) -> Result<(), String> {
     }
 }
 
+/// How a child ended, as `waitid` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExitSummary {
+    /// The exit code, when it exited.
+    pub code: Option<i32>,
+    /// The signal that ended it, when one did.
+    pub signal: Option<i32>,
+}
+
+fn summary(status: &WaitIdStatus) -> ExitSummary {
+    ExitSummary {
+        code: status.exit_status(),
+        signal: status.terminating_signal(),
+    }
+}
+
+/// Block until `child` has exited, without reaping it, and say how it ended.
+/// As [`wait_for_exit`], a stop is not an ending.
+pub(super) fn wait_for_exit_status(child: i32) -> Result<ExitSummary, String> {
+    let Some(child) = Pid::from_raw(child) else {
+        return Err(format!("invalid pid {child}"));
+    };
+    loop {
+        match rustix::process::waitid(
+            WaitId::Pid(child),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+        ) {
+            Ok(Some(status)) if is_ending(&status) => return Ok(summary(&status)),
+            Ok(_) => std::thread::sleep(EXIT_POLL_INTERVAL),
+            Err(Errno::INTR) => {}
+            Err(errno) => return Err(std::io::Error::from(errno).to_string()),
+        }
+    }
+}
+
+/// Reap `child` if it has exited; `true` when it was reaped.
+pub(super) fn reap_if_exited(child: i32) -> bool {
+    let Some(child) = Pid::from_raw(child) else {
+        return false;
+    };
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG;
+    matches!(
+        rustix::process::waitid(WaitId::Pid(child), options),
+        Ok(Some(status)) if is_ending(&status)
+    )
+}
+
+/// Make the calling process the reaper of every orphaned descendant
+/// (`prctl(PR_SET_CHILD_SUBREAPER)`). Linux only.
+#[cfg(target_os = "linux")]
+pub(super) fn become_subreaper() -> Result<(), String> {
+    rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
+        .map_err(|errno| std::io::Error::from(errno).to_string())
+}
+
 /// The session id of a process, when it can be read.
 #[cfg(test)]
 pub(super) fn session_of(target: i32) -> Option<i32> {
@@ -187,11 +242,13 @@ pub(super) fn probe_group(pgid: i32) -> GroupProbe {
 
 /// Make the child lead a new session, so it has no controlling terminal and
 /// every descendant that does not call `setsid` itself shares its session id.
+/// Used for the provider and for the keeper alike.
 ///
 /// This is the only `unsafe` in the workspace: `Command::pre_exec` is unsafe
 /// because the closure runs in the forked child before `exec`.
 #[allow(unsafe_code)]
-pub(super) fn new_session(command: &mut tokio::process::Command) {
+pub(super) fn new_session(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
     // SAFETY: the closure calls only `setsid(2)`, which is async-signal-safe,
     // through rustix's direct syscall. It allocates nothing, takes no locks and
     // touches no state of the parent; a failure becomes an `io::Error` built

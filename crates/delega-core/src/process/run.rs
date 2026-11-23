@@ -17,7 +17,7 @@ use super::capture::{Bounded, Captured};
 use super::dialogue::End;
 use super::handle::Stop;
 use super::limits::{FAR_FUTURE, STDERR_READ_CHUNK, STDOUT_READ_CHUNK};
-use super::owner::{OwnedProcess, Registry, Settled, Shared};
+use super::owner::{OwnedProcess, Registry, Settled, Shared, SpawnFailure};
 use super::report::{Ending, LeaderExit, ProcessReport, ProcessTiming};
 use super::spec::ProcessSpec;
 use super::sys::Signal;
@@ -30,7 +30,7 @@ const DIALOGUE_STOP_WRITE_BUDGET: Duration = Duration::from_millis(50);
 pub const PIPE_WARNING: &str =
     "Output pipes remained open after process-group cleanup; the owner closed its ends";
 
-fn command(spec: &ProcessSpec) -> tokio::process::Command {
+pub(super) fn command(spec: &ProcessSpec) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&spec.program);
     command.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
@@ -71,10 +71,13 @@ pub(super) async fn run_owned(
 ) -> ProcessReport {
     let started_wall = SystemTime::now();
     let started = Instant::now();
-    let mut command = command(&spec);
-    let mut owner = match OwnedProcess::spawn(&mut command, &spec, &registry) {
+    let mut owner = match OwnedProcess::spawn(&spec, &registry).await {
         Ok(owner) => owner,
-        Err(error) => return failed_to_start(&spec, error),
+        Err(SpawnFailure::Program(error)) => {
+            let program = spec.program.to_string_lossy();
+            return failed_to_start(&spec, format!("could not start {program}: {error}"));
+        }
+        Err(SpawnFailure::Keeper(why)) => return failed_to_start(&spec, why),
     };
     let shared = owner.shared.clone();
     registry
@@ -175,16 +178,19 @@ async fn drive(
         };
     };
 
-    let child = owner.child.as_mut().expect("a new owner holds its child");
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    let io = owner
+        .io
+        .take()
+        .expect("a new owner holds its child's streams");
+    let mut stdout = io.stdout;
+    let mut stderr = io.stderr;
     let dialogue = spec.dialogue.as_ref();
     let limit_at = started + spec.time_limit;
     if let Some(dialogue) = dialogue {
         dialogue.started(limit_at);
     }
     let mut pending_line = Vec::new();
-    if let (Some(content), Some(mut stdin)) = (spec.stdin.clone(), child.stdin.take()) {
+    if let (Some(content), Some(mut stdin)) = (spec.stdin.clone(), io.stdin) {
         let task_shared = shared.clone();
         let dialogue = dialogue.cloned();
         owner.stdin_task = Some(tokio::spawn(async move {
@@ -499,14 +505,11 @@ fn build_report(
     }
 }
 
-fn failed_to_start(spec: &ProcessSpec, error: std::io::Error) -> ProcessReport {
+fn failed_to_start(spec: &ProcessSpec, message: String) -> ProcessReport {
     let now = SystemTime::now();
-    let program = spec.program.to_string_lossy();
     ProcessReport {
         pid: None,
-        ending: Ending::FailedToStart {
-            message: format!("could not start {program}: {error}"),
-        },
+        ending: Ending::FailedToStart { message },
         exit: None,
         stdout: Captured::default(),
         stderr: Captured::default(),
@@ -528,6 +531,10 @@ fn failed_to_start(spec: &ProcessSpec, error: std::io::Error) -> ProcessReport {
             post_exit_group_signal: false,
             pipes_closed_by_owner: false,
             session_members_swept: Vec::new(),
+            keeper: spec
+                .keeper
+                .as_ref()
+                .map(|_| super::report::KeeperDiagnostics::unstarted()),
         },
     }
 }

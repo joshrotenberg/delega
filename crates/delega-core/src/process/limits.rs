@@ -65,6 +65,31 @@ pub const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub const PS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Most bytes of `ps` output accepted.
 pub const PS_MAX_BYTES: usize = 4_000_000;
+/// Most bytes of the marker listing accepted (`ps -E`, macOS), which carries
+/// every environment of this user's processes. About 300 KB was measured with
+/// some 1,000 processes on a development machine.
+pub const MARKER_PS_MAX_BYTES: usize = 32_000_000;
+
+/// Most listings one freeze takes. A freeze stops (SIGSTOP) every process a
+/// listing finds outside the group and lists again until a listing finds
+/// nothing that is not already stopped; a run of it that ends without that is
+/// incomplete and the verdict cannot be `Confirmed`.
+pub const FREEZE_MAX_ROUNDS: u32 = 6;
+/// How long the keeper may take to start the program and say so before the
+/// run is refused.
+pub const KEEPER_START_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the owner waits for the keeper to answer one request (a census of
+/// its tree, a freeze, or the reap).
+pub const KEEPER_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Added to the time limit and the cleanup deadline for the keeper's own
+/// ceiling: if the owner has not had the program reaped by then, the keeper
+/// stops the tree by itself, as when the owner is gone.
+pub const KEEPER_CEILING_MARGIN: Duration = Duration::from_secs(10);
+/// How often the keeper reaps adopted orphans and checks that its parent is
+/// still the owner.
+pub const KEEPER_TICK: Duration = Duration::from_millis(100);
+/// Most passes of the keeper's tree walk in one freeze (Linux).
+pub const KEEPER_FREEZE_PASSES: u32 = 64;
 
 /// Size of the buffer for one read from standard output.
 pub const STDOUT_READ_CHUNK: usize = 64 * 1024;

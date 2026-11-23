@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use super::keeper::KeeperCommand;
 use super::limits::{
     CLEANUP_DEADLINE_MARGIN, DEFAULT_CLEANUP_DEADLINE, DEFAULT_DRAIN_BOUND,
     DEFAULT_STDERR_CAPTURE_BYTES, DEFAULT_STDOUT_CAPTURE_BYTES, DEFAULT_STOP_GRACE,
@@ -160,6 +161,10 @@ pub struct ProcessSpec {
     /// Whether to track descendants with `ps`. Without it only the child's own
     /// process group is signalled.
     pub track_descendants: bool,
+    /// The keeper that starts and holds the program (see
+    /// [`KeeperCommand`]). Without one the program is this process's own
+    /// child and the cleanup gaps the module documentation lists remain.
+    pub keeper: Option<KeeperCommand>,
     pub(crate) lister: Option<Lister>,
     /// Test seam: make the first N group SIGKILLs do nothing.
     #[cfg(test)]
@@ -250,6 +255,7 @@ impl ProcessSpec {
             drain_bound: DEFAULT_DRAIN_BOUND,
             cleanup_deadline: DEFAULT_CLEANUP_DEADLINE,
             track_descendants: true,
+            keeper: None,
             lister: None,
             #[cfg(test)]
             swallow_group_kills: 0,
@@ -327,6 +333,7 @@ impl std::fmt::Debug for ProcessSpec {
             .field("drain_bound", &self.drain_bound)
             .field("cleanup_deadline", &self.cleanup_deadline)
             .field("track_descendants", &self.track_descendants)
+            .field("keeper", &self.keeper)
             .finish_non_exhaustive()
     }
 }
