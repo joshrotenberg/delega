@@ -266,6 +266,37 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                         ))),
                     }
                 }
+                // On macOS the tracker answers on a blocking task of its
+                // own, within its budget, so this loop goes on watching the
+                // socket, the signals and the ceiling meanwhile.
+                #[cfg(target_os = "macos")]
+                Some(Event::Command(ToKeeper::Census(id))) if super::track::get().is_some() => {
+                    let tracker = super::track::get().cloned();
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(tracker) = tracker {
+                            let report = tracker.census();
+                            say(&FromKeeper::Tree {
+                                id,
+                                live: report.effective_live(),
+                                detail: report.detail(),
+                            });
+                        }
+                    });
+                }
+                #[cfg(target_os = "macos")]
+                Some(Event::Command(ToKeeper::Freeze(id))) if super::track::get().is_some() => {
+                    let tracker = super::track::get().cloned();
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(tracker) = tracker {
+                            let report = tracker.freeze_kill();
+                            say(&FromKeeper::Tree {
+                                id,
+                                live: report.effective_live(),
+                                detail: report.detail(),
+                            });
+                        }
+                    });
+                }
                 Some(Event::Command(ToKeeper::Census(id))) => {
                     let (live, detail) = census_report(pid);
                     say(&FromKeeper::Tree { id, live, detail });

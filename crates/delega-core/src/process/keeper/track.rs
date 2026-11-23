@@ -79,6 +79,12 @@ const MARGIN_US: u64 = 1_000;
 /// Listings one scan may take while new processes keep appearing before
 /// the tracker counts a hole.
 const MAX_ROUNDS: u32 = 64;
+/// How long one census may take; past it, the answer is unproven.
+const CENSUS_BUDGET: Duration = Duration::from_secs(1);
+/// How long one freeze may take, its final census included.
+const FREEZE_BUDGET: Duration = Duration::from_secs(2);
+/// How long the tracker may spend on one batch of events between requests.
+const BATCH_BUDGET: Duration = Duration::from_millis(250);
 /// How deep recovery scans may nest before the tracker counts a hole.
 const MAX_DEPTH: u32 = 32;
 /// How long a process being created is waited for before it counts as a
@@ -368,6 +374,10 @@ struct Tracker {
     first_hole: Option<&'static str>,
     /// This keeper's entry in the keeper registry, when there is one.
     registry: Option<super::registry::Registry>,
+    /// When the current request or batch of events must end. Past it, the
+    /// tracker stops listing and scanning and counts a hole once.
+    until: Option<Instant>,
+    expired: bool,
     /// How old each process was when it was taken, in microseconds, for the
     /// measurement in the tests.
     #[cfg(test)]
@@ -401,6 +411,8 @@ impl Tracker {
             depth: 0,
             first_hole: None,
             registry: None,
+            until: None,
+            expired: false,
             #[cfg(test)]
             ages: Vec::new(),
             refused: 0,
@@ -428,7 +440,35 @@ impl Tracker {
         }
     }
 
+    /// Give the current work until `budget` from now.
+    fn budget(&mut self, budget: Duration) {
+        self.until = Some(Instant::now() + budget);
+        self.expired = false;
+    }
+
+    /// Whether the current work's budget is spent; the first time, a hole.
+    fn spent(&mut self) -> bool {
+        if self.until.is_some_and(|until| Instant::now() >= until) {
+            if !self.expired {
+                self.expired = true;
+                self.hole("budget");
+            }
+            return true;
+        }
+        false
+    }
+
     fn serve(&mut self, request: Request) {
+        match request {
+            Request::Census(_) => self.budget(CENSUS_BUDGET),
+            Request::Freeze(_) => self.budget(FREEZE_BUDGET),
+            _ => self.budget(BATCH_BUDGET),
+        }
+        self.serve_within(request);
+        self.until = None;
+    }
+
+    fn serve_within(&mut self, request: Request) {
         match request {
             Request::Start(program, ident, watched) => self.start(program, ident, watched),
             Request::Census(tx) => {
@@ -454,6 +494,12 @@ impl Tracker {
             return;
         }
         let returned = now_us();
+        // Between requests, a batch of events has a budget of its own; inside
+        // a request (its `drain`), the request's budget holds.
+        let batch = self.until.is_none();
+        if batch && !events.is_empty() {
+            self.budget(BATCH_BUDGET);
+        }
         for event in events.drain(..) {
             if event.forked {
                 self.forked(event.pid, waited_from);
@@ -461,6 +507,9 @@ impl Tracker {
             if event.exited {
                 self.exited(event.pid);
             }
+        }
+        if batch {
+            self.until = None;
         }
         self.last_wait_us = returned;
     }
@@ -643,6 +692,9 @@ impl Tracker {
     /// the queue is empty.
     fn discover(&mut self, mut queue: Vec<(i32, u64)>) {
         while let Some((pid, uniqueid)) = queue.pop() {
+            if self.spent() {
+                return;
+            }
             let _ = self.list_under(pid, uniqueid, &mut queue);
         }
     }
@@ -764,6 +816,9 @@ impl Tracker {
             self.hole("recover1");
             return;
         }
+        if self.spent() {
+            return;
+        }
         self.depth += 1;
         if let Some(window) = self.windows.get_mut(index) {
             window.open += 1;
@@ -844,6 +899,10 @@ impl Tracker {
         let mut pending = pids;
         let mut rounds = 0;
         while !pending.is_empty() {
+            if self.spent() {
+                scanned.complete = false;
+                break;
+            }
             for pid in pending.drain(..) {
                 if self
                     .by_pid
@@ -1121,6 +1180,9 @@ impl Tracker {
         let mut previous: Option<BTreeSet<u64>> = None;
         let mut last = 0;
         for pass in 1..=KEEPER_FREEZE_PASSES {
+            if self.spent() {
+                return (last.max(1), pass, false);
+            }
             let before = self.holes();
             self.drain();
             self.refresh();
@@ -1243,7 +1305,7 @@ impl Tracker {
                 frozen = true;
                 break;
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline || self.spent() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -1257,7 +1319,7 @@ impl Tracker {
         loop {
             let (live, _, counted) = self.census_passes();
             let complete = frozen && !refused_here && counted;
-            if (complete && live == 0) || Instant::now() >= until {
+            if (complete && live == 0) || Instant::now() >= until || self.expired {
                 let live = if complete { live } else { live.max(1) };
                 return self.report(live, passes, complete);
             }
@@ -1377,6 +1439,47 @@ mod tests {
             ages[ages.len() - 1],
             scans[10],
             recoveries[10]
+        );
+    }
+
+    #[test]
+    fn a_census_of_a_family_that_keeps_forking_ends_within_its_budget_unproven() {
+        use crate::test_spawn::Guarded;
+        // Its children outlive their parent when it is killed.
+        crate::test_spawn::rooms::hold(crate::test_spawn::rooms::Room::Alone);
+        let mut t = tracker();
+        let script = "my $end = time + 5; while (time < $end) { if (fork() == 0) { \
+            select(undef, undef, undef, 0.1); exit 0 } select(undef, undef, undef, 0.001); \
+            1 while waitpid(-1, 1) > 0 }";
+        let mut child = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", script])
+            .guarded_spawn()
+            .expect("start perl");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        let ident = darwin::identity(pid).ok().flatten();
+        let watched = t.queue.watch(pid);
+        t.start(pid, ident, watched);
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            t.collect(Duration::from_millis(5), &mut events);
+        }
+        let bound = Duration::from_millis(50);
+        t.budget(bound);
+        let began = Instant::now();
+        let report = t.census();
+        let took = began.elapsed();
+        t.until = None;
+        let _ = child.kill();
+        let _ = child.wait();
+        // One pass (a scan of every process and a listing of each child)
+        // may be under way when the budget runs out.
+        assert!(took < bound + Duration::from_millis(500), "{took:?}");
+        assert!(report.read_failures > 0, "{report:?}");
+        assert_eq!(report.hole, Some("budget"), "{report:?}");
+        assert!(
+            crate::process::keeper::link_reply_unproven("census", &report.detail()),
+            "{}",
+            report.detail()
         );
     }
 
