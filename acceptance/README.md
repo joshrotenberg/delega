@@ -14,6 +14,10 @@ matrix of the outcome spike (`delega-dot-spike-outcomes`, commit `7f4da23`),
 which drove counterpart's and due's libraries, so the results can be compared:
 [COMPARISON.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/COMPARISON.md).
 
+It also has a live suite for criterion 6, which runs a few cases per provider
+against the installed `claude` and `codex` and only with `--live`; see
+[Live suite](#live-suite).
+
 Results: [RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md) (summary and expected failures),
 `results.jsonl` (one row per case), `repeats.jsonl` (three more full runs, for
 variation).
@@ -31,6 +35,7 @@ cargo run --release -p delega-acceptance -- --timing-gaps --repeat 3 --out /tmp/
 cargo run -p delega-acceptance -- --list                   # row ids
 cargo run -p delega-acceptance -- --report                 # regenerate RESULTS.md and COMPARISON.md
 cargo run -p delega-acceptance -- --sweep                  # kill leftovers of an interrupted harness run
+cargo run -p delega-acceptance -- --live                   # the live suite, real providers (see below)
 ```
 
 `--timing-gaps` selects the rows whose expectation is a timing-dependent known
@@ -116,7 +121,7 @@ fails.
 
 ## Safety
 
-Everything runs against fake provider scripts. Each case gets a temporary
+Everything but `--live` runs against fake provider scripts. Each case gets a temporary
 directory with its own `HOME`, the fakes as `DELEGA_CLAUDE_BIN` and
 `DELEGA_CODEX_BIN`, and a cleared environment (`PATH=/usr/bin:/bin` and the few
 variables set by the harness). Nothing reads real provider state, a shell
@@ -125,6 +130,117 @@ runs in a process group of its own, so no signal the harness sends reaches the
 harness. The harness kills every process it finds by marker after each case,
 including the cases that are designed to leave strays, and sweeps again at the
 end.
+
+## Live suite
+
+`--live` runs the installed `claude` and `codex` through the built `delega`
+binary, with the real `HOME` and the caller's provider logins. It calls the
+real models and costs money, so nothing live runs without the flag, it is never
+run in CI, and `cargo test` never runs it. `--provider` without `--live` is
+refused, and so is `--live` with a matrix option (`--all`, `--smoke`,
+`--filter`, `--timing-gaps`, `--repeat`, `--jobs`, `--report`, `--results`,
+`--sweep`, `--allow-skips`).
+
+```sh
+cargo run -p delega-acceptance -- --live                       # both providers
+cargo run -p delega-acceptance -- --live --provider claude     # one provider
+cargo run -p delega-acceptance -- --live --list                # the case ids, nothing run
+cargo run -p delega-acceptance -- --live --out acceptance/live.jsonl
+cargo run -p delega-acceptance -- --report                     # then render it into RESULTS.md
+```
+
+Every Claude run asks for `--model haiku` and every Codex run for
+`--effort low`. Prompts are one or two sentences that say exactly what to do.
+Cases run one at a time. The run exits non-zero when a case fails.
+
+### Cases
+
+Every case runs for each provider. Every `delega run` must print one valid
+result whose exit status follows its outcome, with `cleanup.confirmed` true.
+Beyond that:
+
+| Case | Mode | What it asserts |
+| --- | --- | --- |
+| `doctor` | | `delega doctor --output json` reports the provider `ready`; its version is recorded. |
+| `plain-answer` | `read` | `completed` with a non-empty answer. |
+| `read-cwd` | `read` | `completed`, and the answer has the word the harness seeded in `word.txt` in the working directory. |
+| `write-refused` | `read` | `completed` or `refused`, and the seeded `note.txt` is unchanged. The number of denials is recorded, not asserted: in `read` Claude Code is offered no `Edit` or `Write` tool, so a model has nothing to be denied. |
+| `read-outside` | `read` | Claude: `completed` or `refused`, the answer does not have the word seeded in a file outside the working directory, and `permissions.denied` is not empty. Codex: `completed` and a `wider than requested` provider note; whether the answer has the word is recorded, not asserted, because Codex does not confine reads. |
+| `build` | `build` | `completed`, and the worker ran a seeded `probe.sh` to its end. The script writes a file in the working directory and one in `$TMPDIR`, tries to write in the outside directory, and runs `/usr/bin/curl` against `https://example.com`. Asserted: both files exist, the temporary one outside the working directory; the outside file does not; curl did not succeed. Where the temporary file was (the `TMPDIR` delega was given, Claude Code's `/tmp/claude-<uid>`, or elsewhere) is recorded. |
+| `resume` | `read` | Two runs that keep their session. The first is told a word; the second resumes the first run's `session_id` and must complete, report the same session id, and give the word back. |
+| `interrupt` | `build` | The worker is told to run `sleep 120`. The harness sends SIGINT to `delega run` 2 s after a `--progress` line names the shell tool (Claude Code's `Bash`, a Codex `command_execution`), or 30 s after the start if none does. Asserted: `interrupted`, exit 130. |
+| `timeout` | `build` | The same prompt with `--timeout 10s`. Asserted: `timed_out`, exit 124, and `timing.timeout_secs` 10. |
+
+The interrupt goes through the documented interrupt path of the command line
+(SIGINT to `delega run`, see "Interrupt" in
+[docs/api.md](https://github.com/joshrotenberg/delega/blob/main/docs/api.md#command-line)),
+not through MCP or the library.
+
+Every run but the two of `resume` passes `--ephemeral`, so the providers keep
+no session for it. The `resume` runs leave their two sessions in the
+provider's own history under the real `HOME`; the harness does not delete
+provider state.
+
+### Directories
+
+Each case gets a directory `dlive-XXXX` with three subdirectories: `work`, the
+worker's working directory; `tmp`, given to `delega` as `TMPDIR`; and
+`outside`, given to no run. It is removed when the case ends, and the one file
+the build probe writes in a temporary directory outside it (a name unique to
+the run) is removed too.
+
+The directories are made on macOS under the per-user temporary directory that
+`getconf DARWIN_USER_TEMP_DIR` names (under `/var/folders`), and elsewhere under
+`XDG_RUNTIME_DIR` when it is set, else under the system temporary directory.
+The aim is an `outside` directory that no `build` sandbox lets commands write:
+it is not the working directory, not under `/tmp/claude-<uid>` (where Claude
+Code points its commands' `TMPDIR`), not under `/tmp` (which Codex's `build`
+includes), and not the `TMPDIR` delega was given (which Codex also includes).
+On a system with no `XDG_RUNTIME_DIR` the directories fall back under `/tmp`;
+then the outside write is still asserted for Claude Code, whose sandbox does not
+let commands write the rest of `/tmp`, and is recorded as not asserted for
+Codex. Whether Claude Code's sandbox lets commands write under `/var/folders`
+had not been run live when this suite was written; the first live run shows it.
+
+### Bounds
+
+Every run has `--timeout 120s` (the timeout case 10 s). If `delega` has not
+exited 45 s past its time limit (`doctor`, 60 s after it starts), the harness sends SIGTERM,
+and SIGKILL 15 s later, and the case fails with a problem saying so. So each
+run ends, and the suite with it. `delega` runs in a process group of its own; a
+Ctrl-C at the harness's terminal does not reach it, and a `delega` left by a
+killed harness ends at its own time limit.
+
+### Output
+
+One line per case (provider, case, verdict, outcome, seconds) with the
+problems of a failed case, then per provider the number of runs, the version,
+the cost Claude Code reports in `usage.cost_usd` and the token counts. Codex
+reports no cost. Nothing printed or recorded holds a model's answer, the content
+of a file other than the words the harness seeded, or an environment value.
+Problems name what was asserted; an error is named by its `error.kind` only.
+
+`--out FILE` writes one JSON line per case (verdict, outcome, exit status,
+`cleanup.confirmed`, the number of denials, whether a `wider than requested`
+note was present, `error.kind`, provider version, seconds, reported cost and
+tokens, and the checks, notes and problems) and `FILE` with the extension
+`meta.json` (date, machine, delega version, harness commit, provider versions,
+model and effort). `--report` renders `acceptance/live.jsonl` and
+`live.meta.json`, when present, into a "Live suite" section at the end of
+`RESULTS.md`; without them the section says no live run is recorded.
+
+### Cost
+
+An estimate, not a measurement: a full run makes 9 model runs per provider
+(none for `doctor`, two for `resume`), of which `interrupt` and `timeout` are
+stopped early. For Claude Code, two start runs in #115 (default model) reported
+$0.011 and $0.028 each, so 9 runs cost at most about $0.25 at those figures;
+haiku costs less per token, so expect less. For Codex, a start run in #115
+reported about 16,000 input tokens, 13,000 of them cached, and about 600 output
+tokens; with a ChatGPT login that counts against the plan's usage limits and
+has no per-run charge, and with an API key it is billed at the model's token
+prices. The summary line prints what the providers reported, so a recorded run
+replaces this estimate.
 
 ## The matrix
 
