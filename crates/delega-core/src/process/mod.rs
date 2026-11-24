@@ -184,8 +184,9 @@
 //!   owner's own environment, if any, then a new one), so a descendant that left
 //!   the child's session and whose parent is gone can still be found. Cleanup
 //!   sweeps read it from `/proc/<pid>/environ` on Linux and from one `ps -U
-//!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both show
-//!   the environment as it was at `exec`. A marked process that is in the
+//!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both read
+//!   the process's environment area as the kernel exposes it (see module
+//!   `marker`). A marked process that is in the
 //!   child's session when it is read (it started after the ordinary listing)
 //!   is a member and is signalled as one. A process found only by the marker is
 //!   never signalled by number alone: it is stopped with SIGSTOP when first
@@ -294,6 +295,20 @@
 //! reported as not confirmed. It cannot substitute a program, so it can only
 //! make the verdict weaker.
 //!
+//! # What a macOS verdict covers
+//!
+//! This describes cleanup after a kept run started a child; a run that started
+//! none has nothing to sweep. On macOS the keeper is not a subreaper, so it
+//! cannot adopt orphans. Cleanup finds descendants through the child's process
+//! group, its session, earlier listings and the run marker. An output pipe
+//! still held when the drain bound runs out makes the verdict `Unconfirmed`.
+//! A descendant that none of these reach (for example one that left the
+//! session and does not show the marker, or a fast fork relay) can be missed,
+//! and the run can then end `Confirmed` while it runs. The evidence and
+//! measurements are under "What remains possible". A kept run on macOS carries
+//! [`MACOS_KEEPER_NOTE`](crate::provider::MACOS_KEEPER_NOTE) in its
+//! `provider_notes`.
+//!
 //! # What remains possible
 //!
 //! Without a keeper, two gaps remain, and both end with `Confirmed` while a
@@ -339,8 +354,9 @@
 //! no in-process code can do").
 //!
 //! A kept run closes these on Linux. On macOS it closes the SIGKILL of the
-//! owner, and the two gaps remain in part; tracking forks on macOS is
-//! delega issue 167. In detail:
+//! owner, and the two gaps remain in part, as "What a macOS verdict covers"
+//! states; tracking forks on macOS is shelved (delega issues 167 and 189). In
+//! detail:
 //!
 //! - On Linux the keeper is the reaper of every orphan, so the `setsid`
 //!   descendant and every generation of the relay are the keeper's descendants
@@ -350,11 +366,11 @@
 //!   `an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux` and
 //!   `a_fork_relay_is_stopped_in_a_kept_run` in `tests/gaps.rs` run in the Linux
 //!   CI job; they have not run on a developer machine.
-//! - On macOS there is no subreaper, and the run marker is the only tie. A
-//!   descendant that left the session, whose parent is gone, and that does not
-//!   show the marker is not found. That covers a process started with an
-//!   environment that leaves the marker out, and, measured on macOS 27.2 with
-//!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
+//! - On macOS there is no subreaper. A descendant that left the session, whose
+//!   parent is gone, and that does not show the marker can be missed. Among
+//!   these are a process started with an environment that leaves the marker
+//!   out, and, measured on macOS 27.2 with System Integrity Protection enabled,
+//!   the Apple programs measured: `ps -E` showed no
 //!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
 //!   for a Homebrew binary and for this crate's test binary. Whether this applies
 //!   depends on the machine: a macOS system that does not hide the environment
@@ -363,10 +379,8 @@
 //!   it (start `/bin/sleep` with a marker value and look for it in `ps -E`) and
 //!   expect accordingly, and so does the acceptance harness, which records the
 //!   answer in its results. Where it is hidden, such a descendant
-//!   ends with `Confirmed` while it runs, as without a keeper, unless it holds
-//!   the output pipes past the drain bound, which makes the verdict
-//!   `Unconfirmed`.
-//! - On macOS a fast fork relay is not stopped. In 50 interrupted kept runs of
+//!   can end with `Confirmed` while it runs, as without a keeper.
+//! - On macOS a fast fork relay can escape the freeze. In 50 interrupted kept runs of
 //!   the relay in `tests/gaps.rs` (perl, a new generation about every 5 ms, 4000
 //!   generations), measured on macOS 27.2 arm64 at a load average of about 15
 //!   (`measure_the_relay_freeze`), the freeze stopped it in none: each listing
@@ -375,7 +389,7 @@
 //!   That relay holds the output pipes, and with the held-pipe verdict all 50
 //!   runs of a second measurement (load average about 20) ended `Unconfirmed`
 //!   and none `Confirmed`; before it, all 50 had ended `Confirmed` with a relay
-//!   process alive. A relay that does not hold the output still ends
+//!   process alive. A relay that does not hold the output can end
 //!   `Confirmed` while it runs.
 //! - On Linux, two windows remain. The keeper is started with a synchronous
 //!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
@@ -394,9 +408,8 @@
 //!   - a keeper that is lost, or that exits without the owner's `released`,
 //!     leaves the child unreaped to the reaper above it, and the verdict is
 //!     `Unconfirmed`;
-//!   - on macOS, a detached orphan whose environment the system hides from
-//!     `ps -E` (Apple's programs under SIP), and a fast fork relay, can be
-//!     missed;
+//!   - on macOS, the two kinds of process "What a macOS verdict covers" names
+//!     can be missed;
 //!   - a process the kernel prevents inspecting or signalling (`hidepid`,
 //!     another user's, no pidfd) leaves the verdict `Unconfirmed`, and the
 //!     keeper's own cleanup keeps going until its deadline and then exits.

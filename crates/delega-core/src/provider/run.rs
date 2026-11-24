@@ -30,6 +30,22 @@ use super::{claude, codex, program};
 pub const NO_KEEPER_NOTE: &str = "cleanup ran without a keeper: a descendant that detaches \
      between listings, a fork relay, or a SIGKILL of the caller can leave a process running";
 
+/// The note a kept run on macOS carries: the scope of cleanup once a child
+/// started (see "What a macOS verdict covers" in [`crate::process`]).
+pub const MACOS_KEEPER_NOTE: &str = "on macOS, cleanup after a provider process starts finds \
+     its descendants through its process group, its session, earlier listings and the run \
+     marker; a descendant none of these reach can be missed";
+
+/// The cleanup note a run carries, if any, given whether it has a keeper and
+/// whether it runs on macOS.
+pub(super) fn cleanup_note(kept: bool, macos: bool) -> Option<&'static str> {
+    match (kept, macos) {
+        (false, _) => Some(NO_KEEPER_NOTE),
+        (true, true) => Some(MACOS_KEEPER_NOTE),
+        (true, false) => None,
+    }
+}
+
 /// A cloneable way to stop a run from another task or thread.
 #[derive(Debug, Clone)]
 pub struct RunInterrupter(CancellationToken);
@@ -325,8 +341,8 @@ async fn execute_steps(
 ) -> RunResult {
     let began = Instant::now();
     let mut notes = plan.notes.clone();
-    if plan.keeper.is_none() {
-        notes.push(NO_KEEPER_NOTE.to_string());
+    if let Some(note) = cleanup_note(plan.keeper.is_some(), cfg!(target_os = "macos")) {
+        notes.push(note.to_string());
     }
     let mut cleanup = Cleanup::Confirmed;
     if cancel.is_cancelled() {

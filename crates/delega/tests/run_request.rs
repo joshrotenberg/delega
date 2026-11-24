@@ -1706,3 +1706,31 @@ fn the_run_cli_refuses_live_asking_before_start_even_for_dry_run() {
         }
     }
 }
+
+#[test]
+fn a_kept_run_names_the_macos_cleanup_scope_on_macos_and_not_on_linux() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = rig
+            .command()
+            .args(rig.run_args(provider, "success", &["--output", "json"]))
+            .guarded_output()
+            .expect("run delega");
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let notes = result_of(&out).provider_notes;
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n == delega_core::provider::NO_KEEPER_NOTE),
+            "{provider}: the CLI runs every provider through a keeper: {notes:?}"
+        );
+        let scoped = notes
+            .iter()
+            .any(|n| n == delega_core::provider::MACOS_KEEPER_NOTE);
+        assert_eq!(
+            scoped,
+            cfg!(target_os = "macos"),
+            "{provider}: the macOS cleanup scope note: {notes:?}"
+        );
+    }
+}

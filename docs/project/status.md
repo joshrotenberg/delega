@@ -33,20 +33,12 @@ stands. This page lists the limits a user meets.
 - **Asking permission live** works for Claude Code runs over MCP or the Rust
   supervisor (`permissions.on_request: ask`). Codex runs and `delega run` refuse
   it before start ([#164](https://github.com/joshrotenberg/delega/issues/164)).
-- **Cleanup.** Met on Linux; partly met on macOS. Every provider process the
-  CLI and MCP start is held by a keeper, a small `delega` process that stops the
-  provider's whole tree when delega is gone, even after a `SIGKILL`. On Linux
-  the keeper also adopts every orphaned descendant, so cleanup cannot miss one.
-  On macOS two cases can still be missed and reported as confirmed: a detached
-  orphan running a program whose environment macOS hides (Apple's own programs
-  under SIP, such as `/bin/sh`, `/bin/sleep` or `perl`), and a fast fork relay.
-  The first depends on the machine: a Mac that does not hide its programs'
-  environment (one with SIP disabled) shows the run marker and cleanup finds
-  such an orphan. The acceptance results record which kind of machine they come
-  from;
-  fork tracking on macOS is
-  [#167](https://github.com/joshrotenberg/delega/issues/167). On every
-  platform, a run is reported unconfirmed when a process still held the output
+- **Cleanup.** Met on Linux; partly met on macOS. The CLI and MCP run
+  provider processes under a keeper, a small `delega` process that runs cleanup
+  when delega is gone, even after a `SIGKILL`. On macOS a kept run's result
+  notes the cleanup scope in `provider_notes`. What cleanup covers:
+  [`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs).
+  On every platform, a run is reported unconfirmed when a process still held the output
   after the kill, a `SIGKILL` of the keeper alone makes the result unconfirmed,
   and a `SIGKILL` of the keeper together with delega leaves the worker running.
   A program that embeds the library without a keeper keeps the earlier gaps,

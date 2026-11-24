@@ -38,6 +38,9 @@ descendant can outlive a confirmed run, in
 and the [acceptance harness](../acceptance.md) tests them
 ([matrix](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md#the-matrix),
 [expectations](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md#expectations)).
+On macOS a kept run's result notes the cleanup scope in `provider_notes`,
+as described in "What a macOS verdict covers" in
+[`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs).
 Under the supervisor, `interrupt`, `close` and `shutdown` wait for a run to
 settle within a bound ([Stopping](../supervisor.md#stopping)).
 
