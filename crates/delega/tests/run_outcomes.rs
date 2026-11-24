@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{
     Guarded, PROVIDERS, Rig, assert_stop_cleanup, guarded_pipe, result_of, signal, text,
-    wait_bounded, wait_exit_only,
+    wait_bounded, wait_exit_only, wait_for_ack,
 };
 
 #[test]
@@ -693,17 +693,22 @@ fn a_signal_ends_delega_that_is_only_waiting_for_a_reader_of_a_large_result() {
         let rig = Rig::new();
         // The fake answers with 3 MB; nobody reads standard output, so delega
         // blocks writing the result after the worker is gone.
-        let mut child = rig.spawn_run(provider, "large", &["--output", "json"]);
-        let began = std::time::Instant::now();
-        while !rig.record.join("pid").exists() {
-            assert!(
-                began.elapsed() < Duration::from_secs(120),
-                "the fake never started"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let blocked = rig.path("result-blocked");
+        let mut child = rig
+            .command()
+            .args(rig.run_args(provider, "large", &["--output", "json"]))
+            .env("DELEGA_TEST_ACK_RESULT_BLOCKED", &blocked)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .guarded_spawn()
+            .expect("spawn delega");
+        // The result is written only once the worker is gone.
+        wait_for_ack(
+            &blocked,
+            &mut child,
+            "writing the result waits for a reader",
+        );
         rig.assert_nothing_left();
-        std::thread::sleep(Duration::from_millis(500));
         assert!(
             child.try_wait().expect("poll").is_none(),
             "{provider}: delega should still be waiting to write"
@@ -719,16 +724,20 @@ fn a_signal_ends_delega_that_is_only_waiting_for_a_reader_of_a_large_result() {
 fn every_terminal_signal_ends_a_delega_blocked_writing_its_result() {
     for name in ["INT", "HUP", "QUIT"] {
         let rig = Rig::new();
-        let mut child = rig.spawn_run("claude", "large", &["--output", "json"]);
-        let began = std::time::Instant::now();
-        while !rig.record.join("pid").exists() {
-            assert!(
-                began.elapsed() < Duration::from_secs(120),
-                "the fake never started"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        std::thread::sleep(Duration::from_millis(800));
+        let blocked = rig.path("result-blocked");
+        let mut child = rig
+            .command()
+            .args(rig.run_args("claude", "large", &["--output", "json"]))
+            .env("DELEGA_TEST_ACK_RESULT_BLOCKED", &blocked)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .guarded_spawn()
+            .expect("spawn delega");
+        wait_for_ack(
+            &blocked,
+            &mut child,
+            "writing the result waits for a reader",
+        );
         signal(child.id(), name);
         let status = wait_exit_only(&mut child, Duration::from_secs(90));
         assert_eq!(status.code(), Some(130), "{name}");

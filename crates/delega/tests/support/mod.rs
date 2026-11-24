@@ -456,6 +456,29 @@ pub fn wait_exit_only(child: &mut Child, limit: Duration) -> std::process::ExitS
     }
 }
 
+/// Wait for the acknowledgement file a test seam of `delega` creates at `path`
+/// (`DELEGA_TEST_ACK_*`, debug builds only) once it has reached `what`. Fails
+/// the test past [`WAIT_LIMIT`], or at once if `child` exits first, so a
+/// `delega` that never reaches the state is a failure and not a long wait.
+pub fn wait_for_ack(path: &Path, child: &mut Child, what: &str) {
+    let began = Instant::now();
+    while !path.exists() {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            // It may have acknowledged just before it exited.
+            assert!(
+                path.exists(),
+                "delega exited ({status}) before it acknowledged that {what}"
+            );
+            return;
+        }
+        assert!(
+            began.elapsed() < WAIT_LIMIT,
+            "delega did not acknowledge within {WAIT_LIMIT:?} that {what}"
+        );
+        std::thread::sleep(POLL);
+    }
+}
+
 /// Send a signal by name (`INT`, `TERM`) to a process.
 pub fn signal(pid: u32, name: &str) {
     let status = Command::new("/bin/kill")
