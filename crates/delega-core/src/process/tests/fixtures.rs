@@ -705,6 +705,215 @@ pub(super) async fn wait_tracked(handle: &ProcessHandle, pid: i32) {
     .await;
 }
 
+// Deadlines on a paused clock.
+//
+// A test about a deadline of the owner (the time limit, a listing budget, the
+// capture schedule) pauses the runtime's clock with `tokio::time::pause` on the
+// current-thread runtime `#[tokio::test]` builds, so the owner's timers move
+// only as the test says. Paused time also moves by itself: when the runtime has
+// nothing to run, it jumps to the next timer. A real child's events (a record
+// written, a signal delivered, an exit) are not work for the runtime, so a test
+// that awaited one on a paused clock would let every deadline of the run pass
+// at once. Two helpers keep the clock still instead:
+//
+// - [`await_held`] waits for a real event on a thread of the blocking pool.
+//   While a blocking task is in flight, tokio does not move a current-thread
+//   runtime's paused clock by itself (its `BlockingSchedule` holds automatic
+//   advance off from spawn to release; tokio 1.54, pinned by
+//   `a_held_wait_keeps_the_paused_clock_still_while_a_real_event_is_awaited`).
+//   So no deadline of the run can pass while the test waits for its child to
+//   be ready, however long that takes.
+// - [`list_off_the_clock`] takes a real listing the same way, on a runtime of
+//   its own with the real clock, so a listing costs the run's clock nothing
+//   and a slow `ps` cannot spend a budget.
+//
+// Once what the test drives has happened, it calls `tokio::time::resume`
+// before anything else real is awaited.
+
+/// Wait on a thread of the blocking pool, with the real clock, until `read`
+/// returns a value, for at most [`AWAIT`]; an `Err` from `read` ends the wait
+/// at once with that message. A paused clock does not move while this waits
+/// (see the notes above). `read` runs on that thread, so it may block (run
+/// `ps`, say), and must not need the runtime.
+pub(super) async fn await_held<T: Send + 'static>(
+    what: &str,
+    mut read: impl FnMut() -> Result<Option<T>, String> + Send + 'static,
+) -> T {
+    let what = what.to_owned();
+    let waited = tokio::task::spawn_blocking(move || {
+        let began = Instant::now();
+        loop {
+            match read() {
+                Ok(Some(value)) => return Ok(value),
+                Ok(None) => {}
+                Err(why) => return Err(format!("while waiting for {what}: {why}")),
+            }
+            if began.elapsed() >= AWAIT {
+                return Err(format!("waited {AWAIT:?} and never saw: {what}"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await
+    .expect("the held wait's thread ended");
+    waited.unwrap_or_else(|why| panic!("{why}"))
+}
+
+/// The real process listing, taken on a thread of the blocking pool with a
+/// runtime of its own, so a paused clock of the caller's runtime does not move
+/// while it runs (see the notes above) and the listing's own timeout runs on
+/// the real clock.
+pub(super) async fn list_off_the_clock()
+-> Result<Vec<crate::process::tree::ProcessRow>, crate::process::tree::InspectError> {
+    tokio::task::spawn_blocking(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the listing's runtime")
+            .block_on(list_processes())
+    })
+    .await
+    .expect("the listing's thread ended")
+}
+
+/// A lister for a run on a paused clock: each call is counted when it is made,
+/// then answered by [`list_off_the_clock`], and counted again when answered.
+/// With the capture interval set far beyond the test, the only listings are
+/// the one at spawn and the ones a stop asks for, so the count of calls says
+/// when a stop has begun.
+#[derive(Clone, Default)]
+pub(super) struct Listings {
+    calls: Arc<AtomicU32>,
+    answered: Arc<AtomicU32>,
+}
+
+impl Listings {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn lister(&self) -> Lister {
+        let listings = self.clone();
+        Arc::new(move || {
+            listings.calls.fetch_add(1, Ordering::SeqCst);
+            let answered = listings.answered.clone();
+            Box::pin(async move {
+                let rows = list_off_the_clock().await;
+                answered.fetch_add(1, Ordering::SeqCst);
+                rows
+            })
+        })
+    }
+
+    /// The calls made so far.
+    pub(super) fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// An error once a listing beyond the one at spawn has been asked for: a
+    /// stop has begun. A wait for readiness that checks it fails at once on a
+    /// run that stops before its child is ready, rather than at [`AWAIT`].
+    pub(super) fn not_stopping(&self) -> Result<(), String> {
+        match self.calls() {
+            0 | 1 => Ok(()),
+            n => Err(format!("{n} listings were asked for: a stop began first")),
+        }
+    }
+
+    /// Whether every call made so far has been answered and there was at
+    /// least one: the capture task is between listings, so the next call
+    /// can come at once.
+    pub(super) fn idle(&self) -> bool {
+        let calls = self.calls();
+        calls >= 1 && self.answered.load(Ordering::SeqCst) == calls
+    }
+}
+
+/// Yield to the runtime's other tasks a fixed number of times. On a paused
+/// clock a yield never moves the clock (a yield parks with no timeout), so
+/// this lets tasks already woken run, and nothing else. A timer that fired
+/// takes two task hops to show in a lister (the owner, then its capture task);
+/// 32 is a margin over that.
+pub(super) async fn settle() {
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Yield until `done` holds, on a paused clock: for an event that needs only
+/// tasks already woken, so the clock never moves while this waits. A bound on
+/// the yields ends a wait for an event that is not coming.
+pub(super) async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..100_000 {
+        if done() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the runtime ran out of work to do and never showed: {what}");
+}
+
+/// Drive a run's time limit on the paused clock, once the test has seen the
+/// child ready with the clock held ([`await_held`]): check that the clock has
+/// not moved since `began` (taken just before the run started, on the paused
+/// clock), step to one millisecond before the limit and check that no stop
+/// has asked for a listing, step two milliseconds more and wait until the
+/// stop asks for one, then resume the real clock for the stop itself. Tokio's
+/// timer wheel rounds a deadline up to its next millisecond tick, so the limit
+/// fires after `limit - 1 ms` and by `limit + 1 ms`. `asked` counts the
+/// listings asked for; `before` is that count once the child was ready.
+pub(super) async fn step_through_the_limit(
+    began: tokio::time::Instant,
+    limit: Duration,
+    before: u32,
+    asked: impl Fn() -> u32,
+) {
+    const TICK: Duration = Duration::from_millis(1);
+    assert_eq!(
+        tokio::time::Instant::now(),
+        began,
+        "the paused clock moved before the child was ready"
+    );
+    tokio::time::advance(limit - TICK).await;
+    settle().await;
+    assert_eq!(
+        asked(),
+        before,
+        "the run began to stop {TICK:?} before its time limit of {limit:?}"
+    );
+    tokio::time::advance(TICK * 2).await;
+    settle_until(
+        &format!("the time limit of {limit:?} asking for its stop listing by {TICK:?} after it"),
+        || asked() > before,
+    )
+    .await;
+    tokio::time::resume();
+}
+
+#[tokio::test]
+async fn a_held_wait_keeps_the_paused_clock_still_while_a_real_event_is_awaited() {
+    tokio::time::pause();
+    let began = tokio::time::Instant::now();
+    let timer = tokio::spawn(tokio::time::sleep(Duration::from_millis(1)));
+    let real = Instant::now();
+    await_held("50 ms of real time", move || {
+        Ok((real.elapsed() >= Duration::from_millis(50)).then_some(()))
+    })
+    .await;
+    assert_eq!(tokio::time::Instant::now(), began, "the paused clock moved");
+    assert!(
+        !timer.is_finished(),
+        "a timer fired while the clock was held"
+    );
+    // The listing holds it still too.
+    list_off_the_clock().await.expect("a listing");
+    assert_eq!(tokio::time::Instant::now(), began, "the paused clock moved");
+    // Without a held wait, an idle runtime moves it to the next timer (which
+    // tokio rounds up to its next millisecond tick).
+    timer.await.expect("the timer task");
+    assert!(tokio::time::Instant::now() > began, "the clock never moved");
+}
+
 /// A lister that, while armed, does not answer until the gate is opened, and
 /// then reads the real table. It counts the calls that had to wait.
 #[derive(Clone)]
