@@ -18,6 +18,7 @@ use crate::provider::{ProviderOptions, run};
 use crate::test_spawn::Guarded;
 
 mod applied;
+mod cleanup_note;
 mod deny;
 mod dry;
 mod enforce;
