@@ -608,52 +608,85 @@ impl RelayLife {
     }
 }
 
-/// A writer that stands in for a relay's last generations: it writes `h`, and
-/// a moment later the terminal byte `last`, and exits. Whether the terminal
-/// byte arrives before a call starts waiting or while it waits, the relay
-/// must never be taken for a stopped one: a byte read while waiting is
-/// `Running`, and the end read afterwards still knows the terminal byte.
-async fn fate_of_a_relay_that_ends_with(last: char) -> RelayFate {
+/// When a relay's terminal byte reaches the reader, relative to a call of
+/// [`RelayLife::fate_by`].
+#[derive(Clone, Copy)]
+enum TerminalByte {
+    /// Written while the call waits on an empty lifeline: the call reads it
+    /// as `Running`, and a later call reads the end.
+    WhileWaiting,
+    /// Written, and the lifeline closed, before the call: the call reads both
+    /// at once.
+    AlreadyBuffered,
+}
+
+/// A relay's last generation stood in for by a write end of the lifeline
+/// that the test holds, so the test decides when each byte is written: `h`,
+/// then the terminal byte `last` at the point `when` names, then the close.
+/// Whichever branch reads the terminal byte, the relay must never be taken
+/// for a stopped one.
+async fn fate_of_a_relay_that_ends_with(last: u8, when: TerminalByte) -> RelayFate {
+    use std::future::Future;
+    use std::io::Write;
+    use std::task::Poll;
     let s = Scratch::new();
     let mut relay = RelayLife::new(&s);
-    let mut writer = std::process::Command::new("perl")
-        .arg("-e")
-        .arg(format!(
-            "open L, q(>), q(life) or die; syswrite L, q(h); \
-             select(undef, undef, undef, 0.2); syswrite L, q({last})"
-        ))
-        .current_dir(s.dir())
-        .env_clear()
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .guarded_spawn()
-        .expect("start the writer");
+    // The read end is open, so opening the write end does not block.
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(s.path("life"))
+        .expect("open the lifeline for writing");
+    writer.write_all(b"h").expect("write a handoff");
     relay.await_handoffs(0).await;
     let deadline = std::time::Instant::now() + AWAIT;
-    let fate = loop {
-        match relay.fate_by(deadline).await {
-            RelayFate::Running => {}
-            fate => break fate,
+    let first = match when {
+        TerminalByte::WhileWaiting => {
+            let mut call = std::pin::pin!(relay.fate_by(deadline));
+            // Poll once: the lifeline is empty and still open, so the call
+            // must be waiting, not answering.
+            let polled = std::future::poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+            assert!(
+                polled.is_pending(),
+                "fate_by answered on an empty lifeline: {polled:?}"
+            );
+            writer.write_all(&[last]).expect("write the terminal byte");
+            drop(writer);
+            call.await
+        }
+        TerminalByte::AlreadyBuffered => {
+            writer.write_all(&[last]).expect("write the terminal byte");
+            drop(writer);
+            relay.fate_by(deadline).await
         }
     };
-    assert!(writer.wait().expect("reap the writer").success());
-    fate
+    if first != RelayFate::Running {
+        return first;
+    }
+    relay.fate_by(deadline).await
 }
 
 #[tokio::test]
-async fn a_relay_that_ran_its_course_is_never_taken_for_a_stopped_one() {
-    require_perl!();
+async fn a_relay_that_ran_its_course_while_its_fate_was_awaited_is_never_taken_for_a_stopped_one() {
     assert_eq!(
-        fate_of_a_relay_that_ends_with('e').await,
+        fate_of_a_relay_that_ends_with(b'e', TerminalByte::WhileWaiting).await,
         RelayFate::RanItsCourse
     );
 }
 
 #[tokio::test]
-async fn a_relay_that_broke_by_itself_is_never_taken_for_a_stopped_one() {
-    require_perl!();
-    assert_eq!(fate_of_a_relay_that_ends_with('x').await, RelayFate::Broke);
+async fn a_relay_that_broke_while_its_fate_was_awaited_is_never_taken_for_a_stopped_one() {
+    assert_eq!(
+        fate_of_a_relay_that_ends_with(b'x', TerminalByte::WhileWaiting).await,
+        RelayFate::Broke
+    );
+}
+
+#[tokio::test]
+async fn a_relay_that_ran_its_course_before_its_fate_was_asked_is_never_taken_for_a_stopped_one() {
+    assert_eq!(
+        fate_of_a_relay_that_ends_with(b'e', TerminalByte::AlreadyBuffered).await,
+        RelayFate::RanItsCourse
+    );
 }
 
 /// The same relay with 4000 generations, so it outlives any stop by many
