@@ -6,8 +6,9 @@
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, ProcessIdentity, Reaper, Scratch, assert_confirmed, assert_gone, is_running,
-    own_group_recorded, own_session_recorded, perl_record_self, run_guarded, sh,
+    Listings, OWN_GROUP, ProcessIdentity, Reaper, Record, Scratch, assert_confirmed, assert_gone,
+    await_held, is_running, own_group_recorded, own_session_recorded, perl_record_self,
+    read_record, run_guarded, sh, step_through_the_limit,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -173,9 +174,40 @@ async fn a_kept_run_reports_a_crash_by_its_signal() {
 #[tokio::test]
 async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
     let s = Scratch::new();
+    let limit = Duration::from_millis(800);
     let script = format!("{OWN_GROUP} & record gc $!; record leader $$; sleep 60");
-    let spec = kept(sh(&s, &script, Duration::from_millis(800)));
-    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc", "leader"]).await;
+    // The run's clock is paused and held until both records are written, so
+    // the limit cannot pass before the script is ready (a real 800 ms limit
+    // could, and the test then waited for a record that never came); the
+    // test then steps the clock through the limit. With the capture interval
+    // far off, the only listings are the one at spawn and the stop's.
+    let listings = Listings::new();
+    let mut spec = kept(sh(&s, &script, limit)).with_lister(listings.lister());
+    spec.capture_interval = Some(Duration::from_secs(3600));
+    tokio::time::pause();
+    let began = tokio::time::Instant::now();
+    let handle = ProcessHandle::start(spec);
+    let (gc, leader) = (s.path("gc"), s.path("leader"));
+    let counted = listings.clone();
+    let pids = await_held(
+        "the descendant's and the leader's records, and the listing at spawn",
+        move || {
+            counted.not_stopping()?;
+            Ok(match (read_record(&gc), read_record(&leader)) {
+                (Record::Pid(gc), Record::Pid(leader)) if counted.idle() => Some(vec![gc, leader]),
+                _ => None,
+            })
+        },
+    )
+    .await;
+    let mut reaper = Reaper::default();
+    for pid in &pids {
+        reaper.register(*pid, &s);
+    }
+    step_through_the_limit(began, limit, 1, || listings.calls()).await;
+    let report = tokio::time::timeout(Duration::from_secs(120), handle.wait())
+        .await
+        .expect("the kept run did not end after its time limit");
     assert!(
         matches!(report.ending, Ending::TimedOut { .. }),
         "{report:#?}"
