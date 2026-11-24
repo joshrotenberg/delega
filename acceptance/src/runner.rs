@@ -634,16 +634,16 @@ fn judge(m: &mut Measured, case: &Case) {
                         ));
                     }
                 }
-                Some(true) if !documented_residual => {
-                    if m.cleanup_confirmed != Some(true)
+                Some(true)
+                    if !documented_residual
+                        && m.cleanup_confirmed != Some(true)
                         && !(m.cleanup_confirmed == Some(false)
                             && no_survivors
-                            && late_listing_only(m))
-                    {
-                        m.problems.push(
-                            "expected Confirmed or a late listing alone with no survivors".into(),
-                        );
-                    }
+                            && late_listing_only(m)) =>
+                {
+                    m.problems.push(
+                        "expected Confirmed or a late listing alone with no survivors".into(),
+                    );
                 }
                 _ => {}
             }
@@ -856,7 +856,7 @@ mod judge_tests {
 
     #[test]
     fn a_timed_out_result_with_a_success_exit_fails_even_on_a_residual() {
-        for id in ["codex-e-plain", "codex-e-relay"] {
+        for id in ["codex-c-plain", "codex-c-relay"] {
             let (case, mut m) = fixture_run("macos", id);
             assert_eq!(m.outcome.as_deref(), Some("timed_out"));
             m.exit_code = Some(0);
