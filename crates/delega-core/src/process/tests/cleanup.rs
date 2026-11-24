@@ -315,23 +315,41 @@ both!(
     }
 );
 
+/// How many runs of its TERM handler the leader of the test below has
+/// acknowledged: the highest `N` of the `handled-N` files its loop creates
+/// between handlers. Two handlers can run back to back (a TERM that arrives
+/// during one is delivered as it ends), so a count can be skipped.
+fn handlers_finished(s: &Scratch) -> u32 {
+    std::fs::read_dir(s.dir())
+        .expect("read the scratch directory")
+        .filter_map(|entry| {
+            let name = entry.expect("read a scratch entry").file_name();
+            name.to_str()?.strip_prefix("handled-")?.parse().ok()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind, a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind_kept, async {
     require_perl!();
     let s = Scratch::new();
     // The scenario of the test above with a leader that keeps running after its
     // handler, so the handler runs again for every TERM it receives and each run
     // starts another child in a group of its own and records it. The stop sends
-    // one TERM. The test sends the leader another, and again until two children
-    // are recorded, so at least two children exist by construction whatever the
+    // one TERM. The test sends the leader another once the first handler has
+    // finished, so at least two children exist by construction whatever the
     // order of the sweep and the leader. A TERM that arrives while the handler
-    // runs is merged with it, which is why the test repeats rather than counts
-    // on one. The leader ends when the test says so (a file it writes), not
-    // after a grace that load could make too short: the grace is a minute. The
-    // children do not hold the output pipes.
+    // runs is delivered only as it ends, so the handler counts its runs in
+    // `n` and the leader's loop, which runs only between handlers,
+    // acknowledges the runs finished so far by creating `handled-N`
+    // (`handlers_finished`). A TERM sent after that acknowledgement runs the
+    // handler again. The leader ends when the test says so (a file it
+    // writes), not after a grace that load could make too short: the grace is
+    // a minute. The children do not hold the output pipes.
     let child = detached_own_group();
     let script = format!(
-        "trap \"{child} & record gcs/\\$! \\$!\" TERM; record leader $$; \
-         while [ ! -e quit ]; do sleep 0.05; done"
+        "n=0; trap \"{child} & record gcs/\\$! \\$!; n=\\$((n + 1))\" TERM; record leader $$; \
+         while [ ! -e quit ]; do : > handled-$n; sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
     spec.stop_grace = Duration::from_secs(60);
@@ -342,20 +360,13 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     let mut reaper = Reaper::default();
     let child = reaper.register(leader, &s).expect("identify the leader in the test scratch directory");
     handle.interrupt();
-    await_event("a first child started by the stop's TERM", || {
-        !s.published_pids_in("gcs").0.is_empty()
+    await_event("the leader finishing the handler of the stop's TERM", || {
+        handlers_finished(&s) >= 1
     })
     .await;
-    let mut sent_at = Instant::now();
-    await_event("a second child started by a second TERM", || {
-        if s.published_pids_in("gcs").0.len() >= 2 {
-            return true;
-        }
-        if sent_at.elapsed() >= Duration::from_millis(300) {
-            child.signal(Signal::TERM);
-            sent_at = Instant::now();
-        }
-        false
+    assert!(child.signal(Signal::TERM), "send the leader a second TERM");
+    await_event("the leader finishing the handler of a second TERM", || {
+        handlers_finished(&s) >= 2
     })
     .await;
     let quit_at = Instant::now();
