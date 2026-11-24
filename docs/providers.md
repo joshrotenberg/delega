@@ -161,7 +161,7 @@ of `provider_error`:
 | `provider_capacity` | The provider is rate limiting or overloaded (HTTP 429, 503, 529). Retrying later can work. |
 | `provider_model_unavailable` | The requested model does not exist or this account cannot use it. |
 | `provider_context_exhausted` | The conversation no longer fits the model's context window. |
-| `provider_content_policy` | The provider refused the content under its content policy. Retrying the same assignment on the same provider fails again; rephrase it or move it to the other provider. Codex only: a failure message that starts with "This content was flagged for possible" (codex-cli 0.171.0, 2026-11-24). Claude Code has no match, because no Claude Code content-policy refusal has been observed. |
+| `provider_content_policy` | The provider refused the content under its content policy. Retrying the same assignment on the same provider fails again; rephrase it or move it to the other provider. Codex only: a failure message that starts with "This content was flagged for possible cybersecurity risk" (codex-cli 0.171.0, 2026-11-24), ignoring case and leading space. Only that observed category is matched; another content-policy wording keeps `provider_error` until it is observed. Claude Code has no match, because no Claude Code content-policy refusal has been observed. |
 
 Classification applies to failures. `session_not_found` and Claude's
 turn and budget limits take precedence. For overlapping matches at the same

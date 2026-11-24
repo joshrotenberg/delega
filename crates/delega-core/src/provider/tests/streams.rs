@@ -437,7 +437,7 @@ fn claude_sub_agent_result_neither_ends_nor_names_the_run() {
 }
 
 #[test]
-fn codex_content_policy_phrase_names_the_kind_only_at_the_start() {
+fn codex_content_policy_names_the_kind_only_for_the_observed_wording_at_the_start() {
     for (message, kind) in [
         (
             "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.",
@@ -447,6 +447,15 @@ fn codex_content_policy_phrase_names_the_kind_only_at_the_start() {
             "This content was flagged for possible cybersecurity risk. Apply for access before retrying; usage limit and rate limit do not apply.",
             Some("provider_content_policy"),
         ),
+        (
+            "  this content was FLAGGED for possible cybersecurity risk.",
+            Some("provider_content_policy"),
+        ),
+        (
+            "This content was flagged for possible review. The request failed because you exceeded your current quota.",
+            Some("provider_usage_limit"),
+        ),
+        ("This content was flagged for possible review.", None),
         ("This content was flagged", None),
         ("Error: this content was flagged for possible review", None),
         (

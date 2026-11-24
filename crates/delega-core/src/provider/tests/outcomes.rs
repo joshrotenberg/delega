@@ -1114,13 +1114,15 @@ async fn codex_content_policy_refusal_is_provider_content_policy_with_its_messag
     let error = failure_of(Provider::Codex, "content-policy").await;
     assert_eq!(error.kind, "provider_content_policy");
     assert_eq!(error.provider_exit_code, Some(1));
-    assert!(
-        error.message.starts_with(
-            "This content was flagged for possible cybersecurity risk. \
-             If this seems wrong, try rephrasing your request."
-        ),
-        "{}",
-        error.message
+    // The whole message the fake sent, as content-policy in fake-codex.sh.
+    assert_eq!(
+        error.message,
+        "This content was flagged for possible cybersecurity risk. \
+         If this seems wrong, try rephrasing your request. \
+         If you're doing authorized security work that requires more cyber \
+         permissive safeguards, apply for ... access via \
+         https://platform.openai.com/settings/organization/status-and-access \
+         before retrying."
     );
 }
 
