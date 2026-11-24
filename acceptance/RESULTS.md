@@ -401,11 +401,11 @@ Acceptance criterion 6 asks for a small live suite per provider. `--live` runs i
 installed `claude` and `codex` (README.md, "Live suite"); this section is generated from the
 recorded run in `live.jsonl`, whose first line is the run's metadata.
 
-- Date: 2026-11-23.
+- Date: 2026-11-24.
 - Machine: Darwin 27.2.0 arm64.
 - delega: version 0.1.0-dev.
-- Harness commit: `3eab6f8`.
-- claude: claude 2.1.330.
+- Harness commit: `5cbab8e`.
+- claude: claude 2.1.331.
 - codex: codex 0.171.0.
 - Claude cases used `--model haiku`, Codex cases `--effort low`.
 
@@ -413,15 +413,15 @@ recorded run in `live.jsonl`, whose first line is the run's metadata.
 
 | Provider | Case | Version | Verdict | Outcome | Cleanup confirmed | Denials | Runs | Reported cost | Problems | Not shown and notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| claude | doctor | claude 2.1.330 | pass | - | n/a | 0 | 0 | - | none | 0 problems that block a run |
-| claude | plain-answer | claude 2.1.330 | pass | completed | yes | 0 | 1 | $0.0001 | none | none |
-| claude | read-cwd | claude 2.1.330 | pass | completed | yes | 0 | 1 | $0.0003 | none | none |
-| claude | write-refused | claude 2.1.330 | pass | completed | yes | 0 | 1 | $0.0006 | none | 0 denials listed |
-| claude | read-outside | claude 2.1.330 | pass | completed | yes | 1 | 1 | $0.0005 | none | none |
-| claude | build | claude 2.1.330 | pass | completed | yes | 0 | 1 | $0.0012 | none | the temporary file was in Claude Code's per-user temporary directory |
-| claude | resume | claude 2.1.330 | pass | completed | yes | 0 | 2 | $0.0003 | none | none |
-| claude | interrupt | claude 2.1.330 | pass | interrupted | yes | 0 | 1 | - | none | none |
-| claude | timeout | claude 2.1.330 | pass | timed_out | yes | 0 | 1 | - | none | none |
+| claude | doctor | claude 2.1.331 | pass | - | n/a | 0 | 0 | - | none | 0 problems that block a run |
+| claude | plain-answer | claude 2.1.331 | pass | completed | yes | 0 | 1 | $0.0005 | none | none |
+| claude | read-cwd | claude 2.1.331 | pass | completed | yes | 0 | 1 | $0.0003 | none | none |
+| claude | write-refused | claude 2.1.331 | pass | completed | yes | 0 | 1 | $0.0004 | none | 0 denials listed |
+| claude | read-outside | claude 2.1.331 | pass | completed | yes | 1 | 1 | $0.0004 | none | none |
+| claude | build | claude 2.1.331 | pass | completed | yes | 0 | 1 | $0.0026 | none | the temporary file was in Claude Code's per-user temporary directory |
+| claude | resume | claude 2.1.331 | pass | completed | yes | 0 | 2 | $0.0003 | none | none |
+| claude | interrupt | claude 2.1.331 | pass | interrupted | yes | 0 | 1 | - | none | none |
+| claude | timeout | claude 2.1.331 | pass | timed_out | yes | 0 | 1 | - | none | none |
 | codex | doctor | codex 0.171.0 | pass | - | n/a | 0 | 0 | - | none | 0 problems that block a run |
 | codex | plain-answer | codex 0.171.0 | pass | completed | yes | 0 | 1 | - | none | none |
 | codex | read-cwd | codex 0.171.0 | pass | completed | yes | 0 | 1 | - | none | none |
