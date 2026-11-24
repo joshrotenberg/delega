@@ -81,9 +81,10 @@ Where each stands:
 | 6 | Met. The fake-provider tests run in CI. A maintainer runs the live suite per provider locally (`delega-acceptance --live`, see [acceptance/README.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md#live-suite)); the recorded run of 2026-11-23 (Claude Code 2.1.330, codex-cli 0.171.0) passed 18 of 18 cases ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md)). | `crates/delega-core/src/provider/tests/fakes`, `acceptance/src/live.rs`. |
 
 The committed acceptance run ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),
-fake providers only, Darwin arm64) has 188 rows: 158 pass, 29 are expected
-failures, 1 is a documented gap that did not show in that run, and none failed
-unexpectedly.
+fake providers only, Darwin arm64) has 202 rows. Of those, 181 passed and
+21 failed because cleanup reported `Confirmed` with a surviving process.
+The report records 27 gaps shown and one gap not shown independently of the
+verdicts.
 
 ## Documentation
 

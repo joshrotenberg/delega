@@ -18,7 +18,7 @@ It also has a live suite for criterion 6, which runs a few cases per provider
 against the installed `claude` and `codex` and only with `--live`; see
 [Live suite](#live-suite).
 
-Results: [RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md) (summary and expected failures),
+Results: [RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md) (verdicts and gap observations),
 `results.jsonl` (one row per case), `repeats.jsonl` (three more full runs, for
 variation).
 
@@ -27,11 +27,11 @@ variation).
 From the repository root:
 
 ```sh
-cargo run --release -p delega-acceptance -- --all          # the whole matrix, about 75 s
+cargo run --release -p delega-acceptance -- --all          # the whole matrix
 cargo run --release -p delega-acceptance -- --all --repeat 3 --out /tmp/repeats.jsonl
 cargo run -p delega-acceptance -- --smoke                  # the rows `cargo test` runs
 cargo run -p delega-acceptance -- --filter codex-d-       # rows whose id contains the text
-cargo run --release -p delega-acceptance -- --timing-gaps --repeat 3 --out /tmp/gaps.jsonl  # only the timing-dependent gap rows
+cargo run --release -p delega-acceptance -- --timing-gaps --out /tmp/gaps.jsonl  # only the timing-dependent gap rows
 cargo run -p delega-acceptance -- --list                   # row ids
 cargo run -p delega-acceptance -- --report                 # regenerate RESULTS.md and COMPARISON.md
 cargo run -p delega-acceptance -- --sweep                  # kill leftovers of an interrupted harness run
@@ -39,10 +39,10 @@ cargo run -p delega-acceptance -- --live                   # the live suite, rea
 ```
 
 `--timing-gaps` selects the rows whose expectation is a timing-dependent known
-gap, by the matrix flag and not by name. It combines with `--repeat` and narrows
+gap, using the matrix flag. It combines with `--repeat` and narrows
 `--all`, `--smoke` and `--filter`; with no other selector it starts from the
-whole matrix. If it selects no row the harness exits 2, like a filter that
-matches nothing.
+whole matrix. An unfiltered `--timing-gaps` run on a system with no matching
+rows exits successfully.
 
 `--all` writes `acceptance/results.jsonl` and `results.meta.json`; use `--out`
 to write elsewhere. `--jobs N` sets how many cases run at once (default 8) and
@@ -58,18 +58,15 @@ confirmed, the harness stops. Use the debug harness (omit `--release` and
 directory. The harness also applies the metadata check to a supplied `--delega`
 binary because its build profile is unknown.
 
-The run exits non-zero when a row that is expected to pass fails, when a
-known-gap row fails in any way other than a missing survivor, when a known gap
-is closed (`gap_closed`, below), or when a process of the run is alive at the
-end. After a run the harness kills what is
-left and prints how many processes carried its marker; `ps` shows none.
+The run exits non-zero on a failed check or when a process of the run is alive
+after the harness sweep. Gap observations are counted separately. A trial
+that finds no documented gap contributes to the “gap not shown” count.
 
 `cargo test --workspace` runs `tests/smoke.rs`, which runs eleven rows (both
 providers; a normal run, a normal run with a child that ignores TERM, an error, a
 timeout with a child, a signal, a crash, output with no final answer, a closed
-stdout, a run with process listing unavailable that must report cleanup as not
-confirmed, and a SIGKILL of `delega` after which its keeper must leave nothing) in
-about ten seconds. It never runs the matrix. A skipped row fails the run unless
+stdout, a run with process listing unavailable, and a SIGKILL of `delega`
+after which its keeper must leave nothing). It never runs the matrix. A skipped row fails the run unless
 `--allow-skips` is given.
 
 After a new full run, regenerate the documents:
@@ -88,36 +85,21 @@ results; `scripts/extract-spike-numbers.py` produced it.
 
 `tests/committed_results.rs`, part of `cargo test --workspace`, keeps the
 committed results (`results.jsonl`, `repeats.jsonl`) and the documents
-generated from them (`RESULTS.md`, `COMPARISON.md`) current. It fails when the committed results do not hold exactly the
-matrix's rows (each row once in `results.jsonl`, as repeats 1 to 3 in
-`repeats.jsonl`), when any expectation a committed row records (outcome, exit,
-cleanup verdict, survivors, leak class, timing dependence, reason text) differs
-from `src/matrix.rs`, or when `RESULTS.md` or `COMPARISON.md` differs from what
-`--report` generates. What a change costs to bring them back in step:
-
-- A change to the report format only: `--report`, a few seconds.
-- A change to the matrix (a row, an expectation or a reason text): the three
-  commands above on a quiet machine, about 80 s for `--all` and 240 s for the
-  repeats on an Apple M4 Pro (2026-11-19), then `--report`.
+generated from them (`RESULTS.md`, `COMPARISON.md`) current. It checks matrix
+coverage (one sample in `results.jsonl` and three in `repeats.jsonl`), the
+reference fields recorded from `src/matrix.rs`, and the generated documents.
+For a formatting change, run `--report`. For a change to the matrix or its
+checks, run all three commands above.
 
 Either way the regenerated files go in the same pull request as the change.
 
-## Retries after a late process listing
+## Repeats in CI
 
-`delega` waits at most 500 ms (a requested stop) or 3.1 s (after the worker
-exits) for the process listing it takes before its first signal. On a machine
-where `ps` is slower than that, it reports cleanup as `Unconfirmed` with the
-reason `delega_core::process::LATE_LISTING_REASON`. A row that expects a
-confirmed cleanup is then run again, up to five runs in all, but only when that
-is the whole failure: the cleanup verdict is exactly the late-listing verdict
-(`delega_core::process::is_late_listing_only`: that reason alone, or repeated
-for the version probe and the run, with no pids and no process groups), and the
-only problem `judge` found is the confirmed mismatch, so the exit status, the
-outcome and the survivors were as expected. Any other failure is reported as
-measured. Each result records `attempts` and the `discarded` reasons in the
-JSONL output, and the summary line says how many rows needed a retry and how
-many runs the matrix took in total. A row whose listing is late in all five runs
-fails.
+Both platforms run the full matrix once. On Linux, the SIGKILL-with-relay
+rows run ten more times to check the keeper's cleanup after `delega` dies.
+All Linux relay rows also run five more times to check the result and cleanup
+guarantees while descendants fork rapidly. The committed three-run sample
+records how the checks and observations vary across full matrix runs.
 
 ## Safety
 
@@ -414,10 +396,9 @@ whose variant needs it are skipped, visibly, when `perl` is missing from
 ## Measuring what is left
 
 The harness copies the fakes and their helper scripts into a directory whose
-name is unique to the case, `accmk-<run>-<n>`. Every process the fakes start
-runs a script from that directory, so the name is in its command line. After
-`delega` exits the harness looks in the process table (`ps -axww`) for the
-marker, whatever `delega` reported. The marker it matches ends in `/`, so case 1
+name is unique to the case, `accmk-<run>-<n>`. The fake scripts and relay
+carry that path in their command lines. After `delega` exits the harness
+looks in the process table (`ps -axww`) for the marker. The marker it matches ends in `/`, so case 1
 is not found in the command line of case 10 (a unit test covers it). It samples
 at exit and again 1 s later, records the second set as the survivors, then kills
 everything, stops the relay through a file it checks, and checks the table until
@@ -438,9 +419,9 @@ touching a heartbeat is invisible to the harness.
 Per row the results file records the provider, behaviour, action, exit status,
 the number of JSON documents on standard output and whether the one validates
 as a `RunResult`, the outcome, `cleanup.confirmed` with its reason, pids and
-groups, the survivors, whether the report was honest (survivors exist only when
-cleanup is not confirmed), the latency from the action to the exit, and the
-expectation and verdict.
+groups, the survivors at exit and after settling, whether a Confirmed result
+had zero observed survivors, the latency from the action to the exit, and the
+reference values, gap observation and verdict.
 
 ## Forcing an unconfirmed cleanup
 
@@ -452,86 +433,39 @@ set, whatever its value, no program is used to list processes. It cannot
 substitute a program, so it can only make the verdict weaker. `delega` hard-codes
 `/bin/ps` and `/usr/bin/ps`, and neither can be hidden without root, so no
 arrangement from outside was found; nothing outside this harness sets the
-variable. With no listing, the run must still end in its outcome, must report
-`cleanup.confirmed` false, with a reason that contains "process inspection was
-unavailable" and says what could not be checked. A descendant in a session of its
-own then survives, as the report says.
+variable. The report records cleanup status, reason, and survivors for these
+rows. A surviving descendant may be outside the process group checked by the
+fallback.
 
-A second way to an unconfirmed cleanup, a descendant that is seen and cannot be
-killed within the cleanup deadline, was not built: without root there is no
-process that survives SIGKILL on demand (an uninterruptible wait cannot be
-arranged from a script, and a respawning process would need to outrun the
-kill, which risks the machine). No row covers it.
+## What gates the matrix
 
-Every row that has a result also carries an expectation on `cleanup.confirmed`
-(true unless listed above), so a `delega` that reported confirmed unconditionally
-fails the run.
+- A readable run must exit and produce exactly one valid `RunResult`.
+- A `Confirmed` result fails if the harness observes any survivor at exit or
+  after settling, including on a row with a documented gap.
+- An `Unconfirmed` result must give a reason documented by the process layer.
+  Examples include a late or unavailable listing, an incomplete freeze, a
+  keeper that could not prove its tree empty, and output pipes still held
+  open. Probe and provider reasons can appear together.
+- When the fixture kills `delega` or closes its output, the harness checks the
+  expected termination. A SIGKILL produces no result. Where cleanup is
+  guaranteed without a result, the harness checks for survivors after settling.
+  The harness gives the keeper up to five extra seconds after SIGKILL of
+  `delega` to stop the tree.
+- The harness must leave no processes from the run after its sweep.
 
-## Expectations
+The matrix keeps reference outcomes, exit statuses and cleanup verdicts for
+comparison in the report. Its gap rows exercise macOS orphans, a detached
+`bare` child and the fork relay, plus SIGKILL of both `delega` and its keeper
+on every platform. The orphan and detached-child gaps are listed on macOS
+where `ps -E` hides system program environments. The harness probes that
+once per run and records `system_programs_hide_environment` in the metadata.
 
-`src/matrix.rs` holds them: per case the expected outcome, exit status, standard
-output and `cleanup.confirmed`, and a list of expected failures (`GAPS`), each
-with a class, a reason and exactly which roles may survive:
+`RESULTS.md` shows whether each gap's listed survivor roles were observed
+after settling, alongside the row's verdict. An observed survivor alongside
+a `Confirmed` result is a failure of the cleanup check.
 
-- **documented gap**: the process module's docs list it as a residual of a kept
-  run: on macOS a descendant that left the session, whose parent is gone and
-  whose environment `ps -E` does not show (the `orphan` rows, and `a` with
-  `bare`: the fakes run `sh`, `sleep` and `perl`, Apple's own programs), and a
-  fast fork relay (the `relay` rows); on every platform a SIGKILL of `delega`
-  together with its keeper (`kk`). A gap may apply to one system only; on Linux
-  only `kk` is listed. The macOS `orphan` and `a`-with-`bare` gaps apply only on
-  a system that hides the environment of its own programs from `ps -E` (System
-  Integrity Protection does); the harness probes this once per run (it starts
-  `/bin/sleep` with a marker value and looks for it in `ps -E`), records it in
-  the results metadata as `system_programs_hide_environment`, and expects those
-  rows to pass where the environment is visible. After a SIGKILL of `delega` (`k`) the harness waits up to
-  5 s more for the keeper to stop the tree before it counts survivors.
-- **undocumented gap**: a failure this harness found that the docs do not
-  describe. None is listed now.
-- **defect**: a failure that is neither. None is listed now.
-
-A row's verdict is `pass`, `expected_failure`, `gap_not_shown`, `gap_closed`,
-`unexpected_pass` or `fail`. A wrong outcome, exit status, `cleanup.confirmed`,
-document or hang is always `fail`. A row with no gap passes only with no
-survivor. A known-gap row says a survivor of the listed roles may remain:
-
-- **`expected_failure`**: the listed roles survived, so the gap showed.
-- **`gap_not_shown`**: nothing survived, on a row whose gap depends on timing
-  (on macOS `relay`, `orphan` and `a` with `bare`; Linux has none). Whether `delega` catches a process
-  that left the worker's session before any listing saw it depends on timing, so
-  on a busy machine a gap that showed on one run may not on the next. This is
-  not a failure and not counted as an unexpected pass. The summary says how many
-  known-gap runs did not show their gap and lists them.
-- **`gap_closed`**: the gap is probably fixed and the table is out of date, so
-  the run fails. Two rules produce it, both only for timing-dependent rows:
-  with `--repeat N` and N at least 3, a row that was `gap_not_shown` in every
-  one of the N runs; and in any single run, when there are at least 3
-  timing-dependent gap runs and every one of them is `gap_not_shown` (all of
-  them failing to show at once is not load noise). CI runs `--all` once, which
-  applies the second rule, and then the timing-dependent gap rows with
-  `--repeat 3`, which applies the first:
-
-  ```sh
-  cargo run --release --locked -p delega-acceptance -- \
-    --timing-gaps --repeat 3 --out acceptance-gaps.jsonl
-  ```
-
-  `--timing-gaps` selects by the matrix flag, so a renamed variant stays in the
-  step and the strict rows (`orphan-late`, the rows whose process listing is
-  unavailable, and the `c`, `d`, `e` and `fd` bare rows) are not repeated. It
-  selects exactly the 22 timing-dependent gap rows. Locally the repeat takes
-  about a minute. A skipped timing-dependent row is never marked `gap_closed`.
-- **`unexpected_pass`**: a known-gap row whose gap does not depend on timing
-  (the SIGKILL `k` rows: after `delega` is killed nothing can stop the worker,
-  so the provider always survives) had no survivor. That is not load noise and
-  fails the run: either the gap is fixed and the table is out of date, or
-  `delega` stopped before it started the worker.
-- **`fail`**: anything else about the survivors: a role the row does not list, a
-  subset of the listed roles, or an `unrecorded` survivor (a process that carries
-  the case marker and that the ledger does not know, which is a real finding). An
-  expected failure cannot hide a second leak.
-
-Every process a fake starts appends its role to the ledger as its first act.
+Each ledger entry is an empty file named `pids/role.pid`. Creating the file
+publishes its complete role and PID in one step.
 That includes each generation of the `relay` variant (role `relay-heartbeat`),
 so a relay process that is sampled is attributed to its role. A marked process
 the ledger does not know yet is given two seconds to record itself, which only

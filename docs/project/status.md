@@ -44,7 +44,7 @@ stands. This page lists the limits a user meets.
   A program that embeds the library without a keeper keeps the earlier gaps,
   and the result says so in `provider_notes`. Details are in
   `crates/delega-core/src/process/mod.rs` ("What remains possible") and the
-  expected failures in
+  gap observations in
   [acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md).
 - **Environment.** A worker gets a fixed environment allowlist plus what `--env`
   or the configuration file adds. The installed plugin starts `delega mcp` with
@@ -70,9 +70,10 @@ stands. This page lists the limits a user meets.
 
 The committed acceptance run
 ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),
-fake providers only, Darwin arm64) has 188 rows: 158 pass, 29 are expected
-failures, 1 is a documented gap that did not show in that run, and none failed
-unexpectedly. [Guarantees and how they are tested](../acceptance.md) describes
+fake providers only, Darwin arm64) has 202 rows. Of those, 181 passed and
+21 failed because cleanup reported `Confirmed` with a surviving process.
+The report records 27 gaps shown and one gap not shown independently of the
+verdicts. [Guarantees and how they are tested](../acceptance.md) describes
 the harness.
 
 ## Scope
