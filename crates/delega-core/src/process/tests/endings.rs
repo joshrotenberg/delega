@@ -207,9 +207,9 @@ async fn dropping_the_handle_stops_the_child_and_its_descendants() {
         "echo $$ > leader; sleep 60 & echo $! > gc; wait",
         LONG,
     ));
-    let leader = s.pid("leader").await;
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![leader, gc]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
+    let gc = reaper.watch(&s, "gc").await;
     drop(handle);
     assert_gone(
         "child and grandchild after the handle was dropped",
@@ -226,11 +226,11 @@ both!(
         let spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
         let mut future = Box::pin(run(spec));
         // Wait for the child to exist, however slow the machine, then cancel.
+        let mut reaper = Reaper::default();
         let leader = tokio::select! {
             _ = &mut future => panic!("the run should still be going"),
-            pid = s.pid("leader") => pid,
+            pid = reaper.watch(&s, "leader") => pid,
         };
-        let _reaper = Reaper(vec![leader]);
         drop(future);
         assert_gone("leader after the run future was dropped", &[leader]).await;
     }
@@ -243,17 +243,17 @@ fn shutting_down_the_runtime_kills_the_group_of_a_running_child() {
         .enable_all()
         .build()
         .expect("build runtime");
+    let mut reaper = Reaper::default();
     let (handle, leader, gc) = runtime.block_on(async {
         let handle = ProcessHandle::start(sh(
             &s,
             "echo $$ > leader; sleep 60 & echo $! > gc; wait",
             LONG,
         ));
-        let leader = s.pid("leader").await;
-        let gc = s.pid("gc").await;
+        let leader = reaper.watch(&s, "leader").await;
+        let gc = reaper.watch(&s, "gc").await;
         (handle, leader, gc)
     });
-    let _reaper = Reaper(vec![leader, gc]);
     drop(runtime);
     drop(handle);
     let check = tokio::runtime::Builder::new_current_thread()

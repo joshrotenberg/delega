@@ -1,6 +1,6 @@
 //! Shared helpers: scratch directory, fake children, process checks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -54,16 +54,13 @@ impl Scratch {
     /// Wait until a script has written a pid to the named file.
     pub(super) async fn pid(&self, name: &str) -> i32 {
         let path = self.path(name);
-        let read = || {
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| text.trim().parse::<i32>().ok())
-        };
+        let mut pid = None;
         await_event(&format!("the script writing a pid to {name}"), || {
-            read().is_some()
+            pid = read_pid_file(&path);
+            pid.is_some()
         })
         .await;
-        read().expect("the pid file was just read")
+        pid.expect("the pid file was just read")
     }
 
     /// Wait until a file exists and is not empty.
@@ -85,14 +82,166 @@ impl Scratch {
     }
 }
 
-/// Stops leftover processes when a test ends, even when it fails, so a failed
-/// assertion does not leave strays on the machine.
-pub(super) struct Reaper(pub(super) Vec<i32>);
+fn read_pid_file(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// The process observed at registration. A pidfd pins the identity on Linux.
+pub(super) struct ProcessIdentity {
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::OwnedFd,
+    #[cfg(not(target_os = "linux"))]
+    pid: i32,
+    #[cfg(not(target_os = "linux"))]
+    started: String,
+    #[cfg(not(target_os = "linux"))]
+    cwd: Option<PathBuf>,
+}
+
+impl ProcessIdentity {
+    pub(super) fn capture(pid: i32) -> Option<Self> {
+        if pid <= 1 {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::process::{Pid, PidfdFlags, pidfd_open};
+            let fd = pidfd_open(Pid::from_raw(pid)?, PidfdFlags::empty()).ok()?;
+            Some(Self { fd })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(Self {
+                pid,
+                started: process_start(pid)?,
+                cwd: None,
+            })
+        }
+    }
+
+    /// A PID file identifies a candidate only. Its process must still be in
+    /// the case's private directory. If it changes cwd or the OS hides it
+    /// (for example, a non-dumpable process on Linux), registration fails.
+    /// macOS also repeats the cwd check at delivery, so changing directories
+    /// after registration there prevents cleanup.
+    fn from_pid_file(pid: i32, dir: &Path) -> Option<Self> {
+        // Open the Linux pidfd before checking cwd so it holds the identity
+        // throughout verification and delivery.
+        let identity = Self::capture(pid)?;
+        let dir = dir.canonicalize().ok()?;
+        if !cwd_matches(pid, &dir) {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        if sys::pidfd_exited(&identity.fd) {
+            return None;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let identity = Self {
+            cwd: Some(dir),
+            ..identity
+        };
+        Some(identity)
+    }
+
+    pub(super) fn signal(&self, signal: Signal) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            rustix::process::pidfd_send_signal(&self.fd, signal).is_ok()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // ps has one-second precision, and the process can exit between
+            // the check and kill. macOS has no pidfd to close that window.
+            process_start(self.pid).as_ref() == Some(&self.started)
+                && self
+                    .cwd
+                    .as_ref()
+                    .is_none_or(|dir| cwd_matches(self.pid, dir))
+                && sys::signal_process(self.pid, signal).is_ok()
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cwd_matches(pid: i32, expected: &Path) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == expected)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cwd_matches(pid: i32, expected: &Path) -> bool {
+    let pid = pid.to_string();
+    // Avoid filesystem lookups on unrelated mounts. Darwin still reports cwd.
+    let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-b", "-a", "-p", &pid, "-d", "cwd", "-Fn"])
+        .env_clear()
+        .env("LC_ALL", "C")
+        .guarded_output()
+    else {
+        return false;
+    };
+    let stdout = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let mut lines = stdout.split(|&byte| byte == b'\n');
+    let process = format!("p{pid}");
+    output.status.success()
+        && lines.next() == Some(process.as_bytes())
+        && lines.next() == Some(b"fcwd")
+        && lines.next().and_then(|line| line.strip_prefix(b"n"))
+            == Some(expected.as_os_str().as_encoded_bytes())
+        && lines.next().is_none()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start(pid: i32) -> Option<String> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .guarded_output()
+        .ok()?;
+    let started = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.status.success() && !started.is_empty()).then(|| started.to_owned())
+}
+
+/// Stops leftover processes when a test ends, even when it fails.
+#[derive(Default)]
+pub(super) struct Reaper(Vec<ProcessIdentity>);
+
+impl Reaper {
+    pub(super) fn new(pids: impl IntoIterator<Item = i32>) -> Self {
+        Self(
+            pids.into_iter()
+                .filter_map(ProcessIdentity::capture)
+                .collect(),
+        )
+    }
+
+    pub(super) async fn watch(&mut self, scratch: &Scratch, name: &str) -> i32 {
+        let pid = scratch.pid(name).await;
+        if self.register(pid, scratch).is_none() {
+            eprintln!(
+                "cleanup skipped for {name} (PID {pid}): could not verify its identity in the test scratch directory"
+            );
+        }
+        pid
+    }
+
+    pub(super) fn register(&mut self, pid: i32, scratch: &Scratch) -> Option<&ProcessIdentity> {
+        self.0
+            .push(ProcessIdentity::from_pid_file(pid, &scratch.dir())?);
+        self.0.last()
+    }
+
+    pub(super) fn add(&mut self, identity: Option<ProcessIdentity>) {
+        self.0.extend(identity);
+    }
+}
 
 impl Drop for Reaper {
     fn drop(&mut self) {
-        for pid in &self.0 {
-            let _ = sys::signal_process(*pid, Signal::KILL);
+        for process in &self.0 {
+            process.signal(Signal::KILL);
         }
     }
 }
@@ -231,10 +380,10 @@ pub(super) async fn run_guarded(
 ) -> (ProcessReport, Vec<i32>, Reaper) {
     let handle = ProcessHandle::start(spec);
     let mut pids = Vec::new();
+    let mut reaper = Reaper::default();
     for file in files {
-        pids.push(scratch.pid(file).await);
+        pids.push(reaper.watch(scratch, file).await);
     }
-    let reaper = Reaper(pids.clone());
     (handle.wait().await, pids, reaper)
 }
 
@@ -437,11 +586,23 @@ fn a_stat_line_with_a_name_that_is_not_utf8_and_holds_a_parenthesis_is_read() {
     assert_eq!(stat_state_and_start(b"4242 (a\xff"), None);
 }
 
-/// End what a relay case left in `dir`, without signalling a foreign process:
-/// on Linux every process [`case_processes`] finds, each through a pidfd
-/// opened and then checked to still name `dir` on its command line; elsewhere the pid in the heartbeat file,
-/// only while `ps` shows it is the relay's `perl`. Repeats until nothing is
-/// left or 5 s pass.
+pub(super) fn process_names_path(pid: i32, path: &[u8]) -> bool {
+    #[cfg(target_os = "linux")]
+    let command = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
+    #[cfg(not(target_os = "linux"))]
+    let command = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .env_clear()
+        .guarded_output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| out.stdout);
+    command.is_some_and(|command| holds_path(&command, path))
+}
+
+/// End the relay processes whose command lines name the case directory.
+/// Linux signals through a pidfd. Elsewhere the heartbeat supplies a candidate
+/// PID and the start time must still match. Retry for up to five seconds.
 pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(5) {
@@ -455,18 +616,10 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
             }
             let names = path_names(dir).unwrap_or_default();
             for pid in left {
-                let Some(raw) = rustix::process::Pid::from_raw(pid) else {
-                    continue;
-                };
-                let Ok(fd) = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())
-                else {
-                    continue;
-                };
-                let still_here = std::fs::read(format!("/proc/{pid}/cmdline"))
-                    .ok()
-                    .is_some_and(|cmdline| names.iter().any(|name| holds_path(&cmdline, name)));
-                if still_here {
-                    let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
+                if let Some(process) = ProcessIdentity::capture(pid)
+                    && names.iter().any(|name| process_names_path(pid, name))
+                {
+                    process.signal(Signal::KILL);
                 }
             }
         }
@@ -481,18 +634,11 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
             if !fresh {
                 return;
             }
-            if let Some(pid) = std::fs::read_to_string(&beat)
-                .ok()
-                .and_then(|t| t.trim().parse::<i32>().ok())
+            if let Some(pid) = read_pid_file(&beat)
+                && let Some(process) = ProcessIdentity::from_pid_file(pid, dir)
+                && process_names_path(pid, dir.as_os_str().as_encoded_bytes())
             {
-                let command = std::process::Command::new("/bin/ps")
-                    .args(["-o", "command=", "-p", &pid.to_string()])
-                    .guarded_output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
-                if command.contains("perl") {
-                    let _ = sys::signal_process(pid, Signal::KILL);
-                }
+                process.signal(Signal::KILL);
             }
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -507,4 +653,80 @@ impl Drop for SetOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
     }
+}
+
+fn waiting_child(dir: &Scratch) -> std::process::Child {
+    use std::process::Stdio;
+
+    std::process::Command::new("/bin/cat")
+        .current_dir(dir.dir())
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .guarded_spawn()
+        .expect("start a child waiting for EOF")
+}
+
+#[test]
+fn a_pid_file_only_registers_a_process_in_its_test_directory() {
+    let scratch = Scratch::new();
+    let foreign = Scratch::new();
+    let path = scratch.path("pid");
+    let mut original = waiting_child(&scratch);
+    std::fs::write(&path, format!("{}\n", original.id())).expect("write the original PID");
+    let pid = read_pid_file(&path).expect("read the original PID");
+    assert!(
+        ProcessIdentity::from_pid_file(pid, &scratch.dir()).is_some(),
+        "a process in the test directory must register"
+    );
+    assert!(original.wait().expect("reap the original").success());
+
+    let mut replacement = waiting_child(&foreign);
+    // Stand in for numeric PID reuse without requiring the kernel to reuse it.
+    std::fs::write(&path, format!("{}\n", replacement.id())).expect("simulate PID reuse");
+    let pid = read_pid_file(&path).expect("read the replacement PID");
+    let registered = ProcessIdentity::from_pid_file(pid, &scratch.dir());
+    assert!(replacement.wait().expect("reap the replacement").success());
+    assert!(
+        registered.is_none(),
+        "a different cwd must prevent registration"
+    );
+}
+
+#[test]
+fn reaper_does_not_signal_a_replacement_after_the_registered_process_exits() {
+    let scratch = Scratch::new();
+    let mut original = waiting_child(&scratch);
+    let mut reaper = Reaper::default();
+    reaper
+        .register(i32::try_from(original.id()).expect("a pid"), &scratch)
+        .expect("register the original in the test directory");
+    assert!(original.wait().expect("reap the original").success());
+
+    // The two starts must differ at ps's one-second precision. This test
+    // leaves the same-second reuse window on macOS untested.
+    #[cfg(not(target_os = "linux"))]
+    std::thread::sleep(Duration::from_secs(1));
+    let mut replacement = waiting_child(&scratch);
+
+    // On Linux the old PID is free, so this cannot distinguish a pidfd
+    // signal from signalling that PID by number.
+    #[cfg(target_os = "linux")]
+    assert!(
+        !reaper.0[0].signal(Signal::KILL),
+        "the original pidfd must no longer address a process"
+    );
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Simulate reuse by making the stored PID resolve to the replacement
+        // while keeping the identity captured for the original.
+        reaper.0[0].pid = i32::try_from(replacement.id()).expect("a pid");
+    }
+
+    drop(reaper);
+    assert!(
+        replacement.wait().expect("reap the replacement").success(),
+        "the replacement was signalled"
+    );
 }

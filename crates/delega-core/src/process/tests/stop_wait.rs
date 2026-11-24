@@ -73,9 +73,8 @@ async fn stop_while_the_listing_is_held(how: How) -> Option<ProcessReport> {
         How::SecondInterrupt | How::Drop => Duration::from_secs(120),
     };
     let handle = ProcessHandle::start(spec);
-    await_event("the child starting", || handle.pid().is_some()).await;
-    let leader = i32::try_from(handle.pid().expect("it started")).expect("a pid");
-    let _reaper = Reaper(vec![leader]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
     let handle = match how {
         How::Interrupt => {
             handle.interrupt();
@@ -171,8 +170,8 @@ async fn a_normal_interrupt_is_one_listing_and_confirmed() {
     let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG).with_lister(held.lister());
     spec.capture_interval = Some(Duration::from_secs(3600));
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
     held.armed.store(true, Ordering::SeqCst);
     handle.interrupt();
     await_event("the stop asking for its listing", || {
@@ -233,9 +232,9 @@ async fn a_term_sweep_that_ran_out_of_budget_is_repeated_until_a_descendant_gets
     spec.timings.stop_listing = SHORT_BUDGET;
     spec.timings.descendant_signal = Duration::from_millis(100);
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![leader, gc]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
+    let gc = reaper.watch(&s, "gc").await;
     super::fixtures::wait_own_group(gc).await;
     super::fixtures::wait_tracked(&handle, gc).await;
     held.armed.store(true, Ordering::SeqCst);
@@ -295,8 +294,8 @@ async fn a_stop_whose_listing_never_completes_still_ends_at_the_grace_with_kill(
     spec.timings.stop_listing = SHORT_BUDGET;
     spec.timings.descendant_signal = Duration::from_millis(250);
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
     handle.interrupt();
     let report = tokio::time::timeout(DEADLINE, handle.wait())
         .await
@@ -363,9 +362,9 @@ async fn stop_with_slow_listings(term_handler: &str, grace: Duration) -> (Proces
     spec.timings.stop_listing = SHORT_BUDGET;
     spec.timings.descendant_signal = Duration::from_millis(250);
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![leader, gc]);
+    let mut reaper = Reaper::default();
+    reaper.watch(&s, "leader").await;
+    let gc = reaper.watch(&s, "gc").await;
     super::fixtures::wait_tracked(&handle, gc).await;
     handle.interrupt();
     let report = tokio::time::timeout(DEADLINE, handle.wait())

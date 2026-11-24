@@ -387,7 +387,7 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
         orphan_own_session,
         child_of_test,
     ];
-    let _foreign_reaper = Reaper(foreigners.clone());
+    let _foreign_reaper = Reaper::new(foreigners.clone());
     for pid in &foreigners {
         assert!(is_running(*pid), "foreign process {pid} did not start");
     }
