@@ -36,20 +36,28 @@ impl Drop for Sibling {
     }
 }
 
+/// The sibling's name in its argument list. It and the two arguments keep the
+/// sibling's `ps` line short, so the probe value falls well inside the clip on
+/// `inspection.last_error` and an error that quoted the whole line would be
+/// caught.
+const SIBLING_NAME: &str = "s";
+
+/// How far into the sibling's command column (on Linux, its environment block)
+/// the probe word may end. Well inside the 1000-character clip on
+/// `inspection.last_error`, with room for the prefixes an error would add.
+const PROBE_END_MAX: usize = 500;
+
 /// Start this test binary as a 60 s sleeper with `value` under [`PROBE_ENV`].
 /// It is the test's child, outside any run. It is this binary rather than
 /// `/bin/sleep` because macOS hides the environment of Apple's own programs
 /// from `ps -E`, and the test needs a sibling whose environment cleanup does
 /// see.
 fn start_sibling(value: &str) -> Sibling {
+    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().expect("the test binary's path");
     let child = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "process::tests::keeper::sleeper_entry",
-            "--test-threads=1",
-            "-q",
-        ])
+        .arg0(SIBLING_NAME)
+        .args(["--exact", "process::tests::keeper::sleeper_entry"])
         .env_clear()
         .env(SLEEP_ENV, "60")
         .env(PROBE_ENV, value)
@@ -61,26 +69,49 @@ fn start_sibling(value: &str) -> Sibling {
     Sibling(child)
 }
 
-/// Whether the environment of `pid`, read the way cleanup reads it, holds
-/// `value`. On macOS that is the same `ps -U <uid> -Eww` listing cleanup takes;
-/// on Linux it is `/proc/<pid>/environ`.
+/// Where the probe word `PROBE_ENV=value` ends in the sibling's environment,
+/// read the way cleanup reads it, or `None` when it is not there. On macOS the
+/// reading is the same `ps -U <uid> -Eww` listing cleanup takes, and the
+/// offset counts from the start of the sibling's command column; on Linux it
+/// is `/proc/<pid>/environ`, counted from the start of the block.
 #[cfg(not(target_os = "linux"))]
-fn environment_shows(_pid: u32, value: &str) -> bool {
+fn probe_end(pid: u32, value: &str) -> Option<usize> {
     let uid = rustix::process::getuid().as_raw().to_string();
-    std::process::Command::new("/bin/ps")
+    let out = std::process::Command::new("/bin/ps")
         .args(["-U", &uid, "-Eww", "-o", "pid=,stat=,lstart=,command="])
         .env("LC_ALL", "C")
         .guarded_output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(value))
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.split_ascii_whitespace().next() == Some(pid.to_string().as_str()))?;
+    // pid, state and the five words of the start time come before the command.
+    let mut rest = line.trim_start();
+    for _ in 0..7 {
+        let word_end = rest.find(char::is_whitespace)?;
+        rest = rest[word_end..].trim_start();
+    }
+    let word = format!("{PROBE_ENV}={value}");
+    rest.find(&word).map(|start| start + word.len())
 }
 
 #[cfg(target_os = "linux")]
+fn probe_end(pid: u32, value: &str) -> Option<usize> {
+    let block = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let word = format!("{PROBE_ENV}={value}");
+    let mut offset = 0;
+    for entry in block.split(|b| *b == 0) {
+        if entry == word.as_bytes() {
+            return Some(offset + entry.len());
+        }
+        offset += entry.len() + 1;
+    }
+    None
+}
+
 fn environment_shows(pid: u32, value: &str) -> bool {
-    std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|block| {
-        block
-            .split(|b| *b == 0)
-            .any(|entry| entry == format!("{PROBE_ENV}={value}").as_bytes())
-    })
+    probe_end(pid, value).is_some()
 }
 
 /// Wait until the sibling's environment is readable with the value, so the
@@ -112,6 +143,12 @@ async fn environment_text_read_by_cleanup_never_reaches_the_report_or_its_diagno
     let pid = sibling.0.id();
     await_environment(pid, &value).await;
     assert!(is_running(pid as i32), "the sibling is not running");
+    let end = probe_end(pid, &value).expect("the probe value is readable");
+    assert!(
+        end <= PROBE_END_MAX,
+        "the probe word ends {end} characters into the sibling's reading, past \
+         {PROBE_END_MAX}: an error quoting the whole line could be clipped before it"
+    );
 
     let s = Scratch::new();
     let report = ProcessHandle::start(kept(sh(&s, "exit 0", Duration::from_secs(60))))
