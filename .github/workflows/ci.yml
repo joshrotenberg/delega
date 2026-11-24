@@ -39,6 +39,13 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Check only delega-core. The other crates, delega-mcp and delega, require
+      # its version on crates.io and can only be packaged in release publish order.
+      # In #214, a versioned self dev-dependency nearly merged and made
+      # delega-core impossible to package.
+      - name: Package delega-core
+        if: runner.os == 'Linux'
+        run: cargo package -p delega-core --no-verify --locked
       # Each test step also writes its output to test-logs/, which is uploaded
       # only when the job fails. The attempt number in the artifact name keeps
       # a rerun from replacing the first attempt's logs.
