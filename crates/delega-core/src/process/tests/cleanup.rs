@@ -530,6 +530,41 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     assert_stopped_in_time("same-group grandchild", &[gc], started).await;
 }
 
+#[tokio::test]
+async fn a_refused_ps_is_reported_as_refused_not_as_missing() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Scratch::new();
+    // A listing program that exists but may not be executed, tried before a
+    // missing one, as a sandbox that refuses `/bin/ps` presents it.
+    let refused = s.path("refused-ps");
+    std::fs::write(&refused, "#!/bin/sh\nexit 0\n").expect("write refused ps");
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let missing = std::path::PathBuf::from("/nonexistent/delega-ps");
+    let error = crate::process::tree::list_processes_from(&[refused.clone(), missing.clone()])
+        .await
+        .expect_err("neither program can start");
+    let InspectError::Unavailable(message) = &error else {
+        panic!("a program that cannot start is unavailable inspection: {error:?}");
+    };
+    let refusal = std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error());
+    assert!(
+        message.starts_with("ps could not be started ("),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("{}: {refusal}", refused.display())),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("{}: ", missing.display())),
+        "{message}"
+    );
+    assert!(
+        message.find(&refused.display().to_string()) < message.find(&missing.display().to_string()),
+        "the paths are named in the order tried: {message}"
+    );
+}
+
 /// A `ps` stand-in that prints `output` and exits 0, at a path in `s`.
 fn fake_ps(s: &Scratch, output: &str) -> Lister {
     use std::os::unix::fs::PermissionsExt;
