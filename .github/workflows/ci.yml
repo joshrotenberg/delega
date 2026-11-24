@@ -34,19 +34,33 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Each test step also writes its output to test-logs/, which is uploaded
+      # only when the job fails. The attempt number in the artifact name keeps
+      # a rerun from replacing the first attempt's logs.
       - name: Test
-        run: cargo test --workspace --locked
+        run: |
+          set -o pipefail
+          mkdir -p test-logs
+          cargo test --workspace --locked 2>&1 | tee test-logs/test.log
       # The keeper and the gap tests depend on timing on Linux (the keeper's
       # walk races the tree it stops), so they run five more times there; any
       # failure fails the job.
       - name: Keeper and gap tests, five repeats (Linux)
         if: runner.os == 'Linux'
         run: |
+          set -o pipefail
+          mkdir -p test-logs
           for attempt in 1 2 3 4 5; do
             echo "keeper and gap tests, repeat $attempt of 5"
             cargo test --locked -p delega-core --lib -- \
-              process::keeper:: process::tests::keeper:: process::tests::gaps::
+              process::keeper:: process::tests::keeper:: process::tests::gaps:: \
+              2>&1 | tee "test-logs/keeper-and-gaps-repeat-$attempt.log"
           done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-logs-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: test-logs/
       - name: Processes left by the tests
         if: always()
         run: ps -axo pid,ppid,command | grep -E "fake-claude|fake-codex|sleep 300" | grep -v grep || true
@@ -68,18 +82,22 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: acceptance-results-${{ matrix.os }}
+          name: acceptance-results-${{ matrix.os }}-attempt-${{ github.run_attempt }}
           path: acceptance-results.jsonl
       # On Linux the keeper alone must stop a fork relay after a SIGKILL of
       # delega (the k-relay rows). Whether a generation slips past depends on
       # timing, so those rows run ten more times; any survivor fails the job.
       - name: SIGKILL with a fork relay, ten repeats (Linux)
         if: runner.os == 'Linux'
-        run: cargo run --release --locked -p delega-acceptance -- --filter=-k-relay --repeat 10 --out acceptance-k-relay.jsonl
+        run: |
+          set -o pipefail
+          mkdir -p acceptance-logs
+          cargo run --release --locked -p delega-acceptance -- --filter=-k-relay --repeat 10 --out acceptance-k-relay.jsonl \
+            2>&1 | tee acceptance-logs/k-relay-repeats.log
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
-          name: acceptance-k-relay-repeats
+          name: acceptance-k-relay-repeats-attempt-${{ github.run_attempt }}
           path: acceptance-k-relay.jsonl
       # Repeat the Linux relay rows to check the expected outcome and exit,
       # one valid result, and no survivors under process churn. Readable runs
@@ -87,12 +105,23 @@ jobs:
       # rows check signal exit, no result, and the keeper's cleanup.
       - name: Every relay row, five repeats (Linux)
         if: runner.os == 'Linux'
-        run: cargo run --release --locked -p delega-acceptance -- --filter=-relay --repeat 5 --out acceptance-relay.jsonl
+        run: |
+          set -o pipefail
+          mkdir -p acceptance-logs
+          cargo run --release --locked -p delega-acceptance -- --filter=-relay --repeat 5 --out acceptance-relay.jsonl \
+            2>&1 | tee acceptance-logs/relay-repeats.log
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
-          name: acceptance-relay-repeats
+          name: acceptance-relay-repeats-attempt-${{ github.run_attempt }}
           path: acceptance-relay.jsonl
+      # The console output of the relay repeats, kept per attempt when the job
+      # fails so a rerun does not replace the first attempt's logs.
+      - uses: actions/upload-artifact@v4
+        if: failure() && runner.os == 'Linux'
+        with:
+          name: acceptance-logs-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: acceptance-logs/
 
   msrv:
     name: build on the minimum supported Rust
