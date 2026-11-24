@@ -604,9 +604,17 @@ fn a_blocked_standard_error_does_not_delay_stopping_the_worker() {
         let rig = Rig::new();
         // The fake writes about 10000 progress events, far more than a pipe
         // holds, and nobody reads standard error.
-        let mut child = rig.spawn_run(provider, "chatty-hang", &["--progress", "--output", "json"]);
+        let blocked = rig.path("stderr-blocked");
+        let mut child = rig
+            .command()
+            .args(rig.run_args(provider, "chatty-hang", &["--progress", "--output", "json"]))
+            .env("DELEGA_TEST_ACK_STDERR_BLOCKED", &blocked)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .guarded_spawn()
+            .expect("spawn delega");
         rig.wait_started();
-        std::thread::sleep(Duration::from_millis(500));
+        wait_for_ack(&blocked, &mut child, "writing to standard error blocks");
         signal(child.id(), "TERM");
         let status = wait_exit_only(&mut child, Duration::from_secs(90));
         assert_eq!(status.code(), Some(130), "{provider}");
