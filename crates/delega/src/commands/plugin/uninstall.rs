@@ -133,7 +133,7 @@ impl Report {
     }
 }
 
-pub async fn run(args: Args) -> ExitCode {
+pub async fn run(args: Args, runner: &mut exec::Runner) -> ExitCode {
     let configured = match super::configured_dir(args.install_dir) {
         Ok(dir) => dir,
         Err(error) => {
@@ -149,15 +149,18 @@ pub async fn run(args: Args) -> ExitCode {
     }
     let report = match fsops::canonical_dir(&configured) {
         Ok(dir) => {
-            uninstall(&Request {
-                dir,
-                named,
-                programs: Host::ALL
-                    .into_iter()
-                    .map(|host| (host, super::find_host(host)))
-                    .collect(),
-                dry_run: args.dry_run,
-            })
+            uninstall(
+                &Request {
+                    dir,
+                    named,
+                    programs: Host::ALL
+                        .into_iter()
+                        .map(|host| (host, super::find_host(host)))
+                        .collect(),
+                    dry_run: args.dry_run,
+                },
+                runner,
+            )
             .await
         }
         // Still a document, so a caller that asked for JSON always gets one.
@@ -195,7 +198,7 @@ fn program(request: &Request, host: Host) -> &Result<PathBuf, String> {
 }
 
 /// Uninstall, or with `dry_run` report what would be done.
-pub(super) async fn uninstall(request: &Request) -> Report {
+pub(super) async fn uninstall(request: &Request, runner: &mut exec::Runner) -> Report {
     let dir: &Path = &request.dir;
     let mut report = Report {
         dry_run: request.dry_run,
@@ -266,7 +269,7 @@ pub(super) async fn uninstall(request: &Request) -> Report {
             row.note = Some("registrations are read before removal (not run in a dry run)".into());
             host.uninstall_commands()
         } else {
-            match registration::removal_commands(host, path, dir).await {
+            match registration::removal_commands(host, path, dir, runner).await {
                 Ok(commands) => commands,
                 Err(error) => {
                     row.status = "refused";
@@ -293,7 +296,10 @@ pub(super) async fn uninstall(request: &Request) -> Report {
             } else if broke {
                 row.commands.push(CommandRecord::new(args, "not_run", ""));
             } else {
-                match exec::run(&path, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES).await {
+                match runner
+                    .run(&path, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES)
+                    .await
+                {
                     Ok(ran) if matches!(ran.ending, Ending::Exited { code: 0 }) => {
                         row.commands
                             .push(CommandRecord::new(args, "ran", &exec::shown(&ran)));

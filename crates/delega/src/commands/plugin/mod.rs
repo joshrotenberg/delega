@@ -43,10 +43,21 @@ impl Command {
                 return ExitCode::FAILURE;
             }
         };
-        match self {
-            Self::Install(args) => runtime.block_on(install::run(args)),
-            Self::Uninstall(args) => runtime.block_on(uninstall::run(args)),
-        }
+        runtime.block_on(async {
+            let mut runner = match exec::Runner::install() {
+                Ok(runner) => runner,
+                Err(err) => {
+                    super::output::report(&format!(
+                        "delega plugin: cannot install signal handlers: {err}"
+                    ));
+                    return ExitCode::FAILURE;
+                }
+            };
+            match self {
+                Self::Install(args) => install::run(args, &mut runner).await,
+                Self::Uninstall(args) => uninstall::run(args, &mut runner).await,
+            }
+        })
     }
 }
 

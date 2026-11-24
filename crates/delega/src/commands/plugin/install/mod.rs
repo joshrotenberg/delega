@@ -147,7 +147,7 @@ impl Report {
     }
 }
 
-pub async fn run(args: Args) -> ExitCode {
+pub async fn run(args: Args, runner: &mut exec::Runner) -> ExitCode {
     let configured = match super::configured_dir(args.install_dir) {
         Ok(dir) => dir,
         Err(error) => {
@@ -174,16 +174,19 @@ pub async fn run(args: Args) -> ExitCode {
     });
     let report = match prepared {
         Ok((dir, executable)) => {
-            install(&Request {
-                dir,
-                explicit,
-                hosts: wanted
-                    .into_iter()
-                    .map(|host| (host, super::find_host(host)))
-                    .collect(),
-                executable,
-                dry_run: args.dry_run,
-            })
+            install(
+                &Request {
+                    dir,
+                    explicit,
+                    hosts: wanted
+                        .into_iter()
+                        .map(|host| (host, super::find_host(host)))
+                        .collect(),
+                    executable,
+                    dry_run: args.dry_run,
+                },
+                runner,
+            )
             .await
         }
         // Still a document, so a caller that asked for JSON always gets one.
@@ -213,7 +216,7 @@ pub async fn run(args: Args) -> ExitCode {
 }
 
 /// Install, or with `dry_run` report what would be done.
-pub(super) async fn install(request: &Request) -> Report {
+pub(super) async fn install(request: &Request, runner: &mut exec::Runner) -> Report {
     let dir = &request.dir;
     let mut report = Report {
         dry_run: request.dry_run,
@@ -305,7 +308,10 @@ pub(super) async fn install(request: &Request) -> Report {
             } else if broke {
                 row.commands.push(CommandRecord::new(args, "not_run", ""));
             } else {
-                match exec::run(program, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES).await {
+                match runner
+                    .run(program, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES)
+                    .await
+                {
                     Ok(ran) if matches!(ran.ending, Ending::Exited { code: 0 }) => {
                         row.commands
                             .push(CommandRecord::new(args, "ran", &exec::shown(&ran)));

@@ -15,9 +15,14 @@ use serde_json::Value;
 use super::exec::{self, LISTING_BYTES, LISTING_LIMIT};
 use super::{Host, MARKETPLACE, PLUGIN_DIR, PLUGIN_ID};
 
-async fn inspect(program: &Path, args: &[&str]) -> Result<Value, String> {
+async fn inspect(
+    program: &Path,
+    args: &[&str],
+    runner: &mut exec::Runner,
+) -> Result<Value, String> {
     let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-    let ran = exec::run(program, &args, LISTING_LIMIT, LISTING_BYTES)
+    let ran = runner
+        .run(program, &args, LISTING_LIMIT, LISTING_BYTES)
         .await
         .map_err(|error| {
             format!("cannot verify registration: {error}; no removal was attempted")
@@ -87,8 +92,14 @@ pub async fn removal_commands(
     host: Host,
     program: &Path,
     dir: &Path,
+    runner: &mut exec::Runner,
 ) -> Result<Vec<Vec<String>>, String> {
-    let marketplaces = inspect(program, &["plugin", "marketplace", "list", "--json"]).await?;
+    let marketplaces = inspect(
+        program,
+        &["plugin", "marketplace", "list", "--json"],
+        runner,
+    )
+    .await?;
     let entries = match host {
         Host::Claude => &marketplaces,
         Host::Codex => &marketplaces["marketplaces"],
@@ -110,7 +121,7 @@ pub async fn removal_commands(
             ));
         }
     }
-    let plugins = inspect(program, &["plugin", "list", "--json"]).await?;
+    let plugins = inspect(program, &["plugin", "list", "--json"], runner).await?;
     let (entries, field) = match host {
         Host::Claude => (&plugins, "id"),
         Host::Codex => (&plugins["installed"], "pluginId"),

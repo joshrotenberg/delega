@@ -50,7 +50,8 @@ async fn an_install_with_different_executable_bytes_has_a_different_version_ever
     fs::write(&executable, b"first build").expect("write executable");
     let request = request(&root, &executable);
 
-    let first = install(&request).await;
+    let mut runner = exec::Runner::install().expect("install signal handlers");
+    let first = install(&request, &mut runner).await;
     assert_eq!(first.error, None);
     let first_version = first.plugin_version.clone().expect("version");
     let claude = request.dir.join("plugin/delega/.claude-plugin/plugin.json");
@@ -65,14 +66,14 @@ async fn an_install_with_different_executable_bytes_has_a_different_version_ever
     );
 
     // The same bytes again: the same version, and the commands repeat.
-    let again = install(&request).await;
+    let again = install(&request, &mut runner).await;
     assert_eq!(
         again.plugin_version.as_deref(),
         Some(first_version.as_str())
     );
 
     fs::write(&executable, b"second build").expect("rewrite executable");
-    let second = install(&request).await;
+    let second = install(&request, &mut runner).await;
     assert_eq!(second.error, None);
     let second_version = second.plugin_version.clone().expect("version");
     assert_ne!(first_version, second_version);
