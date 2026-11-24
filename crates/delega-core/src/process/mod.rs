@@ -585,32 +585,30 @@
 //! `pre_exec` hook in `sys.rs` that calls only `setsid`, used for the child and
 //! for the keeper.
 //!
-//! Verified on macOS only. Not yet verified on Linux, for the Linux run to
-//! check:
+//! CI runs the workspace tests and the full acceptance matrix on
+//! `macos-latest` and `ubuntu-latest`. The Linux job repeats keeper and gap
+//! tests five more times. The `perl is installed` step ensures the group and
+//! session fixtures run.
 //!
-//! - `ps -o lstart` of one process can differ by a second between calls on
-//!   older procps, which would break pid identity matching.
-//! - `kill(-pgid, 0)` and group signals when only a zombie leader remains
-//!   (macOS answers EPERM, Linux succeeds), and the EPERM path in cleanup.
-//! - `waitid` with `WNOWAIT` for a stopped leader: macOS reports a stop as a
-//!   result; the code accepts only exit, kill and core dump, which is the
-//!   Linux behaviour too, but the stopped-leader tests have not run there.
-//! - The `/proc/<pid>/stat` session read for processes in other sessions, for
-//!   other users' processes and for kernel threads, now read for every row of
-//!   every listing (the 0 answer is covered by unit tests).
-//! - A zombie leader keeps its session: the session of the members it left behind
-//!   answers its pid, and its children are reparented when it exits, not when it
-//!   is reaped. Both hold on macOS; the adoption of a `setsid` descendant whose
-//!   parent is a member depends on them.
-//! - SIGCONT after TERM: on Linux a stopped process holds a TERM pending until
-//!   it is continued, so `a_stopped_descendant_receives_terminate_when_the_group_does`
-//!   can fail there if the SIGCONT is removed; on macOS it cannot fail.
-//! - Fixtures use `perl` to start descendants in their own group or session and
-//!   skip with a printed message when it is missing.
-//! - The keeper's subreaper, its `/proc` walk and freeze, the reaping of
-//!   orphans, and the marker read from `/proc/<pid>/environ` run only on Linux;
-//!   their tests run in the Linux CI job and compile and pass clippy locally
-//!   for `x86_64-unknown-linux-gnu`.
+//! On Linux, the stopped-leader and stopped-descendant tests in `tests/stop.rs`
+//! exercise `waitid` with `WNOWAIT` and SIGCONT after TERM. The missing-`ps`
+//! test in `tests/cleanup.rs` exercises the group probe after reaping. Session
+//! sweeps and exit-time adoption are covered by the session-member tests in
+//! `tests/cleanup.rs` and the live-parent `setsid` tests in `tests/gaps.rs`.
+//! The keeper and gap tests exercise subreaper adoption, the `/proc` walk,
+//! freeze and orphan cleanup. The environment test in `tests/environment.rs`
+//! checks that the marker scan reads `/proc/<pid>/environ`.
+//!
+//! Linux coverage gaps:
+//!
+//! - `ps -o lstart` stability on older procps and behavior on distributions
+//!   other than the CI image.
+//! - The exact group probe and signal results with only a zombie leader,
+//!   and cleanup after a real EPERM from a group signal.
+//! - Session reads for other users' processes. Session zero is covered by
+//!   unit tests, but the live check skips if no session-zero process is visible.
+//! - Orphan reaping is exercised during keeper cleanup without a separate
+//!   assertion that the keeper reaped the orphan.
 
 #![cfg(unix)]
 
