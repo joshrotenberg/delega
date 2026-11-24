@@ -45,6 +45,7 @@ mod gaps;
 mod io;
 mod keeper;
 mod ported;
+mod spawn_lock;
 mod stop;
 mod stop_wait;
 mod tap;
