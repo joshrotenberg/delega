@@ -2,7 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::fixtures::{Reaper, Record, Scratch, assert_confirmed, assert_gone, read_record, sh};
+use super::fixtures::{
+    Listings, Reaper, Record, Scratch, assert_confirmed, assert_gone, await_held, read_record, sh,
+    step_through_the_limit,
+};
 use crate::contract::outcome::Outcome;
 use crate::process::{Ending, ProcessHandle, ProcessSpec, run};
 
@@ -72,23 +75,42 @@ both!(
     a_time_limit_ends_the_run_as_timed_out_and_stops_the_child_kept,
     async {
         let s = Scratch::new();
+        let limit = Duration::from_millis(400);
+        // The run's clock is paused and held until the child has recorded
+        // itself, so the limit cannot pass before the child is ready, however
+        // slow the machine; the test then steps the clock through the limit
+        // (see `step_through_the_limit`). With the capture interval far off,
+        // the only listings are the one at spawn and the stop's.
+        let listings = Listings::new();
+        let mut spec = sh(&s, "record leader $$; sleep 60", limit).with_lister(listings.lister());
+        spec.capture_interval = Some(Duration::from_secs(3600));
+        tokio::time::pause();
+        let began = tokio::time::Instant::now();
         let started = Instant::now();
-        let spec = sh(&s, "record leader $$; sleep 60", Duration::from_millis(400));
-        let report = run(spec).await;
-        assert_eq!(
-            report.ending,
-            Ending::TimedOut {
-                limit: Duration::from_millis(400)
-            }
-        );
+        let handle = ProcessHandle::start(spec);
+        let path = s.path("leader");
+        let counted = listings.clone();
+        let leader = await_held("the leader's record and the listing at spawn", move || {
+            counted.not_stopping()?;
+            Ok(match read_record(&path) {
+                Record::Pid(pid) if counted.idle() => Some(pid),
+                _ => None,
+            })
+        })
+        .await;
+        let mut reaper = Reaper::default();
+        reaper.register(leader, &s);
+        step_through_the_limit(began, limit, 1, || listings.calls()).await;
+        let report = tokio::time::timeout(BOUND, handle.wait())
+            .await
+            .expect("the run did not end within the bound after its time limit");
+        assert_eq!(report.ending, Ending::TimedOut { limit });
         assert_eq!(report.outcome(), Outcome::TimedOut);
         assert_eq!(report.error_detail().unwrap().kind, "timed_out");
         assert!(report.exit.as_ref().is_some_and(|e| e.signal.is_some()));
         assert!(started.elapsed() < BOUND, "took {:?}", started.elapsed());
         assert_confirmed(&report);
-        // The pid comes from the report: the limit can pass before the script has
-        // written its pid file.
-        let leader = i32::try_from(report.pid.expect("it started")).expect("a pid");
+        assert_eq!(report.pid, Some(leader as u32), "{report:#?}");
         assert_gone("leader", &[leader]).await;
     }
 );
@@ -99,6 +121,13 @@ async fn a_child_that_ignores_terminate_is_killed_after_the_grace_period() {
     // Stopped by an interrupt once the script has set its trap and started its
     // child (it writes `gc` after the trap). A time limit would race the
     // script's start on a loaded machine; the stop path is the same.
+    //
+    // The one-second grace stays on the real clock: it runs against a real
+    // process that ignores TERM, from a stop that comes only after the child
+    // is ready, so load can only make it later, and the test bounds the end
+    // from above. On a paused clock, the wait for the TERM to be delivered and
+    // for the child's exit would let the clock jump past the grace and the
+    // cleanup deadline.
     let handle = ProcessHandle::start(sh(
         &s,
         "trap '' TERM; record leader $$; sleep 60 & record gc $!; wait",

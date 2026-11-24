@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use super::fixtures::{
     AWAIT, Heard, Lifeline, OWN_GROUP, OWN_SESSION, Reaper, Record, Scratch, assert_gone,
-    await_record, is_running, is_running_async, own_group_recorded, own_session_recorded,
-    read_record, run_guarded, sh,
+    await_held, await_record, is_running, is_running_async, list_off_the_clock, own_group_recorded,
+    own_session_recorded, read_record, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::Ending;
@@ -169,72 +169,96 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
     super::fixtures::assert_gone("descendant", &pids).await;
 }
 
-/// Pins the schedule itself, not one timing. A lister records when each
-/// listing starts and ends. The child lives 1 s, so the first periodic listing
-/// is not the one under test. Each of the three ramp listings must start
-/// promptly once it is due: no later than its offset from spawn (50, 100, 200
-/// ms) or the end of the listing before it, whichever is later, plus a margin
-/// for scheduling. Without that step the next listing would come one periodic
-/// interval (500 ms) after the previous one ended, far past the margin. Timing
-/// each start from the previous end, and not from spawn, keeps the test honest
-/// when `ps` is slow under load and the ramp listings run back to back. A ramp
-/// listing is never early, so each also starts no sooner than its offset.
+/// Pins the schedule itself. The run's clock is paused from before the spawn,
+/// and a lister records when each listing starts and ends on that clock. Each
+/// listing is taken on a thread of the blocking pool ([`list_off_the_clock`]),
+/// which keeps the paused clock still while it runs, so a listing takes no
+/// time on the run's clock however slow `ps` is, and between listings the
+/// clock moves only to the next timer. The child waits for the test's `go`,
+/// so it is alive through the schedule. The listings must then start at
+/// exactly the spawn, each ramp offset from spawn (50, 100, 200 ms), and one
+/// periodic interval (500 ms) after the last ramp listing: a missing ramp step
+/// would put the next listing 500 ms after the previous one, a shortened or
+/// early one would start before its offset.
 #[tokio::test]
 async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing() {
     use crate::process::ProcessHandle;
     use std::sync::Mutex;
-    use std::time::Instant;
-
-    /// Far below the 500 ms a missing ramp step would cost, and far above
-    /// ordinary task scheduling delay.
-    const MARGIN: Duration = Duration::from_millis(250);
+    use tokio::time::Instant;
 
     let s = Scratch::new();
     let spans: Arc<Mutex<Vec<(Instant, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let (seen, mut listed) = tokio::sync::watch::channel(0usize);
     let recorder = spans.clone();
+    let seen = Arc::new(seen);
     let lister: Lister = Arc::new(move || {
         let recorder = recorder.clone();
+        let seen = seen.clone();
         Box::pin(async move {
             let started = Instant::now();
-            let listing = list_processes().await;
-            recorder
-                .lock()
-                .expect("lock spans")
-                .push((started, Instant::now()));
+            let listing = list_off_the_clock().await;
+            let count = {
+                let mut spans = recorder.lock().expect("lock spans");
+                spans.push((started, Instant::now()));
+                spans.len()
+            };
+            seen.send_replace(count);
             listing
         })
     });
-    let spec = sh(&s, "sleep 1", LONG).with_lister(lister);
+    let spec = sh(&s, "until [ -e go ]; do sleep 0.01; done; exit 0", LONG).with_lister(lister);
+    tokio::time::pause();
     let spawned = Instant::now();
-    let report = ProcessHandle::start(spec).wait().await;
+    let handle = ProcessHandle::start(spec);
+    // Nothing real is awaited here: the listings hold the clock while they
+    // run, and the child waits for `go`. The clock moves from timer to timer
+    // until the first periodic listing has been taken.
+    listed
+        .wait_for(|count| *count >= 5)
+        .await
+        .expect("the lister is alive");
+    tokio::time::resume();
+    std::fs::write(s.path("go"), "").expect("let the child exit");
+    let report = tokio::time::timeout(Duration::from_secs(120), handle.wait())
+        .await
+        .expect("the run did not end after the child was let go");
+    assert_eq!(report.ending, Ending::Exited { code: 0 });
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     let mut spans = spans.lock().expect("lock spans").clone();
     spans.sort_by_key(|(started, _)| *started);
     let offsets: Vec<(Duration, Duration)> = spans
         .iter()
-        .map(|(a, b)| {
-            (
-                a.saturating_duration_since(spawned),
-                b.saturating_duration_since(spawned),
-            )
-        })
+        .take(5)
+        .map(|(a, b)| (*a - spawned, *b - spawned))
         .collect();
-    assert!(offsets.len() >= 4, "fewer than four listings: {offsets:?}");
-    // Listing 0 is the one at spawn. The offsets are written out here, not
-    // read from `CAPTURE_RAMP`, so that shortening the ramp fails the test.
-    for (step, due_ms) in [50u64, 100, 200].into_iter().enumerate() {
-        let due = Duration::from_millis(due_ms);
-        let (start, _) = offsets[step + 1];
-        let (_, previous_end) = offsets[step];
-        let ready = due.max(previous_end);
+    // Listing 0 is the one at spawn, then the ramp, then the first periodic
+    // listing, due one interval after the last ramp listing ended. The
+    // offsets are written out here, not read from `CAPTURE_RAMP` or
+    // `CAPTURE_INTERVAL`, so that changing the schedule fails the test.
+    // Tokio's timer wheel rounds a deadline up to its next millisecond tick,
+    // so a listing starts at its due time or within one tick after it.
+    const TICK: Duration = Duration::from_millis(1);
+    assert!(
+        offsets.iter().all(|(start, end)| start == end),
+        "a listing took time on the run's clock: {offsets:?}"
+    );
+    assert_eq!(offsets.len(), 5, "{offsets:?}");
+    assert_eq!(
+        offsets[0].0,
+        Duration::ZERO,
+        "the listing at spawn: {offsets:?}"
+    );
+    let periodic_due = offsets[3].1 + Duration::from_millis(500);
+    for (step, due) in [
+        (1, Duration::from_millis(50)),
+        (2, Duration::from_millis(100)),
+        (3, Duration::from_millis(200)),
+        (4, periodic_due),
+    ] {
+        let start = offsets[step].0;
         assert!(
-            start + Duration::from_millis(5) >= due,
-            "ramp listing {step} started at {start:?}, before its offset {due:?}: {offsets:?}"
-        );
-        assert!(
-            start <= ready + MARGIN,
-            "ramp listing {step} started at {start:?}, more than {MARGIN:?} after it was due at \
-             {ready:?}: {offsets:?}"
+            due <= start && start <= due + TICK,
+            "listing {step} started at {start:?}, due at {due:?}: {offsets:?}"
         );
     }
 }
@@ -940,46 +964,113 @@ fn delayed_lister(
     })
 }
 
+/// The exit budget is the real one (3.1 s). Every listing after the first takes
+/// a fixed 400 ms on the run's clock, well inside the budget, so the exit
+/// listing must be waited for and the descendant that left the session
+/// followed; with the budget the old tests used (150 ms) this run is
+/// `Unconfirmed`. The run's clock is paused from before the spawn and held
+/// (`await_held`) until the leader has ended and the exit listing has begun, so
+/// the start of the run and the leader's end cost the clock nothing. The 400 ms
+/// then pass on the paused clock, and the real `ps` after them is taken off it
+/// (`list_off_the_clock`), so however slow `ps` is under load, the listing
+/// takes exactly 400 ms of the budget. The test resumes the real clock once
+/// the listing has answered.
 #[tokio::test]
 async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
     require_perl!();
-    // The exit budget is the real one (3.1 s). Every listing after the first
-    // takes a fixed 400 ms and then the real `ps`, well inside the budget, so the
-    // exit listing must be waited for and the descendant that left the session
-    // followed. With the budget the old tests used (150 ms) this run is
-    // `Unconfirmed`. The only thing load can change is the real `ps`: when the
-    // longest listing was itself near the budget the premise is gone and the run
-    // is repeated, and only when the verdict is exactly the late listing's
-    // (`is_late_listing_only`). A listing under 2 s with any verdict but
-    // `Confirmed`, or a slow listing with any other `Unconfirmed` (a failed stop,
-    // a pid left over), fails.
-    for attempt in 1..=5 {
-        let s = Scratch::new();
-        let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
-        spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
-        let slowest = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        spec = spec.with_lister(delayed_lister(
-            s.path("scanned"),
-            Duration::from_millis(400),
-            slowest.clone(),
-        ));
-        let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
-        assert_no_false_confirmation(pids[0], &report.cleanup);
-        let slowest = slowest.load(std::sync::atomic::Ordering::SeqCst);
-        if report.cleanup == Cleanup::Confirmed {
-            assert_gone("descendant", &pids).await;
-            return;
-        }
-        assert!(
-            slowest > 2000 && crate::process::is_late_listing_only(&report.cleanup),
-            "the slowest listing took {slowest} ms; a run that is not Confirmed must have a \
-             listing over 2000 ms and the late listing's verdict alone: {report:#?}"
-        );
-        eprintln!("attempt {attempt}: a listing took {slowest} ms under load; repeating");
-    }
-    panic!(
-        "five runs in a row had a listing of more than 2 s; the machine is too loaded to test this"
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::time::Instant;
+
+    const DELAY: Duration = Duration::from_millis(400);
+    let s = Scratch::new();
+    let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
+    spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
+    let calls = Arc::new(AtomicU32::new(0));
+    let spans: Arc<Mutex<Vec<(u32, Instant, Instant)>>> = Arc::default();
+    let (answered, mut answers) = tokio::sync::watch::channel(0u32);
+    // The sender belongs to the lister alone, so the test holds none.
+    let (lister_calls, recorder, marker, answered) = (
+        calls.clone(),
+        spans.clone(),
+        s.path("scanned"),
+        Arc::new(answered),
     );
+    spec = spec.with_lister(Arc::new(move || {
+        let call = lister_calls.fetch_add(1, Ordering::SeqCst);
+        let (recorder, answered, marker) = (recorder.clone(), answered.clone(), marker.clone());
+        Box::pin(async move {
+            let began = Instant::now();
+            if call > 0 {
+                tokio::time::sleep(DELAY).await;
+            }
+            let rows = list_off_the_clock().await;
+            let _ = std::fs::write(&marker, "scanned");
+            recorder
+                .lock()
+                .expect("lock spans")
+                .push((call, began, Instant::now()));
+            answered.send_modify(|n| *n += 1);
+            rows
+        })
+    }));
+    tokio::time::pause();
+    let handle = crate::process::ProcessHandle::start(spec);
+    let (gc, counted) = (s.path("gc"), calls.clone());
+    // The leader ends once the descendant has published `gc`; the exit
+    // listing is the first call after the one at spawn.
+    let descendant = await_held(
+        "the descendant's record and the exit listing beginning",
+        move || {
+            Ok(match read_record(&gc) {
+                Record::Pid(pid) if counted.load(Ordering::SeqCst) >= 2 => Some(pid),
+                _ => None,
+            })
+        },
+    )
+    .await;
+    let mut reaper = Reaper::default();
+    reaper.register(descendant, &s);
+    // Only the listing's 400 ms are left to pass on the clock; nothing real
+    // is awaited until it has answered. The wait is bounded on the paused
+    // clock by the exit budget: the listing's `ps` holds the clock still while
+    // it runs (and is bounded by its own real timeout), so the bound passes
+    // only if the listing stopped without answering, for instance because the
+    // capture task that ran it failed, and then the idle runtime reaches it at
+    // once. The owner keeps the lister, so the channel alone would stay open.
+    match tokio::time::timeout(
+        crate::process::limits::EXIT_LISTING_BUDGET,
+        answers.wait_for(|n| *n >= 2),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => panic!("the lister was dropped before the exit listing answered"),
+        Err(_) => panic!(
+            "the exit listing began and never answered within the exit budget on the run's clock"
+        ),
+    }
+    tokio::time::resume();
+    let report = tokio::time::timeout(Duration::from_secs(120), handle.wait())
+        .await
+        .expect("the run did not end after its exit listing");
+    let exit_listing = spans
+        .lock()
+        .expect("lock spans")
+        .iter()
+        .find(|(call, ..)| *call == 1)
+        .map(|(_, began, ended)| *ended - *began)
+        .expect("the exit listing was recorded");
+    // Tokio's timer wheel rounds the delay's deadline up to its next
+    // millisecond tick.
+    assert!(
+        DELAY <= exit_listing && exit_listing <= DELAY + Duration::from_millis(1),
+        "the exit listing took {exit_listing:?} of the run's clock, not its delay of {DELAY:?}"
+    );
+    assert_no_false_confirmation(descendant, &report.cleanup);
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("descendant", &[descendant]).await;
 }
 
 /// The exit budget of the concurrent runs below, far under the real one.

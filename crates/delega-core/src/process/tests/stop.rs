@@ -5,7 +5,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::fixtures::{
-    Held, Reaper, Scratch, assert_confirmed, assert_gone, await_event, own_session_recorded, sh,
+    Held, Listings, Reaper, Record, Scratch, assert_confirmed, assert_gone, await_event,
+    await_held, own_session_recorded, process_state, read_record, sh, step_through_the_limit,
 };
 use crate::process::sys::{self, Signal};
 use crate::process::tree::Lister;
@@ -20,16 +21,39 @@ const NOT_THE_GRACE: Duration = Duration::from_secs(30);
 #[tokio::test]
 async fn a_leader_that_stops_itself_is_still_running_and_ends_as_timed_out() {
     let s = Scratch::new();
-    // The limit is long against the two commands the child runs before it stops
-    // itself. Whether or not it has stopped by then, a child that has not
-    // exited is stopped by the limit and reported as timed out.
-    let spec = sh(
-        &s,
-        "record leader $$; kill -STOP $$; sleep 1",
-        Duration::from_secs(2),
-    );
+    let limit = Duration::from_secs(2);
+    // The run's clock is paused and held until the leader has recorded itself
+    // and `ps` shows it stopped, so the limit cannot pass first however slow
+    // the machine; the test then steps the clock through the limit. With the
+    // capture interval far off, the only listings are the one at spawn and
+    // the stop's.
+    let listings = Listings::new();
+    let mut spec =
+        sh(&s, "record leader $$; kill -STOP $$; sleep 1", limit).with_lister(listings.lister());
+    spec.capture_interval = Some(Duration::from_secs(3600));
+    tokio::time::pause();
+    let began = tokio::time::Instant::now();
+    let handle = ProcessHandle::start(spec);
+    let path = s.path("leader");
+    let counted = listings.clone();
+    let leader = await_held(
+        "the leader stopped by its own SIGSTOP, and the listing at spawn",
+        move || {
+            counted.not_stopping()?;
+            Ok(match read_record(&path) {
+                Record::Pid(pid) if counted.idle() && process_state(pid).starts_with('T') => {
+                    Some(pid)
+                }
+                _ => None,
+            })
+        },
+    )
+    .await;
+    let mut reaper = Reaper::default();
+    reaper.register(leader, &s);
+    step_through_the_limit(began, limit, 1, || listings.calls()).await;
     // A run that waited for the stopped child to exit would never return.
-    let report = tokio::time::timeout(Duration::from_secs(120), run(spec))
+    let report = tokio::time::timeout(Duration::from_secs(120), handle.wait())
         .await
         .expect("the run did not end with a stopped leader");
     assert!(
@@ -37,7 +61,7 @@ async fn a_leader_that_stops_itself_is_still_running_and_ends_as_timed_out() {
         "a stopped child has not ended: {report:#?}"
     );
     assert_confirmed(&report);
-    let leader = i32::try_from(report.pid.expect("it started")).expect("a pid");
+    assert_eq!(report.pid, Some(leader as u32), "{report:#?}");
     assert_gone("stopped leader", &[leader]).await;
 }
 
