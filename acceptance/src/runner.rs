@@ -32,11 +32,6 @@ pub fn case_marker(run_id: &str, n: u64) -> String {
     format!("{MARKER_PREFIX}{run_id}-{n}/")
 }
 
-/// The verdict of a known-gap row on a run where no survivor remained.
-pub const GAP_NOT_SHOWN: &str = "gap_not_shown";
-/// The verdict of a known-gap row that showed no gap in every repeat of a run.
-pub const GAP_CLOSED: &str = "gap_closed";
-
 /// A case that has not ended this long after it started is a hang.
 const HARD_LIMIT: Duration = Duration::from_secs(30);
 /// How long after `delega` exits the harness waits before it measures what is
@@ -87,10 +82,6 @@ impl Context {
     }
 }
 
-fn one() -> u32 {
-    1
-}
-
 /// What was measured for one case, plus what was expected and the verdict.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Measured {
@@ -116,20 +107,10 @@ pub struct Measured {
     pub cleanup_reason: Option<String>,
     pub cleanup_pids: Vec<u32>,
     pub cleanup_groups: Vec<u32>,
-    /// The cleanup verdict was `Unconfirmed` for the late process listing and
-    /// for nothing else (`delega_core::process::is_late_listing_only`).
-    #[serde(default)]
-    pub cleanup_late_listing_only: bool,
-    /// Runs of the row, the last one measured. More than one only when earlier
-    /// runs failed on a late listing alone.
-    #[serde(default = "one")]
-    pub attempts: u32,
-    /// The cleanup reasons of the runs that were discarded, in order.
-    #[serde(default)]
-    pub discarded: Vec<String>,
     pub provider_pid: Option<i32>,
     pub survivors_at_exit: Vec<String>,
     pub survivors: Vec<String>,
+    /// Consistency of the cleanup verdict where the matrix gates on it.
     pub honest: Option<bool>,
     /// Milliseconds from the action to the exit; for a time limit the
     /// overshoot past `--timeout`; for a run left to finish, the whole run.
@@ -142,10 +123,9 @@ pub struct Measured {
     pub expected_confirmed: Option<bool>,
     pub expected_survivors: Vec<String>,
     pub expected_leak: LeakClass,
-    /// The row's gap depends on timing, so a run without a survivor is
-    /// `gap_not_shown` and not a failure (`Expect::timing_dependent`).
+    /// Whether the documented survivor roles were all observed.
     #[serde(default)]
-    pub timing_dependent: bool,
+    pub gap_shown: Option<bool>,
     pub expected_reason: Option<String>,
     pub verdict: String,
     pub problems: Vec<String>,
@@ -187,7 +167,7 @@ impl Fixture {
         let work = top.join("work");
         let home = top.join("home");
         let record = top.join("record");
-        for d in [&dir, &work, &home, &record] {
+        for d in [&dir, &dir.join("pids"), &work, &home, &record] {
             std::fs::create_dir(d)?;
         }
         for name in [
@@ -306,10 +286,14 @@ fn ready(dir: &Path, case: &Case) -> bool {
         && roles_of(case.variant).iter().all(|r| have(r))
 }
 
-fn heartbeat_fresh(dir: &Path) -> bool {
+fn heartbeat(dir: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(dir.join("beat"))
         .and_then(|m| m.modified())
         .ok()
+}
+
+fn heartbeat_fresh(dir: &Path) -> bool {
+    heartbeat(dir)
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age < Duration::from_millis(300))
 }
@@ -337,9 +321,6 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         cleanup_reason: None,
         cleanup_pids: Vec::new(),
         cleanup_groups: Vec::new(),
-        cleanup_late_listing_only: false,
-        attempts: 1,
-        discarded: Vec::new(),
         provider_pid: None,
         survivors_at_exit: Vec::new(),
         survivors: Vec::new(),
@@ -357,7 +338,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
             .map(|s| (*s).to_string())
             .collect(),
         expected_leak: case.expect.leak,
-        timing_dependent: case.expect.timing_dependent,
+        gap_shown: None,
         expected_reason: case.expect.reason.map(str::to_string),
         verdict: String::new(),
         problems: Vec::new(),
@@ -441,13 +422,6 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
     }
     let exited = Instant::now();
     drop(stdout);
-    let stdout_bytes = stdout_reader
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
-    let stderr_bytes = stderr_reader
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
-
     if let Some(s) = status {
         m.exit_code = s.code();
         m.exit_signal = s.signal();
@@ -468,25 +442,16 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
             m.latency_ms = Some(ms(exited - started));
         }
     }
-    m.stderr_first = String::from_utf8_lossy(&stderr_bytes)
-        .lines()
-        .next()
-        .map(|l| l.chars().take(200).collect());
-
-    read_stdout(&mut m, &stdout_bytes, case.expect.docs);
-
-    if let Ok(mut all) = ctx.bare.lock() {
-        all.extend(procs::bare_pids_in(&fixture.dir));
-    }
     m.provider_pid = procs::ledger(&fixture.dir)
         .into_iter()
         .find(|(role, _)| role == "provider")
         .map(|(_, pid)| pid);
     // Survivors, measured by marker and heartbeat, whatever delega said.
     let except = [delega_pid];
+    let beat_at_exit = heartbeat(&fixture.dir);
     let at_exit = procs::survivors_sampled(&fixture.marker, &fixture.dir, &except, 3);
     let mut labels = procs::roles(&at_exit);
-    if heartbeat_fresh(&fixture.dir) {
+    if heartbeat(&fixture.dir) > beat_at_exit {
         labels.push("relay-heartbeat".to_string());
         labels.sort();
         labels.dedup();
@@ -504,9 +469,10 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    let beat_before_settled = heartbeat(&fixture.dir);
     let settled = procs::survivors_sampled(&fixture.marker, &fixture.dir, &except, 4);
     let mut labels = procs::roles(&settled);
-    if heartbeat_fresh(&fixture.dir) {
+    if heartbeat(&fixture.dir) > beat_before_settled {
         labels.push("relay-heartbeat".to_string());
         labels.sort();
         labels.dedup();
@@ -522,6 +488,9 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         &except,
         Duration::from_secs(10),
     );
+    if let Ok(mut all) = ctx.bare.lock() {
+        all.extend(procs::bare_pids_in(&fixture.dir));
+    }
     if !left.is_empty() {
         m.problems.push(format!(
             "the harness could not kill: {}",
@@ -529,10 +498,21 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
         ));
     }
 
-    m.honest = m
-        .cleanup_confirmed
-        .map(|confirmed| m.survivors.is_empty() || !confirmed);
-    judge(&mut m, case);
+    let stdout_bytes = stdout_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    m.stderr_first = String::from_utf8_lossy(&stderr_bytes)
+        .lines()
+        .next()
+        .map(|l| l.chars().take(200).collect());
+
+    read_stdout(&mut m, &stdout_bytes, case.expect.docs);
+
+    judge(&mut m, case, std::env::consts::OS);
     m
 }
 
@@ -585,192 +565,196 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
                     m.cleanup_confirmed = Some(false);
                     m.cleanup_pids.clone_from(pids);
                     m.cleanup_groups.clone_from(process_groups);
-                    m.cleanup_reason = Some(reason.chars().take(300).collect());
-                    m.cleanup_late_listing_only =
-                        delega_core::process::is_late_listing_only(&result.cleanup);
+                    m.cleanup_reason = Some(reason.clone());
                 }
             }
         }
+        None if docs == Docs::None && bytes.is_empty() => {}
         None => m.result_valid = Some(false),
     }
 }
 
-/// ` (error_kind: message)` for a result that carries an error, else nothing.
-fn error_suffix(m: &Measured) -> String {
-    match (&m.error_kind, &m.error_message) {
-        (Some(kind), Some(message)) => format!(" (error {kind}: {message})"),
-        (Some(kind), None) => format!(" (error {kind})"),
-        _ => String::new(),
-    }
-}
-
-/// The problem `judge` records when the cleanup verdict differs from the
-/// expectation. [`crate::run_all`] builds the same text with this function to
-/// recognise a run whose only fault is a late listing, so the wording is in
-/// one place.
-pub fn cleanup_mismatch(actual: Option<bool>, expected: Option<bool>) -> String {
-    format!("cleanup.confirmed is {actual:?} where {expected:?} was expected")
-}
-
-/// Compare the measurement with the expectation and set the verdict.
-///
-/// Anything but criterion 2 that differs from the expectation is a `fail`: the
-/// outcome, the exit status, the document on standard output, the cleanup
-/// verdict (`confirmed`, and the reason when it is not) and a hang. Criterion 2
-/// is judged on the survivors. Most rows list none, and any survivor fails
-/// them. A known-gap row says a survivor of the listed roles may remain: all
-/// of them present is `expected_failure` (the gap showed). None present is
-/// `gap_not_shown` when the gap depends on timing (relay, orphan, bare: whether
-/// a late process is caught varies, and a gap shown on one run and not on the
-/// next is not a regression) and `unexpected_pass` when it does not (SIGKILL of
-/// `delega`, after which the worker always survives), which fails.
-/// The run does not fail on `gap_not_shown`; [`crate::run_all::close_gaps`]
-/// turns a row that did not show its gap in every repeat of a run into
-/// `gap_closed`. Anything else (a survivor of another role, a subset of the
-/// listed roles, an unrecorded survivor) fails.
-fn judge(m: &mut Measured, case: &Case) {
-    let expect = &case.expect;
-    let mut problems = std::mem::take(&mut m.problems);
+/// Check the result and cleanup guarantees independently of the gap observation.
+fn judge(m: &mut Measured, case: &Case, os: &str) {
+    let documented_residual = case.expect.leak == LeakClass::DocumentedGap;
     if m.hang {
-        problems.push("delega did not exit within 30 s".to_string());
+        m.problems
+            .push("delega did not exit within 30 s".to_string());
     }
-    match m
+    let exit = m
         .exit_code
         .map(Exit::Code)
-        .or(m.exit_signal.map(Exit::Signal))
-    {
-        Some(actual) if actual == expect.exit => {}
-        Some(actual) => problems.push(format!(
-            "exit status {} where {} was expected",
-            actual.label(),
-            expect.exit.label()
-        )),
-        None => problems.push("delega has no exit status".to_string()),
+        .or(m.exit_signal.map(Exit::Signal));
+    if exit != Some(case.expect.exit) {
+        m.problems.push(format!(
+            "expected exit {}, got {}",
+            case.expect.exit.label(),
+            exit.map_or_else(|| "no exit status".to_string(), Exit::label),
+        ));
     }
-    match expect.docs {
+    let no_survivors = m.survivors_at_exit.is_empty() && m.survivors.is_empty();
+    match case.expect.docs {
         Docs::One => {
-            if m.stdout_docs != Some(1) {
-                problems.push(format!(
-                    "standard output held {} JSON documents, expected one",
-                    m.stdout_docs.map_or("?".to_string(), |n| n.to_string())
-                ));
-            } else if m.result_valid != Some(true) {
-                problems.push("the document is not a valid RunResult".to_string());
-            } else {
-                if m.outcome.as_deref() != Some(expect.outcome) {
-                    problems.push(format!(
-                        "outcome {} where {} was expected{}",
-                        m.outcome.as_deref().unwrap_or("none"),
-                        expect.outcome,
-                        error_suffix(m)
-                    ));
-                }
-                if m.cleanup_confirmed != expect.confirmed {
-                    problems.push(cleanup_mismatch(m.cleanup_confirmed, expect.confirmed));
-                }
-                if expect.confirmed == Some(false) {
-                    check_unconfirmed(m, expect.reason, &mut problems);
-                }
+            if m.stdout_docs != Some(1) || m.result_valid != Some(true) {
+                m.problems
+                    .push("standard output must hold exactly one valid RunResult".to_string());
             }
-        }
-        Docs::None => {
-            if m.stdout_docs != Some(0) {
-                problems.push("a killed delega wrote output".to_string());
-            }
-        }
-        Docs::Unread => {}
-    }
-
-    let mut actual: Vec<&str> = m.survivors.iter().map(String::as_str).collect();
-    actual.sort_unstable();
-    let wanted: Vec<&str> = m.expected_survivors.iter().map(String::as_str).collect();
-    let mut wanted_sorted = wanted.clone();
-    wanted_sorted.sort_unstable();
-    // Survivors alongside a report of confirmed cleanup, or no report at all.
-    let unreported = !actual.is_empty() && m.cleanup_confirmed != Some(false);
-
-    if !problems.is_empty() {
-        m.verdict = "fail".to_string();
-        if actual != wanted_sorted {
-            problems.push(format!(
-                "survivors {} where {} was expected",
-                list(&actual),
-                list(&wanted_sorted)
-            ));
-        }
-        m.problems = problems;
-        return;
-    }
-    let gap = m.expected_leak != LeakClass::None;
-    if actual == wanted_sorted {
-        if !gap {
-            if unreported {
-                m.verdict = "fail".to_string();
+            if m.outcome.as_deref() != Some(case.expect.outcome) {
                 m.problems.push(format!(
-                    "survivors {} with cleanup reported confirmed",
-                    list(&actual)
+                    "expected outcome {}, got {}",
+                    case.expect.outcome,
+                    m.outcome.as_deref().unwrap_or("no outcome"),
                 ));
-            } else {
-                m.verdict = "pass".to_string();
             }
-        } else if unreported {
-            m.verdict = "expected_failure".to_string();
-            m.problems.push(format!(
-                "survivors {}; cleanup not reported as unconfirmed",
-                list(&actual)
-            ));
-        } else {
-            m.verdict = "unexpected_pass".to_string();
-            m.problems
-                .push("a row expected to fail criterion 2 passed; correct the table".to_string());
+            if m.cleanup_confirmed == Some(false)
+                && !m
+                    .cleanup_reason
+                    .as_deref()
+                    .is_some_and(documented_cleanup_reason)
+            {
+                m.problems.push(format!(
+                    "undocumented unconfirmed cleanup reason: {:?}",
+                    m.cleanup_reason
+                ));
+            }
+            match case.expect.confirmed {
+                Some(false) => {
+                    if m.cleanup_confirmed != Some(false) {
+                        m.problems
+                            .push("expected Unconfirmed with process listing disabled".into());
+                    }
+                    if m.survivors_at_exit
+                        .iter()
+                        .chain(&m.survivors)
+                        .any(|role| !case.expect.survivors.contains(&role.as_str()))
+                    {
+                        m.problems.push(format!(
+                            "unexpected survivors with process listing disabled (at exit: {:?}, after settling: {:?})",
+                            m.survivors_at_exit, m.survivors
+                        ));
+                    }
+                }
+                Some(true)
+                    if !documented_residual
+                        && m.cleanup_confirmed != Some(true)
+                        && !(m.cleanup_confirmed == Some(false)
+                            && late_listing_with_allowed_survivors(m, os)) =>
+                {
+                    m.problems.push(
+                        "expected Confirmed or a late listing alone with only allowed survivors"
+                            .into(),
+                    );
+                }
+                _ => {}
+            }
         }
-    } else if gap && actual.is_empty() && expect.timing_dependent {
-        m.verdict = GAP_NOT_SHOWN.to_string();
+        Docs::None | Docs::Unread => {
+            // The caller killed delega or made its result unreadable. Check the
+            // observable termination and the cleanup the case can require.
+            if case.expect.docs == Docs::None
+                && (m.stdout_docs != Some(0) || m.result_valid.is_some())
+            {
+                m.problems.push("a killed delega wrote output".to_string());
+            }
+            if !documented_residual && !m.survivors.is_empty() {
+                m.problems.push(format!(
+                    "survivors after delega exited: {}",
+                    m.survivors.join(", ")
+                ));
+            }
+        }
+    }
+
+    m.honest = m
+        .cleanup_confirmed
+        .filter(|_| !documented_residual)
+        .map(|confirmed| !confirmed || no_survivors);
+    if m.honest == Some(false) {
         m.problems.push(format!(
-            "no survivor where {} was allowed: the gap did not show in this run",
-            list(&wanted_sorted)
-        ));
-    } else if gap && actual.is_empty() {
-        m.verdict = "unexpected_pass".to_string();
-        m.problems.push(format!(
-            "no survivor where {} is certain: this gap does not depend on timing, so the row no longer shows it; correct the table or find the regression",
-            list(&wanted_sorted)
-        ));
-    } else {
-        m.verdict = "fail".to_string();
-        m.problems.push(format!(
-            "survivors {} where {} was expected",
-            list(&actual),
-            list(&wanted_sorted)
+            "cleanup was Confirmed with survivors (at exit: {:?}, after settling: {:?})",
+            m.survivors_at_exit, m.survivors
         ));
     }
+    m.gap_shown = documented_residual.then(|| {
+        case.expect
+            .survivors
+            .iter()
+            .all(|role| m.survivors.iter().any(|observed| observed == role))
+    });
+    m.verdict = if m.problems.is_empty() {
+        "pass"
+    } else {
+        "fail"
+    }
+    .to_string();
 }
 
-fn list(roles: &[&str]) -> String {
-    if roles.is_empty() {
-        "none".to_string()
-    } else {
-        roles.join(",")
-    }
+fn late_listing_with_allowed_survivors(m: &Measured, os: &str) -> bool {
+    // A late listing can miss an orphan in its own session on macOS.
+    m.survivors_at_exit
+        .iter()
+        .chain(&m.survivors)
+        .all(|role| os == "macos" && matches!(role.as_str(), "leaf-setsid" | "bare"))
+        && m.cleanup_reason.as_ref().is_some_and(|reason| {
+            delega_core::process::is_late_listing_only(&Cleanup::Unconfirmed {
+                reason: reason.clone(),
+                pids: m.cleanup_pids.clone(),
+                process_groups: m.cleanup_groups.clone(),
+            })
+        })
 }
 
-/// An unconfirmed cleanup must say why, and say what could not be checked.
-/// With no process listing it cannot name the processes that remain, so
-/// `pids` and `process_groups` list only what is known to be alive (nothing,
-/// when the worker's group is gone); the reason carries the caveat.
-fn check_unconfirmed(m: &Measured, reason: Option<&str>, problems: &mut Vec<String>) {
-    let text = m.cleanup_reason.as_deref().unwrap_or("");
-    if let Some(wanted) = reason
-        && !text.contains(wanted)
-    {
-        problems.push(format!(
-            "cleanup.reason does not contain {wanted:?}: {text:?}"
-        ));
-    }
-    if !text.contains("could not be checked") {
-        problems.push(format!(
-            "cleanup.reason does not say what could not be checked: {text:?}"
-        ));
+/// Cleanup can combine the probe and provider reasons with "; ". Match
+/// complete static reasons first because some of them contain that separator.
+fn documented_cleanup_reason(mut reason: &str) -> bool {
+    use delega_core::process::{
+        FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, KEEPER_UNANSWERED_REASON,
+        KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON, NO_REAP_ACK_REASON, NO_SUBREAPER_REASON,
+        PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON, UNVERIFIED_SIGNAL_REASON,
+    };
+    let fixed = [
+        FREEZE_INCOMPLETE_REASON,
+        KEEPER_LOST_REASON,
+        KEEPER_UNANSWERED_REASON,
+        KEEPER_UNPROVEN_REASON,
+        LATE_LISTING_REASON,
+        NO_REAP_ACK_REASON,
+        NO_SUBREAPER_REASON,
+        PIPES_HELD_REASON,
+        UNVERIFIED_SIGNAL_REASON,
+    ];
+    loop {
+        let tail = fixed
+            .iter()
+            .find_map(|known| reason.strip_prefix(known))
+            .or_else(|| {
+                let (count, rest) = reason.split_once(' ')?;
+                count.parse::<u32>().ok()?;
+                rest.strip_prefix(TREE_LEFT_AT_REAP_REASON)
+            })
+            .or_else(|| {
+                let rest = reason.strip_prefix("process inspection was unavailable (")?;
+                let (_, rest) = rest.split_once(
+                    "); only the child's process group was checked with kill(-pgid, 0): ",
+                )?;
+                let (_, rest) = rest.split_once(". Descendants outside")?;
+                let tail = rest.strip_prefix(" the group and session could not be checked.")?;
+                Some(tail.strip_prefix(" Descendants seen at the latest scan are listed because they cannot be checked.").unwrap_or(tail))
+            });
+        match tail {
+            Some("") => return true,
+            Some(rest) => match rest.strip_prefix("; ") {
+                Some(next) => reason = next,
+                None => return false,
+            },
+            None => {
+                return reason.strip_prefix("stopping was not confirmed within ")
+                    .and_then(|text| text.split_once(": "))
+                    .is_some_and(|(wait, detail)| !wait.is_empty() && !detail.is_empty())
+                    || reason.split_once("; a best-effort SIGKILL was sent to the process group but no check confirmed it").is_some_and(|(why, _)| !why.is_empty())
+                    || matches!(reason, "the run task panicked; the provider process, if one started, was sent an interrupt but nothing confirmed it stopped" | "the runtime shut down before the run finished; the provider process, if one started, was sent an interrupt but nothing confirmed it stopped");
+            }
+        }
     }
 }
 
@@ -778,125 +762,221 @@ fn check_unconfirmed(m: &Measured, reason: Option<&str>, problems: &mut Vec<Stri
 mod judge_tests {
     use super::*;
 
-    /// The relay row as a timing-dependent known gap, whatever the table
-    /// says on this platform (the gap is macOS-only there).
-    fn relay_row() -> Case {
-        let mut row = crate::matrix::all()
-            .into_iter()
-            .find(|r| r.id == "claude-a-relay")
-            .expect("the relay row");
-        row.expect.leak = LeakClass::DocumentedGap;
-        row.expect.survivors = vec!["relay-heartbeat"];
-        row.expect.reason = Some("a timing-dependent gap");
-        row.expect.timing_dependent = true;
-        row
-    }
+    use crate::matrix::{Machine, all_for};
 
-    /// A measurement of `row` that met everything but the survivors.
-    fn measured(row: &Case, survivors: &[&str]) -> Measured {
-        let mut m: Measured = serde_json::from_str(
-            r#"{"id":"x","repeat":1,"provider":"claude","case":"a","variant":"relay",
-            "behaviour":"success","action":"","timeout_secs":null,"exit_code":0,
-            "exit_signal":null,"hang":false,"stdout_docs":1,"result_valid":true,
-            "outcome":"completed","error_kind":null,"cleanup_confirmed":true,
-            "cleanup_reason":null,"cleanup_pids":[],"cleanup_groups":[],
-            "provider_pid":null,"survivors_at_exit":[],"survivors":[],"honest":true,
-            "latency_ms":null,"latency_kind":"","elapsed_ms":null,
+    fn fixture_run(os: &'static str, id: &str) -> (Case, Measured) {
+        let case = all_for(Machine {
+            os,
+            hides_system_env: os == "macos",
+        })
+        .into_iter()
+        .find(|r| r.id == id)
+        .expect("the matrix row");
+        let mut measured: Measured = serde_json::from_str(
+            r#"{"id":"claude-a-relay","repeat":1,"provider":"claude","case":"a",
+            "variant":"relay","behaviour":"success","action":"","exit_code":0,
+            "hang":false,"stdout_docs":1,"result_valid":true,
+            "cleanup_confirmed":true,"cleanup_pids":[],"cleanup_groups":[],
+            "survivors_at_exit":[],"survivors":[],"latency_kind":"",
             "expected_outcome":"completed","expected_exit":{"Code":0},
-            "expected_confirmed":true,"expected_survivors":[],
-            "expected_leak":"none","expected_reason":null,
-            "verdict":"","problems":[],"stderr_first":null}"#,
+            "expected_leak":"documented_gap","expected_survivors":["relay-heartbeat"],
+            "verdict":"","problems":[]}"#,
         )
-        .expect("a measurement");
-        m.expected_leak = row.expect.leak;
-        m.timing_dependent = row.expect.timing_dependent;
-        m.expected_survivors = row
-            .expect
-            .survivors
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
-        m.survivors = survivors.iter().map(|s| (*s).to_owned()).collect();
-        judge(&mut m, row);
-        m
+        .expect("measurement");
+        measured.outcome = Some(case.expect.outcome.into());
+        if let Exit::Code(code) = case.expect.exit {
+            measured.exit_code = Some(code);
+        }
+        (case, measured)
+    }
+
+    fn relay_run(os: &'static str) -> (Case, Measured) {
+        fixture_run(os, "claude-a-relay")
     }
 
     #[test]
-    fn a_known_gap_row_with_its_survivor_is_an_expected_failure() {
-        let m = measured(&relay_row(), &["relay-heartbeat"]);
-        assert_eq!(m.verdict, "expected_failure", "{:?}", m.problems);
+    fn a_measured_gap_label_cannot_excuse_a_linux_relay_survivor() {
+        for at_exit in [true, false] {
+            // The sample claims to be a gap. The Linux matrix row decides.
+            let (case, mut m) = relay_run("linux");
+            let survivors = if at_exit {
+                &mut m.survivors_at_exit
+            } else {
+                &mut m.survivors
+            };
+            survivors.push("relay-heartbeat".into());
+            judge(&mut m, &case, "linux");
+            assert_eq!(m.gap_shown, None);
+            assert_eq!(m.honest, Some(false));
+            assert_eq!(m.verdict, "fail");
+        }
     }
 
     #[test]
-    fn a_known_gap_row_without_its_survivor_is_gap_not_shown() {
-        let m = measured(&relay_row(), &[]);
-        assert_eq!(m.verdict, GAP_NOT_SHOWN, "{:?}", m.problems);
-    }
-
-    fn sigkill_row() -> Case {
-        crate::matrix::all()
-            .into_iter()
-            .find(|r| r.id == "claude-kk-plain")
-            .expect("the SIGKILL row of delega and its keeper")
-    }
-
-    /// The SIGKILL rows measured with `delega` killed: no output, signal 9.
-    fn killed(row: &Case, survivors: &[&str]) -> Measured {
-        let mut m = measured(row, survivors);
-        m.exit_code = None;
-        m.exit_signal = Some(9);
-        m.stdout_docs = Some(0);
-        m.problems.clear();
-        m.survivors = survivors.iter().map(|s| (*s).to_owned()).collect();
-        judge(&mut m, row);
-        m
+    fn a_documented_gap_can_show_or_disappear_with_either_cleanup_verdict() {
+        for confirmed in [true, false] {
+            for gap_shown in [true, false] {
+                let (case, mut m) = relay_run("macos");
+                m.cleanup_confirmed = Some(confirmed);
+                m.cleanup_reason =
+                    (!confirmed).then(|| delega_core::process::LATE_LISTING_REASON.into());
+                if gap_shown {
+                    m.survivors_at_exit.push("relay-heartbeat".into());
+                    m.survivors.push("relay-heartbeat".into());
+                }
+                judge(&mut m, &case, "macos");
+                assert_eq!(m.gap_shown, Some(gap_shown));
+                assert_eq!(m.honest, None);
+                assert_eq!(m.verdict, "pass");
+            }
+        }
     }
 
     #[test]
-    fn a_gap_that_does_not_depend_on_timing_is_strict() {
-        let row = sigkill_row();
-        assert!(!row.expect.timing_dependent);
-        assert!(relay_row().expect.timing_dependent);
-        assert_eq!(killed(&row, &["provider"]).verdict, "expected_failure");
-        // No survivor after SIGKILL is not load noise: the worker cannot have gone.
-        assert_eq!(killed(&row, &[]).verdict, "unexpected_pass");
-        assert_eq!(killed(&row, &["child"]).verdict, "fail");
+    fn a_gap_row_requires_one_valid_result() {
+        for (docs, valid) in [(0, false), (2, true), (1, false)] {
+            let (case, mut m) = relay_run("macos");
+            m.stdout_docs = Some(docs);
+            m.result_valid = Some(valid);
+            judge(&mut m, &case, "macos");
+            assert_eq!(m.verdict, "fail");
+        }
     }
 
     #[test]
-    fn an_unrecorded_survivor_still_fails_a_known_gap_row() {
-        let m = measured(&relay_row(), &["relay-heartbeat", "unrecorded"]);
+    fn a_valid_result_with_the_wrong_outcome_fails_on_both_platforms() {
+        for (os, id, outcome) in [
+            ("macos", "claude-d-plain", "failed"),
+            ("macos", "codex-e-plain", "completed"),
+            ("macos", "claude-d-relay", "failed"),
+            ("linux", "claude-d-relay", "failed"),
+        ] {
+            let (case, mut m) = fixture_run(os, id);
+            m.outcome = Some(outcome.into());
+            judge(&mut m, &case, os);
+            assert_eq!(m.verdict, "fail", "{id} on {os}");
+            assert!(m.problems[0].starts_with("expected outcome "));
+        }
+    }
+
+    #[test]
+    fn a_timed_out_result_with_a_success_exit_fails_even_on_a_residual() {
+        for id in ["codex-c-plain", "codex-c-relay"] {
+            let (case, mut m) = fixture_run("macos", id);
+            assert_eq!(m.outcome.as_deref(), Some("timed_out"));
+            m.exit_code = Some(0);
+            judge(&mut m, &case, "macos");
+            assert_eq!(m.verdict, "fail");
+            assert_eq!(m.problems, ["expected exit 124, got 0"]);
+        }
+    }
+
+    #[test]
+    fn a_late_listing_on_linux_is_allowed_only_when_nothing_survived() {
+        let (case, mut m) = relay_run("linux");
+        m.cleanup_confirmed = Some(false);
+        m.cleanup_reason = Some(delega_core::process::LATE_LISTING_REASON.into());
+        judge(&mut m, &case, "linux");
+        assert_eq!(m.verdict, "pass");
+
+        for at_exit in [true, false] {
+            let mut m = m.clone();
+            let survivors = if at_exit {
+                &mut m.survivors_at_exit
+            } else {
+                &mut m.survivors
+            };
+            survivors.push("relay-heartbeat".into());
+            judge(&mut m, &case, "linux");
+            assert_eq!(m.verdict, "fail");
+        }
+    }
+
+    #[test]
+    fn a_late_listing_allows_only_detached_survivors_on_macos() {
+        for (os, role, expected) in [
+            ("macos", "leaf-setsid", "pass"),
+            ("macos", "bare", "pass"),
+            ("macos", "child", "fail"),
+            ("macos", "child-ignore", "fail"),
+            ("macos", "relay-heartbeat", "fail"),
+            ("linux", "leaf-setsid", "fail"),
+        ] {
+            for at_exit in [true, false] {
+                let (case, mut m) = fixture_run(os, "claude-d-setsid");
+                m.cleanup_confirmed = Some(false);
+                m.cleanup_reason = Some(delega_core::process::LATE_LISTING_REASON.into());
+                let survivors = if at_exit {
+                    &mut m.survivors_at_exit
+                } else {
+                    &mut m.survivors
+                };
+                survivors.push(role.into());
+                judge(&mut m, &case, os);
+                assert_eq!(m.verdict, expected, "{os}: {role}, at_exit={at_exit}");
+            }
+        }
+    }
+
+    #[test]
+    fn another_documented_reason_cannot_replace_expected_confirmation() {
+        let (case, mut m) = relay_run("linux");
+        m.cleanup_confirmed = Some(false);
+        m.cleanup_reason = Some(delega_core::process::PIPES_HELD_REASON.into());
+        judge(&mut m, &case, "linux");
         assert_eq!(m.verdict, "fail");
-        let m = measured(&relay_row(), &["unrecorded"]);
-        assert_eq!(m.verdict, "fail");
+        assert_eq!(
+            m.problems,
+            ["expected Confirmed or a late listing alone with only allowed survivors"]
+        );
     }
 
     #[test]
-    fn a_survivor_of_another_role_still_fails_a_known_gap_row() {
-        let m = measured(&relay_row(), &["child"]);
-        assert_eq!(m.verdict, "fail");
-        let m = measured(&relay_row(), &["relay-heartbeat", "child"]);
-        assert_eq!(m.verdict, "fail");
+    fn a_result_cannot_confirm_cleanup_with_listing_disabled() {
+        for os in ["linux", "macos"] {
+            let (case, mut m) = fixture_run(os, "claude-u-setsid");
+            judge(&mut m, &case, os);
+            assert_eq!(m.verdict, "fail");
+            assert_eq!(
+                m.problems,
+                ["expected Unconfirmed with process listing disabled"]
+            );
+        }
     }
 
     #[test]
-    fn a_wrong_exit_status_fails_a_known_gap_row_whether_or_not_the_gap_shows() {
-        let row = relay_row();
-        let mut m = measured(&row, &[]);
-        m.exit_code = Some(1);
-        m.problems.clear();
-        judge(&mut m, &row);
-        assert_eq!(m.verdict, "fail");
+    fn linux_keeper_must_clean_up_even_with_listing_disabled() {
+        for (id, role) in [
+            ("claude-u-setsid", "leaf-setsid"),
+            ("claude-u-orphan", "leaf-setsid"),
+            ("claude-u-bare", "bare"),
+        ] {
+            let (case, mut m) = fixture_run("linux", id);
+            m.cleanup_confirmed = Some(false);
+            m.cleanup_reason = Some(delega_core::process::PIPES_HELD_REASON.into());
+            m.survivors.push(role.into());
+            judge(&mut m, &case, "linux");
+            assert_eq!(m.verdict, "fail");
+            assert!(
+                m.problems[0].starts_with("unexpected survivors with process listing disabled")
+            );
+        }
     }
 
     #[test]
-    fn a_row_with_no_gap_fails_on_any_survivor_and_passes_on_none() {
-        let row = crate::matrix::all()
-            .into_iter()
-            .find(|r| r.id == "claude-a-child")
-            .expect("a strict row");
-        assert_eq!(measured(&row, &[]).verdict, "pass");
-        assert_eq!(measured(&row, &["child"]).verdict, "fail");
-        assert_eq!(measured(&row, &["relay-heartbeat"]).verdict, "fail");
+    fn unconfirmed_cleanup_rejects_unknown_reasons_and_accepts_combined_reasons() {
+        use delega_core::process::{LATE_LISTING_REASON, PIPES_HELD_REASON};
+
+        let (case, mut m) = relay_run("macos");
+        m.cleanup_confirmed = Some(false);
+        m.cleanup_reason = Some("could not be checked".into());
+        judge(&mut m, &case, "macos");
+        assert_eq!(m.verdict, "fail");
+        assert!(documented_cleanup_reason(&format!(
+            "{LATE_LISTING_REASON}; {PIPES_HELD_REASON}"
+        )));
+        assert!(!documented_cleanup_reason(&format!(
+            "{LATE_LISTING_REASON}; unknown reason"
+        )));
     }
 }

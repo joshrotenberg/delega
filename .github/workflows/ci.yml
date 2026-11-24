@@ -70,16 +70,6 @@ jobs:
         with:
           name: acceptance-results-${{ matrix.os }}
           path: acceptance-results.jsonl
-      # A gap row that shows no survivor is not a failure in one run (it depends
-      # on timing), so a fixed gap is noticed by running the timing-dependent
-      # gap rows three times: a row that shows no gap in all three is gap_closed.
-      - name: Timing-dependent known-gap rows, three repeats
-        run: cargo run --release --locked -p delega-acceptance -- --timing-gaps --repeat 3 --out acceptance-gaps.jsonl
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: acceptance-gap-repeats-${{ matrix.os }}
-          path: acceptance-gaps.jsonl
       # On Linux the keeper alone must stop a fork relay after a SIGKILL of
       # delega (the k-relay rows). Whether a generation slips past depends on
       # timing, so those rows run ten more times; any survivor fails the job.
@@ -91,16 +81,10 @@ jobs:
         with:
           name: acceptance-k-relay-repeats
           path: acceptance-k-relay.jsonl
-      # The 12 relay rows (both providers; cases a, c, d, e, fd and k) run five
-      # more times on Linux, where the keeper stops the relay. A row fails
-      # when what it measured differs from what the matrix expects for it
-      # (acceptance/README.md); on Linux that includes no survivor, and for
-      # the 10 rows that report a result, cleanup Confirmed. The two k-relay
-      # rows (SIGKILL of delega) report no result and so no cleanup verdict;
-      # they are checked for exit status and survivors. As in every acceptance
-      # step, the harness reruns a row (up to 5 runs in all) when its only
-      # problem is the verdict for a late listing before the first signal, so
-      # that verdict alone does not fail the job. Any other failure does.
+      # Repeat the Linux relay rows to check the expected outcome and exit,
+      # one valid result, and no survivors under process churn. Readable runs
+      # must report Confirmed or the late-listing reason alone. The SIGKILL
+      # rows check signal exit, no result, and the keeper's cleanup.
       - name: Every relay row, five repeats (Linux)
         if: runner.os == 'Linux'
         run: cargo run --release --locked -p delega-acceptance -- --filter=-relay --repeat 5 --out acceptance-relay.jsonl

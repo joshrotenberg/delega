@@ -114,14 +114,19 @@ pub fn ps() -> Vec<Proc> {
         .collect()
 }
 
-/// `role pid` pairs the fakes wrote.
+/// The fakes publish empty files named `role.pid`. Creating the directory
+/// entry publishes both fields at once, even when the writer is killed.
 pub fn ledger(dir: &Path) -> Vec<(String, i32)> {
-    std::fs::read_to_string(dir.join("pids"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let (role, pid) = l.split_once(' ')?;
-            Some((role.to_owned(), pid.trim().parse().ok()?))
+    std::fs::read_dir(dir.join("pids"))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let (role, pid) = name.to_str()?.split_once('.')?;
+            let pid = pid.parse::<i32>().ok()?;
+            (pid > 0 && !role.is_empty() && entry.file_type().ok()?.is_file())
+                .then(|| (role.to_owned(), pid))
         })
         .collect()
 }
@@ -204,7 +209,7 @@ pub fn survivors(marker: &str, dir: &Path, except: &[i32]) -> Vec<Survivor> {
 pub const UNRECORDED: &str = "unrecorded";
 
 /// How long a marked process the ledger does not yet know is given to record
-/// itself. Every process the fakes start appends its role as its first act, but
+/// itself. Every process the fakes start publishes its role as its first act, but
 /// the first act of a process that was only just forked can wait for the
 /// scheduler for as long as the machine is busy. Only a process that is still
 /// alive and unknown after this is `unrecorded`, a real finding.
@@ -350,7 +355,30 @@ pub fn sweep(marker: &str, dir: &Path, except: &[i32], limit: Duration) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::carries;
+    use super::{bare_pids_in, carries, ledger};
+
+    #[test]
+    fn the_ledger_reads_complete_role_and_pid_pairs_from_filenames() {
+        let case = tempfile::tempdir().expect("case directory");
+        let pids = case.path().join("pids");
+        std::fs::create_dir(&pids).expect("ledger directory");
+        for name in [
+            "bare.123",
+            "relay-heartbeat.456",
+            "child.",
+            "provider.0",
+            "bare.23.tmp",
+        ] {
+            std::fs::write(pids.join(name), []).expect("ledger entry");
+        }
+        let mut pairs = ledger(case.path());
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            [("bare".into(), 123), ("relay-heartbeat".into(), 456)]
+        );
+        assert_eq!(bare_pids_in(case.path()), [123]);
+    }
 
     #[test]
     fn a_marker_is_not_found_in_the_command_line_of_a_case_whose_number_starts_with_it() {
