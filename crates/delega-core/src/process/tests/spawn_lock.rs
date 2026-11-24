@@ -20,7 +20,9 @@
 //!   sibling may hold the pipe.
 //! - Unguarded (macOS only), the sibling spawns directly. The window stays
 //!   open until its spawn has returned, so it is certain to inherit the write
-//!   end, and the check sees it. That is what makes a pass in the guarded case
+//!   end. It proves it: after `exec` it writes a sentinel byte through the
+//!   window's write end, by its descriptor number, and the test reads that
+//!   byte before reaping it. That is what makes a pass in the guarded case
 //!   mean something.
 //!
 //! What this proves is the lock's contract: a spawn through the process
@@ -51,9 +53,10 @@
 //! 8000 when the read waited until the sibling had echoed a byte (so its
 //! `exec` had finished), and in none of 16000 with the write end moved above
 //! the descriptors the spawn makes. That one read is the likely cause of the
-//! guarded case's failures on 2026-11-24 (#186). The unguarded case does read
-//! once: its sibling holds the write end without close-on-exec until it is
-//! reaped, so `EAGAIN` there is stable.
+//! guarded case's failures on 2026-11-24 (#186). For the same reason the
+//! unguarded case does not take `EAGAIN` as held either: it reads its
+//! sibling's sentinel, which only a process holding that write end can have
+//! written.
 //!
 //! Each case runs in a process of its own: the outer test re-runs this test
 //! binary on one ignored inner test, as due does, and kills it if it has not
@@ -69,7 +72,7 @@
 //! end by themselves if that process is killed; otherwise every sibling is
 //! killed and reaped, on failure paths too.
 
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -161,11 +164,26 @@ struct Seen {
     siblings: Vec<Sibling>,
 }
 
+/// The byte an unguarded sibling writes through the inherited write end.
+const SENTINEL: u8 = b'x';
+
 /// A child set up as the provider is when started directly (see
 /// `OwnedProcess::spawn`). `cat` with its standard input a pipe from this
-/// process: it lives until it is killed or this process exits.
-fn provider_command(dir: &Path) -> Command {
-    let spec = ProcessSpec::new("/bin/cat", DEADLINE)
+/// process: it lives until it is killed or this process exits. With
+/// `sentinel_fd`, a shell first writes [`SENTINEL`] to that descriptor number
+/// and then becomes `cat`, keeping the descriptor; if the descriptor was not
+/// inherited, the write fails and it becomes `cat` without writing.
+fn provider_command(dir: &Path, sentinel_fd: Option<i32>) -> Command {
+    let spec = match sentinel_fd {
+        None => ProcessSpec::new("/bin/cat", DEADLINE),
+        Some(fd) => ProcessSpec::new("/bin/sh", DEADLINE).args([
+            "-c".to_string(),
+            format!("printf {} >&\"$1\"; exec /bin/cat", char::from(SENTINEL)),
+            "sh".to_string(),
+            fd.to_string(),
+        ]),
+    };
+    let spec = spec
         .cwd(dir)
         .env(EnvPolicy::inherit_only(["PATH"]))
         .stdin("");
@@ -188,15 +206,38 @@ fn read_would_block(read: &OwnedFd) -> bool {
     }
 }
 
-/// Whether a process other than this one holds the write end of the pipe
-/// whose read end is `read`, once this process has closed its own, read once.
-/// Only for a holder that keeps it until it is reaped (see the module
-/// documentation). Taken under the spawn lock, so no spawn can be between
-/// fork and exec holding a copy.
+/// Wait, for at most [`DEADLINE`], for the first byte on the pipe whose read
+/// end is `read`: `Some` byte, or `None` at end of input. A byte can only
+/// have come from a process holding the write end, since this process has
+/// closed its own.
 #[cfg(target_os = "macos")]
-fn write_end_held(read: &OwnedFd) -> bool {
-    let _held = spawn_guard();
-    read_would_block(read)
+fn first_byte(read: &OwnedFd) -> Option<u8> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    rustix::io::ioctl_fionbio(read, true).expect("make the read end nonblocking");
+    let until = Instant::now() + DEADLINE;
+    loop {
+        let mut byte = [0u8; 1];
+        match rustix::io::read(read, &mut byte) {
+            Ok(0) => return None,
+            Ok(_) => return Some(byte[0]),
+            Err(Errno::AGAIN | Errno::INTR) => {}
+            Err(e) => panic!("read the window's pipe: {e}"),
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "neither a byte nor end of input on the window's pipe within {DEADLINE:?}"
+        );
+        let timeout = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(read, PollFlags::IN)];
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(_) | Err(Errno::INTR) => {}
+            Err(e) => panic!("poll the window's pipe: {e}"),
+        }
+    }
 }
 
 /// Whether end of input arrives, within [`DEADLINE`], on the pipe whose read
@@ -272,11 +313,14 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
         );
     }
 
+    // An unguarded sibling proves it inherited the write end by writing a
+    // sentinel through this descriptor number.
+    let sentinel_fd = (!guarded).then(|| write.as_raw_fd());
     let (tx, rx) = mpsc::channel::<std::io::Result<Child>>();
     for _ in 0..count {
         let tx = tx.clone();
         let handle = runtime.handle().clone();
-        let mut command = provider_command(dir);
+        let mut command = provider_command(dir, sentinel_fd);
         // Not joined: a sibling stuck on the lock must not hang the case. If
         // the case has given up, the send fails and dropping the child kills
         // it (`kill_on_drop`); it is `cat` reading a pipe from this process,
@@ -521,11 +565,15 @@ fn an_unguarded_spawn_in_the_window_inherits_the_pipe_inner() {
     let runtime = runtime();
     let dir = tempfile::tempdir().expect("create scratch directory");
     let seen = open_window(&runtime, dir.path(), 1, false);
-    let held = write_end_held(&seen.read);
+    // Read while the sibling runs: only a holder of the write end can have
+    // written the sentinel, and this process closed its own.
+    let came = first_byte(&seen.read);
     reap_all(seen.siblings);
-    assert!(
-        held,
-        "an unguarded sibling started in the window was not seen holding the pipe's write end"
+    assert_eq!(
+        came,
+        Some(SENTINEL),
+        "an unguarded sibling started in the window did not write its sentinel through the \
+         pipe's write end, so it did not inherit it"
     );
     assert!(
         write_end_released(&seen.read),
