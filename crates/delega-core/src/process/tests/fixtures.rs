@@ -669,6 +669,32 @@ fn waiting_child(dir: &Scratch) -> std::process::Child {
 }
 
 #[test]
+fn a_pid_file_only_registers_a_process_in_its_test_directory() {
+    let scratch = Scratch::new();
+    let foreign = Scratch::new();
+    let path = scratch.path("pid");
+    let mut original = waiting_child(&scratch);
+    std::fs::write(&path, format!("{}\n", original.id())).expect("write the original PID");
+    let pid = read_pid_file(&path).expect("read the original PID");
+    assert!(
+        ProcessIdentity::from_pid_file(pid, &scratch.dir()).is_some(),
+        "a process in the test directory must register"
+    );
+    assert!(original.wait().expect("reap the original").success());
+
+    let mut replacement = waiting_child(&foreign);
+    // Stand in for numeric PID reuse without requiring the kernel to reuse it.
+    std::fs::write(&path, format!("{}\n", replacement.id())).expect("simulate PID reuse");
+    let pid = read_pid_file(&path).expect("read the replacement PID");
+    let registered = ProcessIdentity::from_pid_file(pid, &scratch.dir());
+    assert!(replacement.wait().expect("reap the replacement").success());
+    assert!(
+        registered.is_none(),
+        "a different cwd must prevent registration"
+    );
+}
+
+#[test]
 fn reaper_does_not_signal_a_replacement_after_the_registered_process_exits() {
     let scratch = Scratch::new();
     let mut original = waiting_child(&scratch);
