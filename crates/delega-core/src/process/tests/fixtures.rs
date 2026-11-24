@@ -237,6 +237,13 @@ impl ProcessIdentity {
         Some(identity)
     }
 
+    /// Whether the process has exited (Linux: its pidfd is readable, which
+    /// it is from the exit on, before the process is reaped).
+    #[cfg(target_os = "linux")]
+    pub(super) fn has_exited(&self) -> bool {
+        sys::pidfd_exited(&self.fd)
+    }
+
     pub(super) fn signal(&self, signal: Signal) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -859,22 +866,31 @@ pub(super) fn process_names_path(pid: i32, path: &[u8]) -> bool {
     command.is_some_and(|command| holds_path(&command, path))
 }
 
-/// End the relay processes whose command lines name the case directory, until
-/// the relay's lifeline ends (every relay process is gone). Linux signals
-/// through a pidfd. Elsewhere the heartbeat supplies a candidate PID and the
-/// start time must still match. Retry for up to five seconds: this is
-/// teardown, and nothing is asserted on it; the 2 ms between tries is only a
-/// retry cadence.
+/// End the processes a relay case left, until nothing of it is left: on
+/// Linux, until the relay's lifeline has ended and the census of processes
+/// that name the case directory ([`case_processes`]) is known to be empty,
+/// so a census survivor that holds no lifeline (a keeper named by the
+/// directory, say) is still ended; elsewhere, until the lifeline ends.
+/// Linux signals through a pidfd. Elsewhere the heartbeat supplies a
+/// candidate PID and the start time must still match. Retry for up to five
+/// seconds: this is teardown, and nothing is asserted on it; the 2 ms
+/// between tries is only a retry cadence.
 pub(super) async fn end_relay_leftovers(dir: &std::path::Path, lifeline: &mut Lifeline) {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(5) {
-        if lifeline.drain() == Some(Heard::Ended) {
+        let ended = lifeline.drain() == Some(Heard::Ended);
+        #[cfg(not(target_os = "linux"))]
+        if ended {
             return;
         }
         #[cfg(target_os = "linux")]
         {
             // An unknown answer is retried; the teardown only does what it can.
-            let left = case_processes(dir).unwrap_or_default();
+            let census = case_processes(dir);
+            if ended && census.as_ref().is_ok_and(Vec::is_empty) {
+                return;
+            }
+            let left = census.unwrap_or_default();
             let names = path_names(dir).unwrap_or_default();
             for pid in left {
                 if let Some(process) = ProcessIdentity::capture(pid)

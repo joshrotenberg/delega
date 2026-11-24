@@ -496,18 +496,24 @@ async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
 /// with every process stopped, so a generation reparented to the keeper
 /// between two reads is not missed. The race is a matter of timing, so the
 /// case is repeated 20 times; any surviving generation fails it. The owner is
-/// killed once the relay has made one handoff, and the relay's lifeline says
-/// when its last process is gone and whether it ran its course by itself
+/// killed once the relay has made one handoff. The relay's lifeline says when
+/// its last process is gone and whether it ran its course or broke by itself
 /// first (see `gaps::RELAY`); the relay outlives any stop by many seconds.
+/// The keeper holds no lifeline and goes on after the relay is gone (it
+/// reaps and exits), so its exit is awaited on its own pidfd; the census of
+/// processes naming the case directory, which also finds the keeper (the
+/// directory is on its command line), is taken after that. One deadline
+/// bounds each attempt.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
     require_perl!();
-    use super::gaps::{RelayFate, await_handoffs, relay_fate};
+    use super::fixtures::AWAIT;
+    use super::gaps::{RelayFate, RelayLife};
     use crate::test_spawn::Guarded;
     for attempt in 1..=20 {
         let s = Scratch::new();
-        let mut lifeline = super::fixtures::Lifeline::new(&s, "life");
+        let mut relay = RelayLife::new(&s);
         let exe = std::env::current_exe().expect("the test binary's path");
         let mut owner = std::process::Command::new(exe)
             .args([
@@ -524,28 +530,49 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
             .guarded_spawn()
             .expect("start the owner");
         let owner_pid = i32::try_from(owner.id()).expect("a pid");
-        await_handoffs(&mut lifeline, 1).await;
+        let mut reaper = Reaper::default();
+        let leader = s.pid("leader").await;
+        let keeper_pid = parent_of(leader).expect("the program's parent");
+        assert_ne!(
+            keeper_pid, owner_pid,
+            "the program's parent must be the keeper"
+        );
+        let keeper = keeper_identity(keeper_pid, &s.dir()).expect("identify the keeper");
+        reaper.add(keeper_identity(keeper_pid, &s.dir()));
+        relay.await_handoffs(1).await;
         let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
         let _ = owner.wait();
+        let deadline = std::time::Instant::now() + AWAIT;
         // Generations go on running until the keeper stops them; only the
         // end of the lifeline, or the relay's own end, decides.
         let fate = loop {
-            match relay_fate(&mut lifeline).await {
+            match relay.fate_by(deadline).await {
                 RelayFate::Running => {}
                 fate => break fate,
             }
         };
+        let keeper_exited = loop {
+            if keeper.has_exited() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         // A census that does not depend on the lifeline: no process may name
-        // the case directory on its command line either.
+        // the case directory on its command line either. The keeper has
+        // exited by now, and an exited process is not counted.
         let survivors = super::fixtures::case_processes(&s.dir())
             .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
-        let stopped = fate == RelayFate::Stopped && survivors.is_empty();
+        let stopped = fate == RelayFate::Stopped && keeper_exited && survivors.is_empty();
         if !stopped {
-            super::fixtures::end_relay_leftovers(&s.dir(), &mut lifeline).await;
+            super::fixtures::end_relay_leftovers(&s.dir(), &mut relay.lifeline).await;
         }
         assert!(
             stopped,
-            "attempt {attempt}: the relay outlived the keeper's cleanup ({fate:?}); survivors {survivors:?}"
+            "attempt {attempt}: the relay or the keeper outlived the keeper's cleanup: relay \
+             {fate:?}, keeper {keeper_pid} exited {keeper_exited}, survivors {survivors:?}"
         );
     }
 }

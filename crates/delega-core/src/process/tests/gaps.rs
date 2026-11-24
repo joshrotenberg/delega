@@ -493,77 +493,167 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
 /// milliseconds, forks a successor and exits, so no process stays alive for
 /// longer than one listing. It stops itself after 300 generations.
 ///
-/// What a test can see of it: every generation publishes its pid in `beat` as
-/// a complete record (renamed into place) and then writes `h` on the case's
-/// lifeline (`life`, a [`Lifeline`] the test opened), and the last generation
-/// writes `e` before it exits by itself. The perl process opens the lifeline
-/// before its first fork, so it and every generation hold it: the lifeline
-/// ends exactly when the last of them is gone. A second `h` is one completed
-/// handoff; an `h` read after a moment is a generation that ran after it; the
-/// end of the lifeline without an `e` is a relay that something stopped.
+/// What a test can see of it ([`RelayLife`]): every generation checks that it
+/// leads its own group, publishes its pid in `beat` as a complete record
+/// (renamed into place), and then writes `h` on the case's lifeline (`life`,
+/// a [`Lifeline`] the test opened). It writes `h` once: a generation whose
+/// `setpgid` or successor `fork` fails writes `x` and exits, instead of going
+/// round the loop again. The last generation writes `e` before it exits by
+/// itself. The perl process opens the lifeline before its first fork, so it
+/// and every generation hold it: the lifeline ends exactly when the last of
+/// them is gone. A second `h` is one completed handoff; an `h` read after a
+/// moment is a generation that ran after it; the end of the lifeline without
+/// an `e` or an `x` is a relay that something stopped.
 const RELAY: &str = "exec perl -e 'use POSIX; \
     open L, q(>), q(life) or die; \
-    my $p = fork(); \
+    my $p = fork(); defined $p or die; \
     if ($p == 0) { $SIG{TERM} = q(IGNORE); \
-      for (1..300) { setpgid(0,0); \
+      for (1..300) { setpgid(0, 0); getpgrp() == $$ or do { syswrite L, q(x); exit 1 }; \
         open H, q(>), q(beat.tmp); print H qq($$\n); close H; rename q(beat.tmp), q(beat); \
         syswrite L, q(h); \
         select(undef, undef, undef, 0.005); \
-        my $q = fork(); \
+        my $q = fork(); defined $q or do { syswrite L, q(x); exit 1 }; \
         if ($q) { exit 0 } } \
       syswrite L, q(e); \
       exit 0 } \
     sleep 60'";
 
-/// What became of a relay after a moment the test chose (see [`relay_fate`]).
+/// What became of a relay after a moment the test chose (see
+/// [`RelayLife::fate_by`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RelayFate {
     /// Every relay process is gone, and the relay never reached its end by
-    /// itself: something stopped it.
+    /// itself or broke: something stopped it.
     Stopped,
     /// A generation ran after the moment.
     Running,
-    /// The relay ran all its generations and ended by itself, so nothing
-    /// stopped it.
+    /// The relay ran all its generations and ended by itself (`e`), so
+    /// nothing stopped it.
     RanItsCourse,
-    /// No generation ran and the lifeline did not end within [`AWAIT`]: a
+    /// A generation could not lead its own group or fork its successor (`x`),
+    /// so the relay ended without being stopped.
+    Broke,
+    /// No generation ran and the lifeline did not end by the deadline: a
     /// relay process is alive but not running (stopped, or never scheduled).
     Silent,
 }
 
-/// Wait until the relay has made `handoffs` complete handoffs: one more `h`
-/// on its lifeline than that, each from a new generation.
-pub(super) async fn await_handoffs(lifeline: &mut Lifeline, handoffs: usize) {
-    let mut generations = 0;
-    while generations <= handoffs {
-        match lifeline.hear("a relay generation starting").await {
-            Heard::Byte(b'h') => generations += 1,
-            other => panic!("the relay ended before {handoffs} handoffs: {other:?}"),
+/// A relay's lifeline and the terminal byte (`e` or `x`) read from it so
+/// far. The terminal byte is kept across reads, so a relay that wrote `e`
+/// while one call was waiting and then closed the lifeline is still known to
+/// have run its course when a later call reads the end.
+pub(super) struct RelayLife {
+    pub(super) lifeline: Lifeline,
+    terminal: Option<u8>,
+}
+
+impl RelayLife {
+    /// Open the lifeline `life` in `s`, before the relay starts.
+    pub(super) fn new(s: &Scratch) -> Self {
+        Self {
+            lifeline: Lifeline::new(s, "life"),
+            terminal: None,
+        }
+    }
+
+    fn note(&mut self, byte: u8) {
+        if matches!(byte, b'e' | b'x') {
+            self.terminal = Some(byte);
+        }
+    }
+
+    fn ended(&self) -> RelayFate {
+        match self.terminal {
+            Some(b'e') => RelayFate::RanItsCourse,
+            Some(_) => RelayFate::Broke,
+            None => RelayFate::Stopped,
+        }
+    }
+
+    /// Wait until the relay has made `handoffs` complete handoffs: one more
+    /// `h` on its lifeline than that, each from a new generation.
+    pub(super) async fn await_handoffs(&mut self, handoffs: usize) {
+        let mut generations = 0;
+        while generations <= handoffs {
+            match self.lifeline.hear("a relay generation starting").await {
+                Heard::Byte(b'h') => generations += 1,
+                other => panic!("the relay ended before {handoffs} handoffs: {other:?}"),
+            }
+        }
+    }
+
+    /// What became of the relay from now on, deciding by `deadline` at the
+    /// latest. Every byte already on the lifeline was written before now;
+    /// then the first thing heard decides: the end of the lifeline is
+    /// [`RelayFate::Stopped`] (unless a terminal byte came first), any byte
+    /// is a generation that ran after now. A generation killed just before
+    /// now has written nothing since and ends the lifeline as soon as it is
+    /// gone.
+    pub(super) async fn fate_by(&mut self, deadline: std::time::Instant) -> RelayFate {
+        while let Some(heard) = self.lifeline.try_hear() {
+            match heard {
+                Heard::Ended => return self.ended(),
+                Heard::Byte(byte) => self.note(byte),
+            }
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match self.lifeline.hear_within(left).await {
+            None => RelayFate::Silent,
+            Some(Heard::Ended) => self.ended(),
+            Some(Heard::Byte(byte)) => {
+                self.note(byte);
+                RelayFate::Running
+            }
         }
     }
 }
 
-/// What became of the relay from now on. Every byte already on the lifeline
-/// was written before now; then the first thing heard decides: the end of the
-/// lifeline (and no `e` on the way) is [`RelayFate::Stopped`], an `h` is a
-/// generation that ran after now. A generation killed just before now has
-/// written nothing since and ends the lifeline as soon as it is gone.
-pub(super) async fn relay_fate(lifeline: &mut Lifeline) -> RelayFate {
-    let mut ended_by_itself = false;
-    while let Some(heard) = lifeline.try_hear() {
-        match heard {
-            Heard::Ended if ended_by_itself => return RelayFate::RanItsCourse,
-            Heard::Ended => return RelayFate::Stopped,
-            Heard::Byte(b'e') => ended_by_itself = true,
-            Heard::Byte(_) => {}
+/// A writer that stands in for a relay's last generations: it writes `h`, and
+/// a moment later the terminal byte `last`, and exits. Whether the terminal
+/// byte arrives before a call starts waiting or while it waits, the relay
+/// must never be taken for a stopped one: a byte read while waiting is
+/// `Running`, and the end read afterwards still knows the terminal byte.
+async fn fate_of_a_relay_that_ends_with(last: char) -> RelayFate {
+    let s = Scratch::new();
+    let mut relay = RelayLife::new(&s);
+    let mut writer = std::process::Command::new("perl")
+        .arg("-e")
+        .arg(format!(
+            "open L, q(>), q(life) or die; syswrite L, q(h); \
+             select(undef, undef, undef, 0.2); syswrite L, q({last})"
+        ))
+        .current_dir(s.dir())
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .guarded_spawn()
+        .expect("start the writer");
+    relay.await_handoffs(0).await;
+    let deadline = std::time::Instant::now() + AWAIT;
+    let fate = loop {
+        match relay.fate_by(deadline).await {
+            RelayFate::Running => {}
+            fate => break fate,
         }
-    }
-    match lifeline.hear_within(AWAIT).await {
-        None => RelayFate::Silent,
-        Some(Heard::Ended) if ended_by_itself => RelayFate::RanItsCourse,
-        Some(Heard::Ended) => RelayFate::Stopped,
-        Some(Heard::Byte(_)) => RelayFate::Running,
-    }
+    };
+    assert!(writer.wait().expect("reap the writer").success());
+    fate
+}
+
+#[tokio::test]
+async fn a_relay_that_ran_its_course_is_never_taken_for_a_stopped_one() {
+    require_perl!();
+    assert_eq!(
+        fate_of_a_relay_that_ends_with('e').await,
+        RelayFate::RanItsCourse
+    );
+}
+
+#[tokio::test]
+async fn a_relay_that_broke_by_itself_is_never_taken_for_a_stopped_one() {
+    require_perl!();
+    assert_eq!(fate_of_a_relay_that_ends_with('x').await, RelayFate::Broke);
 }
 
 /// The same relay with 4000 generations, so it outlives any stop by many
@@ -595,7 +685,7 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
 
 async fn relay_run_with_diagnostics() -> RelayRun {
     let s = Scratch::new();
-    let mut lifeline = Lifeline::new(&s, "life");
+    let mut relay = RelayLife::new(&s);
     let mut spec = kept(sh(&s, &long_relay(&s.dir()), LONG));
     spec.stop_grace = Duration::from_millis(100);
     // The relay holds the output pipes; the owner closes them a second after
@@ -604,7 +694,7 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     let handle = crate::process::ProcessHandle::start(spec);
     // The interrupt comes once the relay is relaying: one generation has
     // started its successor.
-    await_handoffs(&mut lifeline, 1).await;
+    relay.await_handoffs(1).await;
     let asked = std::time::Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
@@ -612,7 +702,7 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     // A relay process alive after the report either runs (an `h` after it)
     // or holds the lifeline open without running; only the end of the
     // lifeline says every one is gone.
-    let fate = relay_fate(&mut lifeline).await;
+    let fate = relay.fate_by(std::time::Instant::now() + AWAIT).await;
     // On Linux, any process that names the case directory on its command
     // line counts as alive too: a census that does not depend on the
     // lifeline.
@@ -625,7 +715,7 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     let diagnostics = format!("relay {fate:?}\n{}", relay_diagnostics(&survivors, &report));
     // A relay that survived is ended here, so nothing is left, without
     // signalling a foreign process (see `end_relay_leftovers`).
-    super::fixtures::end_relay_leftovers(&s.dir(), &mut lifeline).await;
+    super::fixtures::end_relay_leftovers(&s.dir(), &mut relay.lifeline).await;
     RelayRun {
         alive,
         cleanup: report.cleanup,
