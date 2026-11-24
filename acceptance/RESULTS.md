@@ -160,9 +160,9 @@ slow down, which accounts for the 264 to 680 ms seen for a normal completion her
 
 | Run | Pass | Expected failure | Gap not shown | Unexpected pass | Fail | p99 latency (not SIGKILL) | Max latency |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 200 | 2 | 0 | 0 | 0 | 4524 ms | 4810 ms |
-| 2 | 200 | 2 | 0 | 0 | 0 | 3658 ms | 4954 ms |
-| 3 | 200 | 2 | 0 | 0 | 0 | 4288 ms | 5068 ms |
+| 1 | 200 | 2 | 0 | 0 | 0 | 4770 ms | 5162 ms |
+| 2 | 200 | 2 | 0 | 0 | 0 | 3605 ms | 4622 ms |
+| 3 | 200 | 2 | 0 | 0 | 0 | 4347 ms | 4462 ms |
 
 No row changed verdict, outcome, exit status, survivors or cleanup report between runs.
 
