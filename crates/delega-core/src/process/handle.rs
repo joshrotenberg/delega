@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::cleanup_reason::{self, OwnerLost};
 use crate::contract::result::Cleanup;
 
 use super::capture::Captured;
@@ -139,16 +140,16 @@ impl ProcessHandle {
     pub async fn wait(mut self) -> ProcessReport {
         let joined = match self.join.as_mut() {
             Some(join) => join.await,
-            None => return self.lost("the report was already taken"),
+            None => return self.lost(OwnerLost::ReportTaken),
         };
         self.join = None;
         match joined {
             Ok(report) => report,
             Err(error) => {
                 let why = if error.is_panic() {
-                    "the owner task panicked"
+                    OwnerLost::Panicked
                 } else {
-                    "the runtime shut down before the run finished"
+                    OwnerLost::RuntimeShutDown
                 };
                 self.lost(why)
             }
@@ -157,12 +158,12 @@ impl ProcessHandle {
 
     /// The report for an owner that ended without one. The owner's drop sent a
     /// best-effort SIGKILL to the group; nothing confirms it worked.
-    fn lost(&self, why: &str) -> ProcessReport {
+    fn lost(&self, why: OwnerLost) -> ProcessReport {
         let pid = self.pid();
         ProcessReport {
             pid,
             ending: Ending::WaitFailed {
-                message: why.to_string(),
+                message: why.text().to_string(),
             },
             exit: None,
             stdout: Captured::default(),
@@ -179,19 +180,10 @@ impl ProcessHandle {
                     .chain(self.registry.tracked_pids())
                     .collect(),
                 process_groups: pid.into_iter().collect(),
-                reason: format!(
-                    "{why}; a best-effort SIGKILL was sent to the process group but \
-                     no check confirmed it{}",
-                    if self.kept {
-                        "; the keeper stops what is left when the owner's end of its socket \
-                         closes"
-                    } else {
-                        ""
-                    }
-                ),
+                reason: cleanup_reason::owner_lost(why, self.kept),
             },
             diagnostics: Diagnostics {
-                warnings: vec![why.to_string()],
+                warnings: vec![why.text().to_string()],
                 signals: Vec::new(),
                 signals_omitted: 0,
                 tracking_enabled: self.tracking,

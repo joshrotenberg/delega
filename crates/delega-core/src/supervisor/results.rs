@@ -9,6 +9,7 @@
 use std::time::SystemTime;
 
 use crate::VERSION;
+use crate::cleanup_reason::{self, RunLost};
 use crate::contract::result::{
     AppliedPermissions, Cleanup, ErrorDetail, Provenance, RefusalContext, RunContext, RunResult,
     Timing, WorkerRef,
@@ -172,22 +173,19 @@ pub(super) fn interrupted_unstarted(run: &Run, worker: Option<WorkerRef>, why: &
 pub(super) fn crashed(
     run: &Run,
     worker: Option<WorkerRef>,
-    why: &str,
+    why: RunLost,
     partial_text: String,
 ) -> RunResult {
     let cleanup = Cleanup::Unconfirmed {
         pids: Vec::new(),
         process_groups: Vec::new(),
-        reason: format!(
-            "{why}; the provider process, if one started, was sent an interrupt but nothing \
-             confirmed it stopped"
-        ),
+        reason: cleanup_reason::run_lost(why),
     };
     let result = RunResult::failed(
         context(run, worker.clone(), cleanup),
         ErrorDetail {
             kind: "internal_error".to_string(),
-            message: why.to_string(),
+            message: why.text().to_string(),
             provider_exit_code: None,
         },
         partial_text,

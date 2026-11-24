@@ -29,6 +29,9 @@
 
 pub mod canonical;
 
+#[doc(hidden)]
+pub mod cleanup_reason;
+
 pub mod config;
 
 pub mod contract;

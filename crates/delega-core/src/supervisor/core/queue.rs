@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
+use crate::cleanup_reason::RunLost;
 use crate::contract::result::RunResult;
 use crate::process::rfc3339_utc;
 use crate::provider::ProgressSink;
@@ -81,11 +82,11 @@ impl Core {
             .get_mut(id)
             .and_then(|r| Some((r.worker.clone()?, r.kind, r.request.take()?)))
         else {
-            self.finish_unstarted_failed(id, "the run has no request to start");
+            self.finish_unstarted_failed(id, RunLost::NoRequest);
             return;
         };
         let Some(worker) = self.workers.get(&worker_id) else {
-            self.finish_unstarted_failed(id, "the run has no worker");
+            self.finish_unstarted_failed(id, RunLost::NoWorker);
             return;
         };
         let mut request = request;
@@ -175,7 +176,7 @@ impl Core {
         self.finish_run(id, result);
     }
 
-    fn finish_unstarted_failed(&mut self, id: &str, why: &str) {
+    fn finish_unstarted_failed(&mut self, id: &str, why: RunLost) {
         let Some(result) = self.runs.get(id).map(|run| {
             let wref = self.worker_ref_of(run);
             results::crashed(run, wref, why, String::new())
@@ -206,7 +207,7 @@ impl Core {
     }
 
     /// A run's task ended without a result.
-    pub(super) fn run_crashed(&mut self, id: &str, reason: &str) {
+    pub(super) fn run_crashed(&mut self, id: &str, reason: RunLost) {
         let Some(result) = self
             .runs
             .get(id)

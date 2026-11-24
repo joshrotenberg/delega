@@ -173,7 +173,7 @@ pub(super) enum Command {
     /// A run's task ended without a result.
     Crashed {
         run: String,
-        reason: String,
+        reason: crate::cleanup_reason::RunLost,
     },
     /// Stop everything and end the task.
     Quit,

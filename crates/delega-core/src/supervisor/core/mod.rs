@@ -228,7 +228,7 @@ impl Core {
                 });
             }
             Command::Finished { run, result } => self.run_finished(&run, *result),
-            Command::Crashed { run, reason } => self.run_crashed(&run, &reason),
+            Command::Crashed { run, reason } => self.run_crashed(&run, reason),
             Command::Quit => {
                 let _ = self.shutdown(false);
             }
