@@ -254,22 +254,21 @@ both!(
          for (1..400) {{ my $p = fork(); \
          if (!defined $p) {{ next }} \
          if (!$p) {{ setpgid(0,0); {WAIT_WHILE_GUARDED}; exit 0 }} \
-         open F, q(>), qq(kids/$p.tmp); print F qq($p\n); close F; \
-         rename qq(kids/$p.tmp), qq(kids/$p); \
+         open F, q(>), qq(kids/$p); print F qq($p\n); close F; \
          select(undef, undef, undef, 0.05); }}'"
         );
         std::fs::create_dir(s.path("kids")).expect("create the record directory");
         let _reaper = ChildLifetime::new(&s);
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         await_event("three children being started", || {
-            s.published_pids_in("kids").len() >= 3
+            s.published_pids_in("kids").0.len() >= 3
         })
         .await;
         let stopped = Instant::now();
         handle.interrupt();
         let report = handle.wait().await;
         assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-        let kids = s.published_pids_in("kids");
+        let (kids, _) = s.published_pids_in("kids");
         assert!(kids.len() >= 3, "only {} children were started", kids.len());
         assert_confirmed(&report);
         assert_stopped_in_time("children forked until the stop", &kids, stopped).await;
@@ -344,12 +343,12 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     let child = reaper.register(leader, &s).expect("identify the leader in the test scratch directory");
     handle.interrupt();
     await_event("a first child started by the stop's TERM", || {
-        !s.published_pids_in("gcs").is_empty()
+        !s.published_pids_in("gcs").0.is_empty()
     })
     .await;
     let mut sent_at = Instant::now();
     await_event("a second child started by a second TERM", || {
-        if s.published_pids_in("gcs").len() >= 2 {
+        if s.published_pids_in("gcs").0.len() >= 2 {
             return true;
         }
         if sent_at.elapsed() >= Duration::from_millis(300) {
@@ -363,7 +362,10 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     std::fs::write(s.path("quit"), "quit").expect("write the quit file");
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-    let children = s.published_pids_in("gcs");
+    // The leader ran every handler to its end before it saw the quit file, so
+    // every record it began is complete.
+    let (children, incomplete) = s.published_pids_in("gcs");
+    assert!(incomplete.is_empty(), "incomplete records: {incomplete:?}");
     assert!(
         children.len() >= 2,
         "{} children were started",
@@ -623,7 +625,7 @@ async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
     let lister = fake_ps(&s, ps_output);
     let mut spec = sh(
         &s,
-        "record leader $$; sh -c 'trap \"\" TERM; echo $$ > gc.tmp && /bin/mv gc.tmp gc; while :; do sleep 1; done' & \
+        "record leader $$; sh -c 'trap \"\" TERM; echo $$ > gc; while :; do sleep 1; done' & \
          while [ ! -e gc ]; do sleep 0.02; done; exit 0",
         LONG,
     )

@@ -44,19 +44,18 @@ pub(super) async fn await_value<T>(what: &str, mut read: impl FnMut() -> Result<
     }
 }
 
-/// Shell: defines `record NAME VALUE`, which publishes `VALUE` and a newline
-/// as the record `NAME` by writing `NAME.tmp` in the same directory and
-/// renaming it, so a reader finds the record absent or complete, never
-/// partly written. [`sh`] puts it before every script; a script that starts
-/// another shell writes the temporary file and renames it itself. `mv` is
-/// named by path because some specs inherit no `PATH`, and it ignores TERM,
-/// INT and HUP so a stop sweep that reaches it while a TERM handler records a
-/// child does not lose the record.
-pub(super) const RECORD: &str = "record() { echo \"$2\" > \"$1.tmp\" && \
-     (trap '' TERM INT HUP; exec /bin/mv -f \"$1.tmp\" \"$1\"); }; ";
+/// Shell: defines `record NAME VALUE`, which writes `VALUE` and a newline to
+/// `NAME` with the `printf` builtin: one small write, and no process of its
+/// own in the run's tree. A reader can still find the file empty (created by
+/// the redirection, not yet written) or, in principle, partly written;
+/// [`read_record`] calls that incomplete and the waits keep waiting. [`sh`]
+/// puts it before every script; a script that starts another shell writes
+/// its record with `echo` the same way.
+pub(super) const RECORD: &str = "record() { printf '%s\\n' \"$2\" > \"$1\"; }; ";
 
-/// Publish `pid` as a complete record at `path`, as the scripts' `record`
-/// does: write a temporary file beside it and rename it into place.
+/// Publish `pid` as a complete record at `path`: write a temporary file
+/// beside it and rename it into place. It runs in the test process, so it
+/// adds no process to any run.
 pub(super) fn publish_pid(path: &Path, pid: u32) {
     let name = path.file_name().expect("a record has a file name");
     let mut temporary = name.to_os_string();
@@ -166,42 +165,26 @@ impl Scratch {
             other => panic!("{name} holds no complete pid record: {other:?}"),
         }
     }
-    /// The pid in a record if it was published, `None` if it never was. A
-    /// record is published by renaming a complete file into place, so a file
-    /// under the name that is not complete is a failure, never absence.
-    pub(super) fn published_pid(&self, name: &str) -> Option<i32> {
-        match read_record(&self.path(name)) {
-            Record::Absent => None,
-            Record::Pid(pid) => Some(pid),
-            Record::Incomplete(text) => panic!("{name} holds an incomplete pid record: {text}"),
-        }
-    }
-
-    /// The pids published as separate records in the directory `name`, one
-    /// file per pid. Temporary files not yet renamed are not records and are
-    /// skipped; a record file that is not complete is a failure.
-    pub(super) fn published_pids_in(&self, name: &str) -> Vec<i32> {
+    /// The records in the directory `name`, one file per pid: the complete
+    /// ones' pids, and what each incomplete one held (a record still being
+    /// written, or one whose writer was stopped before it wrote).
+    pub(super) fn published_pids_in(&self, name: &str) -> (Vec<i32>, Vec<String>) {
         let entries = match std::fs::read_dir(self.path(name)) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
             Err(e) => panic!("read the record directory {name}: {e}"),
         };
-        let mut pids = Vec::new();
+        let (mut pids, mut incomplete) = (Vec::new(), Vec::new());
         for entry in entries {
             let path = entry.expect("read a record directory entry").path();
-            if path.extension().is_some_and(|ext| ext == "tmp") {
-                continue;
-            }
             match read_record(&path) {
                 Record::Pid(pid) => pids.push(pid),
                 Record::Absent => {}
-                Record::Incomplete(text) => {
-                    panic!("{} holds an incomplete pid record: {text}", path.display())
-                }
+                Record::Incomplete(text) => incomplete.push(format!("{}: {text}", path.display())),
             }
         }
         pids.sort_unstable();
-        pids
+        (pids, incomplete)
     }
 }
 

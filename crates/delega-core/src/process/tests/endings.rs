@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::fixtures::{Reaper, Scratch, assert_confirmed, assert_gone, sh};
+use super::fixtures::{Reaper, Record, Scratch, assert_confirmed, assert_gone, read_record, sh};
 use crate::contract::outcome::Outcome;
 use crate::process::{Ending, ProcessHandle, ProcessSpec, run};
 
@@ -192,11 +192,19 @@ both!(
             "{report:#?}"
         );
         assert_confirmed(&report);
-        // The interrupt can end the shell before it published its pid, even
-        // after it created the temporary file: then there is no record, and
-        // nothing of the leader to check. A record that was published is
-        // complete.
-        if let Some(leader) = s.published_pid("leader") {
+        // The interrupt can end the shell before its record is complete,
+        // even after the redirection created the file. The report's pid is
+        // the leader either way, so the leader is checked whether or not it
+        // recorded itself; a record that is complete must name the same pid.
+        let recorded = match read_record(&s.path("leader")) {
+            Record::Pid(pid) => Some(pid),
+            Record::Absent | Record::Incomplete(_) => None,
+        };
+        if let Some(recorded) = recorded {
+            assert_eq!(report.pid, Some(recorded as u32), "{report:#?}");
+        }
+        if let Some(leader) = report.pid {
+            let leader = i32::try_from(leader).expect("a pid");
             assert_gone("leader", &[leader]).await;
         }
     }

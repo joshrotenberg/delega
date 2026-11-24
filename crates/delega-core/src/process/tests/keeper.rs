@@ -295,7 +295,7 @@ fn owner_entry() {
         format!(
             "record leader $$; {OWN_GROUP} & record group $!; \
              {} >/dev/null 2>&1 & record session $!; \
-             sh -c 'trap \"\" TERM; echo $$ > stubborn.tmp && /bin/mv stubborn.tmp stubborn; while :; do sleep 1; done' & \
+             sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
              sleep 60",
             own_session_sleeper()
         )
