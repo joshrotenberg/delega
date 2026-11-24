@@ -766,6 +766,145 @@ async fn a_keeper_refusal_answered_after_its_request_timed_out_makes_the_verdict
     );
 }
 
+/// An interrupted kept run of a program that ignores TERM, so the owner's
+/// hard stop asks the keeper for a freeze, with a keeper whose first freeze
+/// is answered by the test seam with the details `answer` names (see
+/// `FIRST_FREEZE_ENV`), without a walk. The owner's group KILL ends the
+/// program, and every later answer is a real walk. Linux: only a subreaper
+/// keeper is asked for a freeze.
+#[cfg(target_os = "linux")]
+async fn interrupted_with_first_freeze(answer: &str) -> crate::process::ProcessReport {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "trap '' TERM; record leader $$; sleep 60", LONG);
+    spec.stop_grace = Duration::from_millis(100);
+    spec.keeper = Some(test_keeper().env(crate::process::keeper::FIRST_FREEZE_ENV, answer));
+    let handle = ProcessHandle::start(spec);
+    let _ = s.pid("leader").await;
+    handle.interrupt();
+    let report = handle.wait().await;
+    assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
+    let keeper = report.diagnostics.keeper.as_ref().expect("a kept run");
+    assert!(keeper.subreaper, "{report:#?}");
+    report
+}
+
+/// Whether the keeper's answers include the seam's freeze, `late` or not.
+#[cfg(target_os = "linux")]
+fn has_freeze_answer(report: &crate::process::ProcessReport, late: bool, detail: &str) -> bool {
+    let prefix = if late {
+        "freeze: late live="
+    } else {
+        "freeze: live="
+    };
+    report.diagnostics.keeper.as_ref().is_some_and(|k| {
+        k.tree_reports
+            .iter()
+            .any(|r| r.starts_with(prefix) && r.ends_with(detail))
+    })
+}
+
+/// The narrower Rule A on Linux: a freeze that only did not complete (no
+/// refused hold, no failed read) says the keeper had not stopped everything
+/// yet, not that a process escaped, and the final census that proves the
+/// tree empty supersedes it. A verdict that kept every incomplete freeze
+/// sticky would be Unconfirmed here.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_incomplete_freeze_is_superseded_by_a_final_census_that_proves_the_tree_empty() {
+    let report = interrupted_with_first_freeze("incomplete").await;
+    assert!(
+        has_freeze_answer(
+            &report,
+            false,
+            "passes=64 complete=false refused=0 read_failures=0"
+        ),
+        "the seam's freeze was not answered: {report:#?}"
+    );
+    assert_eq!(
+        reap_report(&report),
+        "reaped: live=0 proven=true incomplete=true",
+        "{report:#?}"
+    );
+    assert_confirmed(&report);
+}
+
+/// The same with the incomplete freeze answered after the owner's request
+/// timed out: the owner's reader records it as incomplete, and the proof
+/// still supersedes it. This is the race of #208 made certain.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_late_incomplete_freeze_is_superseded_by_a_final_census_that_proves_the_tree_empty() {
+    let report = interrupted_with_first_freeze("late-incomplete").await;
+    let keeper = report.diagnostics.keeper.as_ref().expect("a kept run");
+    assert!(
+        keeper.tree_reports.iter().any(|r| r == "freeze: no answer"),
+        "the freeze did not time out: {report:#?}"
+    );
+    assert!(
+        has_freeze_answer(
+            &report,
+            true,
+            "passes=64 complete=false refused=0 read_failures=0"
+        ),
+        "the late freeze was not read: {report:#?}"
+    );
+    assert_eq!(
+        reap_report(&report),
+        "reaped: live=0 proven=true incomplete=true",
+        "{report:#?}"
+    );
+    assert_confirmed(&report);
+}
+
+/// Assert that a freeze answer carrying a hole stayed sticky through a
+/// proven final census.
+#[cfg(target_os = "linux")]
+fn assert_freeze_hole_stands(report: &crate::process::ProcessReport, detail: &str) {
+    assert!(
+        has_freeze_answer(report, false, detail),
+        "the seam's freeze was not answered: {report:#?}"
+    );
+    assert_eq!(
+        reap_report(report),
+        "reaped: live=0 proven=true unproven=true",
+        "{report:#?}"
+    );
+    assert_eq!(
+        unconfirmed_reason(report),
+        crate::process::KEEPER_UNPROVEN_REASON,
+        "{report:#?}"
+    );
+}
+
+/// An incomplete freeze that refused a hold left a process unsignalled; the
+/// proof does not supersede it, so the verdict stays Unconfirmed.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_freeze_that_refused_a_hold_is_not_superseded_by_a_proven_final_census() {
+    let report = interrupted_with_first_freeze("refused").await;
+    assert_freeze_hole_stands(&report, "passes=2 complete=false refused=1 read_failures=0");
+}
+
+/// The same for an incomplete freeze with a failed read of `/proc`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_freeze_with_a_failed_read_is_not_superseded_by_a_proven_final_census() {
+    let report = interrupted_with_first_freeze("read-failure").await;
+    assert_freeze_hole_stands(&report, "passes=2 complete=false refused=0 read_failures=1");
+}
+
+/// The same for a freeze whose task failed: no walk ran, so it is not merely
+/// incomplete.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_failed_freeze_task_is_not_superseded_by_a_proven_final_census() {
+    let report = interrupted_with_first_freeze("task-failed").await;
+    assert_freeze_hole_stands(
+        &report,
+        "passes=0 complete=false refused=0 read_failures=0 task=failed",
+    );
+}
+
 /// A kept run that starts nothing but the program, with a keeper whose first
 /// read of `/proc` after the owner says `reap` fails (a test seam, Linux).
 /// Nothing is alive and the owner refused nothing, but the final census
