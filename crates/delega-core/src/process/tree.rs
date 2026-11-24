@@ -108,15 +108,16 @@ fn parse_row(line: &str) -> Option<ProcessRow> {
     })
 }
 
-/// Whether `line` has exactly the shape Linux `ps` can print for a task that is
-/// exiting, or that an exec from another thread of its process has just
-/// replaced: `<pid> 0 4294967295 X<flags> <weekday> <month> <day> <hh:mm:ss>
-/// <year>`, with a positive pid, ppid 0, pgid -1 printed as unsigned, state `X`
-/// followed only by procps's flags (`<NLsl+`), and a complete start time in
-/// the C locale. Every field is anchored; no other shape matches. Such a row
-/// proves nothing about its pid (an exec from a non-leader thread hands the
-/// leader's pid and start time to the thread that called it), so it is never
-/// skipped; it only lets the listing be taken again.
+/// Whether `line` has exactly the shape Linux `ps` was seen to print for a
+/// task that is exiting, or that an exec from another thread of its process
+/// has just replaced (#217): `<pid> 0 4294967295 <X or X+> <weekday> <month>
+/// <day> <hh:mm:ss> <year>`, with a positive pid, ppid 0, pgid -1 printed as
+/// unsigned, state exactly `X` or `X+`, and a complete start time in the C
+/// locale. Every field is anchored; no other shape matches, so a start time
+/// printed in another locale leaves such a listing failed without a retry.
+/// Such a row proves nothing about its pid (an exec from a non-leader thread
+/// hands the leader's pid and start time to the thread that called it), so it
+/// is never skipped; it only lets the listing be taken again.
 fn exiting_row_signature(line: &str) -> bool {
     const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [
@@ -139,9 +140,7 @@ fn exiting_row_signature(line: &str) -> bool {
     number(pid, 1..=10, i32::MAX as u32).is_some_and(|pid| pid > 0)
         && ppid == "0"
         && pgid == "4294967295"
-        && state
-            .strip_prefix('X')
-            .is_some_and(|flags| flags.chars().all(|c| "<NLsl+".contains(c)))
+        && (state == "X" || state == "X+")
         && WEEKDAYS.contains(&weekday)
         && MONTHS.contains(&month)
         && number(day, 1..=2, 31).is_some_and(|day| day > 0)
@@ -298,8 +297,9 @@ pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
 }
 
 /// Run one process listing the way cleanup does and say whether it gave a usable
-/// table. This is the check `delega doctor` makes: when it fails, every cleanup
-/// would be reported as not confirmed. The error is text and names no process.
+/// table. This is the check `delega doctor` makes. It is one sample and never
+/// retried: a failure says that one listing failed, which cleanup would
+/// report as not confirmed if its listings failed the same way. The error is text and names no process.
 /// It honours the same test-only variable as cleanup.
 pub async fn check_inspection() -> Result<(), String> {
     list_processes_from(&system_programs())
@@ -326,9 +326,11 @@ fn system_programs() -> Vec<PathBuf> {
 /// listing is never empty, holds this process (`own_pid`), and has no line
 /// that does not parse. Anything else is a failed inspection, never "nothing
 /// found": a listing that shows no descendants must not confirm cleanup. When
-/// every unparsable line is a [`retry_trigger`], the error is
-/// [`InspectError::ExitingRow`] instead of `Failed`, with the same text, so
-/// the caller can take the listing again.
+/// the listing has rows, holds this process, and every unparsable line is a
+/// [`retry_trigger`], the error is [`InspectError::ExitingRow`] instead of
+/// `Failed`, with the same text, so the caller can take the listing again.
+/// Any other listing with an unparsable line fails with the quoted line, even
+/// when this process is missing too.
 ///
 /// The error for unparsed lines quotes the first of them, escaped and
 /// bounded by `cleanup_reason::unparsed_lines`. That is safe only because
@@ -356,18 +358,18 @@ pub(crate) fn validate_listing(
     if rows.is_empty() {
         return Err(InspectError::Failed(ListingFailure::NoRows.text().into()));
     }
+    let has_own = rows
+        .iter()
+        .any(|row| u32::try_from(row.pid).is_ok_and(|pid| pid == own_pid));
     if let Some(first) = first_unparsed {
         let message = cleanup_reason::unparsed_lines(unparsed, first);
-        return Err(if only_exiting {
+        return Err(if only_exiting && has_own {
             InspectError::ExitingRow(message)
         } else {
             InspectError::Failed(message)
         });
     }
-    if !rows
-        .iter()
-        .any(|row| u32::try_from(row.pid).is_ok_and(|pid| pid == own_pid))
-    {
+    if !has_own {
         return Err(InspectError::Failed(
             ListingFailure::OwnMissing.text().into(),
         ));
@@ -429,8 +431,9 @@ pub struct InspectionStats {
     /// Signals not sent because the process could not be verified (Linux: no
     /// pidfd, or no recorded start time). Any makes the verdict `Unconfirmed`.
     pub unverified_signals: u64,
-    /// Fresh listings taken because the only unparsable lines of a listing
-    /// were rows for an exiting process (Linux only). They count within one
+    /// Fresh listings started because the only unparsable lines of a listing
+    /// were rows for an exiting process (Linux only), including any whose
+    /// result was discarded at the deadline. They count within one
     /// inspection, not in `attempts`.
     pub exiting_row_retries: u64,
 }
@@ -792,14 +795,16 @@ impl ProcessTree {
     /// Bounded inspection; a failed snapshot never proves that a process exited.
     ///
     /// A listing whose only unparsable lines are rows for an exiting process
-    /// ([`InspectError::ExitingRow`]) is taken again, up to
-    /// [`EXITING_ROW_RETRIES`] times, and the first fresh listing that parses
-    /// fully is used. A retry starts only before, and is awaited only until,
-    /// one listing deadline (`ps_timeout`) after this inspection started, so
-    /// retries never extend the time one inspection may take. A retry that
-    /// would pass the deadline is not awaited (its listing reaps itself under
-    /// its own deadline). If no fresh listing parses fully, the latest error
-    /// is returned, with `ExitingRow` reported as `Failed` and the same text.
+    /// ([`InspectError::ExitingRow`]) is taken again, at most
+    /// [`EXITING_ROW_RETRIES`] times, against one absolute deadline: this
+    /// inspection's start plus `ps_timeout`. A retry starts only before the
+    /// deadline, and its result is used only if it arrives before the
+    /// deadline; one that arrives later is discarded (its listing reaps
+    /// itself under its own deadline), so retries never extend the time one
+    /// inspection may take. A fresh listing is used whatever it returns: a
+    /// table that passes validation, or its own error. When the retry is
+    /// discarded or not started, the listing fails as before, with
+    /// `ExitingRow` reported as `Failed` and the same quoted text.
     async fn rows(&self) -> Result<Vec<ProcessRow>, InspectError> {
         let started = Instant::now();
         {
@@ -808,20 +813,17 @@ impl ProcessTree {
         }
         let deadline = started + ps_timeout();
         let mut result = self.list_once().await;
-        let mut retries = 0;
-        while matches!(result, Err(InspectError::ExitingRow(_))) && retries < EXITING_ROW_RETRIES {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+        for _ in 0..EXITING_ROW_RETRIES {
+            if !matches!(result, Err(InspectError::ExitingRow(_))) || Instant::now() >= deadline {
                 break;
             }
-            retries += 1;
             {
                 let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
                 obs.stats.exiting_row_retries += 1;
             }
-            match tokio::time::timeout(remaining, self.list_once()).await {
-                Ok(next) => result = next,
-                Err(_) => break,
+            match tokio::time::timeout_at(deadline, self.list_once()).await {
+                Ok(next) if Instant::now() < deadline => result = next,
+                _ => break,
             }
         }
         let result = result.map_err(|error| match error {
@@ -1729,7 +1731,7 @@ mod tests {
     const OBSERVED: &str = "  17328       0 4294967295 X+ Tue Nov 24 10:44:54 2026";
 
     /// Unparsable rows that are not the exiting-row shape.
-    const NOT_EXITING: [&str; 15] = [
+    const NOT_EXITING: [&str; 19] = [
         "17328 0 X+ Tue Nov 24 10:44:54 2026",
         "17328 0 S Xday Nov 24 10:44:54 2026",
         "17328 0 4294967295 X+ Tue Nov 24",
@@ -1738,6 +1740,10 @@ mod tests {
         "17328 0 4294967295 R+ Tue Nov 24 10:44:54 2026",
         "17328 0 4294967295 Z+ Tue Nov 24 10:44:54 2026",
         "17328 0 4294967295 XT Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X< Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 Xs+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X++ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 +X Tue Nov 24 10:44:54 2026",
         "0 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
         "+17328 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
         "4294967295 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
@@ -1778,7 +1784,7 @@ mod tests {
         for line in [
             OBSERVED,
             "17328 0 4294967295 X Mon Jan 1 00:00:00 2026",
-            "1 0 4294967295 X<NLsl+ Sat Dec 31 23:59:60 9999",
+            "1 0 4294967295 X+ Sat Dec 31 23:59:60 9999",
         ] {
             assert!(exiting_row_signature(line), "{line:?} did not match");
         }
@@ -1842,7 +1848,7 @@ mod tests {
     #[tokio::test]
     async fn an_exiting_row_past_the_retry_limit_fails_quoting_the_line() {
         let text = format!("{}{OBSERVED}\n", own_row());
-        let (lister, calls) = listings(vec![text; 4]);
+        let (lister, calls) = listings(vec![text; 3]);
         let tree = ProcessTree::new(123, lister, true);
         let result = tree.rows().await;
         let message = quoting(OBSERVED);

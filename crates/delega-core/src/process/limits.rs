@@ -64,9 +64,9 @@ pub const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Deadline for one `ps` run.
 pub const PS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Most fresh listings taken after one whose only unparsable lines are rows
-/// for an exiting process (Linux only), all within `PS_TIMEOUT` of the first
-/// listing's start.
-pub const EXITING_ROW_RETRIES: u32 = 2;
+/// for an exiting process (Linux only), within `PS_TIMEOUT` of the
+/// inspection's start.
+pub const EXITING_ROW_RETRIES: u32 = 1;
 /// Most bytes of `ps` output accepted.
 pub const PS_MAX_BYTES: usize = 4_000_000;
 /// Most bytes of the marker listing accepted (`ps -E`, macOS), which carries
