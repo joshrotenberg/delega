@@ -469,10 +469,9 @@ pub fn wait_for_ack(path: &Path, child: &mut Child, what: &str) {
             return;
         }
         match child.try_wait() {
-            // The acknowledgement is written on a thread of its own, so it
-            // can land just after delega exits; look once more.
+            // The acknowledgement is written before the seam returns, so one
+            // made before exit is already there; look once more for it.
             Ok(Some(status)) => {
-                std::thread::sleep(POLL);
                 if path.exists() {
                     return;
                 }

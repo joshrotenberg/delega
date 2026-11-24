@@ -5,10 +5,14 @@
 //! never a sign that usually comes with it. Each is active only when its
 //! environment variable names a path. The first time the state is reached,
 //! `delega` creates that file new and writes one line to it in a single write,
-//! on a thread of its own so the caller never waits on the filesystem; a later
-//! arrival, or a path that already exists (a FIFO included), writes nothing. A
-//! test waits for the file to exist, with a bound. Nothing runs, and no thread
-//! is started, unless the variable is set.
+//! before the seam returns, so the file exists once the state is reached; a
+//! later arrival, or a path that already exists (a FIFO included), writes
+//! nothing. A test waits for the file to exist, with a bound.
+//!
+//! The seams exist only in debug builds and act only when a test sets their
+//! variable. That is not a supported configuration for users: the write is
+//! made on the caller's thread, the signal path included, and is not guarded
+//! against a file system that does not answer.
 //!
 //! A release build compiles none of this: the entry points are empty there,
 //! and the variable names are not in the binary.
@@ -24,7 +28,6 @@ pub enum Ack {
 
 #[cfg(debug_assertions)]
 mod hooks {
-    use std::ffi::OsString;
     use std::io::Write;
     use std::path::Path;
 
@@ -40,34 +43,29 @@ mod hooks {
     /// The prefix of the files [`signal`] creates, one per signal.
     const SIGNAL: &str = "DELEGA_TEST_ACK_RUN_SIGNAL";
 
-    /// Create `path` new and write one line to it, once, on a thread of its
-    /// own: the callers are on the signal path, and creating a file can
-    /// block (a stalled mount, say). An existing path is left alone, and a
-    /// thread that cannot be started writes nothing.
-    fn write_new(path: OsString) {
-        let _ = std::thread::Builder::new()
-            .name("delega-test-ack".into())
-            .spawn(move || {
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(Path::new(&path))
-                {
-                    let _ = file.write_all(b"ack\n");
-                }
-            });
+    /// Create `path` new and write one line to it, once. An existing path is
+    /// left alone.
+    fn write_new(path: &Path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            let _ = file.write_all(b"ack\n");
+        }
     }
 
     pub fn acknowledge(ack: Ack) {
         if let Some(path) = std::env::var_os(variable(ack)) {
-            write_new(path);
+            write_new(Path::new(&path));
         }
     }
 
     pub fn signal(count: u64) {
-        if let Some(mut path) = std::env::var_os(SIGNAL) {
+        if let Some(prefix) = std::env::var_os(SIGNAL) {
+            let mut path = prefix;
             path.push(format!("-{count}"));
-            write_new(path);
+            write_new(Path::new(&path));
         }
     }
 }
