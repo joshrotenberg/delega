@@ -135,8 +135,13 @@
 //!   tree. Once any answer of a run was unproven in a way a later one cannot
 //!   repair (a refused hold, a failed read, a freeze that did not complete),
 //!   the verdict stays `Unconfirmed` ([`KEEPER_UNPROVEN_REASON`]); no later
-//!   proof supersedes it. A census that is incomplete only because the tree
-//!   keeps changing never claimed zero and does not count. A process listed in a children file whose stat
+//!   proof supersedes it. The keeper records such an answer before it sends
+//!   it (the census and freeze it runs at the reap included) and says so in
+//!   its `reaped` line; the owner's socket reader records it as it reads the
+//!   answer, before handing it to the request, so an answer that arrives
+//!   after its request timed out or was cancelled still counts. A census
+//!   that is incomplete only because the tree keeps changing never claimed
+//!   zero and does not count. A process listed in a children file whose stat
 //!   reads as missing is gone only if its pidfd says so (`hidepid` can hide a
 //!   live one). A queued child is taken under its parent only while the
 //!   parent's pidfd shows it alive, and otherwise only as the keeper's own
@@ -252,7 +257,11 @@
 //! refusals of group and session members and tracked processes, which while
 //! alive are in the keeper's tree, and nothing else: a refusal meant for a
 //! process found only by the run marker and anything the keeper reported stay
-//! sticky. macOS has no subreaper, and its keeper never reports a proof.
+//! sticky. The proof is also required: a Linux kept run whose keeper is a
+//! subreaper, acknowledged the reap and left nothing alive, but did not
+//! prove the tree empty, is `Unconfirmed` ([`FINAL_CENSUS_UNPROVEN_REASON`])
+//! even when nothing was refused. macOS has no subreaper, and its keeper
+//! never reports a proof; its verdict does not wait for one.
 //!
 //! It also requires that the listing taken before the first signal completed
 //! (see "How a child is owned"). That listing is the only one that can see a
