@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
-    await_event, is_running, run_guarded, sh, wait_own_group, wait_tracked,
+    Heard, Lifeline, OWN_GROUP, Reaper, Scratch, assert_confirmed, assert_gone, await_event,
+    await_record, is_running, own_group_recorded, own_session_recorded, run_guarded, sh,
+    wait_tracked,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -21,10 +22,13 @@ const LONG: Duration = Duration::from_secs(60);
 /// and listing delays.
 const BOUND: Duration = Duration::from_secs(30);
 
+/// The report, or a failure once [`BOUND`] has passed since `began`: a
+/// cleanup that does not end (a descendant holding the report, say) fails
+/// the test within its bound, not at the run's cleanup deadline.
 async fn wait_for_cleanup_report(handle: ProcessHandle, began: Instant) -> ProcessReport {
     tokio::time::timeout_at(tokio::time::Instant::from_std(began + BOUND), handle.wait())
         .await
-        .expect("the report was held by the detached descendant for 30 s")
+        .unwrap_or_else(|_| panic!("no report within {BOUND:?} of the stop"))
 }
 
 async fn assert_stopped_in_time(what: &str, pids: &[i32], began: Instant) {
@@ -116,8 +120,13 @@ both!(
         require_perl!();
         let s = Scratch::new();
         // Its own group, the child's session: the group signal cannot reach it, the
-        // session sweep can, whether or not a scan ever saw it.
-        let script = format!("record leader $$; {OWN_GROUP} & record gc $!; {WAIT_ESCAPED} exit 0");
+        // session sweep can, whether or not a scan ever saw it. The leader exits
+        // once the descendant has said it left the group.
+        let script = format!(
+            "record leader $$; {} & {} exit 0",
+            own_group_recorded("gc"),
+            await_record("gc")
+        );
         let started = Instant::now();
         let (report, pids, _reaper) = run_guarded(&s, sh(&s, &script, LONG), &["gc"]).await;
         assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
@@ -135,13 +144,14 @@ both!(
         // A session of its own is beyond the sweep. Only a scan that saw it while
         // its parent lived can track it. The leader stays until the test has seen
         // the scan track the descendant, however long that takes, then exits.
+        // The descendant publishes `gc` only once it has left the session.
         let script = format!(
-            "record leader $$; {OWN_SESSION} & record gc $!; while [ ! -e go ]; do sleep 0.02; done; exit 0"
+            "record leader $$; {} & while [ ! -e go ]; do sleep 0.02; done; exit 0",
+            own_session_recorded("gc")
         );
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         let mut reaper = Reaper::default();
         let gc = reaper.watch(&s, "gc").await;
-        wait_own_group(gc).await;
         wait_tracked(&handle, gc).await;
         let stopped = Instant::now();
         std::fs::write(s.path("go"), "go").expect("write the go file");
@@ -162,7 +172,8 @@ both!(
         // The descendant is in its own session, inherits the pipes and is tracked.
         // It must get TERM when the group does, not when cleanup starts: with a
         // long grace and drain it would otherwise hold the report for a minute.
-        let script = format!("record leader $$; {OWN_SESSION} & record gc $!; wait");
+        // It publishes `gc` only once it has left the session.
+        let script = format!("record leader $$; {} & wait", own_session_recorded("gc"));
         let mut spec = sh(&s, &script, LONG);
         spec.stop_grace = Duration::from_secs(60);
         spec.drain_bound = Duration::from_secs(60);
@@ -170,7 +181,6 @@ both!(
         let handle = ProcessHandle::start(spec);
         let mut reaper = Reaper::default();
         let gc = reaper.watch(&s, "gc").await;
-        wait_own_group(gc).await;
         // Let the periodic scan see the descendant.
         wait_tracked(&handle, gc).await;
         let stopped = Instant::now();
@@ -190,9 +200,11 @@ both!(
         let s = Scratch::new();
         // The descendant starts after the first scan and the interrupt comes before
         // the next periodic one, so only the scan a stop makes first can see it.
+        // It publishes `gc` only once it has left the session, so the sweep
+        // cannot catch it in the session.
         let script = format!(
-            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; \
-         {OWN_SESSION} & record gc $!; wait"
+            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; {} & wait",
+            own_session_recorded("gc")
         );
         let mut spec =
             sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
@@ -201,8 +213,6 @@ both!(
         let handle = ProcessHandle::start(spec);
         let mut reaper = Reaper::default();
         let gc = reaper.watch(&s, "gc").await;
-        // Without this the sweep could catch it before it has left the session.
-        wait_own_group(gc).await;
         let stopped = Instant::now();
         handle.interrupt();
         let report = wait_for_cleanup_report(handle, stopped).await;
@@ -249,8 +259,15 @@ both!(
     async {
         require_perl!();
         let s = Scratch::new();
+        // The leader records each child after it forks it, so a leader stopped
+        // between the fork and the record leaves a child without one. The
+        // leader opens the lifeline before its first fork, so every child holds
+        // it from the fork on: the lifeline ends only once the leader and every
+        // child it forked are gone, recorded or not.
+        let mut lifeline = Lifeline::new(&s, "life");
         let script = format!(
-            "exec perl -e 'use POSIX; open L, q(>), q(leader); print L qq($$\n); close L; \
+            "exec perl -e 'use POSIX; open W, q(>), q(life) or die; \
+         open L, q(>), q(leader); print L qq($$\n); close L; \
          for (1..400) {{ my $p = fork(); \
          if (!defined $p) {{ next }} \
          if (!$p) {{ setpgid(0,0); {WAIT_WHILE_GUARDED}; exit 0 }} \
@@ -264,14 +281,28 @@ both!(
             s.published_pids_in("kids").0.len() >= 3
         })
         .await;
+        lifeline
+            .await_opened("the leader opening the lifeline")
+            .await;
         let stopped = Instant::now();
         handle.interrupt();
-        let report = handle.wait().await;
+        let report = wait_for_cleanup_report(handle, stopped).await;
         assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
         let (kids, _) = s.published_pids_in("kids");
         assert!(kids.len() >= 3, "only {} children were started", kids.len());
         assert_confirmed(&report);
         assert_stopped_in_time("children forked until the stop", &kids, stopped).await;
+        // The children wait until the lifetime file is removed, so one that
+        // outlived the cleanup holds the lifeline open until the bound.
+        let left = stopped + BOUND;
+        let ended = lifeline
+            .hear_within(left.saturating_duration_since(Instant::now()))
+            .await;
+        assert_eq!(
+            ended,
+            Some(Heard::Ended),
+            "a process the leader forked, recorded or not, was still running {BOUND:?} after the stop"
+        );
     }
 );
 
@@ -315,23 +346,41 @@ both!(
     }
 );
 
+/// How many runs of its TERM handler the leader of the test below has
+/// acknowledged: the highest `N` of the `handled-N` files its loop creates
+/// between handlers. Two handlers can run back to back (a TERM that arrives
+/// during one is delivered as it ends), so a count can be skipped.
+fn handlers_finished(s: &Scratch) -> u32 {
+    std::fs::read_dir(s.dir())
+        .expect("read the scratch directory")
+        .filter_map(|entry| {
+            let name = entry.expect("read a scratch entry").file_name();
+            name.to_str()?.strip_prefix("handled-")?.parse().ok()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind, a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_term_leaves_none_behind_kept, async {
     require_perl!();
     let s = Scratch::new();
     // The scenario of the test above with a leader that keeps running after its
     // handler, so the handler runs again for every TERM it receives and each run
     // starts another child in a group of its own and records it. The stop sends
-    // one TERM. The test sends the leader another, and again until two children
-    // are recorded, so at least two children exist by construction whatever the
+    // one TERM. The test sends the leader another once the first handler has
+    // finished, so at least two children exist by construction whatever the
     // order of the sweep and the leader. A TERM that arrives while the handler
-    // runs is merged with it, which is why the test repeats rather than counts
-    // on one. The leader ends when the test says so (a file it writes), not
-    // after a grace that load could make too short: the grace is a minute. The
-    // children do not hold the output pipes.
+    // runs is delivered only as it ends, so the handler counts its runs in
+    // `n` and the leader's loop, which runs only between handlers,
+    // acknowledges the runs finished so far by creating `handled-N`
+    // (`handlers_finished`). A TERM sent after that acknowledgement runs the
+    // handler again. The leader ends when the test says so (a file it
+    // writes), not after a grace that load could make too short: the grace is
+    // a minute. The children do not hold the output pipes.
     let child = detached_own_group();
     let script = format!(
-        "trap \"{child} & record gcs/\\$! \\$!\" TERM; record leader $$; \
-         while [ ! -e quit ]; do sleep 0.05; done"
+        "n=0; trap \"{child} & record gcs/\\$! \\$!; n=\\$((n + 1))\" TERM; record leader $$; \
+         while [ ! -e quit ]; do : > handled-$n; sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
     spec.stop_grace = Duration::from_secs(60);
@@ -342,20 +391,13 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     let mut reaper = Reaper::default();
     let child = reaper.register(leader, &s).expect("identify the leader in the test scratch directory");
     handle.interrupt();
-    await_event("a first child started by the stop's TERM", || {
-        !s.published_pids_in("gcs").0.is_empty()
+    await_event("the leader finishing the handler of the stop's TERM", || {
+        handlers_finished(&s) >= 1
     })
     .await;
-    let mut sent_at = Instant::now();
-    await_event("a second child started by a second TERM", || {
-        if s.published_pids_in("gcs").0.len() >= 2 {
-            return true;
-        }
-        if sent_at.elapsed() >= Duration::from_millis(300) {
-            child.signal(Signal::TERM);
-            sent_at = Instant::now();
-        }
-        false
+    assert!(child.signal(Signal::TERM), "send the leader a second TERM");
+    await_event("the leader finishing the handler of a second TERM", || {
+        handlers_finished(&s) >= 2
     })
     .await;
     let quit_at = Instant::now();
@@ -393,9 +435,12 @@ both!(
         // pipe makes it Unconfirmed. Never Confirmed with the orphan alive.
         // It starts after the first scan, and the leader exits before the next, so
         // no scan can have seen it with its parent alive.
+        // It publishes `gc` once it has left the session, and the leader exits
+        // then.
         let script = format!(
-            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; \
-         {OWN_SESSION} & record gc $!; {WAIT_ESCAPED} exit 0"
+            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; {} & {} exit 0",
+            own_session_recorded("gc"),
+            await_record("gc")
         );
         let mut spec =
             sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
@@ -684,8 +729,12 @@ both!(
         require_perl!();
         let s = Scratch::new();
         // Wait until the descendant has left the group, so the group signal cannot
-        // be what reaches it.
-        let script = format!("record leader $$; {OWN_GROUP} & record gc $!; {WAIT_ESCAPED} exit 0");
+        // be what reaches it: it says so in `gc`.
+        let script = format!(
+            "record leader $$; {} & {} exit 0",
+            own_group_recorded("gc"),
+            await_record("gc")
+        );
         let mut spec = sh(&s, &script, LONG);
         spec.track_descendants = false;
         let started = Instant::now();

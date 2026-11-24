@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, ProcessIdentity, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed,
-    assert_gone, is_running, run_guarded, sh,
+    OWN_GROUP, ProcessIdentity, Reaper, Scratch, assert_confirmed, assert_gone, is_running,
+    own_group_recorded, own_session_recorded, perl_record_self, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -76,13 +76,16 @@ fn sleeper_entry() {
 }
 
 /// A shell command that starts a process in a session of its own, like
-/// `OWN_SESSION`, running this test binary as a 60 s sleeper instead of
-/// `sleep`, so the run marker in its environment is visible on macOS too.
-pub(super) fn own_session_sleeper() -> String {
+/// `own_session_recorded`, running this test binary as a 60 s sleeper instead
+/// of `sleep`, so the run marker in its environment is visible on macOS too.
+/// It publishes its own pid at `record` once it leads its own session.
+pub(super) fn own_session_sleeper(record: &str) -> String {
     let exe = std::env::current_exe().expect("the test binary's path");
     format!(
-        "perl -e 'use POSIX; POSIX::setsid(); $ENV{{{SLEEP_ENV}}} = 60; \
+        "perl -e 'use POSIX; {} {} $ENV{{{SLEEP_ENV}}} = 60; \
          exec q({}), q(--exact), q(process::tests::keeper::sleeper_entry), q(--test-threads=1), q(-q)'",
+        super::fixtures::PERL_LEAVE_SESSION,
+        perl_record_self(record),
         exe.display()
     )
 }
@@ -185,29 +188,18 @@ async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
 async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     require_perl!();
     let s = Scratch::new();
-    let script = format!(
-        "{OWN_SESSION} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} echo ready > ready; sleep 60"
-    );
+    // The descendant publishes `gc` once it has left the session, so the
+    // interrupt comes after that.
+    let script = format!("{} >/dev/null 2>&1 & sleep 60", own_session_recorded("gc"));
     let spec = kept(sh(&s, &script, LONG));
     let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
     let gc = reaper.watch(&s, "gc").await;
-    s.exists("ready").await;
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
     assert_confirmed(&report);
     assert_gone("setsid descendant", &[gc]).await;
-}
-
-/// The state letter `ps` shows for a process, empty when it is gone.
-fn state_of(pid: i32) -> String {
-    use crate::test_spawn::Guarded;
-    std::process::Command::new("/bin/ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .guarded_output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
 }
 
 /// A process the run did not start, carrying another run's marker value, is
@@ -241,14 +233,22 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
     let watching = done.clone();
     // Stops the watcher however the test ends.
     let stop_watching = super::fixtures::SetOnDrop(done.clone());
+    let (first_sample, sampled) = tokio::sync::oneshot::channel();
     let watcher = tokio::task::spawn_blocking(move || {
         let mut states = Vec::new();
+        let mut first_sample = Some(first_sample);
         while !watching.load(std::sync::atomic::Ordering::SeqCst) {
-            states.push(state_of(pid));
+            states.push(super::fixtures::process_state(pid));
+            if let Some(first) = first_sample.take() {
+                let _ = first.send(());
+            }
+            // How often it samples, not a wait for anything.
             std::thread::sleep(Duration::from_millis(5));
         }
         states
     });
+    // The runs start only once the watcher is watching.
+    sampled.await.expect("the watcher took its first sample");
     let s = Scratch::new();
     let report = ProcessHandle::start(kept(sh(&s, "exit 0", LONG)))
         .wait()
@@ -292,12 +292,15 @@ fn owner_entry() {
         // a stop explains its end.
         format!("record leader $$; {}", super::gaps::long_relay(&dir))
     } else {
+        // The group and session descendants publish their own records once
+        // they have left the group and the session.
         format!(
-            "record leader $$; {OWN_GROUP} & record group $!; \
-             {} >/dev/null 2>&1 & record session $!; \
+            "record leader $$; {} & \
+             {} >/dev/null 2>&1 & \
              sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
              sleep 60",
-            own_session_sleeper()
+            own_group_recorded("group"),
+            own_session_sleeper("session")
         )
     };
     let script = format!("{}{script}", super::fixtures::RECORD);
@@ -358,7 +361,6 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
         pids.push(reaper.watch(&s, file).await);
     }
     pids.push(keeper);
-    super::fixtures::wait_own_group(pids[2]).await;
     let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
     let _ = owner.wait();
     assert_gone("the program, its descendants and the keeper", &pids).await;
@@ -493,14 +495,25 @@ async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
 /// tree again from the keeper's own children until a pass finds nothing new
 /// with every process stopped, so a generation reparented to the keeper
 /// between two reads is not missed. The race is a matter of timing, so the
-/// case is repeated 20 times; any surviving generation fails it.
+/// case is repeated 20 times; any surviving generation fails it. The owner is
+/// killed once the relay has made one handoff. The relay's lifeline says when
+/// its last process is gone and whether it ran its course or broke by itself
+/// first (see `gaps::RELAY`); the relay outlives any stop by many seconds.
+/// The keeper holds no lifeline and goes on after the relay is gone (it
+/// reaps and exits), so its exit is awaited on its own pidfd; the census of
+/// processes naming the case directory, which also finds the keeper (the
+/// directory is on its command line), is taken after that. One deadline
+/// bounds each attempt.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
     require_perl!();
+    use super::fixtures::AWAIT;
+    use super::gaps::{RelayFate, RelayLife};
     use crate::test_spawn::Guarded;
     for attempt in 1..=20 {
         let s = Scratch::new();
+        let mut relay = RelayLife::new(&s);
         let exe = std::env::current_exe().expect("the test binary's path");
         let mut owner = std::process::Command::new(exe)
             .args([
@@ -517,38 +530,49 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
             .guarded_spawn()
             .expect("start the owner");
         let owner_pid = i32::try_from(owner.id()).expect("a pid");
-        s.exists("beat").await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut reaper = Reaper::default();
+        let leader = s.pid("leader").await;
+        let keeper_pid = parent_of(leader).expect("the program's parent");
+        assert_ne!(
+            keeper_pid, owner_pid,
+            "the program's parent must be the keeper"
+        );
+        let keeper = keeper_identity(keeper_pid, &s.dir()).expect("identify the keeper");
+        reaper.add(keeper_identity(keeper_pid, &s.dir()));
+        relay.await_handoffs(1).await;
         let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
         let _ = owner.wait();
-        // The keeper's grace is 0.5 s; give it ample time, then require the
-        // heartbeat to have stopped changing.
-        let began = std::time::Instant::now();
-        let mut stopped = false;
-        let mut survivors = Vec::new();
-        while began.elapsed() < Duration::from_secs(15) {
-            let before = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let after = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-            // A quiet heartbeat alone is not death: a stopped or unscheduled
-            // generation writes nothing. No process may name the case
-            // directory on its command line either.
-            survivors = super::fixtures::case_processes(&s.dir())
-                .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
-            if before == after
-                && super::gaps::heartbeat_age(&s) > Duration::from_millis(300)
-                && survivors.is_empty()
-            {
-                stopped = true;
-                break;
+        let deadline = std::time::Instant::now() + AWAIT;
+        // Generations go on running until the keeper stops them; only the
+        // end of the lifeline, or the relay's own end, decides.
+        let fate = loop {
+            match relay.fate_by(deadline).await {
+                RelayFate::Running => {}
+                fate => break fate,
             }
-        }
+        };
+        let keeper_exited = loop {
+            if keeper.has_exited() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // A census that does not depend on the lifeline: no process may name
+        // the case directory on its command line either. The keeper has
+        // exited by now, and an exited process is not counted.
+        let survivors = super::fixtures::case_processes(&s.dir())
+            .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
+        let stopped = fate == RelayFate::Stopped && keeper_exited && survivors.is_empty();
         if !stopped {
-            super::fixtures::end_relay_leftovers(&s.dir()).await;
+            super::fixtures::end_relay_leftovers(&s.dir(), &mut relay.lifeline).await;
         }
         assert!(
             stopped,
-            "attempt {attempt}: the relay outlived the keeper's cleanup; survivors {survivors:?}"
+            "attempt {attempt}: the relay or the keeper outlived the keeper's cleanup: relay \
+             {fate:?}, keeper {keeper_pid} exited {keeper_exited}, survivors {survivors:?}"
         );
     }
 }
@@ -560,7 +584,7 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
 /// It ends only then, by itself. The leader goes on only once `gc-ready` is
 /// written, so no group signal can reach the descendant before it left the
 /// group, and nothing but the refusal decides when it ends.
-const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; POSIX::setpgid(0, 0) or die; \
+const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; setpgid(0, 0); getpgrp() == $$ or die; \
      open F, q(>), q(gc-ready); print F $$; close F; \
      until (-e q(refused)) { select(undef, undef, undef, 0.02) }' \
      </dev/null >/dev/null 2>&1 & record gc $!; \

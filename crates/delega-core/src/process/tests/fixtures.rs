@@ -149,15 +149,6 @@ impl Scratch {
         .await
     }
 
-    /// Wait until a file exists and is not empty.
-    pub(super) async fn exists(&self, name: &str) {
-        let path = self.path(name);
-        await_event(&format!("the script writing {name}"), || {
-            std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
-        })
-        .await;
-    }
-
     /// The pid in a record that must already be published.
     pub(super) fn pid_now(&self, name: &str) -> i32 {
         match read_record(&self.path(name)) {
@@ -186,14 +177,6 @@ impl Scratch {
         pids.sort_unstable();
         (pids, incomplete)
     }
-}
-
-/// The pid in the relay's heartbeat file. The heartbeat is rewritten in place
-/// by every generation and is not a published record, so this read accepts
-/// whatever parses; the caller checks the identity before it signals.
-#[cfg(not(target_os = "linux"))]
-fn read_heartbeat_pid(path: &Path) -> Option<i32> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// The process observed at registration. A pidfd pins the identity on Linux.
@@ -252,6 +235,13 @@ impl ProcessIdentity {
             ..identity
         };
         Some(identity)
+    }
+
+    /// Whether the process has exited (Linux: its pidfd is readable, which
+    /// it is from the exit on, before the process is reaped).
+    #[cfg(target_os = "linux")]
+    pub(super) fn has_exited(&self) -> bool {
+        sys::pidfd_exited(&self.fd)
     }
 
     pub(super) fn signal(&self, signal: Signal) -> bool {
@@ -438,6 +428,176 @@ pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sle
 /// `sleep 60` in a session of its own, beyond what the session sweep reaches.
 pub(super) const OWN_SESSION: &str = "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)'";
 
+/// Perl: become the leader of a new session, or die. `POSIX::setsid`
+/// returns -1 (defined) on failure, so only a session id equal to the
+/// process's own pid counts as success.
+pub(super) const PERL_LEAVE_SESSION: &str = "POSIX::setsid() == $$ or die;";
+
+/// Perl: become the leader of a new process group in the same session, or
+/// die. Success is read back from the process group itself, not from the
+/// call's return value.
+pub(super) const PERL_LEAVE_GROUP: &str = "setpgid(0, 0); getpgrp() == $$ or die;";
+
+/// Perl statements that publish the running process's own pid as a complete
+/// record at `name` in the current directory: a temporary file beside it,
+/// renamed into place, as [`publish_pid`] does.
+pub(super) fn perl_record_self(name: &str) -> String {
+    format!(
+        "open F, q(>), q({name}.tmp) or die; print F qq($$\\n); close F or die; \
+         rename q({name}.tmp), q({name}) or die;"
+    )
+}
+
+/// [`OWN_GROUP`] that publishes its own pid at `name` once it leads its own
+/// group ([`PERL_LEAVE_GROUP`]), and only then: the record is its acknowledgement that it has
+/// left the group. Wait for it in the script with [`await_record`].
+pub(super) fn own_group_recorded(name: &str) -> String {
+    format!(
+        "perl -e 'use POSIX; {PERL_LEAVE_GROUP} {} exec q(sleep), q(60)'",
+        perl_record_self(name)
+    )
+}
+
+/// [`OWN_SESSION`] that publishes its own pid at `name` once it leads its own
+/// session ([`PERL_LEAVE_SESSION`]), and only then: the record is its acknowledgement that it has
+/// left the session.
+pub(super) fn own_session_recorded(name: &str) -> String {
+    format!(
+        "perl -e 'use POSIX; {PERL_LEAVE_SESSION} {} exec q(sleep), q(60)'",
+        perl_record_self(name)
+    )
+}
+
+/// Shell: wait until the record `name` exists. The records the descendants
+/// publish themselves are renamed into place, so a file that exists is
+/// complete. The 10 ms is how often the shell looks, not a guess at when the
+/// record comes.
+pub(super) fn await_record(name: &str) -> String {
+    format!("until [ -e {name} ]; do sleep 0.01; done;")
+}
+
+/// The state letters `ps` shows for a process, empty when it is gone.
+pub(super) fn process_state(pid: i32) -> String {
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .guarded_output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The read end of a FIFO in a case's scratch directory that the case's
+/// processes hold open for writing. A process that opens it passes it to
+/// every process it forks from then on, at the fork itself, before the child
+/// has run a single instruction, so the read end reaches end of file exactly
+/// when the last of them is gone, however it ended and whether or not it ever
+/// published a record. A process can also write a byte on it to say what
+/// phase it reached. The read end is nonblocking and is opened before the
+/// case starts, so the case's `open` for writing does not block.
+pub(super) struct Lifeline {
+    reader: std::fs::File,
+    /// Whether a writer has been seen: a nonblocking read of a FIFO that no
+    /// process has opened for writing yet also reads as end of file.
+    opened: bool,
+}
+
+/// What a [`Lifeline`] said next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Heard {
+    /// A byte a writer wrote.
+    Byte(u8),
+    /// Every writer is gone.
+    Ended,
+}
+
+impl Lifeline {
+    pub(super) fn new(scratch: &Scratch, name: &str) -> Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = scratch.path(name);
+        // rustix has no `mkfifoat` on macOS, and this crate has no unsafe
+        // code for `libc::mkfifo`.
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .env_clear()
+            .guarded_status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed: {made:?}");
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(&path)
+            .expect("open the lifeline for reading");
+        Self {
+            reader,
+            opened: false,
+        }
+    }
+
+    /// One nonblocking read: a byte, the end, or nothing yet (`None`).
+    pub(super) fn try_hear(&mut self) -> Option<Heard> {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        match self.reader.read(&mut byte) {
+            Ok(1) => {
+                self.opened = true;
+                Some(Heard::Byte(byte[0]))
+            }
+            Ok(_) if self.opened => Some(Heard::Ended),
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                self.opened = true;
+                None
+            }
+            Err(e) => panic!("read the lifeline: {e}"),
+        }
+    }
+
+    /// Wait for the next byte or the end, for at most `within`; `None` when
+    /// neither came.
+    pub(super) async fn hear_within(&mut self, within: Duration) -> Option<Heard> {
+        let began = Instant::now();
+        loop {
+            if let Some(heard) = self.try_hear() {
+                return Some(heard);
+            }
+            if began.elapsed() >= within {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Wait for the next byte or the end (see [`AWAIT`]).
+    pub(super) async fn hear(&mut self, what: &str) -> Heard {
+        self.hear_within(AWAIT)
+            .await
+            .unwrap_or_else(|| panic!("waited {AWAIT:?} and never heard: {what}"))
+    }
+
+    /// Wait until a writer has opened it (see [`AWAIT`]). Bytes read on the
+    /// way are dropped, so only a caller that ignores them uses this.
+    pub(super) async fn await_opened(&mut self, what: &str) {
+        await_value(what, || match self.try_hear() {
+            Some(Heard::Ended) => Err("every writer had already gone".to_owned()),
+            _ if self.opened => Ok(()),
+            _ => Err(String::new()),
+        })
+        .await;
+    }
+
+    /// Read every byte already written, without waiting: the end if every
+    /// writer is gone, else the last byte read, if any.
+    pub(super) fn drain(&mut self) -> Option<Heard> {
+        let mut last = None;
+        while let Some(heard) = self.try_hear() {
+            last = Some(heard);
+            if heard == Heard::Ended {
+                break;
+            }
+        }
+        last
+    }
+}
+
 /// Whether the run marker shows for Apple's own programs here: `ps -E` shows
 /// the environment of a `/bin/sleep` started with a marker value. macOS hides
 /// it under System Integrity Protection; a machine without it shows it, and
@@ -497,13 +657,9 @@ pub(super) async fn run_guarded(
     (handle.wait().await, pids, reaper)
 }
 
-/// Shell: after starting a background command with `&`, wait until it has
-/// become the leader of its own group (so it has run `setsid` or `setpgid`).
-pub(super) const WAIT_ESCAPED: &str =
-    "until [ \"$(ps -o pgid= -p $! | tr -d ' ')\" = \"$!\" ]; do sleep 0.02; done;";
-
 /// Wait until a process leads its own group, for tests that must not race the
-/// descendant's own `setsid`.
+/// descendant's own `setsid`. A descendant that can acknowledge the move
+/// itself ([`own_session_recorded`]) needs no such wait.
 pub(super) async fn wait_own_group(pid: i32) {
     let began = Instant::now();
     loop {
@@ -710,20 +866,31 @@ pub(super) fn process_names_path(pid: i32, path: &[u8]) -> bool {
     command.is_some_and(|command| holds_path(&command, path))
 }
 
-/// End the relay processes whose command lines name the case directory.
-/// Linux signals through a pidfd. Elsewhere the heartbeat supplies a candidate
-/// PID and the start time must still match. Retry for up to five seconds.
-pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
+/// End the processes a relay case left, until nothing of it is left: on
+/// Linux, until the relay's lifeline has ended and the census of processes
+/// that name the case directory ([`case_processes`]) is known to be empty,
+/// so a census survivor that holds no lifeline (a keeper named by the
+/// directory, say) is still ended; elsewhere, until the lifeline ends.
+/// Linux signals through a pidfd. Elsewhere the heartbeat supplies a
+/// candidate PID and the start time must still match. Retry for up to five
+/// seconds: this is teardown, and nothing is asserted on it; the 2 ms
+/// between tries is only a retry cadence.
+pub(super) async fn end_relay_leftovers(dir: &std::path::Path, lifeline: &mut Lifeline) {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(5) {
+        let ended = lifeline.drain() == Some(Heard::Ended);
+        #[cfg(not(target_os = "linux"))]
+        if ended {
+            return;
+        }
         #[cfg(target_os = "linux")]
         {
-            // An unknown answer is retried; the test has failed already
-            // when this runs, so the teardown only does what it can.
-            let left = case_processes(dir).unwrap_or_default();
-            if left.is_empty() && case_processes(dir).is_ok() {
+            // An unknown answer is retried; the teardown only does what it can.
+            let census = case_processes(dir);
+            if ended && census.as_ref().is_ok_and(Vec::is_empty) {
                 return;
             }
+            let left = census.unwrap_or_default();
             let names = path_names(dir).unwrap_or_default();
             for pid in left {
                 if let Some(process) = ProcessIdentity::capture(pid)
@@ -735,16 +902,7 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let beat = dir.join("beat");
-            let fresh = std::fs::metadata(&beat)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age < Duration::from_millis(300));
-            if !fresh {
-                return;
-            }
-            if let Some(pid) = read_heartbeat_pid(&beat)
+            if let Record::Pid(pid) = read_record(&dir.join("beat"))
                 && let Some(process) = ProcessIdentity::from_pid_file(pid, dir)
                 && process_names_path(pid, dir.as_os_str().as_encoded_bytes())
             {

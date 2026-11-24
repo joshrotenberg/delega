@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_gone, is_running,
-    is_running_async, run_guarded, sh,
+    AWAIT, Heard, Lifeline, OWN_GROUP, OWN_SESSION, Reaper, Record, Scratch, assert_gone,
+    await_record, is_running, is_running_async, own_group_recorded, own_session_recorded,
+    read_record, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::Ending;
@@ -54,11 +55,78 @@ pub(super) fn marking_lister(marker: std::path::PathBuf) -> Lister {
 
 const WAIT_FOR_SCAN: &str = "while [ ! -e scanned ]; do sleep 0.02; done;";
 
-/// Waits until the last listing of `CAPTURE_RAMP` (200 ms after spawn) has
-/// passed, so a descendant started after it can only be seen by the periodic
-/// listing, 500 ms after the ramp ends. The first listing ends just after
-/// spawn, so 0.3 s from there is after 200 ms with room to spare.
-const AFTER_RAMP: &str = "sleep 0.3;";
+/// Wait in a lister until `path` exists, for at most [`AWAIT`]; past that the
+/// listing goes ahead and the test fails on what it then sees.
+async fn listing_waits_for(path: &std::path::Path) {
+    let began = std::time::Instant::now();
+    while !path.exists() && began.elapsed() < AWAIT {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The listings of a run whose leader (`leader`) starts a descendant that
+/// publishes `gc` itself once it has left the session, put in an order that no
+/// schedule of listings and no load can change.
+///
+/// - The first listing reads the table and writes `scanned`; the scripts start
+///   the descendant only after it ([`WAIT_FOR_SCAN`]).
+/// - With `witness`, the second listing, the first of `CAPTURE_RAMP`, waits
+///   until `gc` is published and then reads the table. The test lets the
+///   leader end only once the owner tracks the descendant, so this listing
+///   sees the descendant while the leader is its parent, and the owner has
+///   recorded what it saw before the leader goes. (On Linux the owner reads
+///   the descendant's start time from `/proc` after the listing returns, and
+///   accepts it only while the descendant's parent is still the leader; a
+///   leader that ended as soon as the listing returned would leave a
+///   descendant the owner may not signal.)
+/// - Every other listing waits until `gc` is published, then reads the table
+///   until the leader is no longer a live process in it, and answers with that
+///   reading. None of them can see the descendant with the leader as its
+///   parent: the ramp and periodic listings are held, not raced. The listing
+///   taken when the leader ends is one of them and goes ahead at once.
+///
+/// With `hide_group_leaders`, a reading taken once the leader is recorded
+/// shows no group leader but the leader (see the test that uses it).
+fn ordered_listings(s: &Scratch, witness: bool, hide_group_leaders: bool) -> Lister {
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (scanned, gc, leader) = (s.path("scanned"), s.path("gc"), s.path("leader"));
+    Arc::new(move || {
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (scanned, gc, leader) = (scanned.clone(), gc.clone(), leader.clone());
+        Box::pin(async move {
+            let hide = |rows: Vec<crate::process::tree::ProcessRow>| match read_record(&leader) {
+                Record::Pid(leader) if hide_group_leaders => rows
+                    .into_iter()
+                    .filter(|r| r.group != r.pid || r.pid == leader)
+                    .collect(),
+                _ => rows,
+            };
+            if call == 0 {
+                let rows = list_processes().await;
+                let _ = std::fs::write(&scanned, "scanned");
+                return rows.map(hide);
+            }
+            listing_waits_for(&gc).await;
+            if call == 1 && witness {
+                return list_processes().await.map(hide);
+            }
+            let began = std::time::Instant::now();
+            loop {
+                let rows = list_processes().await;
+                let leader_live = match (&rows, read_record(&leader)) {
+                    (Ok(rows), Record::Pid(leader)) => {
+                        rows.iter().any(|r| r.pid == leader && !r.zombie)
+                    }
+                    _ => false,
+                };
+                if !leader_live || began.elapsed() >= AWAIT {
+                    return rows.map(hide);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    })
+}
 
 /// The wanted behaviour: when a descendant is left running, the result must not
 /// claim cleanup is confirmed.
@@ -86,11 +154,12 @@ async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
 async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
-    // The crash lands 0.2 s after the descendant starts. No periodic scan runs
-    // after the first, however slow the machine is.
+    // The crash comes once the descendant has said it left the group. No
+    // periodic scan runs after the first, however slow the machine is.
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {OWN_GROUP} & record gc $!; \
-         sleep 0.2; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} record leader $$; {} & {} kill -KILL $$; sleep 5",
+        own_group_recorded("gc"),
+        await_record("gc")
     );
     let mut spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     spec.capture_interval = Some(Duration::from_secs(3600));
@@ -171,24 +240,35 @@ async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing
 
 /// The periodic interval is the default here, so the listings are the one at
 /// spawn, the early ramp (`CAPTURE_RAMP`) and then the 500 ms interval. The
-/// descendant calls `setsid` straight after the first listing and the leader
-/// crashes about 0.2 s later, long before the first periodic listing. Only a
-/// ramp listing can see the descendant while the leader is its parent. Without
-/// the ramp the descendant outlives the run, and the result says Confirmed.
+/// descendant calls `setsid` straight after the first listing. The first ramp
+/// listing is held until it has; the test waits until the owner tracks the
+/// descendant and then lets the leader crash (`go`); every later listing is
+/// held until the leader is gone ([`ordered_listings`]). So that ramp
+/// listing, and no other, sees the descendant while the leader is its parent,
+/// and what it saw must be enough to stop the descendant after the crash. That the ramp listing comes
+/// before the first periodic one is a matter of the schedule, which
+/// `each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing`
+/// pins.
 #[tokio::test]
 async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_leader_crashes_before_the_first_periodic_listing()
  {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {OWN_SESSION} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} \
-         sleep 0.2; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} kill -KILL $$; sleep 5",
+        own_session_recorded("gc"),
+        await_record("go")
     );
-    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
-    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
-    assert_no_false_confirmation(pids[0], &report.cleanup);
+    let spec = sh(&s, &script, LONG).with_lister(ordered_listings(&s, true, false));
+    let handle = crate::process::ProcessHandle::start(spec);
+    let mut reaper = Reaper::default();
+    let gc = reaper.watch(&s, "gc").await;
+    super::fixtures::wait_tracked(&handle, gc).await;
+    std::fs::write(s.path("go"), "go").expect("write the go file");
+    let report = handle.wait().await;
+    assert_no_false_confirmation(gc, &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
-    assert_gone("descendant", &pids).await;
+    assert_gone("descendant", &[gc]).await;
 }
 
 /// Gap 1 without a keeper: a `setsid` descendant whose parent, the leader,
@@ -197,32 +277,38 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
 /// marker), stopped, and the verdict is `Confirmed` only once it is gone. The
 /// descendant runs this test binary, not `sleep`: on macOS `ps -E` shows no
 /// environment for Apple's own programs, so an orphan running one of them is
-/// the documented residual there.
+/// the documented residual there. No owner listing after the first can see
+/// the descendant with the leader alive ([`ordered_listings`]).
 #[tokio::test]
 async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} exit 0",
-        own_session_sleeper()
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} exit 0",
+        own_session_sleeper("gc"),
+        await_record("gc")
     );
-    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
+    let spec = kept(sh(&s, &script, LONG).with_lister(ordered_listings(&s, false, false)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     assert_gone("orphaned setsid descendant", &pids).await;
 }
 
+/// The descendant leaves the session after the first listing and the leader
+/// crashes once it has; every owner listing after the first is held until the
+/// leader is gone ([`ordered_listings`]), so none sees the two together and
+/// only the keeper can find the descendant.
 #[tokio::test]
 async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped_in_a_kept_run() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} \
-         sleep 0.15; kill -KILL $$; sleep 5",
-        own_session_sleeper()
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} kill -KILL $$; sleep 5",
+        own_session_sleeper("gc"),
+        await_record("gc")
     );
-    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
+    let spec = kept(sh(&s, &script, LONG).with_lister(ordered_listings(&s, false, false)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
@@ -238,36 +324,23 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped
 async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux() {
     require_perl!();
     let s = Scratch::new();
-    let detach =
-        "perl -e 'use POSIX; POSIX::setsid(); %ENV = (); exec { q(/bin/sleep) } q(sleep), q(60)'";
+    let detach = format!(
+        "perl -e 'use POSIX; {} {} %ENV = (); \
+         exec {{ q(/bin/sleep) }} q(sleep), q(60)'",
+        super::fixtures::PERL_LEAVE_SESSION,
+        super::fixtures::perl_record_self("gc")
+    );
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {detach} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} exit 0"
+        "{WAIT_FOR_SCAN} record leader $$; {detach} >/dev/null 2>&1 & {} exit 0",
+        await_record("gc")
     );
     // The owner's listings never show it: once the leader is known they hide
     // every group leader but the leader, which the orphan is from its
-    // `setsid` on. Only the keeper's own walk of its tree can find it, so a
-    // broken walk ends Confirmed with the orphan alive and fails here.
-    let marker = s.path("scanned");
-    let leader_file = s.path("leader");
-    let hiding: Lister = Arc::new(move || {
-        let marker = marker.clone();
-        let leader_file = leader_file.clone();
-        Box::pin(async move {
-            let rows = list_processes().await;
-            let _ = std::fs::write(&marker, "scanned");
-            let leader: Option<i32> = std::fs::read_to_string(&leader_file)
-                .ok()
-                .and_then(|t| t.trim().parse().ok());
-            rows.map(|rows| match leader {
-                Some(leader) => rows
-                    .into_iter()
-                    .filter(|r| r.group != r.pid || r.pid == leader)
-                    .collect(),
-                None => rows,
-            })
-        })
-    });
-    let spec = kept(sh(&s, &script, LONG).with_lister(hiding));
+    // `setsid` on, and no listing after the first sees it with the leader
+    // alive ([`ordered_listings`]). Only the keeper's own walk of its tree
+    // can find it, so a broken walk ends Confirmed with the orphan alive and
+    // fails here.
+    let spec = kept(sh(&s, &script, LONG).with_lister(ordered_listings(&s, false, true)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
@@ -277,7 +350,7 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
 /// A middle process that stays alive in the child's session and group and
 /// starts a descendant that calls `setsid` and then writes its own pid to `gc`.
 /// The descendant's parent is the middle process, not the leader.
-const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid(); \
+const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid() == $$ or die; \
     open F, q(>), q(gc.tmp); print F qq($$\\n); close F; rename q(gc.tmp), q(gc); \
     exec q(sleep), q(60)' &\nwait\n";
 
@@ -417,18 +490,204 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
 }
 
 /// A relay: each process ignores TERM, leads a group of its own, lives a few
-/// milliseconds, forks a successor and exits, and touches a heartbeat file, so
-/// no process stays alive for longer than one listing. It stops itself after
-/// 300 generations.
+/// milliseconds, forks a successor and exits, so no process stays alive for
+/// longer than one listing. It stops itself after 300 generations.
+///
+/// What a test can see of it ([`RelayLife`]): every generation checks that it
+/// leads its own group, publishes its pid in `beat` as a complete record
+/// (renamed into place), and then writes `h` on the case's lifeline (`life`,
+/// a [`Lifeline`] the test opened). It writes `h` once: a generation whose
+/// `setpgid` or successor `fork` fails writes `x` and exits, instead of going
+/// round the loop again. The last generation writes `e` before it exits by
+/// itself. The perl process opens the lifeline before its first fork, so it
+/// and every generation hold it: the lifeline ends exactly when the last of
+/// them is gone. A second `h` is one completed handoff; an `h` read after a
+/// moment is a generation that ran after it; the end of the lifeline without
+/// an `e` or an `x` is a relay that something stopped.
 const RELAY: &str = "exec perl -e 'use POSIX; \
-    my $p = fork(); \
+    open L, q(>), q(life) or die; \
+    my $p = fork(); defined $p or die; \
     if ($p == 0) { $SIG{TERM} = q(IGNORE); \
-      for (1..300) { setpgid(0,0); open H, q(>), q(beat); print H $$; close H; \
+      for (1..300) { setpgid(0, 0); getpgrp() == $$ or do { syswrite L, q(x); exit 1 }; \
+        open H, q(>), q(beat.tmp); print H qq($$\n); close H; rename q(beat.tmp), q(beat); \
+        syswrite L, q(h); \
         select(undef, undef, undef, 0.005); \
-        my $q = fork(); \
+        my $q = fork(); defined $q or do { syswrite L, q(x); exit 1 }; \
         if ($q) { exit 0 } } \
+      syswrite L, q(e); \
       exit 0 } \
     sleep 60'";
+
+/// What became of a relay after a moment the test chose (see
+/// [`RelayLife::fate_by`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RelayFate {
+    /// Every relay process is gone, and the relay never reached its end by
+    /// itself or broke: something stopped it.
+    Stopped,
+    /// A generation ran after the moment.
+    Running,
+    /// The relay ran all its generations and ended by itself (`e`), so
+    /// nothing stopped it.
+    RanItsCourse,
+    /// A generation could not lead its own group or fork its successor (`x`),
+    /// so the relay ended without being stopped.
+    Broke,
+    /// No generation ran and the lifeline did not end by the deadline: a
+    /// relay process is alive but not running (stopped, or never scheduled).
+    Silent,
+}
+
+/// A relay's lifeline and the terminal byte (`e` or `x`) read from it so
+/// far. The terminal byte is kept across reads, so a relay that wrote `e`
+/// while one call was waiting and then closed the lifeline is still known to
+/// have run its course when a later call reads the end.
+pub(super) struct RelayLife {
+    pub(super) lifeline: Lifeline,
+    terminal: Option<u8>,
+}
+
+impl RelayLife {
+    /// Open the lifeline `life` in `s`, before the relay starts.
+    pub(super) fn new(s: &Scratch) -> Self {
+        Self {
+            lifeline: Lifeline::new(s, "life"),
+            terminal: None,
+        }
+    }
+
+    fn note(&mut self, byte: u8) {
+        if matches!(byte, b'e' | b'x') {
+            self.terminal = Some(byte);
+        }
+    }
+
+    fn ended(&self) -> RelayFate {
+        match self.terminal {
+            Some(b'e') => RelayFate::RanItsCourse,
+            Some(_) => RelayFate::Broke,
+            None => RelayFate::Stopped,
+        }
+    }
+
+    /// Wait until the relay has made `handoffs` complete handoffs: one more
+    /// `h` on its lifeline than that, each from a new generation.
+    pub(super) async fn await_handoffs(&mut self, handoffs: usize) {
+        let mut generations = 0;
+        while generations <= handoffs {
+            match self.lifeline.hear("a relay generation starting").await {
+                Heard::Byte(b'h') => generations += 1,
+                other => panic!("the relay ended before {handoffs} handoffs: {other:?}"),
+            }
+        }
+    }
+
+    /// What became of the relay from now on, deciding by `deadline` at the
+    /// latest. Every byte already on the lifeline was written before now;
+    /// then the first thing heard decides: the end of the lifeline is
+    /// [`RelayFate::Stopped`] (unless a terminal byte came first), any byte
+    /// is a generation that ran after now. A generation killed just before
+    /// now has written nothing since and ends the lifeline as soon as it is
+    /// gone.
+    pub(super) async fn fate_by(&mut self, deadline: std::time::Instant) -> RelayFate {
+        while let Some(heard) = self.lifeline.try_hear() {
+            match heard {
+                Heard::Ended => return self.ended(),
+                Heard::Byte(byte) => self.note(byte),
+            }
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match self.lifeline.hear_within(left).await {
+            None => RelayFate::Silent,
+            Some(Heard::Ended) => self.ended(),
+            Some(Heard::Byte(byte)) => {
+                self.note(byte);
+                RelayFate::Running
+            }
+        }
+    }
+}
+
+/// When a relay's terminal byte reaches the reader, relative to a call of
+/// [`RelayLife::fate_by`].
+#[derive(Clone, Copy)]
+enum TerminalByte {
+    /// Written while the call waits on an empty lifeline: the call reads it
+    /// as `Running`, and a later call reads the end.
+    WhileWaiting,
+    /// Written, and the lifeline closed, before the call: the call reads both
+    /// at once.
+    AlreadyBuffered,
+}
+
+/// A relay's last generation stood in for by a write end of the lifeline
+/// that the test holds, so the test decides when each byte is written: `h`,
+/// then the terminal byte `last` at the point `when` names, then the close.
+/// Whichever branch reads the terminal byte, the relay must never be taken
+/// for a stopped one.
+async fn fate_of_a_relay_that_ends_with(last: u8, when: TerminalByte) -> RelayFate {
+    use std::future::Future;
+    use std::io::Write;
+    use std::task::Poll;
+    let s = Scratch::new();
+    let mut relay = RelayLife::new(&s);
+    // The read end is open, so opening the write end does not block.
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(s.path("life"))
+        .expect("open the lifeline for writing");
+    writer.write_all(b"h").expect("write a handoff");
+    relay.await_handoffs(0).await;
+    let deadline = std::time::Instant::now() + AWAIT;
+    let first = match when {
+        TerminalByte::WhileWaiting => {
+            let mut call = std::pin::pin!(relay.fate_by(deadline));
+            // Poll once: the lifeline is empty and still open, so the call
+            // must be waiting, not answering.
+            let polled = std::future::poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+            assert!(
+                polled.is_pending(),
+                "fate_by answered on an empty lifeline: {polled:?}"
+            );
+            writer.write_all(&[last]).expect("write the terminal byte");
+            drop(writer);
+            call.await
+        }
+        TerminalByte::AlreadyBuffered => {
+            writer.write_all(&[last]).expect("write the terminal byte");
+            drop(writer);
+            relay.fate_by(deadline).await
+        }
+    };
+    if first != RelayFate::Running {
+        return first;
+    }
+    relay.fate_by(deadline).await
+}
+
+#[tokio::test]
+async fn a_relay_that_ran_its_course_while_its_fate_was_awaited_is_never_taken_for_a_stopped_one() {
+    assert_eq!(
+        fate_of_a_relay_that_ends_with(b'e', TerminalByte::WhileWaiting).await,
+        RelayFate::RanItsCourse
+    );
+}
+
+#[tokio::test]
+async fn a_relay_that_broke_while_its_fate_was_awaited_is_never_taken_for_a_stopped_one() {
+    assert_eq!(
+        fate_of_a_relay_that_ends_with(b'x', TerminalByte::WhileWaiting).await,
+        RelayFate::Broke
+    );
+}
+
+#[tokio::test]
+async fn a_relay_that_ran_its_course_before_its_fate_was_asked_is_never_taken_for_a_stopped_one() {
+    assert_eq!(
+        fate_of_a_relay_that_ends_with(b'e', TerminalByte::AlreadyBuffered).await,
+        RelayFate::RanItsCourse
+    );
+}
 
 /// The same relay with 4000 generations, so it outlives any stop by many
 /// seconds and only a stop can explain its end. The case directory `dir` is
@@ -439,15 +698,6 @@ pub(super) fn long_relay(dir: &std::path::Path) -> String {
     let dir = dir.to_str().expect("a scratch directory named in UTF-8");
     assert!(!dir.contains('\''), "{dir}");
     format!("{} '{dir}'", RELAY.replace("(1..300)", "(1..4000)"))
-}
-
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(super) fn heartbeat_age(scratch: &Scratch) -> Duration {
-    std::fs::metadata(scratch.path("beat"))
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .unwrap_or(Duration::MAX)
 }
 
 /// What one interrupted kept run of the long relay came to: whether a relay
@@ -468,43 +718,37 @@ async fn relay_run() -> (bool, Cleanup, Duration) {
 
 async fn relay_run_with_diagnostics() -> RelayRun {
     let s = Scratch::new();
+    let mut relay = RelayLife::new(&s);
     let mut spec = kept(sh(&s, &long_relay(&s.dir()), LONG));
     spec.stop_grace = Duration::from_millis(100);
     // The relay holds the output pipes; the owner closes them a second after
     // the kill.
     spec.drain_bound = Duration::from_secs(1);
     let handle = crate::process::ProcessHandle::start(spec);
-    s.exists("beat").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The interrupt comes once the relay is relaying: one generation has
+    // started its successor.
+    relay.await_handoffs(1).await;
     let asked = std::time::Instant::now();
     handle.interrupt();
     let report = handle.wait().await;
-    let reported = std::time::SystemTime::now();
     let took = asked.elapsed();
-    // Every generation writes its pid to the heartbeat about every 5 ms, so a
-    // relay process alive after the report writes it after the report: a
-    // heartbeat written since then, or one that changes over 300 ms, means a
-    // relay process is alive. A fresh heartbeat at the report alone does not:
-    // a relay killed just before the report left it fresh.
-    let first = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let second = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-    let written_after = std::fs::metadata(s.path("beat"))
-        .and_then(|m| m.modified())
-        .is_ok_and(|modified| modified > reported);
-    // A stopped or unscheduled generation writes nothing, so on Linux any
-    // process that names the case directory on its command line counts as
-    // alive too.
+    // A relay process alive after the report either runs (an `h` after it)
+    // or holds the lifeline open without running; only the end of the
+    // lifeline says every one is gone.
+    let fate = relay.fate_by(std::time::Instant::now() + AWAIT).await;
+    // On Linux, any process that names the case directory on its command
+    // line counts as alive too: a census that does not depend on the
+    // lifeline.
     #[cfg(target_os = "linux")]
     let survivors = super::fixtures::case_processes(&s.dir())
         .unwrap_or_else(|e| panic!("survivors unknown: {e}"));
     #[cfg(not(target_os = "linux"))]
     let survivors: Vec<i32> = Vec::new();
-    let alive = first != second || written_after || !survivors.is_empty();
-    let diagnostics = relay_diagnostics(&survivors, &report);
+    let alive = fate != RelayFate::Stopped || !survivors.is_empty();
+    let diagnostics = format!("relay {fate:?}\n{}", relay_diagnostics(&survivors, &report));
     // A relay that survived is ended here, so nothing is left, without
     // signalling a foreign process (see `end_relay_leftovers`).
-    super::fixtures::end_relay_leftovers(&s.dir()).await;
+    super::fixtures::end_relay_leftovers(&s.dir(), &mut relay.lifeline).await;
     RelayRun {
         alive,
         cleanup: report.cleanup,

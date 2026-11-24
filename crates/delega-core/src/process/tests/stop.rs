@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::fixtures::{
-    Held, OWN_SESSION, Reaper, Scratch, assert_confirmed, assert_gone, await_event, sh,
+    Held, Reaper, Scratch, assert_confirmed, assert_gone, await_event, own_session_recorded, sh,
 };
 use crate::process::sys::{self, Signal};
 use crate::process::tree::Lister;
@@ -43,15 +43,25 @@ async fn a_leader_that_stops_itself_is_still_running_and_ends_as_timed_out() {
 
 #[tokio::test]
 async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
+    require_perl!();
     let s = Scratch::new();
     // With a long grace, only SIGTERM followed by SIGCONT stops it quickly.
     // On Linux a stopped process holds a TERM pending until it is continued,
     // so removing the SIGCONT makes this fail there. On macOS TERM ends a
     // stopped process by itself, so this cannot fail there; the Linux run in
     // the checklist in the module docs is what checks it.
+    //
+    // The leader is perl, so that it can wait for its child to have stopped
+    // (`waitpid` with `WUNTRACED`), which `kill -STOP` returning does not say;
+    // it creates `stopped` only then, and goes on waiting for the child.
     let mut spec = sh(
         &s,
-        "record leader $$; sleep 60 & record gc $!; kill -STOP $!; echo stopped > stopped; wait",
+        "record leader $$; exec perl -e 'use POSIX; \
+         my $p = fork(); defined $p or die; if (!$p) { exec q(sleep), q(60) } \
+         open F, q(>), q(gc.tmp); print F qq($p\n); close F; rename q(gc.tmp), q(gc); \
+         kill q(STOP), $p; \
+         waitpid($p, WUNTRACED) == $p && WIFSTOPPED(${^CHILD_ERROR_NATIVE}) or die; \
+         open F, q(>), q(stopped); close F; waitpid($p, 0)'",
         LONG,
     );
     // The grace is a minute, so a stop that reached the descendant only with
@@ -62,7 +72,7 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
     let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
     let gc = reaper.watch(&s, "gc").await;
-    await_event("the descendant being stopped", || {
+    await_event("the leader seeing the descendant stopped", || {
         s.path("stopped").exists()
     })
     .await;
@@ -111,9 +121,9 @@ both!(
     async {
         let s = Scratch::new();
         let held = Held::new(false);
-        // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
-        let script = "trap 'exit 0' USR1; record leader $$; echo ready > ready; \
-                  while :; do sleep 0.02; done";
+        // Exits 0 shortly after SIGUSR1, a signal the test sends itself. It
+        // records its pid once the trap is set, so the record says it is ready.
+        let script = "trap 'exit 0' USR1; record leader $$; while :; do sleep 0.02; done";
         let spec = sh(&s, script, LONG).with_lister(held.lister());
         let handle = ProcessHandle::start(spec);
         let leader = s.pid("leader").await;
@@ -121,7 +131,6 @@ both!(
         let child = reaper
             .register(leader, &s)
             .expect("identify the child in the test scratch directory");
-        await_event("the child being ready", || s.path("ready").exists()).await;
         held.armed.store(true, Ordering::SeqCst);
         // The stop begins and waits for a listing that is held; the child exits
         // during that wait, before any stop signal is sent. The listing is released
@@ -186,7 +195,9 @@ fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session
         .enable_all()
         .build()
         .expect("build runtime");
-    let script = format!("record leader $$; {OWN_SESSION} & record gc $!; wait");
+    // It publishes `gc` only once it has left the session, so a scan that
+    // tracks it tracks a process outside the group and session.
+    let script = format!("record leader $$; {} & wait", own_session_recorded("gc"));
     let mut reaper = Reaper::default();
     let (handle, gc) = runtime.block_on(async {
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
