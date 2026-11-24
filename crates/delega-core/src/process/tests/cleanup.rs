@@ -337,18 +337,17 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     // after a grace that load could make too short: the grace is a minute. The
     // children do not hold the output pipes.
     let child = detached_own_group();
-    // Let the leader's Linux start tick finish before publishing its PID.
     let script = format!(
-        "trap \"{child} & echo \\$! >> gcs\" TERM; sleep 0.05; echo $$ > leader; \
+        "trap \"{child} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
          while [ ! -e quit ]; do sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
     spec.stop_grace = Duration::from_secs(60);
     let _reaper = ChildLifetime::new(&s);
     let handle = ProcessHandle::start(spec);
-    let record = s.pid_file("leader").await;
+    let leader = s.pid("leader").await;
     let mut reaper = Reaper::default();
-    let child = reaper.register(&record).expect("identify the leader");
+    let child = reaper.register(leader, &s).expect("identify the leader in the test scratch directory");
     handle.interrupt();
     s.exists("gcs").await;
     let mut sent_at = Instant::now();

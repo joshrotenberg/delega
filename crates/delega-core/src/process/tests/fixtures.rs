@@ -1,10 +1,9 @@
 //! Shared helpers: scratch directory, fake children, process checks.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
@@ -54,18 +53,14 @@ impl Scratch {
 
     /// Wait until a script has written a pid to the named file.
     pub(super) async fn pid(&self, name: &str) -> i32 {
-        self.pid_file(name).await.pid
-    }
-
-    pub(super) async fn pid_file(&self, name: &str) -> PidFile {
         let path = self.path(name);
-        let mut record = None;
+        let mut pid = None;
         await_event(&format!("the script writing a pid to {name}"), || {
-            record = PidFile::read(&path);
-            record.is_some()
+            pid = read_pid_file(&path);
+            pid.is_some()
         })
         .await;
-        record.expect("the pid file was just read")
+        pid.expect("the pid file was just read")
     }
 
     /// Wait until a file exists and is not empty.
@@ -87,25 +82,8 @@ impl Scratch {
     }
 }
 
-/// Read the PID and timestamp from the same open file. A rewrite during
-/// the read invalidates the sample, so a newer mtime cannot vouch for an old PID.
-pub(super) struct PidFile {
-    pub(super) pid: i32,
-    modified: Option<SystemTime>,
-}
-
-impl PidFile {
-    fn read(path: &Path) -> Option<Self> {
-        let mut file = std::fs::File::open(path).ok()?;
-        let modified = file.metadata().and_then(|meta| meta.modified()).ok();
-        let mut text = String::new();
-        file.read_to_string(&mut text).ok()?;
-        if modified != file.metadata().and_then(|meta| meta.modified()).ok() {
-            return None;
-        }
-        let pid = text.trim().parse().ok()?;
-        Some(Self { pid, modified })
-    }
+fn read_pid_file(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// The process observed at registration. A pidfd pins the identity on Linux.
@@ -116,6 +94,8 @@ pub(super) struct ProcessIdentity {
     pid: i32,
     #[cfg(not(target_os = "linux"))]
     started: String,
+    #[cfg(not(target_os = "linux"))]
+    cwd: Option<PathBuf>,
 }
 
 impl ProcessIdentity {
@@ -134,26 +114,34 @@ impl ProcessIdentity {
             Some(Self {
                 pid,
                 started: process_start(pid)?,
+                cwd: None,
             })
         }
     }
 
-    fn from_pid_file(record: &PidFile) -> Option<Self> {
-        let modified = record.modified?;
-        // On Linux, open the pidfd before looking up the start ticks.
-        let identity = Self::capture(record.pid)?;
+    /// A PID file identifies a candidate only. Its process must still be in
+    /// the case's private directory. If it changes cwd or the OS hides it
+    /// (for example, a non-dumpable process on Linux), registration fails.
+    /// macOS also repeats the cwd check at delivery, so changing directories
+    /// after registration there prevents cleanup.
+    fn from_pid_file(pid: i32, dir: &Path) -> Option<Self> {
+        // Open the Linux pidfd before checking cwd so it holds the identity
+        // throughout verification and delivery.
+        let identity = Self::capture(pid)?;
+        let dir = dir.canonicalize().ok()?;
+        if !cwd_matches(pid, &dir) {
+            return None;
+        }
         #[cfg(target_os = "linux")]
-        let matches = {
-            let ticks = sys::start_ticks(record.pid)?;
-            started_before_file(ticks, modified)? && !sys::pidfd_exited(&identity.fd)
-        };
+        if sys::pidfd_exited(&identity.fd) {
+            return None;
+        }
         #[cfg(not(target_os = "linux"))]
-        let matches = start_seconds(&identity.started)?
-            <= modified
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-        matches.then_some(identity)
+        let identity = Self {
+            cwd: Some(dir),
+            ..identity
+        };
+        Some(identity)
     }
 
     pub(super) fn signal(&self, signal: Signal) -> bool {
@@ -166,44 +154,41 @@ impl ProcessIdentity {
             // ps has one-second precision, and the process can exit between
             // the check and kill. macOS has no pidfd to close that window.
             process_start(self.pid).as_ref() == Some(&self.started)
+                && self
+                    .cwd
+                    .as_ref()
+                    .is_none_or(|dir| cwd_matches(self.pid, dir))
                 && sys::signal_process(self.pid, signal).is_ok()
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn started_before_file(ticks: u64, modified: SystemTime) -> Option<bool> {
-    use rustix::param::clock_ticks_per_second;
-    use rustix::time::{ClockId, clock_gettime};
-
-    // Translate the wall-clock mtime to time since boot. Reading boottime
-    // first makes the elapsed time at the write a lower bound. Require the
-    // entire start tick to precede that bound, since /proc rounds it down.
-    let boot_now = clock_gettime(ClockId::Boottime);
-    let age = SystemTime::now().duration_since(modified).ok()?;
-    let boot_now = Duration::new(
-        boot_now.tv_sec.try_into().ok()?,
-        boot_now.tv_nsec.try_into().ok()?,
-    );
-    let file_ticks = boot_now.checked_sub(age)?.as_nanos() * u128::from(clock_ticks_per_second())
-        / 1_000_000_000;
-    Some(u128::from(ticks) < file_ticks)
+fn cwd_matches(pid: i32, expected: &Path) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == expected)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn start_seconds(started: &str) -> Option<u64> {
-    let output = std::process::Command::new("/bin/date")
-        .args(["-j", "-u", "-f", "%a %b %e %T %Y", started, "+%s"])
+fn cwd_matches(pid: i32, expected: &Path) -> bool {
+    let pid = pid.to_string();
+    // Avoid filesystem lookups on unrelated mounts. Darwin still reports cwd.
+    let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-b", "-a", "-p", &pid, "-d", "cwd", "-Fn"])
         .env_clear()
         .env("LC_ALL", "C")
         .guarded_output()
-        .ok()?;
-    output.status.success().then_some(())?;
-    std::str::from_utf8(&output.stdout)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    else {
+        return false;
+    };
+    let stdout = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let mut lines = stdout.split(|&byte| byte == b'\n');
+    let process = format!("p{pid}");
+    output.status.success()
+        && lines.next() == Some(process.as_bytes())
+        && lines.next() == Some(b"fcwd")
+        && lines.next().and_then(|line| line.strip_prefix(b"n"))
+            == Some(expected.as_os_str().as_encoded_bytes())
+        && lines.next().is_none()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -233,13 +218,18 @@ impl Reaper {
     }
 
     pub(super) async fn watch(&mut self, scratch: &Scratch, name: &str) -> i32 {
-        let record = scratch.pid_file(name).await;
-        self.register(&record);
-        record.pid
+        let pid = scratch.pid(name).await;
+        if self.register(pid, scratch).is_none() {
+            eprintln!(
+                "cleanup skipped for {name} (PID {pid}): could not verify its identity in the test scratch directory"
+            );
+        }
+        pid
     }
 
-    pub(super) fn register(&mut self, record: &PidFile) -> Option<&ProcessIdentity> {
-        self.0.push(ProcessIdentity::from_pid_file(record)?);
+    pub(super) fn register(&mut self, pid: i32, scratch: &Scratch) -> Option<&ProcessIdentity> {
+        self.0
+            .push(ProcessIdentity::from_pid_file(pid, &scratch.dir())?);
         self.0.last()
     }
 
@@ -635,19 +625,20 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if let Some(record) = PidFile::read(&dir.join("beat")) {
-                let fresh = record
-                    .modified
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age < Duration::from_millis(300));
-                if !fresh {
-                    return;
-                }
-                if let Some(process) = ProcessIdentity::from_pid_file(&record)
-                    && process_names_path(record.pid, dir.as_os_str().as_encoded_bytes())
-                {
-                    process.signal(Signal::KILL);
-                }
+            let beat = dir.join("beat");
+            let fresh = std::fs::metadata(&beat)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_millis(300));
+            if !fresh {
+                return;
+            }
+            if let Some(pid) = read_pid_file(&beat)
+                && let Some(process) = ProcessIdentity::from_pid_file(pid, dir)
+                && process_names_path(pid, dir.as_os_str().as_encoded_bytes())
+            {
+                process.signal(Signal::KILL);
             }
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -664,10 +655,11 @@ impl Drop for SetOnDrop {
     }
 }
 
-fn waiting_child() -> std::process::Child {
+fn waiting_child(dir: &Scratch) -> std::process::Child {
     use std::process::Stdio;
 
     std::process::Command::new("/bin/cat")
+        .current_dir(dir.dir())
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -677,44 +669,20 @@ fn waiting_child() -> std::process::Child {
 }
 
 #[test]
-fn a_pid_file_does_not_vouch_for_a_process_started_after_it_was_written() {
-    let scratch = Scratch::new();
-    let path = scratch.path("pid");
-    let written = SystemTime::now();
-    // Cross a full second on macOS and a full start tick on Linux.
-    std::thread::sleep(Duration::from_secs(1));
-    let mut child = waiting_child();
-    std::fs::write(&path, format!("{}\n", child.id())).expect("write the test PID");
-    std::fs::File::options()
-        .write(true)
-        .open(&path)
-        .expect("open the test PID file")
-        .set_modified(written)
-        .expect("set the test PID file's write time");
-    let record = PidFile::read(&path).expect("read the test PID file");
-    assert!(
-        ProcessIdentity::capture(record.pid).is_some(),
-        "the replacement must be visible"
-    );
-    let registered = ProcessIdentity::from_pid_file(&record);
-    assert!(child.wait().expect("reap the replacement").success());
-    assert!(registered.is_none(), "the PID file predates the process");
-}
-
-#[test]
 fn reaper_does_not_signal_a_replacement_after_the_registered_process_exits() {
-    let mut original = waiting_child();
-    let reaper = Reaper::new([i32::try_from(original.id()).expect("a pid")]);
-    #[cfg(not(target_os = "linux"))]
-    let mut reaper = reaper;
-    assert_eq!(reaper.0.len(), 1, "capture the original identity");
+    let scratch = Scratch::new();
+    let mut original = waiting_child(&scratch);
+    let mut reaper = Reaper::default();
+    reaper
+        .register(i32::try_from(original.id()).expect("a pid"), &scratch)
+        .expect("register the original in the test directory");
     assert!(original.wait().expect("reap the original").success());
 
     // The two starts must differ at ps's one-second precision. This test
     // leaves the same-second reuse window on macOS untested.
     #[cfg(not(target_os = "linux"))]
     std::thread::sleep(Duration::from_secs(1));
-    let mut replacement = waiting_child();
+    let mut replacement = waiting_child(&scratch);
 
     // On Linux the old PID is free, so this cannot distinguish a pidfd
     // signal from signalling that PID by number.

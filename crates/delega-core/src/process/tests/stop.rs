@@ -112,15 +112,15 @@ both!(
         let s = Scratch::new();
         let held = Held::new(false);
         // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
-        // Let the leader's Linux start tick finish before publishing its PID.
-        let script = "trap 'exit 0' USR1; sleep 0.05; echo $$ > leader; echo ready > ready; \
+        let script = "trap 'exit 0' USR1; echo $$ > leader; echo ready > ready; \
                   while :; do sleep 0.02; done";
         let spec = sh(&s, script, LONG).with_lister(held.lister());
         let handle = ProcessHandle::start(spec);
-        let record = s.pid_file("leader").await;
-        let leader = record.pid;
+        let leader = s.pid("leader").await;
         let mut reaper = Reaper::default();
-        let child = reaper.register(&record).expect("identify the child");
+        let child = reaper
+            .register(leader, &s)
+            .expect("identify the child in the test scratch directory");
         await_event("the child being ready", || s.path("ready").exists()).await;
         held.armed.store(true, Ordering::SeqCst);
         // The stop begins and waits for a listing that is held; the child exits
