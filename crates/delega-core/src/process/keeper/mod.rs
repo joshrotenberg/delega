@@ -39,13 +39,22 @@
 //!
 //! - keeper: `subreaper on`, `subreaper off <why>`, `started <pid>`,
 //!   `spawn-failed <errno> <message>`, `exited code <n>`, `exited signal <n>`,
-//!   `tree <id> <live> [<details>]`, `reaped <live> [proven] [unproven]`
-//!   (`proven` when the final census before the reap proved the tree empty,
-//!   Linux with a subreaper only; `unproven` when any answer of the run, sent
-//!   or worked out at the reap, was unproven in a way no later answer
-//!   repairs), `releasing`, `warn <text>`.
+//!   `tree <id> <live> [<details>]`,
+//!   `reaped <live> [proven] [unproven] [incomplete]` (`proven` when the
+//!   final census before the reap proved the tree empty, Linux with a
+//!   subreaper only; `unproven` when any answer of the run, sent or worked
+//!   out at the reap, was unproven in a way no later answer repairs: a
+//!   refused hold, a failed read, a failed freeze task; `incomplete` when
+//!   any was a freeze that only did not complete, which the owner lets the
+//!   proof supersede), `releasing`, `warn <text>`.
 //! - owner: `census <id>` (count the live processes in the keeper's tree),
 //!   `freeze <id>` (stop, kill and count them), `reap`, `released`.
+//!
+//! No line either side writes is longer than 4096 bytes (free text is cut to
+//! fit). A longer line is never read, in part or whole, through its newline.
+//! The owner counts such a line from the keeper, and any keeper line that
+//! does not parse, as a hole no later answer repairs: it may have been an
+//! answer whose content cannot be read, so the run cannot end `Confirmed`.
 
 mod link;
 mod protocol;
@@ -82,6 +91,13 @@ pub(crate) use run::gate_expired_marker;
 /// when the answer arrives.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) const LATE_REFUSAL_ENV: &str = "DELEGA_TEST_KEEPER_LATE_REFUSAL";
+
+/// Test seam: a keeper started by the tests with this variable answers the
+/// owner's first freeze (Linux) without walking, with the details its value
+/// names (`incomplete`, `refused`, `read-failure` or `task-failed`), after
+/// `KEEPER_REPLY_TIMEOUT` and a second when the value has a `late-` prefix.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) const FIRST_FREEZE_ENV: &str = "DELEGA_TEST_KEEPER_FIRST_FREEZE";
 pub use run::keeper_main;
 
 /// A program and arguments that run [`keeper_main`].

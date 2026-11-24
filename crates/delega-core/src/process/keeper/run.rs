@@ -11,8 +11,8 @@ use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::link::reply_unproven;
-use super::protocol::{FromKeeper, Hello, Lines, ToKeeper};
+use super::link::{ReplyHole, reply_hole};
+use super::protocol::{Frame, FromKeeper, Hello, Lines, ToKeeper};
 use crate::process::limits::{KEEPER_RELEASE_WAIT, KEEPER_TICK};
 use crate::process::sys::{self, Signal};
 
@@ -261,7 +261,14 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Freeze(id))) => {
-                    let (live, detail) = freeze_report(pid).await;
+                    #[cfg(all(test, target_os = "linux"))]
+                    let answer = match first_freeze_answer().await {
+                        Some(answer) => answer,
+                        None => freeze_report(pid).await,
+                    };
+                    #[cfg(not(all(test, target_os = "linux")))]
+                    let answer = freeze_report(pid).await;
+                    let (live, detail) = answer;
                     sticky.note("freeze", &detail);
                     say(&FromKeeper::Tree { id, live, detail });
                 }
@@ -309,8 +316,11 @@ fn read_commands(tx: &mpsc::UnboundedSender<Event>) {
         match rustix::io::read(rustix::stdio::stdin(), &mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                for line in lines.push(&buffer[..n]) {
-                    if let Some(command) = ToKeeper::parse(&line) {
+                for frame in lines.push(&buffer[..n]) {
+                    // An oversized or unknown line from the owner is ignored.
+                    if let Frame::Line(line) = frame
+                        && let Some(command) = ToKeeper::parse(&line)
+                    {
                         let _ = tx.send(Event::Command(command));
                     }
                 }
@@ -366,19 +376,24 @@ async fn wait_exit(pid: i32, limit: Duration) -> bool {
     }
 }
 
-/// Whether any census or freeze answer of this keeper was unproven in a way
-/// no later answer repairs ([`reply_unproven`]). Recorded before the answer
-/// is sent, so an answer the owner never receives, or receives after its
-/// request timed out, still counts; carried to the owner in `reaped`.
-#[derive(Debug, Default)]
+/// What the census and freeze answers of this keeper left open
+/// ([`reply_hole`]): a hole no later answer repairs (`unproven`), and a
+/// freeze that only did not complete (`incomplete`), which the owner lets the
+/// final proof supersede on Linux. Recorded before the answer is sent, so an
+/// answer the owner never receives, or receives after its request timed out,
+/// still counts; carried to the owner in `reaped`.
+#[derive(Debug, Default, Clone, Copy)]
 struct Sticky {
     unproven: bool,
+    incomplete: bool,
 }
 
 impl Sticky {
     fn note(&mut self, verb: &str, detail: &str) {
-        if reply_unproven(verb, detail) {
-            self.unproven = true;
+        match reply_hole(verb, detail) {
+            ReplyHole::None => {}
+            ReplyHole::Incomplete => self.incomplete = true,
+            ReplyHole::Unproven => self.unproven = true,
         }
     }
 }
@@ -400,6 +415,48 @@ async fn late_refusal() -> Option<(usize, String)> {
     ))
 }
 
+/// With [`super::FIRST_FREEZE_ENV`] set, the keeper's first freeze asked by
+/// the owner is answered without a walk with the details its value names (a
+/// test seam): `incomplete` (a walk that only did not complete), `refused`
+/// (with a refused hold), `read-failure` (with a failed read) or
+/// `task-failed` (a freeze task that failed); with a `late-` prefix, once
+/// the owner's request has timed out. Any other value answers nothing
+/// special.
+#[cfg(all(test, target_os = "linux"))]
+async fn first_freeze_answer() -> Option<(usize, String)> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static USED: AtomicBool = AtomicBool::new(false);
+    let value = std::env::var(super::FIRST_FREEZE_ENV).ok()?;
+    if USED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let (late, kind) = match value.strip_prefix("late-") {
+        Some(kind) => (true, kind),
+        None => (false, value.as_str()),
+    };
+    let answer = match kind {
+        "incomplete" => (
+            1,
+            "passes=64 complete=false refused=0 read_failures=0".to_string(),
+        ),
+        "refused" => (
+            1,
+            "passes=2 complete=false refused=1 read_failures=0".to_string(),
+        ),
+        "read-failure" => (
+            1,
+            "passes=2 complete=false refused=0 read_failures=1".to_string(),
+        ),
+        "task-failed" => freeze_task_failed(),
+        _ => return None,
+    };
+    if late {
+        tokio::time::sleep(crate::process::limits::KEEPER_REPLY_TIMEOUT + Duration::from_secs(1))
+            .await;
+    }
+    Some(answer)
+}
+
 /// What the keeper says when it has reaped the program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Finished {
@@ -411,6 +468,8 @@ struct Finished {
     /// Whether any answer of the run, or the census or freeze at the reap,
     /// was unproven in a way no later answer repairs.
     unproven: bool,
+    /// Whether any of them was a freeze that only did not complete.
+    incomplete: bool,
 }
 
 /// The owner asked for the reap: everything is settled on its side. Anything
@@ -479,11 +538,15 @@ async fn finish(
         let _ = subreaper;
         false
     };
-    let unproven = sticky.unproven;
+    let Sticky {
+        unproven,
+        incomplete,
+    } = *sticky;
     reaped.map(|()| Finished {
         live,
         proven,
         unproven,
+        incomplete,
     })
 }
 
@@ -515,10 +578,12 @@ fn reap_reply(finished: Result<Finished, String>) -> FromKeeper {
             live,
             proven,
             unproven,
+            incomplete,
         }) => FromKeeper::Reaped {
             live,
             proven,
             unproven,
+            incomplete,
         },
         Err(why) => FromKeeper::Warn(why),
     }
@@ -634,8 +699,8 @@ async fn freeze_report(pid: i32) -> (usize, String) {
     }
 }
 
-/// The answer to a freeze whose task failed (it panicked): an incomplete
-/// freeze, which is never zero and which [`reply_unproven`] counts.
+/// The answer to a freeze whose task failed (it panicked): never zero, and
+/// [`ReplyHole::Unproven`], not merely incomplete, since no walk ran.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn freeze_task_failed() -> (usize, String) {
     (
@@ -787,6 +852,7 @@ mod tests {
             live: 0,
             proven: true,
             unproven: false,
+            incomplete: false,
         }));
         assert!(matches!(reply, FromKeeper::Warn(_)), "{reply:?}");
     }
@@ -808,11 +874,13 @@ mod tests {
                 live: 2,
                 proven: false,
                 unproven: false,
+                incomplete: true,
             })),
             FromKeeper::Reaped {
                 live: 2,
                 proven: false,
                 unproven: false,
+                incomplete: true,
             }
         );
     }
@@ -824,7 +892,11 @@ mod tests {
     fn a_failed_freeze_task_is_an_unproven_answer_and_never_zero() {
         let (live, detail) = freeze_task_failed();
         assert_ne!(live, 0);
-        assert!(reply_unproven("freeze", &detail), "{detail}");
+        assert_eq!(
+            reply_hole("freeze", &detail),
+            ReplyHole::Unproven,
+            "{detail}"
+        );
         let mut sticky = Sticky::default();
         sticky.note("freeze", &detail);
         sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
@@ -850,12 +922,50 @@ mod tests {
                 live: 0,
                 proven: true,
                 unproven: sticky.unproven,
+                incomplete: sticky.incomplete,
             })),
             FromKeeper::Reaped {
                 live: 0,
                 proven: true,
                 unproven: true,
+                incomplete: false,
             }
         );
+    }
+
+    /// A freeze that only did not complete is noted apart from a hole no
+    /// later answer repairs, and carried by the reap as such; a refused hold
+    /// or a failed read inside a freeze answer is noted as the hole.
+    #[test]
+    fn an_incomplete_freeze_is_noted_apart_from_a_refusal_or_a_failed_read() {
+        let mut sticky = Sticky::default();
+        sticky.note(
+            "freeze",
+            "passes=64 complete=false refused=0 read_failures=0",
+        );
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert!(sticky.incomplete && !sticky.unproven, "{sticky:?}");
+        assert_eq!(
+            reap_reply(Ok(Finished {
+                live: 0,
+                proven: true,
+                unproven: sticky.unproven,
+                incomplete: sticky.incomplete,
+            })),
+            FromKeeper::Reaped {
+                live: 0,
+                proven: true,
+                unproven: false,
+                incomplete: true,
+            }
+        );
+        for hole in [
+            "passes=2 complete=false refused=1 read_failures=0",
+            "passes=2 complete=false refused=0 read_failures=1",
+        ] {
+            let mut sticky = Sticky::default();
+            sticky.note("freeze", hole);
+            assert!(sticky.unproven && !sticky.incomplete, "{hole}: {sticky:?}");
+        }
     }
 }
