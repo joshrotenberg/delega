@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::fixtures::{Scratch, is_running, sh};
 use super::keeper::{SLEEP_ENV, kept};
-use crate::process::ProcessHandle;
+use crate::process::{MARKER_ENV, ProcessHandle};
 use crate::test_spawn::Guarded;
 
 /// The variable that carries the probe value in the sibling's environment.
@@ -133,7 +133,9 @@ async fn await_environment(pid: u32, value: &str) {
 /// environment. Neither the report (with every diagnostic, the keeper's tree
 /// reports and the inspection's last error), nor the warnings, may contain
 /// that value. The test checks that the sibling was alive across the run, that
-/// cleanup took at least one marker reading, and that the value is readable
+/// cleanup took at least one marker reading and that a reading of this run's
+/// token examined the sibling (a test-only record of the pids the production
+/// reader looked at), and that the value is readable
 /// where cleanup reads (`ps -Eww` on macOS, `/proc` on Linux), so a pass means
 /// delega dropped the value rather than never saw it.
 #[tokio::test]
@@ -151,9 +153,20 @@ async fn environment_text_read_by_cleanup_never_reaches_the_report_or_its_diagno
     );
 
     let s = Scratch::new();
-    let report = ProcessHandle::start(kept(sh(&s, "exit 0", Duration::from_secs(60))))
+    // The run's own token is the last element of the marker its child holds.
+    let script = format!("record marker \"${MARKER_ENV}\"; exit 0");
+    let report = ProcessHandle::start(kept(sh(&s, &script, Duration::from_secs(60))))
         .wait()
         .await;
+    let recorded =
+        std::fs::read_to_string(s.path("marker")).expect("the child recorded its marker");
+    let token = recorded
+        .trim_end()
+        .rsplit(':')
+        .next()
+        .filter(|t| !t.is_empty())
+        .expect("the child holds a run marker")
+        .to_owned();
 
     assert!(
         is_running(pid as i32),
@@ -167,6 +180,10 @@ async fn environment_text_read_by_cleanup_never_reaches_the_report_or_its_diagno
     assert!(
         stats.marker_readings > 0,
         "cleanup took no marker reading, so it never read the sibling's environment"
+    );
+    assert!(
+        crate::process::marker::examined::contains(&token, pid as i32),
+        "no marker reading of this run examined the sibling, so the test proves nothing"
     );
     let keeper = report
         .diagnostics

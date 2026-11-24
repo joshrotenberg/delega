@@ -136,8 +136,12 @@ pub(crate) async fn marked(
                 // of the process whose environment carried the marker; a pid
                 // replaced in between gets no start time, and then no signal.
                 let before = super::sys::start_ticks(pid);
-                let marked = std::fs::read(format!("/proc/{pid}/environ"))
-                    .is_ok_and(|block| environ_has(&block, &token));
+                let block = std::fs::read(format!("/proc/{pid}/environ"));
+                #[cfg(test)]
+                if block.is_ok() {
+                    examined::note(&token, &[pid]);
+                }
+                let marked = block.is_ok_and(|block| environ_has(&block, &token));
                 let after = super::sys::start_ticks(pid);
                 let ticks = before.filter(|t| after == Some(*t));
                 marked.then_some((pid, started, stopped, ticks))
@@ -185,6 +189,8 @@ pub(crate) fn parse_marked(
     own_pid: u32,
 ) -> Result<Vec<MarkedRow>, InspectError> {
     let mut marked = Vec::new();
+    #[cfg(test)]
+    let mut parsed_pids = Vec::new();
     let mut seen_own = false;
     let mut lines = 0usize;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -201,6 +207,8 @@ pub(crate) fn parse_marked(
                 "the marker listing had a line that could not be parsed".into(),
             ));
         };
+        #[cfg(test)]
+        parsed_pids.push(pid);
         if u32::try_from(pid).is_ok_and(|p| p == own_pid) {
             seen_own = true;
         }
@@ -227,7 +235,38 @@ pub(crate) fn parse_marked(
             "the marker listing does not contain this process".into(),
         ));
     }
+    #[cfg(test)]
+    examined::note(token, &parsed_pids);
     Ok(marked)
+}
+
+/// Test-only record of which processes a marker reading examined, per run
+/// token: on Linux each pid whose `/proc/<pid>/environ` the reader read, on
+/// macOS each pid of a `ps -E` listing that parsed. It holds pids only, never
+/// environment text, and is not compiled outside tests.
+#[cfg(test)]
+pub(crate) mod examined {
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::{Mutex, OnceLock};
+
+    fn table() -> &'static Mutex<HashMap<String, BTreeSet<i32>>> {
+        static TABLE: OnceLock<Mutex<HashMap<String, BTreeSet<i32>>>> = OnceLock::new();
+        TABLE.get_or_init(Default::default)
+    }
+
+    pub(crate) fn note(token: &str, pids: &[i32]) {
+        let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
+        table
+            .entry(token.to_owned())
+            .or_default()
+            .extend(pids.iter().copied());
+    }
+
+    /// Whether a marker reading for `token` examined `pid`.
+    pub(crate) fn contains(token: &str, pid: i32) -> bool {
+        let table = table().lock().unwrap_or_else(|e| e.into_inner());
+        table.get(token).is_some_and(|pids| pids.contains(&pid))
+    }
 }
 
 #[cfg(test)]
@@ -320,11 +359,30 @@ mod tests {
         )
     }
 
-    fn assert_no_secret(error: InspectError) {
+    fn assert_no_secret(error: &InspectError) {
         assert!(
             !error.to_string().contains(SECRET) && !format!("{error:?}").contains(SECRET),
             "the error carries listing text ({} bytes of it)",
             SECRET.len()
+        );
+    }
+
+    /// The error of a call that must fail, without formatting what it returned
+    /// when it did not.
+    fn failure<T>(result: Result<T, InspectError>, what: &str) -> InspectError {
+        match result {
+            Ok(_) => panic!("{what} succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    /// Assert the error is a failed inspection whose message holds `kind`,
+    /// without printing the message (a regression could put listing text in
+    /// it).
+    fn assert_kind(error: &InspectError, kind: &str) {
+        assert!(
+            matches!(error, InspectError::Failed(message) if message.contains(kind)),
+            "the error is not the failed inspection that says {kind:?}"
         );
     }
 
@@ -334,16 +392,19 @@ mod tests {
             "{}  15 S    SECRET={SECRET} cannot be parsed\n",
             listing_with_secret()
         );
-        let error = parse_marked(&text, T, 13).expect_err("a line that cannot be parsed");
-        assert!(error.to_string().contains("could not be parsed"), "{error}");
-        assert_no_secret(error);
+        let error = failure(parse_marked(&text, T, 13), "parsing a broken listing");
+        assert_no_secret(&error);
+        assert_kind(&error, "could not be parsed");
     }
 
     #[test]
     fn a_marker_listing_without_this_process_does_not_quote_the_listing_in_the_error() {
-        let error = parse_marked(&listing_with_secret(), T, 99).expect_err("no own process");
-        assert!(error.to_string().contains("this process"), "{error}");
-        assert_no_secret(error);
+        let error = failure(
+            parse_marked(&listing_with_secret(), T, 99),
+            "parsing a listing without this process",
+        );
+        assert_no_secret(&error);
+        assert_kind(&error, "this process");
     }
 
     fn printing(script: &str) -> tokio::process::Command {
@@ -360,10 +421,10 @@ mod tests {
             )),
             1 << 20,
         )
-        .await
-        .expect_err("a listing that exits non-zero");
-        assert!(error.to_string().contains("exit"), "{error}");
-        assert_no_secret(error);
+        .await;
+        let error = failure(error, "a listing that exits non-zero");
+        assert_no_secret(&error);
+        assert_kind(&error, "exit");
     }
 
     #[tokio::test]
@@ -374,9 +435,9 @@ mod tests {
             )),
             64,
         )
-        .await
-        .expect_err("a listing over the bound");
-        assert!(error.to_string().contains("too large"), "{error}");
-        assert_no_secret(error);
+        .await;
+        let error = failure(error, "a listing over the bound");
+        assert_no_secret(&error);
+        assert_kind(&error, "too large");
     }
 }
