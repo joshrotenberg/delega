@@ -392,6 +392,9 @@ async fn processes_outside_the_childs_tree_are_never_adopted_or_signalled() {
         assert!(is_running(*pid), "foreign process {pid} did not start");
     }
 
+    // Confirmed depends on the exit-time listing seeing the detached
+    // descendant before its middle parent exits; a late or failed exit listing
+    // leaves cleanup Unconfirmed.
     let s = Scratch::new();
     let spec = leader_with_a_live_middle_process(&s, "exit 0");
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
