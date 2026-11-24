@@ -392,7 +392,7 @@ A problem blocks `run` only where a run would be refused or fail for it;
 | `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`; Claude runs are refused. Other managed settings are informational. |
 | `config_unreadable`, `config_invalid` | `run` | The configuration file cannot be used. The rest of the report is given as if there were no file. |
 | `invalid_env_name`, `forbidden_env_name` | `run` | A name in the file's `[env]` that `--env` would refuse. |
-| `process_inspection_unavailable` | `cleanup` | Process listing failed, so no cleanup can be confirmed. Runs still start. |
+| `process_inspection_unavailable` | `cleanup` | A sample process listing failed; a cleanup whose listings fail the same way is not confirmed. Runs still start. |
 
 Another refusal a run would give while being built is reported under its own
 kind and blocks `run`. A provider is `ready` when nothing blocks `run` for it.

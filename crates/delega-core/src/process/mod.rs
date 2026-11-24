@@ -335,21 +335,32 @@
 //! A process listing that is empty, that does not contain this process, or
 //! that has a line that cannot be parsed is a failed inspection, never "nothing
 //! found", so it cannot confirm cleanup. On Linux one shape of unparsable row
-//! lets the listing be taken again instead: `<pid> 0 4294967295 X<flags>
-//! <start time>`, which `ps` can print for a task that is exiting, or that an
-//! exec from another thread of its process has just replaced (ppid 0, and pgid
-//! -1 printed as unsigned). When every unparsable line of a listing has
-//! exactly that shape, the same listing is taken again, at most
-//! `EXITING_ROW_RETRIES` (2) more times and only within one `PS_TIMEOUT` of
-//! the first one's start, and the first fresh listing in which every row
-//! parses is used; otherwise the listing fails with the error that quotes the
-//! line. The retry verifies only that a fresh, complete listing parses. The
-//! row is never skipped, and it does not prove its pid is gone: an exec from
-//! a non-leader thread hands the leader's pid and start time to the thread
-//! that called it, so the pid can still name a live process. Retries are
-//! counted in `inspection.exiting_row_retries`. A listing is also not an
-//! instant: `ps` reads `/proc` one pid after another, so a process that takes
-//! a pid the read has already passed is not in that listing.
+//! lets the listing be taken again instead: `<pid> 0 4294967295 X <start
+//! time>` or the same with `X+`, which `ps` was seen to print for a task that
+//! is exiting, or that an exec from another thread of its process has just
+//! replaced (ppid 0, and pgid -1 printed as unsigned). Only a listing that has
+//! rows, holds this process, and whose every unparsable line has exactly that
+//! shape, with a complete start time in the C locale, is taken again; a start
+//! time printed in another locale leaves the listing failed without a retry.
+//! It is taken again at most once (`EXITING_ROW_RETRIES`), against one
+//! absolute deadline, the inspection's start plus `PS_TIMEOUT`: the retry
+//! starts only before it, and its result is used only if it arrives before
+//! it. The retry verifies only that a fresh, complete listing passes the same
+//! validation. The row is never skipped, and it does not prove its pid is
+//! gone: an exec from a non-leader thread hands the leader's pid and start
+//! time to the thread that called it, so the pid can still name a live
+//! process. When the retry is not started, is discarded at the deadline, or
+//! shows the same signature again, cleanup keeps the error that quotes the
+//! row; a retry that fails differently supplies its own error. Retries
+//! started, including discarded ones, are counted in
+//! `inspection.exiting_row_retries`. A retried listing before the first
+//! signal is taken later, so that signal can come up to one listing's time
+//! later, within the existing stop budget; a leader that exits in that
+//! interval is reported by its natural exit. Ownership and the checks before
+//! a signal are unchanged. `delega doctor` takes one sample listing and does
+//! not retry it, so its failure describes that sample. A listing is also not
+//! an instant: `ps` reads `/proc` one pid after another, so a process that
+//! takes a pid the read has already passed is not in that listing.
 //!
 //! The environment variable `DELEGA_TEST_NO_PROCESS_LISTING` is a test-only
 //! seam for `acceptance/`: when it is set, whatever its value, no program is
