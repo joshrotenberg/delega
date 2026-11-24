@@ -188,7 +188,7 @@ async fn a_requested_stop_signals_after_the_real_stop_budget_and_is_unconfirmed(
     spec.timings = Timings::production();
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
+    let _reaper = Reaper::new([leader]);
     let asked_at = SystemTime::now();
     let asked = Instant::now();
     handle.interrupt();
@@ -231,7 +231,7 @@ async fn a_natural_exit_with_a_held_listing_signals_after_the_real_exit_budget_a
     let before_start = Instant::now();
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![gc]);
+    let _reaper = Reaper::new([gc]);
     wait_gone_while_held("descendant after a natural exit", gc).await;
     let waited = before_start.elapsed();
     held.release();

@@ -61,7 +61,7 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
     spec.cleanup_deadline = Duration::from_secs(180);
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![gc]);
+    let _reaper = Reaper::new([gc]);
     await_event("the descendant being stopped", || {
         s.path("stopped").exists()
     })
@@ -86,7 +86,7 @@ both!(
         let s = Scratch::new();
         let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
         let leader = s.pid("leader").await;
-        let _reaper = Reaper(vec![leader]);
+        let _reaper = Reaper::new([leader]);
         assert_eq!(
             sys::session_of(leader),
             Some(leader),
@@ -117,7 +117,8 @@ both!(
         let spec = sh(&s, script, LONG).with_lister(held.lister());
         let handle = ProcessHandle::start(spec);
         let leader = s.pid("leader").await;
-        let _reaper = Reaper(vec![leader]);
+        let mut reaper = Reaper::default();
+        let child = reaper.register(leader).expect("identify the child");
         await_event("the child being ready", || s.path("ready").exists()).await;
         held.armed.store(true, Ordering::SeqCst);
         // The stop begins and waits for a listing that is held; the child exits
@@ -128,7 +129,7 @@ both!(
             held.waiting.load(Ordering::SeqCst) >= 1
         })
         .await;
-        sys::signal_process(leader, Signal::USR1).expect("signal the child");
+        assert!(child.signal(Signal::USR1), "signal the child");
         assert_gone("the child after its exit signal", &[leader]).await;
         held.release();
         let report = handle.wait().await;
@@ -151,7 +152,7 @@ both!(
         );
         assert_confirmed(&report);
         let pid = report.pid.expect("it started") as i32;
-        let _reaper = Reaper(vec![pid]);
+        let _reaper = Reaper::new([pid]);
         assert_gone("child after a loop panic", &[pid]).await;
     }
 );
@@ -192,7 +193,7 @@ fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session
         super::fixtures::wait_tracked(&handle, gc).await;
         (handle, gc)
     });
-    let _reaper = Reaper(vec![gc]);
+    let _reaper = Reaper::new([gc]);
     drop(runtime);
     drop(handle);
     let check = tokio::runtime::Builder::new_current_thread()

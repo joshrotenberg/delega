@@ -6,10 +6,11 @@
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
-    is_running, run_guarded, sh,
+    OWN_GROUP, OWN_SESSION, ProcessIdentity, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed,
+    assert_gone, is_running, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
+use crate::process::sys::Signal;
 use crate::process::{Ending, KeeperCommand, ProcessHandle, ProcessSpec};
 
 /// Set in the keeper's environment to make [`keeper_entry`] run the keeper.
@@ -28,6 +29,19 @@ pub(super) fn test_keeper() -> KeeperCommand {
         ],
     )
     .env(ENTRY_ENV, "1")
+}
+
+/// An instance identifiable by its private directory on the command line.
+fn named_keeper(dir: &std::path::Path) -> KeeperCommand {
+    let mut keeper = test_keeper();
+    let path = dir.to_str().expect("a scratch directory named in UTF-8");
+    keeper.args.extend(["--skip".to_owned(), path.to_owned()]);
+    keeper
+}
+
+fn keeper_identity(pid: i32, dir: &std::path::Path) -> Option<ProcessIdentity> {
+    let identity = ProcessIdentity::capture(pid)?;
+    super::fixtures::process_names_path(pid, dir.as_os_str().as_encoded_bytes()).then_some(identity)
 }
 
 /// A spec run through the test keeper.
@@ -177,7 +191,7 @@ async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     let spec = kept(sh(&s, &script, LONG));
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![gc]);
+    let _reaper = Reaper::new([gc]);
     s.exists("ready").await;
     handle.interrupt();
     let report = handle.wait().await;
@@ -222,7 +236,7 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
         .guarded_spawn()
         .expect("start a foreign process");
     let pid = i32::try_from(other.id()).expect("a pid");
-    let _reaper = Reaper(vec![pid]);
+    let _reaper = Reaper::new([pid]);
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watching = done.clone();
     // Stops the watcher however the test ends.
@@ -290,7 +304,7 @@ fn owner_entry() {
         .args(["-c", &script])
         .cwd(&dir)
         .env(crate::process::EnvPolicy::inherit_only(["PATH"]));
-    spec.keeper = Some(test_keeper());
+    spec.keeper = Some(named_keeper(&dir));
     spec.stop_grace = Duration::from_millis(500);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -333,16 +347,20 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
         .guarded_spawn()
         .expect("start the owner");
     let owner_pid = i32::try_from(owner.id()).expect("a pid");
-    let mut pids = Vec::new();
-    for file in ["leader", "group", "session", "stubborn"] {
-        pids.push(s.pid(file).await);
-    }
-    let keeper = parent_of(pids[0]).expect("the program's parent");
+    let leader = s.pid("leader").await;
+    let mut reaper = Reaper::new([leader]);
+    let keeper = parent_of(leader).expect("the program's parent");
     assert_ne!(keeper, owner_pid, "the program's parent must be the keeper");
+    reaper.add(keeper_identity(keeper, &s.dir()));
+    let mut pids = vec![leader];
+    for file in ["group", "session", "stubborn"] {
+        let pid = s.pid(file).await;
+        reaper.register(pid);
+        pids.push(pid);
+    }
     pids.push(keeper);
-    let _reaper = Reaper(pids.clone());
     super::fixtures::wait_own_group(pids[2]).await;
-    let _ = crate::process::sys::signal_process(owner_pid, crate::process::sys::Signal::KILL);
+    let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
     let _ = owner.wait();
     assert_gone("the program, its descendants and the keeper", &pids).await;
 }
@@ -353,12 +371,14 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
 #[tokio::test]
 async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
     let s = Scratch::new();
-    let spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+    spec.keeper = Some(named_keeper(&s.dir()));
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
+    let _reaper = Reaper::new([leader]);
     let keeper = parent_of(leader).expect("the program's parent");
-    let _ = crate::process::sys::signal_process(keeper, crate::process::sys::Signal::KILL);
+    let keeper = keeper_identity(keeper, &s.dir()).expect("identify the keeper");
+    assert!(keeper.signal(Signal::KILL), "signal the keeper");
     let report = handle.wait().await;
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
@@ -442,12 +462,14 @@ async fn a_keeper_that_ends_before_answering_leaves_cleanup_unconfirmed() {
 #[tokio::test]
 async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
     let s = Scratch::new();
-    let spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+    spec.keeper = Some(named_keeper(&s.dir()));
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
-    let _reaper = Reaper(vec![leader]);
+    let _reaper = Reaper::new([leader]);
     let keeper = parent_of(leader).expect("the program's parent");
-    let _ = crate::process::sys::signal_process(keeper, crate::process::sys::Signal::TERM);
+    let keeper = keeper_identity(keeper, &s.dir()).expect("identify the keeper");
+    assert!(keeper.signal(Signal::TERM), "signal the keeper");
     let report = handle.wait().await;
     assert_gone("the program", &[leader]).await;
     match &report.cleanup {
@@ -498,7 +520,7 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
         let owner_pid = i32::try_from(owner.id()).expect("a pid");
         s.exists("beat").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let _ = crate::process::sys::signal_process(owner_pid, crate::process::sys::Signal::KILL);
+        let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
         let _ = owner.wait();
         // The keeper's grace is 0.5 s; give it ample time, then require the
         // heartbeat to have stopped changing.
@@ -612,7 +634,7 @@ async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed
     spec.keeper = None;
     let handle = ProcessHandle::start(spec);
     let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![gc]);
+    let _reaper = Reaper::new([gc]);
     let _ = s.pid("leader").await;
     super::fixtures::wait_tracked(&handle, gc).await;
     handle.interrupt();

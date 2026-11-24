@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use crate::process::sys::{self, Signal};
+#[cfg(not(target_os = "linux"))]
+use crate::process::sys;
+use crate::process::sys::Signal;
 use crate::process::tree::{Lister, list_processes};
 use crate::process::{EnvPolicy, ProcessHandle, ProcessReport, ProcessSpec};
 use crate::test_spawn::Guarded;
@@ -85,14 +87,90 @@ impl Scratch {
     }
 }
 
-/// Stops leftover processes when a test ends, even when it fails, so a failed
-/// assertion does not leave strays on the machine.
-pub(super) struct Reaper(pub(super) Vec<i32>);
+/// The process observed at registration. A pidfd pins the identity on Linux.
+pub(super) struct ProcessIdentity {
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::OwnedFd,
+    #[cfg(not(target_os = "linux"))]
+    pid: i32,
+    #[cfg(not(target_os = "linux"))]
+    started: String,
+}
+
+impl ProcessIdentity {
+    pub(super) fn capture(pid: i32) -> Option<Self> {
+        if pid <= 1 {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::process::{Pid, PidfdFlags, pidfd_open};
+            let fd = pidfd_open(Pid::from_raw(pid)?, PidfdFlags::empty()).ok()?;
+            Some(Self { fd })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(Self {
+                pid,
+                started: process_start(pid)?,
+            })
+        }
+    }
+
+    pub(super) fn signal(&self, signal: Signal) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            rustix::process::pidfd_send_signal(&self.fd, signal).is_ok()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // ps has one-second precision, and the process can exit between
+            // the check and kill. macOS has no pidfd to close that window.
+            process_start(self.pid).as_ref() == Some(&self.started)
+                && sys::signal_process(self.pid, signal).is_ok()
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start(pid: i32) -> Option<String> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env_clear()
+        .env("LC_ALL", "C")
+        .guarded_output()
+        .ok()?;
+    let started = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.status.success() && !started.is_empty()).then(|| started.to_owned())
+}
+
+/// Stops leftover processes when a test ends, even when it fails.
+#[derive(Default)]
+pub(super) struct Reaper(Vec<ProcessIdentity>);
+
+impl Reaper {
+    pub(super) fn new(pids: impl IntoIterator<Item = i32>) -> Self {
+        Self(
+            pids.into_iter()
+                .filter_map(ProcessIdentity::capture)
+                .collect(),
+        )
+    }
+
+    pub(super) fn register(&mut self, pid: i32) -> Option<&ProcessIdentity> {
+        self.0.push(ProcessIdentity::capture(pid)?);
+        self.0.last()
+    }
+
+    pub(super) fn add(&mut self, identity: Option<ProcessIdentity>) {
+        self.0.extend(identity);
+    }
+}
 
 impl Drop for Reaper {
     fn drop(&mut self) {
-        for pid in &self.0 {
-            let _ = sys::signal_process(*pid, Signal::KILL);
+        for process in &self.0 {
+            process.signal(Signal::KILL);
         }
     }
 }
@@ -231,10 +309,12 @@ pub(super) async fn run_guarded(
 ) -> (ProcessReport, Vec<i32>, Reaper) {
     let handle = ProcessHandle::start(spec);
     let mut pids = Vec::new();
+    let mut reaper = Reaper::default();
     for file in files {
-        pids.push(scratch.pid(file).await);
+        let pid = scratch.pid(file).await;
+        reaper.register(pid);
+        pids.push(pid);
     }
-    let reaper = Reaper(pids.clone());
     (handle.wait().await, pids, reaper)
 }
 
@@ -437,11 +517,23 @@ fn a_stat_line_with_a_name_that_is_not_utf8_and_holds_a_parenthesis_is_read() {
     assert_eq!(stat_state_and_start(b"4242 (a\xff"), None);
 }
 
-/// End what a relay case left in `dir`, without signalling a foreign process:
-/// on Linux every process [`case_processes`] finds, each through a pidfd
-/// opened and then checked to still name `dir` on its command line; elsewhere the pid in the heartbeat file,
-/// only while `ps` shows it is the relay's `perl`. Repeats until nothing is
-/// left or 5 s pass.
+pub(super) fn process_names_path(pid: i32, path: &[u8]) -> bool {
+    #[cfg(target_os = "linux")]
+    let command = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
+    #[cfg(not(target_os = "linux"))]
+    let command = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .env_clear()
+        .guarded_output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| out.stdout);
+    command.is_some_and(|command| holds_path(&command, path))
+}
+
+/// End the relay processes whose command lines name the case directory.
+/// Linux signals through a pidfd. Elsewhere the heartbeat supplies a candidate
+/// PID and the start time must still match. Retry for up to five seconds.
 pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(5) {
@@ -455,18 +547,10 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
             }
             let names = path_names(dir).unwrap_or_default();
             for pid in left {
-                let Some(raw) = rustix::process::Pid::from_raw(pid) else {
-                    continue;
-                };
-                let Ok(fd) = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())
-                else {
-                    continue;
-                };
-                let still_here = std::fs::read(format!("/proc/{pid}/cmdline"))
-                    .ok()
-                    .is_some_and(|cmdline| names.iter().any(|name| holds_path(&cmdline, name)));
-                if still_here {
-                    let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
+                if let Some(process) = ProcessIdentity::capture(pid)
+                    && names.iter().any(|name| process_names_path(pid, name))
+                {
+                    process.signal(Signal::KILL);
                 }
             }
         }
@@ -484,15 +568,10 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
             if let Some(pid) = std::fs::read_to_string(&beat)
                 .ok()
                 .and_then(|t| t.trim().parse::<i32>().ok())
+                && let Some(process) = ProcessIdentity::capture(pid)
+                && process_names_path(pid, dir.as_os_str().as_encoded_bytes())
             {
-                let command = std::process::Command::new("/bin/ps")
-                    .args(["-o", "command=", "-p", &pid.to_string()])
-                    .guarded_output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
-                if command.contains("perl") {
-                    let _ = sys::signal_process(pid, Signal::KILL);
-                }
+                process.signal(Signal::KILL);
             }
         }
         tokio::time::sleep(Duration::from_millis(2)).await;

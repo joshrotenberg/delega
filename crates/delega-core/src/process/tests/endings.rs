@@ -209,7 +209,7 @@ async fn dropping_the_handle_stops_the_child_and_its_descendants() {
     ));
     let leader = s.pid("leader").await;
     let gc = s.pid("gc").await;
-    let _reaper = Reaper(vec![leader, gc]);
+    let _reaper = Reaper::new([leader, gc]);
     drop(handle);
     assert_gone(
         "child and grandchild after the handle was dropped",
@@ -230,7 +230,7 @@ both!(
             _ = &mut future => panic!("the run should still be going"),
             pid = s.pid("leader") => pid,
         };
-        let _reaper = Reaper(vec![leader]);
+        let _reaper = Reaper::new([leader]);
         drop(future);
         assert_gone("leader after the run future was dropped", &[leader]).await;
     }
@@ -253,7 +253,7 @@ fn shutting_down_the_runtime_kills_the_group_of_a_running_child() {
         let gc = s.pid("gc").await;
         (handle, leader, gc)
     });
-    let _reaper = Reaper(vec![leader, gc]);
+    let _reaper = Reaper::new([leader, gc]);
     drop(runtime);
     drop(handle);
     let check = tokio::runtime::Builder::new_current_thread()
