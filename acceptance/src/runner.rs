@@ -610,7 +610,7 @@ fn judge(m: &mut Measured, case: &Case, os: &str) {
                 && !m
                     .cleanup_reason
                     .as_deref()
-                    .is_some_and(documented_cleanup_reason)
+                    .is_some_and(delega_core::cleanup_reason::is_documented)
             {
                 m.problems.push(format!(
                     "undocumented unconfirmed cleanup reason: {:?}",
@@ -702,61 +702,6 @@ fn late_listing_with_allowed_survivors(m: &Measured, os: &str) -> bool {
                 process_groups: m.cleanup_groups.clone(),
             })
         })
-}
-
-/// Cleanup can combine the probe and provider reasons with "; ". Match
-/// complete static reasons first because some of them contain that separator.
-fn documented_cleanup_reason(mut reason: &str) -> bool {
-    use delega_core::process::{
-        FINAL_CENSUS_UNPROVEN_REASON, FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON,
-        KEEPER_UNANSWERED_REASON, KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON, NO_REAP_ACK_REASON,
-        NO_SUBREAPER_REASON, PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON, UNVERIFIED_SIGNAL_REASON,
-    };
-    let fixed = [
-        FINAL_CENSUS_UNPROVEN_REASON,
-        FREEZE_INCOMPLETE_REASON,
-        KEEPER_LOST_REASON,
-        KEEPER_UNANSWERED_REASON,
-        KEEPER_UNPROVEN_REASON,
-        LATE_LISTING_REASON,
-        NO_REAP_ACK_REASON,
-        NO_SUBREAPER_REASON,
-        PIPES_HELD_REASON,
-        UNVERIFIED_SIGNAL_REASON,
-    ];
-    loop {
-        let tail = fixed
-            .iter()
-            .find_map(|known| reason.strip_prefix(known))
-            .or_else(|| {
-                let (count, rest) = reason.split_once(' ')?;
-                count.parse::<u32>().ok()?;
-                rest.strip_prefix(TREE_LEFT_AT_REAP_REASON)
-            })
-            .or_else(|| {
-                let rest = reason.strip_prefix("process inspection was unavailable (")?;
-                let (_, rest) = rest.split_once(
-                    "); only the child's process group was checked with kill(-pgid, 0): ",
-                )?;
-                let (_, rest) = rest.split_once(". Descendants outside")?;
-                let tail = rest.strip_prefix(" the group and session could not be checked.")?;
-                Some(tail.strip_prefix(" Descendants seen at the latest scan are listed because they cannot be checked.").unwrap_or(tail))
-            });
-        match tail {
-            Some("") => return true,
-            Some(rest) => match rest.strip_prefix("; ") {
-                Some(next) => reason = next,
-                None => return false,
-            },
-            None => {
-                return reason.strip_prefix("stopping was not confirmed within ")
-                    .and_then(|text| text.split_once(": "))
-                    .is_some_and(|(wait, detail)| !wait.is_empty() && !detail.is_empty())
-                    || reason.split_once("; a best-effort SIGKILL was sent to the process group but no check confirmed it").is_some_and(|(why, _)| !why.is_empty())
-                    || matches!(reason, "the run task panicked; the provider process, if one started, was sent an interrupt but nothing confirmed it stopped" | "the runtime shut down before the run finished; the provider process, if one started, was sent an interrupt but nothing confirmed it stopped");
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -973,11 +918,21 @@ mod judge_tests {
         m.cleanup_reason = Some("could not be checked".into());
         judge(&mut m, &case, "macos");
         assert_eq!(m.verdict, "fail");
-        assert!(documented_cleanup_reason(&format!(
-            "{LATE_LISTING_REASON}; {PIPES_HELD_REASON}"
-        )));
-        assert!(!documented_cleanup_reason(&format!(
-            "{LATE_LISTING_REASON}; unknown reason"
-        )));
+
+        m.problems.clear();
+        m.cleanup_reason = Some(format!("{LATE_LISTING_REASON}; unknown reason"));
+        judge(&mut m, &case, "macos");
+        assert!(m.problems[0].starts_with("undocumented unconfirmed cleanup reason"));
+
+        m.problems.clear();
+        m.cleanup_reason = Some(format!("{LATE_LISTING_REASON}; {PIPES_HELD_REASON}"));
+        judge(&mut m, &case, "macos");
+        assert!(
+            !m.problems
+                .iter()
+                .any(|p| p.starts_with("undocumented unconfirmed cleanup reason")),
+            "{:?}",
+            m.problems
+        );
     }
 }
