@@ -24,6 +24,9 @@ pub enum Ack {
     /// write deadline, and is waiting for the print thread to say how the
     /// write ended.
     ResultStopRequested,
+    /// The result writer saw the stop request and abandoned the rest of the
+    /// write, with bytes left unwritten.
+    ResultWriteStopped,
 }
 
 #[cfg(debug_assertions)]
@@ -37,6 +40,7 @@ mod hooks {
     const fn variable(ack: Ack) -> &'static str {
         match ack {
             Ack::ResultStopRequested => "DELEGA_TEST_ACK_RESULT_STOP_REQUESTED",
+            Ack::ResultWriteStopped => "DELEGA_TEST_ACK_RESULT_WRITE_STOPPED",
         }
     }
 

@@ -118,6 +118,7 @@ pub fn write_unless_stopped(bytes: &[u8], stop: &Stop) -> Option<Written> {
     while !rest.is_empty() {
         if stop.requested.load(Ordering::SeqCst) {
             stop.stopped.store(true, Ordering::SeqCst);
+            super::ack::acknowledge(super::ack::Ack::ResultWriteStopped);
             return None;
         }
         let mut fds = [PollFd::new(&out, PollFlags::OUT)];

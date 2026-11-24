@@ -555,18 +555,22 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
     // writes a large result, standard error is full so delega stays alive a
     // while after deciding its status, a signal arrives, and standard output is
     // drained later. The signal asks the write to stop before anything is
-    // drained, and the write is megabytes from its end, so the reader must get
-    // less than a whole result and delega must exit 130. A whole result, or
-    // exit 0, means the write was not cancelled or the status ignored it.
+    // drained, and the write is megabytes from its end, so the writer must
+    // abandon it (it says so through DELEGA_TEST_ACK_RESULT_WRITE_STOPPED), the
+    // reader must get less than a whole result and delega must exit 130. Exit
+    // 130 with a partial result alone is not enough: delega's own deadline for
+    // the print thread gives that too, with a writer that ignored the stop.
     for provider in PROVIDERS {
         let rig = Rig::new();
         let (stderr_reader, stderr_writer) = guarded_pipe().expect("a pipe");
         fill(&stderr_writer);
         let stop_requested = rig.path("stop-requested");
+        let write_stopped = rig.path("write-stopped");
         let mut child = Reaped(Some(
             rig.command()
                 .args(rig.run_args(provider, "large", &["--output", "json"]))
                 .env("DELEGA_TEST_ACK_RESULT_STOP_REQUESTED", &stop_requested)
+                .env("DELEGA_TEST_ACK_RESULT_WRITE_STOPPED", &write_stopped)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::from(stderr_writer))
                 .guarded_spawn()
@@ -577,12 +581,9 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         // writing it, and blocks once the pipe is full.
         wait_readable(&stdout, Duration::from_secs(120));
         signal(child.id(), "TERM");
-        // delega has taken the signal and asked the write to stop. The
-        // acknowledgement is made before delega starts its wait of up to 1 s
-        // for the print thread, and the full standard error holds it alive
-        // about a second more, so the drain below begins at once, while the
-        // writer could still resume: a writer that ignored the stop would
-        // finish the result and fail the test.
+        // delega has taken the signal and asked the write to stop; the reader
+        // then drains while delega is still alive, held by its full standard
+        // error.
         wait_for_ack(
             &stop_requested,
             &mut child,
@@ -604,6 +605,15 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         let stderr = stderr.join().expect("stderr reader");
         let result: Option<delega_core::contract::result::RunResult> =
             serde_json::from_slice(&delivered).ok();
+        // Written by the writer itself, before it returns, at the one place it
+        // abandons the rest of the write.
+        assert!(
+            write_stopped.exists(),
+            "{provider}: the result writer never abandoned the write it was asked \
+             to stop (exit {:?}, {} bytes delivered)",
+            status.code(),
+            delivered.len()
+        );
         match (status.code(), result) {
             (Some(130), None) => {}
             (code, result) => panic!(
