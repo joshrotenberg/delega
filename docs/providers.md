@@ -282,9 +282,9 @@ Listed directories get a scoped Read rule without `--add-dir`. A directory
 inside a writable location stays writable by commands.
 `permissions.commands` must be empty. Managed sandbox settings can override
 these grants and restrictions ([Managed settings](#managed-settings)). When a
-managed source sets a `sandbox` key, or exists and was not read completely,
-the plan carries a note naming it, and `permissions.strict` refuses the run
-([Strict](#strict)).
+managed source sets a recognized `sandbox` key, or exists and was not read
+completely and so may widen the run, the plan carries a note naming it, and
+`permissions.strict` refuses the run ([Strict](#strict)).
 
 ### Commands and directories
 
@@ -389,17 +389,26 @@ guard when it can resolve an absolute path.
 Claude Code applies managed settings above the `--settings` block delega
 passes. While planning a `read`, `write` or `build` run, delega reads the
 managed sources [doctor](#managed-settings) reports and names each one that
-can widen the run:
+can or may widen the run:
 
 - one that sets `permissions.allow`, which can grant what the mode does not;
-- in `build`, one that sets a `sandbox` key, which can disable or loosen the
-  sandbox delega passes;
+- in `build`, one that sets a recognized `sandbox` key (the `sandbox` row of
+  the [Claude Code keys](#managed-settings) table; another key under
+  `sandbox`, such as `sandbox.filesystem.denyWrite`, is not checked), which
+  can disable or loosen the sandbox delega passes;
 - one that exists and was not read completely (`not_inspected`, `unreadable`
-  or `partly_read`), such as the managed preferences file, since it can set
-  either. `managed-mcp.json` holds no settings keys and is not counted.
+  or `partly_read`), such as the managed preferences file or a directory that
+  cannot be listed. It may set either kind of key, so it may widen the run.
+  `managed-mcp.json` holds no settings keys and is not counted.
+
+The users' managed preferences under `/Library/Managed Preferences` are one
+source, named by that directory only, never by a user. Only the current
+user's file applies, and delega does not tell which user a file belongs to,
+so the check can refuse conservatively on another user's file.
 
 Each source is one part of the `permissions_not_enforceable` message, with
-its path and key names, or why it was not read. Values are never read. Without
+its path and key names, or why it was not read. Values are never reported.
+Without
 `permissions.strict` the run goes ahead and each source is a provider note
 starting `managed settings can widen this run:`. `full` asks for no scope and no
 sandbox, so it is not checked. A managed `hooks` key and settings Claude Code
@@ -856,8 +865,8 @@ blocking problem for the same condition. See the
 [Claude Code managed MCP reference](https://code.claude.com/docs/en/managed-mcp#servers-passed-with---mcp-config-or---strict-mcp-config).
 
 Claude planning also notes, and with `permissions.strict` refuses, a managed
-source that sets `permissions.allow`, a `sandbox` key in `build`, or that was
-not read completely ([Strict](#strict)).
+source that sets `permissions.allow`, a recognized `sandbox` key in `build`,
+or that was not read completely and so may widen the run ([Strict](#strict)).
 
 **Sources looked for.** Windows is out of scope.
 
@@ -874,7 +883,7 @@ not read completely ([Strict](#strict)).
 | Read state or limit | What doctor reports |
 | --- | --- |
 | `read` | A parsed source. Empty Claude settings and drop-ins count as empty objects. |
-| `unreadable` | An unreadable, non-regular or invalid source, or a file over 4 MiB. Claude settings require an object root. |
+| `unreadable` | An unreadable, non-regular or invalid source, or a file over 4 MiB. A location that cannot be looked at for a reason other than absence, such as a directory that denies search, or a preferences directory that cannot be listed, is reported this way, not left out. Claude settings require an object root. |
 | `not_inspected` | Managed preferences are present. Doctor does not inspect their contents. |
 | `partly_read` | Some drop-ins were unreadable or a scan limit was reached. A changing file may also be reported this way without keys. |
 | 64 drop-in files, 4,096 directory entries, 4 MiB aggregate | Reaching a drop-in scan limit reports `limit_reached`. |

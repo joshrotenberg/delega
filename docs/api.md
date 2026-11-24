@@ -86,10 +86,12 @@ and what each provider cannot enforce is in
 `strict` refuses every Codex `read`, `write` and `build` request, and a Claude
 Code `build` request or `permissions.commands` without a command guard. It
 also refuses a Claude Code `read`, `write` or `build` request when a managed
-settings source sets `permissions.allow`, sets a `sandbox` key (`build` only),
-or exists and was not read completely, such as the managed preferences file;
-the part names the source path and the key names, never values
-([Strict](providers.md#strict)). The
+settings source sets `permissions.allow`, sets a recognized `sandbox` key
+(`build` only), or exists and was not read completely and so may widen the
+run, such as the managed preferences file. A user's managed preferences file
+refuses even when it is another user's, since delega does not tell whose it
+is. The part names the source path and the key names; values are never
+reported ([Strict](providers.md#strict)). The
 refusal message reads `permissions.strict is set and <provider> cannot enforce
 these permissions as stated: <part>; <part>`. A dry run gives the same refusal.
 
@@ -394,7 +396,7 @@ A problem blocks `run` only where a run would be refused or fail for it;
 | `sandbox_unavailable` | `build` | On Linux, `bwrap` or `socat` was not found on the worker's `PATH`, so Claude `build` runs usually fail at startup; on a system other than macOS and Linux, Claude Code has no sandbox. The message names what is missing. |
 | `settings_unreadable` | `run` | A Claude Code settings file read for deny rules cannot be used. The message names it. |
 | `deny_rules_over_limit` | `run` | The deny rules are over a bound. |
-| `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`; Claude runs are refused. Doctor reports other managed settings for information; a Claude run with `permissions.strict` is refused when they can widen it ([Strict](providers.md#strict)). |
+| `managed_mcp_exclusive` | `run` | A readable, parsing Claude Code `managed-mcp.json` conflicts with `--strict-mcp-config`; Claude runs are refused. Doctor reports other managed settings for information; a Claude run with `permissions.strict` is refused when they can or may widen it ([Strict](providers.md#strict)). |
 | `config_unreadable`, `config_invalid` | `run` | The configuration file cannot be used. The rest of the report is given as if there were no file. |
 | `invalid_env_name`, `forbidden_env_name` | `run` | A name in the file's `[env]` that `--env` would refuse. |
 | `process_inspection_unavailable` | `cleanup` | A sample process listing failed; a cleanup whose listings fail the same way is not confirmed. Runs still start. |

@@ -196,20 +196,30 @@ impl SystemPaths {
 
     /// What is at `path`, a fixed location: nothing, something that may be
     /// opened, or something that may not (a link out of an injected root, or
-    /// one that points nowhere). Under an injected root the directory holding
-    /// the path must itself be inside, or the answer is nothing.
+    /// one that points nowhere, or a path that cannot be looked at for a reason
+    /// other than absence, such as a directory that denies search). Under an
+    /// injected root the directory holding the path must itself be inside, or
+    /// the answer is nothing.
     fn presence(&self, path: &Path) -> Presence {
         if self.injected() && !path.parent().is_some_and(|dir| self.inside(dir)) {
             return Presence::Absent;
         }
-        if std::fs::symlink_metadata(path).is_err() {
-            Presence::Absent
-        } else if self.inside(path) {
-            Presence::Usable
-        } else {
-            Presence::Unusable
+        match std::fs::symlink_metadata(path) {
+            Err(error) if is_absence(&error) => Presence::Absent,
+            Err(_) => Presence::Unusable,
+            Ok(_) if self.inside(path) => Presence::Usable,
+            Ok(_) => Presence::Unusable,
         }
     }
+}
+
+/// Whether an error says that nothing is at a path. Any other error, such as
+/// a denied permission, leaves open that something is there.
+fn is_absence(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,7 +578,9 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
 /// passes. A managed `permissions.allow` can grant what the mode does not, in
 /// `read`, `write` and `build`; in `build` a managed `sandbox` key can disable
 /// or loosen the sandbox delega passes. A source that exists and was not read
-/// completely can hold either, so it is named too. The managed MCP file holds
+/// completely may hold either, so it is named too; for the users' managed
+/// preferences that is conservative, since only the current user's file
+/// applies and which one that is goes unchecked. The managed MCP file holds
 /// no settings keys and is left out. `full` grants the built-in tools without
 /// a scope and asks for no sandbox, so nothing managed can widen it.
 ///
@@ -598,20 +610,44 @@ pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String
                 .collect();
             let unread = match source.state {
                 ManagedSourceState::Read => None,
-                ManagedSourceState::PartlyRead => Some("it was only partly read"),
-                ManagedSourceState::Unreadable => Some("it could not be read or parsed"),
+                ManagedSourceState::PartlyRead => Some("was only partly read"),
+                ManagedSourceState::Unreadable => Some("could not be read or parsed"),
                 ManagedSourceState::NotInspected => {
-                    Some("delega does not open managed preferences")
+                    Some("is managed preferences, which delega does not open")
                 }
             };
+            if source.kind == ManagedSourceKind::UserManagedPreferences {
+                // Only the current user's file applies, and which directory
+                // is the current user's is not looked into: no user is named,
+                // and the check may refuse on another user's file.
+                let what = if source.state == ManagedSourceState::NotInspected {
+                    format!(
+                        "holds a managed preferences file in a user's directory; only the \
+                         current user's applies and delega does not tell whose it is, so it \
+                         may set {could}"
+                    )
+                } else {
+                    format!(
+                        "could not be listed completely, so it may hold the current user's \
+                         managed preferences file, which may set {could}"
+                    )
+                };
+                return Some(format!(
+                    "the managed source {} {what}, and Claude Code applies managed settings \
+                     above the settings delega passes",
+                    source.path
+                ));
+            }
             let what = match (keys.is_empty(), unread) {
                 (true, None) => return None,
                 (false, None) => format!("sets {}", keys.join(", ")),
-                (true, Some(why)) => format!("was not read ({why}), so it may set {could}"),
-                (false, Some(why)) => format!(
-                    "sets {} and was not read completely ({why}), so it may set more {could}",
-                    keys.join(", ")
-                ),
+                (true, Some(why)) => format!("{why}, so it may set {could}"),
+                (false, Some(why)) => {
+                    format!(
+                        "sets {} and {why}, so it may set more {could}",
+                        keys.join(", ")
+                    )
+                }
             };
             Some(format!(
                 "the managed source {} {what}, and Claude Code applies managed settings above the \
@@ -1159,8 +1195,24 @@ fn preferences(
     if !system.inside(&dir) {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if is_absence(&error) => return,
+        // The directory is there and cannot be listed. The provider opens the
+        // current user's file by its known path, which needs no listing, so
+        // the users' files are one source that could not be read.
+        Err(_) => {
+            found.push(ManagedSource {
+                path: dir.display().to_string(),
+                kind: ManagedSourceKind::UserManagedPreferences,
+                state: ManagedSourceState::Unreadable,
+                files: None,
+                note: Some(USER_PREFERENCES_NOTE.to_string()),
+                keys: Vec::new(),
+                other_keys: 0,
+            });
+            return;
+        }
     };
     let mut counts = ManagedFileCounts {
         found: 0,

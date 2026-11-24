@@ -91,7 +91,7 @@ fn text(path: &std::path::Path) -> String {
 }
 
 #[test]
-fn managed_sandbox_keys_refuse_strict_build_and_are_named() {
+fn strict_builds_existing_refusal_also_names_the_managed_sandbox_keys() {
     let setup = Setup::new(Platform::Macos);
     let path = setup.write(
         &format!("{MAC_CLAUDE}/managed-settings.json"),
@@ -99,8 +99,17 @@ fn managed_sandbox_keys_refuse_strict_build_and_are_named() {
             r#"{{"sandbox":{{"enabled":false,"allowUnsandboxedCommands":true,"excludedCommands":["{SECRET}"]}}}}"#
         ),
     );
+    // Claude build with strict is refused for command reads whatever is
+    // managed; the managed keys are added to that same refusal.
     let refusal = setup.refusal(Mode::Build);
     assert_eq!(refusal.kind, "permissions_not_enforceable");
+    assert!(
+        refusal
+            .message
+            .contains("reads by commands are not confined"),
+        "{}",
+        refusal.message
+    );
     let entry = format!(
         "the managed source {} sets sandbox.enabled, sandbox.allowUnsandboxedCommands, \
          sandbox.excludedCommands, and Claude Code applies managed settings above the settings \
@@ -213,7 +222,7 @@ fn managed_preferences_refuse_strict_because_they_are_not_read() {
     assert_eq!(refusal.kind, "permissions_not_enforceable");
     assert!(
         refusal.message.contains(&format!(
-            "the managed source {} was not read (delega does not open managed preferences), so \
+            "the managed source {} is managed preferences, which delega does not open, so \
              it may set permissions.allow,",
             text(&path)
         )),
@@ -243,7 +252,7 @@ fn a_managed_settings_file_that_does_not_parse_refuses_strict() {
     assert_eq!(refusal.kind, "permissions_not_enforceable");
     assert!(
         refusal.message.contains(&format!(
-            "the managed source {} was not read (it could not be read or parsed)",
+            "the managed source {} could not be read or parsed, so it may set",
             text(&path)
         )),
         "{}",
@@ -266,7 +275,7 @@ fn a_managed_settings_file_that_cannot_be_opened_refuses_strict() {
     assert!(
         refusal
             .message
-            .contains("was not read (it could not be read or parsed)"),
+            .contains("could not be read or parsed, so it may set"),
         "{}",
         refusal.message
     );
@@ -298,16 +307,134 @@ fn a_read_managed_file_without_widening_keys_and_an_unreadable_mcp_file_do_not_r
 }
 
 #[test]
-fn managed_settings_do_not_touch_a_codex_run() {
+fn claude_managed_settings_add_no_note_to_a_codex_run() {
     let setup = Setup::new(Platform::Macos);
     setup.write(
         &format!("{MAC_CLAUDE}/managed-settings.json"),
         r#"{"permissions":{"allow":["Bash"]}}"#,
     );
+    setup.write(
+        &format!("{PREFERENCES}/com.anthropic.claudecode.plist"),
+        "x",
+    );
     let mut options = setup.rig.options(Provider::Codex);
     options.system_paths = setup.options().system_paths;
     let mut request = setup.rig.request(Provider::Codex, "p");
-    request.permissions.mode = Mode::Full;
-    request.permissions.strict = true;
-    dry_run(&request, &options).expect("codex full with strict runs");
+    request.permissions.mode = Mode::Read;
+    let notes = dry_run(&request, &options)
+        .expect("codex read without strict runs")
+        .notes;
+    assert!(!notes.iter().any(|n| n.starts_with(NOTE)), "{notes:?}");
+}
+
+#[test]
+fn a_users_managed_preferences_refuse_strict_without_naming_the_user() {
+    let setup = Setup::new(Platform::Macos);
+    let user = "sentinel-user-7731";
+    setup.write(
+        &format!("{PREFERENCES}/{user}/com.anthropic.claudecode.plist"),
+        SECRET,
+    );
+    let dir = setup.root.path().join(PREFERENCES);
+    let refusal = setup.refusal(Mode::Read);
+    assert_eq!(refusal.kind, "permissions_not_enforceable");
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} holds a managed preferences file in a user's directory; only \
+             the current user's applies and delega does not tell whose it is, so it may set \
+             permissions.allow,",
+            text(&dir)
+        )),
+        "{}",
+        refusal.message
+    );
+    assert!(!refusal.message.contains(user), "{}", refusal.message);
+    assert!(!refusal.message.contains(SECRET), "{}", refusal.message);
+}
+
+/// Restores a directory's mode when a test ends, so the temporary root can be
+/// removed.
+struct Mode0755(PathBuf);
+
+impl Drop for Mode0755 {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Set `dir` to `mode`, or `None` when the caller can list it anyway (a
+/// privileged caller), so the test has nothing to check.
+fn deny_listing(dir: &std::path::Path, mode: u32) -> Option<Mode0755> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    let guard = Mode0755(dir.to_path_buf());
+    std::fs::read_dir(dir).is_err().then_some(guard)
+}
+
+#[test]
+fn a_preferences_directory_that_cannot_be_listed_refuses_strict() {
+    let setup = Setup::new(Platform::Macos);
+    let dir = setup.root.path().join(PREFERENCES);
+    std::fs::create_dir_all(&dir).expect("create directory");
+    // Search is allowed, so the current user's file could still be opened by
+    // its path; listing is not.
+    let Some(_restore) = deny_listing(&dir, 0o311) else {
+        return;
+    };
+    let refusal = setup.refusal(Mode::Read);
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} could not be listed completely, so it may hold the current \
+             user's managed preferences file",
+            text(&dir)
+        )),
+        "{}",
+        refusal.message
+    );
+}
+
+#[test]
+fn a_managed_directory_that_denies_search_refuses_strict() {
+    let setup = Setup::new(Platform::Linux);
+    let dir = setup.root.path().join(LINUX_CLAUDE);
+    std::fs::create_dir_all(&dir).expect("create directory");
+    // Nothing under it can be looked at, so nothing proves it holds no
+    // managed settings file.
+    let Some(_restore) = deny_listing(&dir, 0o000) else {
+        return;
+    };
+    let refusal = setup.refusal(Mode::Read);
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} could not be read or parsed, so it may set",
+            text(&dir.join("managed-settings.json"))
+        )),
+        "{}",
+        refusal.message
+    );
+}
+
+#[test]
+fn a_drop_in_directory_with_one_malformed_file_refuses_strict() {
+    let setup = Setup::new(Platform::Linux);
+    setup.write(
+        &format!("{LINUX_CLAUDE}/managed-settings.d/a.json"),
+        r#"{"permissions":{"deny":["Bash"]}}"#,
+    );
+    setup.write(&format!("{LINUX_CLAUDE}/managed-settings.d/b.json"), "{");
+    let dir = setup
+        .root
+        .path()
+        .join(format!("{LINUX_CLAUDE}/managed-settings.d"));
+    let refusal = setup.refusal(Mode::Read);
+    assert_eq!(refusal.kind, "permissions_not_enforceable");
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} was only partly read, so it may set",
+            text(&dir)
+        )),
+        "{}",
+        refusal.message
+    );
 }
