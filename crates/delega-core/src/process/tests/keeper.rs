@@ -78,12 +78,13 @@ fn sleeper_entry() {
 /// A shell command that starts a process in a session of its own, like
 /// `own_session_recorded`, running this test binary as a 60 s sleeper instead
 /// of `sleep`, so the run marker in its environment is visible on macOS too.
-/// It publishes its own pid at `record` once `setsid` has succeeded.
+/// It publishes its own pid at `record` once it leads its own session.
 pub(super) fn own_session_sleeper(record: &str) -> String {
     let exe = std::env::current_exe().expect("the test binary's path");
     format!(
-        "perl -e 'use POSIX; defined(POSIX::setsid()) or die; {} $ENV{{{SLEEP_ENV}}} = 60; \
+        "perl -e 'use POSIX; {} {} $ENV{{{SLEEP_ENV}}} = 60; \
          exec q({}), q(--exact), q(process::tests::keeper::sleeper_entry), q(--test-threads=1), q(-q)'",
+        super::fixtures::PERL_LEAVE_SESSION,
         perl_record_self(record),
         exe.display()
     )
@@ -556,7 +557,7 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
 /// It ends only then, by itself. The leader goes on only once `gc-ready` is
 /// written, so no group signal can reach the descendant before it left the
 /// group, and nothing but the refusal decides when it ends.
-const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; POSIX::setpgid(0, 0) or die; \
+const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; setpgid(0, 0); getpgrp() == $$ or die; \
      open F, q(>), q(gc-ready); print F $$; close F; \
      until (-e q(refused)) { select(undef, undef, undef, 0.02) }' \
      </dev/null >/dev/null 2>&1 & record gc $!; \

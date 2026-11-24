@@ -421,6 +421,16 @@ pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sle
 /// `sleep 60` in a session of its own, beyond what the session sweep reaches.
 pub(super) const OWN_SESSION: &str = "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)'";
 
+/// Perl: become the leader of a new session, or die. `POSIX::setsid`
+/// returns -1 (defined) on failure, so only a session id equal to the
+/// process's own pid counts as success.
+pub(super) const PERL_LEAVE_SESSION: &str = "POSIX::setsid() == $$ or die;";
+
+/// Perl: become the leader of a new process group in the same session, or
+/// die. Success is read back from the process group itself, not from the
+/// call's return value.
+pub(super) const PERL_LEAVE_GROUP: &str = "setpgid(0, 0); getpgrp() == $$ or die;";
+
 /// Perl statements that publish the running process's own pid as a complete
 /// record at `name` in the current directory: a temporary file beside it,
 /// renamed into place, as [`publish_pid`] does.
@@ -431,22 +441,22 @@ pub(super) fn perl_record_self(name: &str) -> String {
     )
 }
 
-/// [`OWN_GROUP`] that publishes its own pid at `name` once `setpgid` has
-/// succeeded, and only then: the record is its acknowledgement that it has
+/// [`OWN_GROUP`] that publishes its own pid at `name` once it leads its own
+/// group ([`PERL_LEAVE_GROUP`]), and only then: the record is its acknowledgement that it has
 /// left the group. Wait for it in the script with [`await_record`].
 pub(super) fn own_group_recorded(name: &str) -> String {
     format!(
-        "perl -e 'use POSIX; setpgid(0,0) or die; {} exec q(sleep), q(60)'",
+        "perl -e 'use POSIX; {PERL_LEAVE_GROUP} {} exec q(sleep), q(60)'",
         perl_record_self(name)
     )
 }
 
-/// [`OWN_SESSION`] that publishes its own pid at `name` once `setsid` has
-/// succeeded, and only then: the record is its acknowledgement that it has
+/// [`OWN_SESSION`] that publishes its own pid at `name` once it leads its own
+/// session ([`PERL_LEAVE_SESSION`]), and only then: the record is its acknowledgement that it has
 /// left the session.
 pub(super) fn own_session_recorded(name: &str) -> String {
     format!(
-        "perl -e 'use POSIX; defined(POSIX::setsid()) or die; {} exec q(sleep), q(60)'",
+        "perl -e 'use POSIX; {PERL_LEAVE_SESSION} {} exec q(sleep), q(60)'",
         perl_record_self(name)
     )
 }

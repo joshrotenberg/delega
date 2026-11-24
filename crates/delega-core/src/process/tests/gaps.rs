@@ -323,8 +323,9 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
     require_perl!();
     let s = Scratch::new();
     let detach = format!(
-        "perl -e 'use POSIX; defined(POSIX::setsid()) or die; {} %ENV = (); \
+        "perl -e 'use POSIX; {} {} %ENV = (); \
          exec {{ q(/bin/sleep) }} q(sleep), q(60)'",
+        super::fixtures::PERL_LEAVE_SESSION,
         super::fixtures::perl_record_self("gc")
     );
     let script = format!(
@@ -347,7 +348,7 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
 /// A middle process that stays alive in the child's session and group and
 /// starts a descendant that calls `setsid` and then writes its own pid to `gc`.
 /// The descendant's parent is the middle process, not the leader.
-const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid(); \
+const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid() == $$ or die; \
     open F, q(>), q(gc.tmp); print F qq($$\\n); close F; rename q(gc.tmp), q(gc); \
     exec q(sleep), q(60)' &\nwait\n";
 
