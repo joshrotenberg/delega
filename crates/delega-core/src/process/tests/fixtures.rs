@@ -915,11 +915,13 @@ async fn a_held_wait_keeps_the_paused_clock_still_while_a_real_event_is_awaited(
 }
 
 /// A lister that, while armed, does not answer until the gate is opened, and
-/// then reads the real table. It counts the calls that had to wait.
+/// then reads the real table. It counts the calls that had to wait, and the
+/// calls answered.
 #[derive(Clone)]
 pub(super) struct Held {
     pub(super) armed: Arc<AtomicBool>,
     pub(super) waiting: Arc<AtomicU32>,
+    pub(super) answered: Arc<AtomicU32>,
     open: watch::Sender<bool>,
 }
 
@@ -928,6 +930,7 @@ impl Held {
         Self {
             armed: Arc::new(AtomicBool::new(armed)),
             waiting: Arc::new(AtomicU32::new(0)),
+            answered: Arc::new(AtomicU32::new(0)),
             open: watch::channel(false).0,
         }
     }
@@ -937,13 +940,16 @@ impl Held {
         Arc::new(move || {
             let armed = held.armed.load(Ordering::SeqCst);
             let waiting = held.waiting.clone();
+            let answered = held.answered.clone();
             let mut gate = held.open.subscribe();
             Box::pin(async move {
                 if armed {
                     waiting.fetch_add(1, Ordering::SeqCst);
                     let _ = gate.wait_for(|open| *open).await;
                 }
-                list_processes().await
+                let rows = list_processes().await;
+                answered.fetch_add(1, Ordering::SeqCst);
+                rows
             })
         })
     }

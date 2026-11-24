@@ -14,7 +14,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::fixtures::{Held, Reaper, Scratch, await_event, is_running_async, sh};
+use super::fixtures::{
+    Held, Reaper, Record, Scratch, await_event, await_held, is_running_async, read_record, sh,
+    step_through_the_limit,
+};
 use crate::contract::result::Cleanup;
 use crate::process::{Ending, ProcessHandle, ProcessReport};
 
@@ -62,7 +65,9 @@ async fn stop_while_the_listing_is_held(how: How) -> Option<ProcessReport> {
         How::TimeLimit => Duration::from_secs(1),
         _ => LONG,
     };
-    let held = Held::new(true);
+    // Every listing is held, except for a time limit the one at spawn (see
+    // below).
+    let held = Held::new(!matches!(how, How::TimeLimit));
     let mut spec = sh(&s, "record leader $$; sleep 60", limit).with_lister(held.lister());
     // No periodic scan after the first, so the stop's listing is the one held.
     spec.capture_interval = Some(Duration::from_secs(3600));
@@ -72,9 +77,41 @@ async fn stop_while_the_listing_is_held(how: How) -> Option<ProcessReport> {
         How::Interrupt | How::TimeLimit => SHORT_BUDGET,
         How::SecondInterrupt | How::Drop => Duration::from_secs(120),
     };
-    let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
-    let leader = reaper.watch(&s, "leader").await;
+    let (handle, leader) = if let How::TimeLimit = how {
+        // The run's clock is paused and held until the leader has recorded
+        // itself and the listing at spawn is answered, so the limit cannot
+        // pass before the child is ready (with a real limit of a second it
+        // could, and the test then waited for a record that never came). Only
+        // then is the gate armed, so the stop's listing is a call of its own
+        // that waits at it, and `waiting` says when the stop has begun. The
+        // test then steps the clock through the limit and resumes it.
+        tokio::time::pause();
+        let began = tokio::time::Instant::now();
+        let handle = ProcessHandle::start(spec);
+        let path = s.path("leader");
+        let answered = held.answered.clone();
+        let leader = await_held(
+            "the leader's record and the listing at spawn answered",
+            move || match answered.load(Ordering::SeqCst) {
+                0 => Ok(None),
+                1 => Ok(match read_record(&path) {
+                    Record::Pid(pid) => Some(pid),
+                    _ => None,
+                }),
+                n => Err(format!("{n} listings were answered: a stop began first")),
+            },
+        )
+        .await;
+        held.armed.store(true, Ordering::SeqCst);
+        reaper.register(leader, &s);
+        step_through_the_limit(began, limit, 0, || held.waiting.load(Ordering::SeqCst)).await;
+        (handle, leader)
+    } else {
+        let handle = ProcessHandle::start(spec);
+        let leader = reaper.watch(&s, "leader").await;
+        (handle, leader)
+    };
     let handle = match how {
         How::Interrupt => {
             handle.interrupt();
