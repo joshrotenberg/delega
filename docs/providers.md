@@ -95,7 +95,7 @@ See [Outcomes](api.md#outcomes) for the shared contract and
 | Outcome | When |
 | --- | --- |
 | `completed` | The provider reported success, exited with code 0, and gave answer text. With `answer_schema`, the text parsed as JSON. A denial that did not stop the run is listed in `permissions.denied`. |
-| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit, or, when the failure says so, `provider_usage_limit`, `provider_auth`, `provider_billing`, `provider_capacity`, `provider_model_unavailable` or `provider_context_exhausted`, see [Provider failure kinds](#provider-failure-kinds)), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run that would otherwise have completed but whose stream reported another session than `session.resume` (`session_mismatch`; any other outcome stands with a note), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
+| `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit, or, when the failure says so, `provider_usage_limit`, `provider_auth`, `provider_billing`, `provider_capacity`, `provider_model_unavailable`, `provider_context_exhausted` or `provider_content_policy`, see [Provider failure kinds](#provider-failure-kinds)), non-zero exit (`provider_exit`, with a bounded, redacted excerpt of standard error, see [Text from the provider](#text-from-the-provider)), success followed by a non-zero exit, no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run that would otherwise have completed but whose stream reported another session than `session.resume` (`session_mismatch`; any other outcome stands with a note), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
 | `timed_out` | The time limit passed. `text` holds any partial answer. |
 | `interrupted` | `interrupt()` was called, or the handle or future was dropped. |
 | `refused` before start | See steps 1 and 2 above. `timing.started_at` is absent. |
@@ -143,7 +143,7 @@ See `crates/delega-core/src/provider/settle.rs`.
 `managed_mcp_exclusive` (all refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_auth`, `provider_billing`, `provider_capacity`,
-`provider_model_unavailable`, `provider_context_exhausted`, `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
+`provider_model_unavailable`, `provider_context_exhausted`, `provider_content_policy`, `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
 `session_mismatch`, `session_not_found`, `provider_preparation_failed`, `spawn_failed`, `process_signaled`,
 `wait_failed`, `internal_error` (failed); `permission_denied` (refused after
 start); `timed_out`; `interrupted`.
@@ -161,11 +161,13 @@ of `provider_error`:
 | `provider_capacity` | The provider is rate limiting or overloaded (HTTP 429, 503, 529). Retrying later can work. |
 | `provider_model_unavailable` | The requested model does not exist or this account cannot use it. |
 | `provider_context_exhausted` | The conversation no longer fits the model's context window. |
+| `provider_content_policy` | The provider refused the content under its content policy. Retrying the same assignment on the same provider fails again; rephrase it or move it to the other provider. Codex only: a failure message that starts with "This content was flagged for possible" (codex-cli 0.171.0, 2026-11-24). Claude Code has no match, because no Claude Code content-policy refusal has been observed. |
 
 Classification applies to failures. `session_not_found` and Claude's
 turn and budget limits take precedence. For overlapping matches at the same
 classification stage, the order is usage, billing, auth, model, context and
-capacity. An unmatched failure keeps `provider_error`.
+capacity. A Codex content-policy refusal is matched before the other message
+matches. An unmatched failure keeps `provider_error`.
 See [Claude Code stream](#stream) and [Codex stream](#stream-1).
 
 ### Text from the provider
@@ -773,6 +775,14 @@ See `crates/delega-core/src/provider/env.rs`.
   `cd $(mktemp -d)` prefix and its 100-round loop.
 - What triggered the denial is not known.
 
+### 2026-11-24, codex-cli 0.171.0 (#219)
+
+- A `full` Codex worker stopped about three and a half minutes in, exit
+  code 1. Its stream ended with an `error` event and then `turn.failed`, both
+  with the message "This content was flagged for possible cybersecurity risk.
+  If this seems wrong, try rephrasing your request. ...". No structured code
+  was recorded. delega now reports this as `provider_content_policy`.
+
 ### Claude Code 2.1.330, date unrecorded
 
 - In ask mode the init event reported `default`. The stdio flag enabled
@@ -806,6 +816,7 @@ Dates and versions are unrecorded unless indicated.
 | Does Claude emit the recorded usage-limit events? | Claude Code 2.1.314 was previously observed emitting `usage_limit_reached` with HTTP 429 and a failed result, with a possible rejected `rate_limit_event`. delega classifies usage exhaustion ahead of capacity unless the rejection is covered by overage. Date unrecorded. |
 | What shapes does Claude emit for capacity, billing, other account errors and context overflow? | The parser recognises statuses 429, 503 and 529, assistant error codes and the result prefix `Prompt is too long`. |
 | What shapes does Codex emit for usage, capacity and context failures? | Prior usage-limit text and structured `usage_limit_exceeded`, capacity messages and `context_window_exceeded` are recognised. |
+| How does Claude Code report a content-policy refusal? | Not observed. Such a failure keeps `provider_error`. |
 | Does Claude emit `error_max_turns` and `error_max_budget_usd` results? | They map to `provider_turn_limit` and `provider_budget_limit`. |
 
 ## Managed settings
