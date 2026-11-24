@@ -196,8 +196,9 @@ pub struct Diagnostics {
     /// Process listing receipts.
     pub inspection: InspectionStats,
     /// True when the descendant picture may have a hole: the pre-stop scan ran
-    /// over budget, a listing failed, tracking was off, or the child's own
-    /// identity was never observed.
+    /// over budget, a listing failed, tracking was off, or no trusted
+    /// identity of the child itself was learned (no listing showed it while
+    /// it was pinned).
     pub capture_gap_observed: bool,
     /// A signal was delivered to the group after the leader had exited. It
     /// records cleanup activity, not proof of live descendants.

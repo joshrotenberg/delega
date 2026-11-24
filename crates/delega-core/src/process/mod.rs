@@ -150,10 +150,17 @@
 //!   drops the candidate unsignalled (the comparison may have matched a
 //!   process that reused the parent's pid), so the child is held only as the
 //!   keeper's own direct child or refused. The owner reads a start time while
-//!   holding the pin's lock, so the child cannot be reaped mid-read; the
-//!   child's own identity is learned under that lock too, with the check of
-//!   the pin, the read and storing it in one hold, and is not learned at all
-//!   once the pin is released. A read of `/proc` that fails for any
+//!   holding the pin's lock; the child's own identity is learned under that
+//!   lock too, with the check of the pin, the read and storing it in one
+//!   hold, and is not learned at all once the pin is released. What the lock
+//!   guarantees is bounded by the release handshake: the keeper reaps the
+//!   child only after `released`, which waits for the lock, so a keeper that
+//!   lets go through the handshake cannot free the pid mid-read. A keeper
+//!   that dies while the owner holds the lock is outside it: the reaper above
+//!   it can reap the child before the read, a reused pid can then supply a
+//!   replacement's start time before the socket reader clears the pin, and
+//!   only the keeper-loss verdict covers that (the residual below; the run
+//!   is `Unconfirmed`, [`KEEPER_LOST_REASON`]). A read of `/proc` that fails for any
 //!   reason but the process being gone (ENOENT, ESRCH) makes the pass
 //!   incomplete, never counts as absence (the stat of a held process
 //!   included), and so does any error from a directory listing of `/proc`;
@@ -358,7 +365,9 @@
 //!   listings of the steps it outlives, so one `delega` run can take more than
 //!   three extra `ps` runs.
 //!   [`Diagnostics::capture_gap_observed`] says when a scan is known to have
-//!   missed its budget or failed, which widens that window. A descendant whose
+//!   missed its budget or failed, which widens that window, and when no
+//!   trusted identity of the child itself was learned (no listing showed it
+//!   while it was pinned, as when the keeper let go before the first one). A descendant whose
 //!   parent is still alive in the session when the child exits is not part of
 //!   this gap: the listing before the first signal adopts it.
 //! - A fast fork relay: a descendant that ignores TERM, changes process group
@@ -428,7 +437,9 @@
 //!     a bound;
 //!   - a keeper that is lost, or that exits without the owner's `released`,
 //!     leaves the child unreaped to the reaper above it, and the verdict is
-//!     `Unconfirmed`;
+//!     `Unconfirmed`; a start time the owner read under the pin's lock
+//!     around that moment can be a replacement's, since the lock holds only
+//!     against the release handshake;
 //!   - on macOS, the two kinds of process "What a macOS verdict covers" names
 //!     can be missed;
 //!   - a process the kernel prevents inspecting or signalling (`hidepid`,

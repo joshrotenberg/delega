@@ -649,9 +649,13 @@ fn follow(
                 }),
                 FromKeeper::Releasing => {
                     // From here the keeper reaps the program on its own. No
-                    // group or member signal is in flight once the pin is
-                    // released under its lock, so the answer is true when
-                    // sent.
+                    // group or member signal, and no start-time read under
+                    // the pin, is in flight once the pin is released under
+                    // its lock, so the answer is true when sent. This holds
+                    // for the handshake only: a keeper that dies instead is
+                    // seen at the end of the stream below, after whatever
+                    // the owner did under the lock meanwhile, and that run
+                    // is `Unconfirmed` as lost.
                     state.pin.release();
                     state.lost.store(true, Ordering::SeqCst);
                     lock(&state.warnings).push(
