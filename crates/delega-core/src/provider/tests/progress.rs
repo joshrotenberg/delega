@@ -233,6 +233,50 @@ both!(
     a_slow_sink_loses_output_and_the_run_says_so
 );
 
+#[test]
+fn slow_sink_is_released_promptly_when_ps_cannot_start() {
+    let rig = Rig::new();
+    let pid_file = rig.record.join("pid");
+    std::fs::write(&pid_file, "123").expect("write a fake PID");
+    let missing_ps = rig.record.join("missing-ps");
+    let release = Arc::new(AtomicBool::new(false));
+    let guard = ReleaseSink(release.clone());
+    let (done, result) = std::sync::mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+        let result =
+            release_after_provider_exit(guard, &pid_file, Duration::from_secs(120), |pid| {
+                super::ps_is_running(&missing_ps, pid)
+            });
+        let _ = done.send(result);
+    });
+
+    assert_eq!(
+        result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the releaser should finish promptly when ps cannot start"),
+        Err("could not check whether the fake provider is running")
+    );
+    releaser.join().expect("the releasing thread");
+    assert!(release.load(Ordering::SeqCst), "the sink is still blocked");
+}
+
+#[test]
+fn slow_sink_is_released_if_the_releaser_panics() {
+    let rig = Rig::new();
+    let pid_file = rig.record.join("pid");
+    std::fs::write(&pid_file, "123").expect("write a fake PID");
+    let release = Arc::new(AtomicBool::new(false));
+    let guard = ReleaseSink(release.clone());
+    let result = std::panic::catch_unwind(move || {
+        release_after_provider_exit(guard, &pid_file, Duration::from_secs(10), |_| {
+            panic!("liveness check panicked")
+        })
+    });
+
+    assert!(result.is_err(), "the liveness check should be called");
+    assert!(release.load(Ordering::SeqCst), "the sink is still blocked");
+}
+
 fn messages(events: &[ProgressEvent]) -> Vec<&str> {
     events
         .iter()
