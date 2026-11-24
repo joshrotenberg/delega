@@ -587,3 +587,48 @@ impl Drop for SetOnDrop {
         self.0.store(true, Ordering::SeqCst);
     }
 }
+
+#[test]
+fn reaper_does_not_signal_a_replacement_after_the_registered_process_exits() {
+    fn waiting_child() -> std::process::Child {
+        use std::process::Stdio;
+
+        std::process::Command::new("/bin/cat")
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .guarded_spawn()
+            .expect("start a child waiting for EOF")
+    }
+
+    let mut original = waiting_child();
+    let mut reaper = Reaper::default();
+    reaper
+        .register(i32::try_from(original.id()).expect("a pid"))
+        .expect("capture the original identity");
+    assert!(original.wait().expect("reap the original").success());
+
+    // The two actual start times must differ at ps's one-second precision.
+    #[cfg(not(target_os = "linux"))]
+    std::thread::sleep(Duration::from_secs(1));
+    let mut replacement = waiting_child();
+
+    #[cfg(target_os = "linux")]
+    assert!(
+        !reaper.0[0].signal(Signal::KILL),
+        "the original pidfd must no longer address a process"
+    );
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Simulate reuse by making the stored PID resolve to the replacement
+        // while keeping the identity captured for the original.
+        reaper.0[0].pid = i32::try_from(replacement.id()).expect("a pid");
+    }
+
+    drop(reaper);
+    assert!(
+        replacement.wait().expect("reap the replacement").success(),
+        "the replacement was signalled"
+    );
+}
