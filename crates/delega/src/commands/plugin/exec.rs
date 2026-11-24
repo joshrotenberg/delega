@@ -176,22 +176,39 @@ mod tests {
         let host = fake_host(
             tmp.path(),
             r#"
-            /bin/sleep 30 &
-            printf '%s\n' "$!" > "$1"
+            export HOME="$2"
+            /bin/sh -c '
+                printf "%s\n" "$$" > "$1.tmp" &&
+                /bin/mv "$1.tmp" "$1" &&
+                exec /bin/sleep 20
+            ' descendant "$1" &
             wait
         "#,
         );
         let pid_file = tmp.path().join("descendant.pid");
+        // Inject a short host limit and let the real clock drive timeout
+        // and cleanup while the host and its descendant are running.
         let limit = Duration::from_secs(3);
-        let error = Runner::without_signal_handlers()
-            .run(
-                &host,
-                &[pid_file.display().to_string()],
-                limit,
-                CHANGE_BYTES,
-            )
-            .await
-            .expect_err("host command should time out");
+        let args = [
+            pid_file.display().to_string(),
+            tmp.path().display().to_string(),
+        ];
+        let mut runner = Runner::without_signal_handlers();
+        let run = runner.run(&host, &args, limit, CHANGE_BYTES);
+        tokio::pin!(run);
+        let ready = async {
+            while !pid_file.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let error = tokio::select! {
+            biased;
+            result = &mut run => panic!("host finished before readiness: {result:?}"),
+            () = ready => tokio::time::timeout(Duration::from_secs(20), &mut run)
+                .await
+                .expect("host timeout and cleanup must finish")
+                .expect_err("host command should time out"),
+        };
 
         assert!(
             error.ends_with("did not finish within 3 s and was stopped"),
