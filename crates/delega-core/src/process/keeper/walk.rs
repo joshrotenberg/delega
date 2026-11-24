@@ -912,6 +912,26 @@ mod tests {
                     INJECTED_READ_FAILURES.load(Ordering::SeqCst)
                 )
             }
+            Some("queued-parent-exits") => {
+                // A subreaper, as the keeper is: the child of a parent that
+                // exits is reparented to this process.
+                sys::become_subreaper().expect("become a child subreaper");
+                let (taken, child) = queued_child_whose_parent_exits_mid_take(me);
+                let held_as_own_child = taken.as_ref().is_ok_and(|held| {
+                    held.pid == child
+                        && held_stat(child)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|stat| stat.parent == me)
+                });
+                let stopped = held_stat(child)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|stat| matches!(stat.state, 'T' | 't'));
+                drop(taken);
+                kill_by_pidfd(child);
+                format!("held_as_own_child={held_as_own_child} stopped={stopped}")
+            }
             _ => "unknown mode".to_string(),
         };
         std::fs::write(out, found).expect("write the findings");
@@ -1225,6 +1245,105 @@ mod tests {
             Err(NotHeld::Refused)
         ));
         let _ = parent.wait();
+    }
+
+    /// Send SIGKILL to `pid` through a pidfd, if it can be opened.
+    fn kill_by_pidfd(pid: i32) {
+        if let Some(raw) = Pid::from_raw(pid)
+            && let Ok(fd) = pidfd_open(raw, PidfdFlags::empty())
+        {
+            let _ = pidfd_send_signal(&fd, Signal::KILL);
+        }
+    }
+
+    /// Start a shell (a stand-in parent, a child of `me`) with one child of
+    /// its own, hold the parent, and take its child through [`take_queued`]
+    /// with the parent killed and exited in the seam between the check of
+    /// the candidate's parent field and the second look at the parent's
+    /// pidfd. Returns what was taken and the child's pid.
+    fn queued_child_whose_parent_exits_mid_take(me: i32) -> (Result<Held, NotHeld>, i32) {
+        use crate::test_spawn::Guarded;
+        let mut parent = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .guarded_spawn()
+            .expect("start a stand-in parent");
+        let parent_pid = i32::try_from(parent.id()).expect("a pid");
+        let until = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = children(parent_pid).ok().and_then(|k| k.first().copied()) {
+                break child;
+            }
+            assert!(Instant::now() < until, "the stand-in parent never forked");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let Ok(hold) = Held::take(parent_pid, me) else {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            kill_by_pidfd(child);
+            panic!("the stand-in parent could not be held");
+        };
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seam_ran = ran.clone();
+        let parent_fd = hold.fd.try_clone().expect("clone the parent's pidfd");
+        // The seam needs to reach the parent: move its handle in and hand it
+        // back afterwards to be reaped.
+        let parent_slot = std::rc::Rc::new(std::cell::RefCell::new(Some(parent)));
+        let seam_slot = parent_slot.clone();
+        AFTER_QUEUED_CHECK.with(|seam| {
+            *seam.borrow_mut() = Some(Box::new(move || {
+                if let Some(parent) = seam_slot.borrow_mut().as_mut() {
+                    let _ = parent.kill();
+                }
+                let until = Instant::now() + Duration::from_secs(10);
+                while !sys::pidfd_exited(&parent_fd) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                seam_ran.set(true);
+            }));
+        });
+        let taken = take_queued(child, parent_pid, Some(&hold), me);
+        AFTER_QUEUED_CHECK.with(|seam| seam.borrow_mut().take());
+        assert!(
+            ran.get(),
+            "the candidate was not checked under a live parent"
+        );
+        if let Some(mut parent) = parent_slot.borrow_mut().take() {
+            let _ = parent.kill();
+            let _ = parent.wait();
+        }
+        (taken, child)
+    }
+
+    /// The parent exits after its child's parent field was checked: the
+    /// candidate is dropped unsignalled, and, the child now being init's
+    /// (this test process is no subreaper), it is refused rather than held.
+    #[test]
+    fn a_queued_child_whose_parent_exits_after_the_check_is_refused_unless_now_the_keepers() {
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let (taken, child) = queued_child_whose_parent_exits_mid_take(me);
+        let stopped = held_stat(child)
+            .ok()
+            .flatten()
+            .is_some_and(|stat| matches!(stat.state, 'T' | 't'));
+        let refused = matches!(taken, Err(NotHeld::Refused));
+        drop(taken);
+        kill_by_pidfd(child);
+        assert!(refused, "a child of an exited parent was held");
+        assert!(!stopped, "the refused child was signalled");
+    }
+
+    /// The same window under a subreaper, as in the keeper: the candidate is
+    /// dropped and the child is held again, verified as the keeper's own
+    /// direct child.
+    #[test]
+    fn a_queued_child_whose_parent_exits_after_the_check_is_held_only_as_the_keepers_child() {
+        assert_eq!(
+            in_a_helper("queued-parent-exits"),
+            "held_as_own_child=true stopped=false"
+        );
     }
 
     #[test]
