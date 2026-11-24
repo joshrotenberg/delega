@@ -381,6 +381,66 @@ pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpe
     spec
 }
 
+/// The live processes whose working directory is `dir`, other than this
+/// one: what a case started in its scratch directory and left running, read
+/// from the system independently of any record a script wrote. Linux reads
+/// `/proc/<pid>/cwd`; elsewhere `lsof` lists every process's cwd. A zombie
+/// has no working directory and is not listed. A failed enumeration is an
+/// error, never absence.
+pub(super) fn processes_in(dir: &Path) -> Result<Vec<i32>, String> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", dir.display()))?;
+    let own = std::process::id() as i32;
+    #[cfg(target_os = "linux")]
+    {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").map_err(|e| format!("read /proc: {e}"))? {
+            let entry = entry.map_err(|e| format!("read /proc entry: {e}"))?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            // A process that is gone, or another user's, has no readable cwd;
+            // a case's processes are this user's and readable.
+            if pid != own
+                && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == dir)
+            {
+                found.push(pid);
+            }
+        }
+        Ok(found)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .args(["-b", "-w", "-d", "cwd", "-Fpn"])
+            .env_clear()
+            .env("LC_ALL", "C")
+            .guarded_output()
+            .map_err(|e| format!("run lsof: {e}"))?;
+        if output.stdout.is_empty() {
+            return Err(format!("lsof listed nothing ({})", output.status));
+        }
+        let expected = format!("n{}", dir.display());
+        let mut pid = None;
+        let mut found = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(number) = line.strip_prefix('p') {
+                pid = number.parse::<i32>().ok();
+            } else if line == expected
+                && let Some(pid) = pid.filter(|pid| *pid != own)
+            {
+                found.push(pid);
+            }
+        }
+        Ok(found)
+    }
+}
+
 /// Whether a process is alive. A zombie counts as gone: it has run to its end
 /// and only waits for its parent to collect it.
 pub(super) fn is_running(pid: i32) -> bool {
@@ -839,4 +899,16 @@ fn reaper_does_not_signal_a_replacement_after_the_registered_process_exits() {
         replacement.wait().expect("reap the replacement").success(),
         "the replacement was signalled"
     );
+}
+
+#[test]
+fn the_directory_census_finds_a_process_by_its_working_directory_alone() {
+    let scratch = Scratch::new();
+    let mut child = waiting_child(&scratch);
+    let pid = i32::try_from(child.id()).expect("a pid");
+    let found = processes_in(&scratch.dir()).expect("list the case directory");
+    assert_eq!(found, vec![pid], "the census of the case directory");
+    child.kill().expect("end the child");
+    child.wait().expect("reap the child");
+    assert_eq!(processes_in(&scratch.dir()), Ok(Vec::new()));
 }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::fixtures::{
     OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
-    await_event, is_running, run_guarded, sh, wait_own_group, wait_tracked,
+    await_event, is_running, processes_in, run_guarded, sh, wait_own_group, wait_tracked,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -25,6 +25,26 @@ async fn wait_for_cleanup_report(handle: ProcessHandle, began: Instant) -> Proce
     tokio::time::timeout_at(tokio::time::Instant::from_std(began + BOUND), handle.wait())
         .await
         .expect("the report was held by the detached descendant for 30 s")
+}
+
+/// Wait, within [`BOUND`] of `began`, until no process has the scratch
+/// directory as its working directory.
+async fn assert_case_empty(what: &str, scratch: &Scratch, began: Instant) {
+    let dir = scratch.dir();
+    loop {
+        let dir = dir.clone();
+        let left = tokio::task::spawn_blocking(move || processes_in(&dir))
+            .await
+            .expect("the census task ended");
+        match left {
+            Ok(left) if left.is_empty() => return,
+            left => assert!(
+                began.elapsed() < BOUND,
+                "{what}: processes in the case directory {BOUND:?} after the stop: {left:?}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn assert_stopped_in_time(what: &str, pids: &[i32], began: Instant) {
@@ -272,6 +292,10 @@ both!(
         assert!(kids.len() >= 3, "only {} children were started", kids.len());
         assert_confirmed(&report);
         assert_stopped_in_time("children forked until the stop", &kids, stopped).await;
+        // A fork whose record the stop cut short is in no record. Every
+        // child runs in the scratch directory, so the directory's census
+        // finds it whatever was recorded, before the lifetime file goes.
+        assert_case_empty("children forked until the stop", &s, stopped).await;
     }
 );
 
