@@ -99,7 +99,7 @@ pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
 }
 
 /// Where `ps` is looked for, in order.
-pub(crate) const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
+const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
 
 /// The deadline for one `ps` run. A test build allows far longer than any
 /// listing takes, so a busy machine cannot turn a slow `ps` into a failed

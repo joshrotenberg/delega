@@ -27,17 +27,17 @@ fn every_listing_error() -> Vec<String> {
     all.push(not_started(&[]).to_string());
     let enoent = || io::Error::from_raw_os_error(2);
     let eacces = || io::Error::from_raw_os_error(13);
-    all.push(not_started(&[(PathBuf::from(PS_PROGRAMS[0]), enoent())]).to_string());
+    all.push(not_started(&[(PathBuf::from("/bin/ps"), enoent())]).to_string());
     all.push(
         not_started(&[
-            (PathBuf::from(PS_PROGRAMS[0]), eacces()),
-            (PathBuf::from(PS_PROGRAMS[1]), enoent()),
+            (PathBuf::from("/bin/ps"), eacces()),
+            (PathBuf::from("/usr/bin/ps"), enoent()),
         ])
         .to_string(),
     );
     // Cut at the length limit.
     let many: Vec<_> = (0..40)
-        .map(|_| (PathBuf::from(PS_PROGRAMS[1]), enoent()))
+        .map(|_| (PathBuf::from("/usr/bin/ps"), enoent()))
         .collect();
     let cut = not_started(&many).to_string();
     assert!(cut.ends_with(NOT_STARTED_CUT), "{cut}");
@@ -214,20 +214,32 @@ fn a_near_miss_of_a_produced_reason_is_not_recognised() {
         .into_iter()
         .chain(every_standalone_reason())
     {
-        let mut truncated = reason.clone();
-        truncated.pop();
-        for near in [
-            format!("{reason}."),
-            format!("{reason} and more"),
+        let mut near = vec![
             format!("{reason};"),
             format!("{reason}; "),
             format!("{reason}; unknown reason"),
+            format!("{reason}\nmore"),
             format!("unknown reason; {reason}"),
             format!(" {reason}"),
             format!("x{reason}"),
-            truncated,
             reason.to_uppercase(),
-        ] {
+        ];
+        // A reason that ends in diagnostic text (after `ps: ` or inside an
+        // unclosed `ps could not be started (`) takes more text on its line,
+        // or less, as the same diagnostic.
+        let ends_in_diagnostic = [PS_IO, NOT_STARTED_START]
+            .iter()
+            .any(|prefix| reason.contains(&format!("{INSPECTION_FAILED}{prefix}")));
+        if !ends_in_diagnostic {
+            let mut truncated = reason.clone();
+            truncated.pop();
+            near.extend([
+                format!("{reason}."),
+                format!("{reason} and more"),
+                truncated,
+            ]);
+        }
+        for near in near {
             assert!(!is_documented(&near), "{near:?}");
         }
     }
@@ -268,11 +280,36 @@ fn a_wait_beyond_the_longest_duration_is_not_recognised() {
 }
 
 #[test]
-fn a_listing_error_outside_the_forms_tree_and_marker_build_is_not_recognised() {
-    let os = |text: &str| format!("{text} (os error 2)");
-    let long_cut = {
-        let mut s = format!("{NOT_STARTED_START}{}: ", PS_PROGRAMS[0]);
-        while s.chars().count() < MAX_ERROR_CHARS - NOT_STARTED_CUT.len() {
+fn every_produced_reason_holds_at_most_the_separators_the_join_search_allows() {
+    for reason in every_process_reason() {
+        let seps = reason.matches("; ").count();
+        assert!(seps <= MAX_SEPARATORS_IN_A_REASON, "{seps} in {reason}");
+    }
+}
+
+#[test]
+fn listing_errors_with_bounded_diagnostic_text_are_recognised() {
+    for error in [
+        // The fixed prefixes with any diagnostic text, not only an errno form.
+        "ps: I/O driver has shut down".to_string(),
+        "ps failed (exit Some(0))".to_string(),
+        format!("ps failed (exit Some({}))", i32::MIN),
+        format!("{NOT_STARTED_START}/opt/ps: not found, /bin/ps: denied)"),
+        format!("{NOT_STARTED_START}anything{NOT_STARTED_CUT}"),
+    ] {
+        assert!(is_listing_error(&error), "{error:?}");
+        let stopping = format!("{STOPPING_START}1.0 s: {INSPECTION_FAILED}{error}");
+        assert!(is_documented(&stopping), "{stopping:?}");
+        let unavailable = inspection_unavailable(&error, GroupCheck::Empty, true);
+        assert!(is_documented(&unavailable), "{unavailable:?}");
+    }
+}
+
+#[test]
+fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
+    let over = |prefix: &str| {
+        let mut s = prefix.to_string();
+        while s.chars().count() <= MAX_ERROR_CHARS {
             s.push('x');
         }
         s
@@ -281,34 +318,33 @@ fn a_listing_error_outside_the_forms_tree_and_marker_build_is_not_recognised() {
         String::new(),
         "anything".to_string(),
         "EPERM".to_string(),
+        // The appended unknown reason, after a fixed text and after
+        // diagnostic text.
         format!("{}; unknown reason", ListingFailure::TimedOut.text()),
+        "ps: Broken pipe (os error 32); unknown reason".to_string(),
+        format!("{NOT_STARTED_START}{NO_PS_PROGRAM}; unknown reason)"),
         format!("{} and more", ListingFailure::TimedOut.text()),
-        "ps: Broken pipe".to_string(),
-        format!("ps: {}", os("")),
-        format!("ps: {}", os("Broken pipe; unknown reason")),
-        format!("ps: {}", os("Broken\npipe")),
-        "ps: Broken pipe (os error x)".to_string(),
-        "ps: Broken pipe (os error 02)".to_string(),
-        format!("ps: {}; unknown reason", os("Broken pipe")),
+        // Diagnostic text that is empty, spans lines, or holds `;`.
+        "ps: ".to_string(),
+        "ps: Broken\npipe".to_string(),
+        "ps: Broken\rpipe".to_string(),
+        "ps: a;b".to_string(),
+        format!("{NOT_STARTED_START})"),
+        format!("{NOT_STARTED_START}a\nb)"),
+        format!("{NOT_STARTED_START}a;b)"),
+        format!("{NOT_STARTED_START}no closing"),
+        // Over the length bound.
+        over(PS_IO),
+        format!("{})", over(NOT_STARTED_START)),
+        format!("{}{NOT_STARTED_CUT}", over(NOT_STARTED_START)),
+        // Exit statuses and counts outside their forms.
         "ps failed (exit 1)".to_string(),
         "ps failed (exit Some(01))".to_string(),
         "ps failed (exit Some())".to_string(),
+        "ps failed (exit Some(99999999999))".to_string(),
         "ps failed (exit Some(1)); unknown reason".to_string(),
         "the process listing had 0 lines that could not be parsed".to_string(),
         "the process listing had many lines that could not be parsed".to_string(),
-        format!("{NOT_STARTED_START})"),
-        format!("{NOT_STARTED_START}{NO_PS_PROGRAM}; unknown reason)"),
-        format!("{NOT_STARTED_START}/opt/ps: {})", os("No such file")),
-        format!("{NOT_STARTED_START}{}: unknown)", PS_PROGRAMS[0]),
-        format!(
-            "{NOT_STARTED_START}{}: {}, unknown)",
-            PS_PROGRAMS[0],
-            os("No such file")
-        ),
-        // Over the limit, or cut but shorter than it, or cut text with `;`.
-        format!("{long_cut}x{NOT_STARTED_CUT}"),
-        format!("{}{NOT_STARTED_CUT}", &long_cut[..long_cut.len() - 1]),
-        format!("{};{NOT_STARTED_CUT}", &long_cut[..long_cut.len() - 1]),
     ];
     for error in errors {
         assert!(!is_listing_error(&error), "{error:?}");
@@ -319,8 +355,33 @@ fn a_listing_error_outside_the_forms_tree_and_marker_build_is_not_recognised() {
             assert!(!is_documented(&unavailable), "{unavailable:?}");
         }
     }
-    // The cut form at exactly the limit is one tree.rs can build.
-    let at_limit = format!("{long_cut}{NOT_STARTED_CUT}");
-    assert_eq!(at_limit.chars().count(), MAX_ERROR_CHARS);
-    assert!(is_listing_error(&at_limit));
+}
+
+#[test]
+fn a_long_adversarial_reason_is_rejected_at_once() {
+    let started = std::time::Instant::now();
+    let entries = vec!["/bin/ps: x (os error 1)"; 5_000].join(", ");
+    for error in [
+        format!("{NOT_STARTED_START}{entries}, invalid"),
+        format!("{NOT_STARTED_START}{entries}"),
+    ] {
+        assert!(!is_listing_error(&error));
+        assert!(!is_documented(&format!(
+            "{STOPPING_START}1.0 s: {INSPECTION_FAILED}{error}"
+        )));
+        assert!(!is_documented(&inspection_unavailable(
+            &error,
+            GroupCheck::Empty,
+            false
+        )));
+    }
+    let joined = vec![LATE_LISTING_REASON; 5_000].join("; ");
+    assert!(!is_documented(&joined));
+    let separators = vec!["x"; 20_000].join("; ");
+    assert!(!is_documented(&separators));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
 }

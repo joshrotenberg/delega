@@ -2,10 +2,35 @@
 //!
 //! Every reason delega-core gives an `Unconfirmed` verdict is either one of
 //! the fixed texts exported from [`crate::process`] or is built here from
-//! fixed parts and the values it carries. [`is_documented`] recognises them
-//! as they can reach a verdict: a provider run joins the reasons of up to
-//! three process reports with `"; "` (`merge_cleanup`), and a run that ended
-//! without its result has one reason of its own.
+//! fixed parts and the values it carries.
+//!
+//! [`is_documented`] checks a reason's shape against these definitions, so a
+//! change of wording here cannot make a caller that uses it reject a reason,
+//! and text that is not one of these shapes is rejected. What it checks:
+//!
+//! - A whole reason is either one run-loss reason (a provider run or a
+//!   supervised run that ended without its result) alone, or one to
+//!   [`MAX_MERGED_REPORTS`] process-report reasons joined by `"; "`, in any
+//!   order. A process-report reason is a fixed text, the count left at the
+//!   reap, the inspection-unavailable reason, the stop not confirmed in time,
+//!   or the owner that ended without a report.
+//! - Fixed parts match exactly; closed sets (a cause, a detail, what the group
+//!   probe found) match one of their values; a count is a decimal above zero
+//!   without padding; a wait is `{:.1} s` and at most `Duration::MAX`.
+//! - A listing error (inside `process inspection was unavailable (...)` and
+//!   after `process inspection failed: `) is one of the fixed listing texts,
+//!   the count of unparsed lines, `ps failed (exit Some(<i32>))` or
+//!   `ps failed (exit None)`, or a fixed prefix (`ps: `, or
+//!   `ps could not be started (` closed by `)` or cut with `...`) followed by
+//!   diagnostic text.
+//! - Diagnostic text is bounded free text: not empty, on one line, without
+//!   `;`, and the listing error that holds it is at most [`MAX_ERROR_CHARS`]
+//!   characters.
+//!
+//! What it does not check: whether a reason could have been produced in a
+//! given run (which combinations a run can merge, which exit codes `ps` can
+//! have, what an OS error looks like), and what a diagnostic text says. The
+//! check is linear in the length of the reason.
 //!
 //! Public only so that the acceptance harness and the tests of the binary can
 //! recognise the reasons from delega-core's own definitions; it is not part of
@@ -13,7 +38,6 @@
 
 use std::time::Duration;
 
-use crate::process::PS_PROGRAMS;
 use crate::process::limits::MAX_ERROR_CHARS;
 
 use crate::process::{
@@ -80,17 +104,27 @@ const STANDALONE_RECOGNISERS: &[fn(&str) -> bool] = &[is_run_lost];
 /// The most process reports a provider run merges: the version probe, the
 /// Codex MCP discovery and the run itself (`execute_steps` in
 /// `provider/run.rs`).
-const MAX_MERGED_REPORTS: usize = 3;
+pub(crate) const MAX_MERGED_REPORTS: usize = 3;
 
-/// Whether `reason` is a reason delega-core gives an `Unconfirmed` verdict:
-/// one standalone reason, or the reasons of one to [`MAX_MERGED_REPORTS`]
-/// process reports joined by `"; "`, in any order. Some reasons contain
-/// `"; "` themselves, so every way of splitting at it is tried.
+/// The most `"; "` separators inside one process-report reason (the owner
+/// that ended without a report, with a keeper). Diagnostic text has no `;`,
+/// so no reason holds more; a test checks every produced reason against it.
+const MAX_SEPARATORS_IN_A_REASON: usize = 2;
+
+/// Whether `reason` has one of the shapes of a reason delega-core gives an
+/// `Unconfirmed` verdict. The module documentation says what is checked and
+/// what is not.
 pub fn is_documented(reason: &str) -> bool {
     if STANDALONE_RECOGNISERS.iter().any(|r| r(reason)) {
         return true;
     }
     let seps: Vec<usize> = reason.match_indices("; ").map(|(at, _)| at).collect();
+    // Each reason holds at most MAX_SEPARATORS_IN_A_REASON separators and
+    // there are at most MAX_MERGED_REPORTS reasons; more separators than that
+    // cannot be a documented reason.
+    if seps.len() > MAX_MERGED_REPORTS * (MAX_SEPARATORS_IN_A_REASON + 1) - 1 {
+        return false;
+    }
     // `fewest[k]`: the fewest whole process reasons that end just before the
     // k-th place a reason can start (the start of the text, or after the k-th
     // separator), if any do.
@@ -104,10 +138,15 @@ pub fn is_documented(reason: &str) -> bool {
             continue;
         }
         let start = if k == 0 { 0 } else { seps[k - 1] + 2 };
-        if is_process_reason(&reason[start..]) {
+        if seps.len() - k <= MAX_SEPARATORS_IN_A_REASON && is_process_reason(&reason[start..]) {
             return true;
         }
-        for (j, &end) in seps.iter().enumerate().skip(k) {
+        let ends = seps
+            .iter()
+            .enumerate()
+            .skip(k)
+            .take(MAX_SEPARATORS_IN_A_REASON + 1);
+        for (j, &end) in ends {
             if is_process_reason(&reason[start..end]) {
                 let count = before + 1;
                 fewest[j + 1] = Some(fewest[j + 1].map_or(count, |c| c.min(count)));
@@ -296,12 +335,22 @@ pub(crate) fn unparsed_lines(count: usize) -> String {
     format!("{UNPARSED_START}{count}{UNPARSED_END}")
 }
 
-/// Whether `error` is the text of a process listing error (`InspectError`):
-/// a fixed text, an exit status, a count of unparsed lines, or an error whose
-/// only free text is an OS error's description (see [`is_os_error`]).
+/// Whether `error` has the shape of a process listing error (`InspectError`):
+/// a fixed text, the count of unparsed lines, an exit status, or a fixed
+/// prefix followed by diagnostic text (see [`is_diagnostic`]). At most
+/// [`MAX_ERROR_CHARS`] characters.
 fn is_listing_error(error: &str) -> bool {
+    if error.chars().count() > MAX_ERROR_CHARS {
+        return false;
+    }
     ListingFailure::ALL.iter().any(|f| f.text() == error)
-        || error.strip_prefix(PS_IO).is_some_and(is_os_error)
+        || error
+            .strip_prefix(UNPARSED_START)
+            .and_then(|rest| rest.strip_suffix(UNPARSED_END))
+            .is_some_and(|n| {
+                n.parse::<usize>()
+                    .is_ok_and(|v| v > 0 && v.to_string() == n)
+            })
         || error
             .strip_prefix(PS_EXIT_START)
             .and_then(|rest| rest.strip_suffix(')'))
@@ -312,71 +361,19 @@ fn is_listing_error(error: &str) -> bool {
                         .and_then(|n| n.strip_suffix(')'))
                         .is_some_and(|n| n.parse::<i32>().is_ok_and(|v| v.to_string() == n))
             })
-        || error
-            .strip_prefix(UNPARSED_START)
-            .and_then(|rest| rest.strip_suffix(UNPARSED_END))
-            .is_some_and(|n| {
-                n.parse::<usize>()
-                    .is_ok_and(|v| v > 0 && v.to_string() == n)
-            })
-        || is_not_started(error)
-}
-
-/// `"{description} (os error {code})"`, as `std::io::Error` shows an OS
-/// error. The description is the system's text: not empty, on one line, and
-/// without `;`.
-fn is_os_error(text: &str) -> bool {
-    text.strip_suffix(')')
-        .and_then(|rest| rest.rsplit_once(" (os error "))
-        .is_some_and(|(description, code)| {
-            !description.is_empty()
-                && !description.contains([';', '\n'])
-                && code.parse::<i32>().is_ok_and(|v| v.to_string() == code)
+        || error.strip_prefix(PS_IO).is_some_and(is_diagnostic)
+        || error.strip_prefix(NOT_STARTED_START).is_some_and(|rest| {
+            rest.strip_suffix(')')
+                .or_else(|| rest.strip_suffix(NOT_STARTED_CUT))
+                .is_some_and(is_diagnostic)
         })
 }
 
-/// The error for a listing program that could not be started
-/// (`tree::not_started`): `"ps could not be started ({detail})"`, where the
-/// detail is [`NO_PS_PROGRAM`] or `"{path}: {os error}"` for each program
-/// tried, joined by `", "`, and the paths are the listing programs. A message
-/// over [`MAX_ERROR_CHARS`] characters is cut to that length ending in
-/// [`NOT_STARTED_CUT`]; what is left must still start like one.
-fn is_not_started(error: &str) -> bool {
-    let chars = error.chars().count();
-    if chars > MAX_ERROR_CHARS {
-        return false;
-    }
-    let Some(rest) = error.strip_prefix(NOT_STARTED_START) else {
-        return false;
-    };
-    if let Some(detail) = rest.strip_suffix(')')
-        && (detail == NO_PS_PROGRAM || is_spawn_failures(detail))
-    {
-        return true;
-    }
-    chars == MAX_ERROR_CHARS
-        && rest.strip_suffix(NOT_STARTED_CUT).is_some_and(|cut| {
-            !cut.contains([';', '\n'])
-                && PS_PROGRAMS
-                    .iter()
-                    .any(|p| cut.strip_prefix(p).is_some_and(|r| r.starts_with(": ")))
-        })
-}
-
-/// `"{path}: {os error}"` for one or more listing programs, joined by `", "`.
-fn is_spawn_failures(detail: &str) -> bool {
-    PS_PROGRAMS.iter().any(|program| {
-        let Some(rest) = detail
-            .strip_prefix(program)
-            .and_then(|r| r.strip_prefix(": "))
-        else {
-            return false;
-        };
-        is_os_error(rest)
-            || rest
-                .match_indices(", ")
-                .any(|(at, _)| is_os_error(&rest[..at]) && is_spawn_failures(&rest[at + 2..]))
-    })
+/// Diagnostic text a listing error carries (an OS error, the programs that
+/// could not be started): not empty, on one line, and without `;`, so it
+/// cannot run into the next reason of a join.
+fn is_diagnostic(text: &str) -> bool {
+    !text.is_empty() && !text.contains([';', '\n', '\r'])
 }
 
 texts! {
