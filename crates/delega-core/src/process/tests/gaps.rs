@@ -989,8 +989,13 @@ async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
     let calls = Arc::new(AtomicU32::new(0));
     let spans: Arc<Mutex<Vec<(u32, Instant, Instant)>>> = Arc::default();
     let (answered, mut answers) = tokio::sync::watch::channel(0u32);
-    let answered = Arc::new(answered);
-    let (lister_calls, recorder, marker) = (calls.clone(), spans.clone(), s.path("scanned"));
+    // The sender belongs to the lister alone, so the test holds none.
+    let (lister_calls, recorder, marker, answered) = (
+        calls.clone(),
+        spans.clone(),
+        s.path("scanned"),
+        Arc::new(answered),
+    );
     spec = spec.with_lister(Arc::new(move || {
         let call = lister_calls.fetch_add(1, Ordering::SeqCst);
         let (recorder, answered, marker) = (recorder.clone(), answered.clone(), marker.clone());
@@ -1027,11 +1032,24 @@ async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
     let mut reaper = Reaper::default();
     reaper.register(descendant, &s);
     // Only the listing's 400 ms are left to pass on the clock; nothing real
-    // is awaited until it has answered.
-    answers
-        .wait_for(|n| *n >= 2)
-        .await
-        .expect("the lister is alive");
+    // is awaited until it has answered. The wait is bounded on the paused
+    // clock by the exit budget: the listing's `ps` holds the clock still while
+    // it runs (and is bounded by its own real timeout), so the bound passes
+    // only if the listing stopped without answering, for instance because the
+    // capture task that ran it failed, and then the idle runtime reaches it at
+    // once. The owner keeps the lister, so the channel alone would stay open.
+    match tokio::time::timeout(
+        crate::process::limits::EXIT_LISTING_BUDGET,
+        answers.wait_for(|n| *n >= 2),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => panic!("the lister was dropped before the exit listing answered"),
+        Err(_) => panic!(
+            "the exit listing began and never answered within the exit budget on the run's clock"
+        ),
+    }
     tokio::time::resume();
     let report = tokio::time::timeout(Duration::from_secs(120), handle.wait())
         .await

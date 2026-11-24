@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use super::fixtures::{
-    Listings, OWN_GROUP, ProcessIdentity, Reaper, Record, Scratch, assert_confirmed, assert_gone,
-    await_held, is_running, own_group_recorded, own_session_recorded, perl_record_self,
+    Listings, ProcessIdentity, Reaper, Record, Scratch, assert_confirmed, assert_gone, await_held,
+    await_record, is_running, own_group_recorded, own_session_recorded, perl_record_self,
     read_record, run_guarded, sh, step_through_the_limit,
 };
 use crate::contract::result::Cleanup;
@@ -173,9 +173,17 @@ async fn a_kept_run_reports_a_crash_by_its_signal() {
 
 #[tokio::test]
 async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
+    require_perl!();
     let s = Scratch::new();
     let limit = Duration::from_millis(800);
-    let script = format!("{OWN_GROUP} & record gc $!; record leader $$; sleep 60");
+    // The descendant publishes `gc` itself once it leads a group of its own,
+    // so the stop at the limit meets a separate group, never a descendant
+    // still in the leader's.
+    let script = format!(
+        "{} & {} record leader $$; sleep 60",
+        own_group_recorded("gc"),
+        await_record("gc")
+    );
     // The run's clock is paused and held until both records are written, so
     // the limit cannot pass before the script is ready (a real 800 ms limit
     // could, and the test then waited for a record that never came); the
