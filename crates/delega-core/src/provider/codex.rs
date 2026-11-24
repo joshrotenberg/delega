@@ -134,7 +134,9 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
              can read, including outside the working directory and permissions.directories, and \
              run any command that works inside the sandbox (writes in the working directory and \
              under /tmp and $TMPDIR, including a permissions.directories entry there, except \
-             .git; no network); permissions.directories does not limit reading"
+             .git; no network; on macOS a live probe found /bin/ps refused inside the \
+             sandbox); \
+             permissions.directories does not limit reading"
                 .to_string(),
             "the workspace-write sandbox keeps .git unwritable, so git add and git commit fail; \
              commit the worker's changes yourself"

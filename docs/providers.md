@@ -273,6 +273,8 @@ shared with that user's Claude Code sessions), except for per-project session
 folders (observed on macOS). Files directly in the temporary directory remain
 writable.
 `git add` and `git commit` can write to the main checkout's Git metadata from a worktree.
+On macOS, commands could not run `/bin/ps`
+([live probe](#verified-against-the-real-cli)).
 
 Listed directories get a scoped Read rule without `--add-dir`. A directory
 inside a writable location stays writable by commands.
@@ -511,6 +513,8 @@ In `build`, directories under the working directory, `/tmp` or `$TMPDIR`
 can be writable even when listed as read-only. Git metadata is protected,
 so `git add` and `git commit` failed in both a checkout and a worktree during
 live verification. A build note tells the caller to commit the changes.
+On macOS, commands could not run `/bin/ps`
+([live probe](#verified-against-the-real-cli)).
 
 ### What cannot be enforced
 
@@ -733,6 +737,19 @@ See `crates/delega-core/src/provider/env.rs`.
 - With the branch binary for #176 (model haiku), a write three levels deep in a
   session folder, a `mkdir` inside it, and a write through the
   `/private/tmp/claude-501/` path were all denied.
+
+### 2026-11-23, Claude Code 2.1.331 and codex-cli 0.171.0 on macOS (#198)
+
+- Claude Code and Codex build workers ran delega's own checks. In both
+  sandboxes, running `/bin/ps` failed with `Operation not permitted`.
+- `cargo fmt`, `cargo clippy` and the builds passed. Tests that list processes
+  with `ps` failed: 104 of 195 in delega-core's process suite, most CLI tests
+  and most doctor tests.
+- Spawning processes, signalling the worker's own child processes, and writing
+  in the working directory and the temporary directory worked.
+- A build worker on macOS could not run a project's tests that inspect
+  processes with `ps`. When delega supervises a build worker, its own process
+  inspection runs outside the worker's sandbox and was not affected.
 
 ### Claude Code 2.1.330, date unrecorded
 

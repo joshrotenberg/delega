@@ -364,7 +364,8 @@ fn build_grants(
          git commit also writes the main checkout's .git), \
          permissions.directories is granted as Read rules (used by Read, Glob and Grep) and is \
          not added to the sandbox, so delega does not make it writable, though one inside a \
-         location commands can write stays writable; the network is refused"
+         location commands can write stays writable; the network is refused; on macOS a live \
+         probe found /bin/ps refused inside the sandbox"
             .to_string(),
         "wider than requested: commands inside the sandbox can read files outside the working \
          directory and permissions.directories"

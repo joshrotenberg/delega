@@ -195,6 +195,7 @@ fn claude_build_mode_adds_unruled_bash_inside_a_sandbox_that_fails_closed() {
          location commands can write stays writable",
         "bubblewrap and socat",
         "git -c name=value) are denied and listed in permissions.denied",
+        "on macOS a live probe found /bin/ps refused inside the sandbox",
     ] {
         assert!(
             plan.notes.iter().any(|n| n.contains(part)),
@@ -566,6 +567,7 @@ fn codex_build_mode_is_workspace_write_without_network_but_with_temporary_direct
     assert!(plan.notes.iter().any(|n| {
         n.contains("wider than requested: the workspace-write sandbox")
             && n.contains("under /tmp and $TMPDIR, including a permissions.directories entry there, except .git")
+            && n.contains("on macOS a live probe found /bin/ps refused inside the sandbox")
     }));
     assert!(
         plan.notes
