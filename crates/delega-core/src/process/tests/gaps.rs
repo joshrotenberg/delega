@@ -451,10 +451,9 @@ pub(super) fn heartbeat_age(scratch: &Scratch) -> Duration {
 }
 
 /// What one interrupted kept run of the long relay came to: whether a relay
-/// process was alive when the report arrived, the verdict, and how long the
-/// stop took from the interrupt to the report.
-/// What one interrupted kept run of the long relay came to, with the report's
-/// diagnostics for a failure message.
+/// process was alive when the report arrived, the verdict, how long the stop
+/// took from the interrupt to the report, and the report's diagnostics for a
+/// failure message (see [`relay_diagnostics`]).
 struct RelayRun {
     alive: bool,
     cleanup: Cleanup,
@@ -502,13 +501,7 @@ async fn relay_run_with_diagnostics() -> RelayRun {
     #[cfg(not(target_os = "linux"))]
     let survivors: Vec<i32> = Vec::new();
     let alive = first != second || written_after || !survivors.is_empty();
-    let diagnostics = format!(
-        "survivors {survivors:?}; cleanup {:?}; keeper {:?}; warnings {:?}; signals {:?}",
-        report.cleanup,
-        report.diagnostics.keeper,
-        report.diagnostics.warnings,
-        report.diagnostics.signals
-    );
+    let diagnostics = relay_diagnostics(&survivors, &report);
     // A relay that survived is ended here, so nothing is left, without
     // signalling a foreign process (see `end_relay_leftovers`).
     super::fixtures::end_relay_leftovers(&s.dir()).await;
@@ -518,6 +511,30 @@ async fn relay_run_with_diagnostics() -> RelayRun {
         took,
         diagnostics,
     }
+}
+
+/// What a relay assertion prints on failure: the survivors, the verdict, and
+/// every answer of the keeper in `tree_reports`, one per line, so a failure
+/// shows which answer was unproven (a refused hold, a failed read, or a
+/// freeze that did not complete) and whether it arrived after its request
+/// timed out (`late`); then `diagnostics.keeper` whole.
+fn relay_diagnostics(survivors: &[i32], report: &crate::process::ProcessReport) -> String {
+    let keeper = report.diagnostics.keeper.as_ref();
+    let answers = keeper.map_or_else(
+        || "  (not a kept run)".to_string(),
+        |k| {
+            k.tree_reports
+                .iter()
+                .map(|r| format!("  {r}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    );
+    format!(
+        "survivors {survivors:?}\ncleanup {:?}\nkeeper tree_reports:\n{answers}\n\
+         diagnostics.keeper {:#?}\nwarnings {:?}\nsignals {:?}",
+        report.cleanup, keeper, report.diagnostics.warnings, report.diagnostics.signals
+    )
 }
 
 /// Gap 2. On Linux the keeper's own walk of its tree stops the relay: every
