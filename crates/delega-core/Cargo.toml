@@ -36,6 +36,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 # `pipe` for the spawn-lock test, which holds a pipe without close-on-exec.
 rustix = { workspace = true, features = ["pipe"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["param", "time"] }
+
 [lints]
 workspace = true
 

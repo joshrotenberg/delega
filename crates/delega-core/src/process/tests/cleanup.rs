@@ -77,12 +77,13 @@ async fn a_crash_while_a_descendant_holds_the_output_pipe_does_not_hang() {
         LONG,
     );
     let started = Instant::now();
-    let (report, pids, _reaper) = run_guarded(&s, spec, &["leader", "gc"]).await;
+    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
+    let leader = s.pid_now("leader");
     assert!(
         matches!(report.ending, Ending::Signaled { signal: 9, .. }),
         "{report:#?}"
     );
-    assert_stopped_in_time("leader and descendant", &pids, started).await;
+    assert_stopped_in_time("leader and descendant", &[leader, pids[0]], started).await;
     assert!(!report.diagnostics.pipes_closed_by_owner, "{report:#?}");
     assert_confirmed(&report);
 }
@@ -147,8 +148,8 @@ both!(
             "echo $$ > leader; {OWN_SESSION} & echo $! > gc; while [ ! -e go ]; do sleep 0.02; done; exit 0"
         );
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
-        let gc = s.pid("gc").await;
-        let _reaper = Reaper::new([gc]);
+        let mut reaper = Reaper::default();
+        let gc = reaper.watch(&s, "gc").await;
         wait_own_group(gc).await;
         wait_tracked(&handle, gc).await;
         let stopped = Instant::now();
@@ -176,8 +177,8 @@ both!(
         spec.drain_bound = Duration::from_secs(60);
         spec.cleanup_deadline = Duration::from_secs(180);
         let handle = ProcessHandle::start(spec);
-        let gc = s.pid("gc").await;
-        let _reaper = Reaper::new([gc]);
+        let mut reaper = Reaper::default();
+        let gc = reaper.watch(&s, "gc").await;
         wait_own_group(gc).await;
         // Let the periodic scan see the descendant.
         wait_tracked(&handle, gc).await;
@@ -207,8 +208,8 @@ both!(
         // No periodic scan after the first, however slow the machine is.
         spec.capture_interval = Some(Duration::from_secs(3600));
         let handle = ProcessHandle::start(spec);
-        let gc = s.pid("gc").await;
-        let _reaper = Reaper::new([gc]);
+        let mut reaper = Reaper::default();
+        let gc = reaper.watch(&s, "gc").await;
         // Without this the sweep could catch it before it has left the session.
         wait_own_group(gc).await;
         let stopped = Instant::now();
@@ -233,8 +234,8 @@ both!(
             let s = Scratch::new();
             let script = format!("echo $$ > leader; {OWN_GROUP} & echo $! > gc; wait");
             let handle = ProcessHandle::start(sh(&s, &script, LONG));
-            let gc = s.pid("gc").await;
-            let _reaper = Reaper::new([gc]);
+            let mut reaper = Reaper::default();
+            let gc = reaper.watch(&s, "gc").await;
             // Interrupt as soon as the fork is recorded. The child may still
             // be in the leader's group or may already have left it.
             let stopped = Instant::now();
@@ -336,17 +337,18 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     // after a grace that load could make too short: the grace is a minute. The
     // children do not hold the output pipes.
     let child = detached_own_group();
+    // Let the leader's Linux start tick finish before publishing its PID.
     let script = format!(
-        "trap \"{child} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
+        "trap \"{child} & echo \\$! >> gcs\" TERM; sleep 0.05; echo $$ > leader; \
          while [ ! -e quit ]; do sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
     spec.stop_grace = Duration::from_secs(60);
     let _reaper = ChildLifetime::new(&s);
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
+    let record = s.pid_file("leader").await;
     let mut reaper = Reaper::default();
-    let child = reaper.register(leader).expect("identify the leader");
+    let child = reaper.register(&record).expect("identify the leader");
     handle.interrupt();
     s.exists("gcs").await;
     let mut sent_at = Instant::now();
@@ -513,8 +515,8 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     spec.cleanup_deadline = Duration::from_secs(600);
     let started = Instant::now();
     let handle = ProcessHandle::start(spec);
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper::new([gc]);
+    let mut reaper = Reaper::default();
+    let gc = reaper.watch(&s, "gc").await;
     let report = handle.wait().await;
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
@@ -557,8 +559,8 @@ async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
     .with_lister(lister);
     spec.cleanup_deadline = Duration::from_secs(30);
     let handle = ProcessHandle::start(spec);
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper::new([gc]);
+    let mut reaper = Reaper::default();
+    reaper.watch(&s, "gc").await;
     let report = handle.wait().await;
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
@@ -676,10 +678,10 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     // the signal assertion below fails.
     spec.timings.final_cleanup_pass = crate::process::limits::FINAL_CLEANUP_PASS;
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let gc = s.pid("gc").await;
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
+    let gc = reaper.watch(&s, "gc").await;
     let pids = vec![leader, gc];
-    let _reaper = Reaper::new(pids.clone());
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(

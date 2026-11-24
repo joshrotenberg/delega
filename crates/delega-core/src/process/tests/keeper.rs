@@ -190,8 +190,8 @@ async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     );
     let spec = kept(sh(&s, &script, LONG));
     let handle = ProcessHandle::start(spec);
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper::new([gc]);
+    let mut reaper = Reaper::default();
+    let gc = reaper.watch(&s, "gc").await;
     s.exists("ready").await;
     handle.interrupt();
     let report = handle.wait().await;
@@ -347,16 +347,14 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
         .guarded_spawn()
         .expect("start the owner");
     let owner_pid = i32::try_from(owner.id()).expect("a pid");
-    let leader = s.pid("leader").await;
-    let mut reaper = Reaper::new([leader]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
     let keeper = parent_of(leader).expect("the program's parent");
     assert_ne!(keeper, owner_pid, "the program's parent must be the keeper");
     reaper.add(keeper_identity(keeper, &s.dir()));
     let mut pids = vec![leader];
     for file in ["group", "session", "stubborn"] {
-        let pid = s.pid(file).await;
-        reaper.register(pid);
-        pids.push(pid);
+        pids.push(reaper.watch(&s, file).await);
     }
     pids.push(keeper);
     super::fixtures::wait_own_group(pids[2]).await;
@@ -374,8 +372,8 @@ async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
     let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
     spec.keeper = Some(named_keeper(&s.dir()));
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let _reaper = Reaper::new([leader]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
     let keeper = parent_of(leader).expect("the program's parent");
     let keeper = keeper_identity(keeper, &s.dir()).expect("identify the keeper");
     assert!(keeper.signal(Signal::KILL), "signal the keeper");
@@ -465,8 +463,8 @@ async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
     let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
     spec.keeper = Some(named_keeper(&s.dir()));
     let handle = ProcessHandle::start(spec);
-    let leader = s.pid("leader").await;
-    let _reaper = Reaper::new([leader]);
+    let mut reaper = Reaper::default();
+    let leader = reaper.watch(&s, "leader").await;
     let keeper = parent_of(leader).expect("the program's parent");
     let keeper = keeper_identity(keeper, &s.dir()).expect("identify the keeper");
     assert!(keeper.signal(Signal::TERM), "signal the keeper");
@@ -633,8 +631,8 @@ async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed
     let mut spec = refusing(&s, sh(&s, &script, LONG));
     spec.keeper = None;
     let handle = ProcessHandle::start(spec);
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper::new([gc]);
+    let mut reaper = Reaper::default();
+    let gc = reaper.watch(&s, "gc").await;
     let _ = s.pid("leader").await;
     super::fixtures::wait_tracked(&handle, gc).await;
     handle.interrupt();

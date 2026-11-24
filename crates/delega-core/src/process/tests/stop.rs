@@ -60,8 +60,8 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
     spec.drain_bound = Duration::from_secs(60);
     spec.cleanup_deadline = Duration::from_secs(180);
     let handle = ProcessHandle::start(spec);
-    let gc = s.pid("gc").await;
-    let _reaper = Reaper::new([gc]);
+    let mut reaper = Reaper::default();
+    let gc = reaper.watch(&s, "gc").await;
     await_event("the descendant being stopped", || {
         s.path("stopped").exists()
     })
@@ -85,8 +85,8 @@ both!(
     async {
         let s = Scratch::new();
         let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
-        let leader = s.pid("leader").await;
-        let _reaper = Reaper::new([leader]);
+        let mut reaper = Reaper::default();
+        let leader = reaper.watch(&s, "leader").await;
         assert_eq!(
             sys::session_of(leader),
             Some(leader),
@@ -112,13 +112,15 @@ both!(
         let s = Scratch::new();
         let held = Held::new(false);
         // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
-        let script = "trap 'exit 0' USR1; echo $$ > leader; echo ready > ready; \
+        // Let the leader's Linux start tick finish before publishing its PID.
+        let script = "trap 'exit 0' USR1; sleep 0.05; echo $$ > leader; echo ready > ready; \
                   while :; do sleep 0.02; done";
         let spec = sh(&s, script, LONG).with_lister(held.lister());
         let handle = ProcessHandle::start(spec);
-        let leader = s.pid("leader").await;
+        let record = s.pid_file("leader").await;
+        let leader = record.pid;
         let mut reaper = Reaper::default();
-        let child = reaper.register(leader).expect("identify the child");
+        let child = reaper.register(&record).expect("identify the child");
         await_event("the child being ready", || s.path("ready").exists()).await;
         held.armed.store(true, Ordering::SeqCst);
         // The stop begins and waits for a listing that is held; the child exits
@@ -185,14 +187,14 @@ fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session
         .build()
         .expect("build runtime");
     let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; wait");
+    let mut reaper = Reaper::default();
     let (handle, gc) = runtime.block_on(async {
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
-        let gc = s.pid("gc").await;
+        let gc = reaper.watch(&s, "gc").await;
         // The owner's drop can only reach it if a scan has recorded it.
         super::fixtures::wait_tracked(&handle, gc).await;
         (handle, gc)
     });
-    let _reaper = Reaper::new([gc]);
     drop(runtime);
     drop(handle);
     let check = tokio::runtime::Builder::new_current_thread()
