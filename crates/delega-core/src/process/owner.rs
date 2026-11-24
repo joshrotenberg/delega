@@ -511,6 +511,13 @@ pub const UNVERIFIED_SIGNAL_REASON: &str = "a process the cleanup had to signal 
 pub const TREE_LEFT_AT_REAP_REASON: &str = "processes were still alive in the keeper's tree \
      after its last freeze at the reap";
 
+/// The reason of an `Unconfirmed` verdict on Linux when the keeper is a child
+/// subreaper, acknowledged the reap and left nothing alive, and its final
+/// census did not prove the tree empty.
+pub const FINAL_CENSUS_UNPROVEN_REASON: &str = "the keeper's final census at the reap could not \
+     prove its tree empty (the census did not complete, or a read of /proc failed during the \
+     run), so a process may still be running";
+
 /// The reason of an `Unconfirmed` verdict on Linux when the keeper could not
 /// become a child subreaper: an orphaned descendant could reparent to init,
 /// beyond what the keeper's tree shows.
@@ -591,6 +598,42 @@ fn refusal_reason(r: Refusals) -> Option<&'static str> {
         Some(UNVERIFIED_SIGNAL_REASON)
     } else {
         None
+    }
+}
+
+/// The keeper's answer to the reap, with what the owner knows of the keeper.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReapAnswer {
+    acknowledged: bool,
+    leftover: usize,
+    proven: bool,
+    subreaper: bool,
+    lost: bool,
+}
+
+impl ReapAnswer {
+    /// The narrower Rule A's proof: on Linux, a subreaper keeper that was not
+    /// lost acknowledged the reap, left nothing alive and proved its tree
+    /// empty.
+    fn proves_empty(self, linux: bool) -> bool {
+        linux
+            && self.subreaper
+            && !self.lost
+            && self.acknowledged
+            && self.leftover == 0
+            && self.proven
+    }
+
+    /// Rule A on Linux kept runs: the keeper could have proved its tree
+    /// empty (a subreaper, not lost, the reap acknowledged with nothing left
+    /// alive) and did not, so the run cannot be `Confirmed`.
+    fn proof_missing(self, linux: bool) -> bool {
+        linux
+            && self.subreaper
+            && !self.lost
+            && self.acknowledged
+            && self.leftover == 0
+            && !self.proven
     }
 }
 
@@ -1060,14 +1103,14 @@ impl OwnedProcess {
                 };
                 // The narrower Rule A (see "What `Confirmed` means" in the
                 // module documentation).
-                let tree_proven_empty = cfg!(target_os = "linux")
-                    && self.reap_acknowledged
-                    && self.reap_proven
-                    && self.reap_leftover == 0
-                    && shared
-                        .keeper
-                        .as_ref()
-                        .is_some_and(|k| k.subreaper() && !k.lost());
+                let answer = ReapAnswer {
+                    acknowledged: self.reap_acknowledged,
+                    leftover: self.reap_leftover,
+                    proven: self.reap_proven,
+                    subreaper: shared.keeper.as_ref().is_some_and(|k| k.subreaper()),
+                    lost: shared.keeper_lost(),
+                };
+                let tree_proven_empty = answer.proves_empty(cfg!(target_os = "linux"));
                 let refusal = refusal_reason(Refusals {
                     keeper_unproven: shared.keeper.as_ref().is_some_and(|k| k.unproven()),
                     owner_refused: unverified,
@@ -1089,6 +1132,8 @@ impl OwnedProcess {
                     && shared.keeper.as_ref().is_some_and(|k| !k.subreaper())
                 {
                     unconfirmed(NO_SUBREAPER_REASON)
+                } else if kept && answer.proof_missing(cfg!(target_os = "linux")) {
+                    unconfirmed(FINAL_CENSUS_UNPROVEN_REASON)
                 } else if missed {
                     unconfirmed(LATE_LISTING_REASON)
                 } else if shared.freeze_incomplete.load(Ordering::SeqCst) {
