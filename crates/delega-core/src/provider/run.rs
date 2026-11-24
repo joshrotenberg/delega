@@ -5,7 +5,9 @@
 //! servers it lists); their time counts against the run's time limit, and the
 //! cleanup verdict of a probe is part of the result's cleanup.
 
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(not(test))]
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -337,6 +339,10 @@ async fn execute_steps(
     session: &Session,
     progress: &Progress,
 ) -> RunResult {
+    // Unit tests drive the preparation budget and the process timer together.
+    #[cfg(test)]
+    let began = tokio::time::Instant::now();
+    #[cfg(not(test))]
     let began = Instant::now();
     let mut notes = plan.notes.clone();
     if let Some(note) = cleanup_note(plan.keeper.is_some(), cfg!(target_os = "macos")) {

@@ -417,10 +417,8 @@ async fn an_unconfirmed_run_stays_recorded_after_a_refused_follow_up_replaced_it
     dir.assert_nothing_left().await;
 }
 
-/// Start a gated run and a `wait` for it that times out after a second and is
-/// held before it asks for its view. The wait is given time because a wait
-/// given none is answered in one command and never reaches its view. Returns the held wait and the gate that lets it
-/// go on.
+/// Start a gated run, expire its registered wait, and hold the wait before
+/// it asks for its view. Return the held wait and the gate that releases it.
 async fn wait_held_after_its_timeout(
     dir: &Dir,
     supervisor: &Supervisor,
@@ -433,16 +431,36 @@ async fn wait_held_after_its_timeout(
         .await
         .expect("start");
     dir.gate_started().await;
+    let mut waits = supervisor.observe_waits();
     let (reached, release) = supervisor.pause_next_wait_before_view();
-    let waiting = {
-        let supervisor = supervisor.clone();
-        let targets = WaitTargets {
-            runs: vec![started.run],
-            workers: Vec::new(),
-        };
-        tokio::spawn(async move { supervisor.wait(targets, Some(1), None).await })
+    let supervisor = supervisor.clone();
+    let targets = WaitTargets {
+        runs: vec![started.run],
+        workers: Vec::new(),
     };
-    reached.await.expect("the wait reached its view");
+    let mut wait = Box::pin(async move { supervisor.wait(targets, Some(1), None).await });
+    // Send the command, then wait for the actor to park it with time running.
+    tokio::select! {
+        biased;
+        response = &mut wait => panic!("wait answered before registration: {response:?}"),
+        () = std::future::ready(()) => {}
+    }
+    waits.registered().await;
+
+    tokio::time::pause();
+    // Arm the timer on this task before advancing the clock.
+    tokio::select! {
+        biased;
+        response = &mut wait => panic!("wait answered when armed: {response:?}"),
+        () = std::future::ready(()) => {}
+    }
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    let waiting = tokio::spawn(wait);
+    tokio::time::timeout(Duration::from_millis(10), reached)
+        .await
+        .expect("the wait did not expire at one second")
+        .expect("the wait reached its view");
+    tokio::time::resume();
     (waiting, release)
 }
 

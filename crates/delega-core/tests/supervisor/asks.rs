@@ -191,23 +191,20 @@ async fn the_run_deadline_denies_a_waiting_request_before_its_permission_timeout
     let supervisor = rig.supervisor(Provider::Claude);
     let mut request = rig.request(Provider::Claude, "ask");
     request.permissions.on_request = OnRequest::Ask;
-    request.timeout_secs = 4;
+    request.timeout_secs = 30;
+    request.permissions.ask_timeout = Some(60);
     let start = supervisor.start(request).await.unwrap();
     let id = pending_id(&supervisor, &start.run).await;
-    let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
-        supervisor
-            .wait(
-                WaitTargets {
-                    workers: vec![],
-                    runs: vec![start.run.clone()],
-                },
-                Some(5),
-                Some(read_full(&supervisor, &start.run).await.cursor),
-            )
-            .await
-            .unwrap();
-        result_of(&supervisor, &start.run).await
-    })
+
+    // The process and its permission timer are running. Advance through the
+    // shorter run deadline and give the real child time to settle its reply.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    tokio::time::resume();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        result_of(&supervisor, &start.run),
+    )
     .await
     .expect("run deadline settles");
     assert_eq!(result.outcome, Outcome::TimedOut);
@@ -321,6 +318,8 @@ async fn a_provider_that_never_reads_a_large_reply_still_stops_at_the_run_deadli
     let supervisor = rig.supervisor(Provider::Claude);
     let mut request = rig.request(Provider::Claude, "ask-no-read");
     request.permissions.on_request = OnRequest::Ask;
+    // Keep a real deadline against the real pipe. An accepted response does
+    // not acknowledge that its write has reached pipe backpressure.
     request.timeout_secs = 5;
     let start = supervisor.start(request).await.unwrap();
     let id = pending_id(&supervisor, &start.run).await;

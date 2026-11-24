@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -319,8 +320,19 @@ async fn preparation_counts_against_the_time_limit() {
     let mut options = rig.options(Provider::Codex);
     options.env_set.push(("FAKE_MCP".into(), "hang".into()));
     let mut request = rig.request(Provider::Codex, "success");
-    request.timeout_secs = 1;
-    let result = run_checked(request, options).await;
+    request.timeout_secs = 8;
+    let handle = start(request, options);
+    rig.wait_record("mcp-argv").await;
+
+    // The discovery probe is running. Jump past the shared run budget,
+    // then let its real child and the process listing finish on real time.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(8)).await;
+    tokio::time::resume();
+    let result = tokio::time::timeout(Duration::from_secs(5), handle.wait())
+        .await
+        .expect("the preparation deadline settles the run");
+    assert_eq!(result.validate(), Ok(()), "{result:#?}");
     assert_eq!(result.outcome, Outcome::TimedOut, "{result:#?}");
     assert_eq!(result.error.as_ref().expect("error").kind, "timed_out");
     assert_eq!(result.cleanup, Cleanup::Confirmed, "{result:#?}");
