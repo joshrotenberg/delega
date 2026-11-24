@@ -446,7 +446,9 @@ fallback.
 - Outside the documented residuals, rows expecting `Confirmed` must have no
   survivors at exit or after settling. They may report `Unconfirmed` for a
   late listing alone, with no reported PIDs or process groups. The harness
-  evaluates that result from the original attempt.
+  evaluates that result from the original attempt. On macOS a late listing
+  alone also permits survivors when every observed role is `leaf-setsid` or
+  `bare`, which both leave the session.
 - Rows with process listing disabled must report `Unconfirmed`. The Linux
   keeper must still leave no survivors. On macOS only the detached roles
   listed for those rows may survive.
