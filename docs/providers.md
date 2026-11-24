@@ -303,6 +303,14 @@ completely and so may widen the run, the plan carries a note naming it, and
   at all and a note says so; with `permissions.strict` the run is refused before
   start with `permissions_not_enforceable` instead. Claude Code 2.1.325 or later supports the hook interface. The guard has
   a 5 s timeout and a 2,000,000-byte input limit.
+- Claude Code applies managed settings above `--settings`. A managed
+  `disableAllHooks` set to true is the value in force, so the guard does not
+  run; a managed `allowManagedHooksOnly` runs only the organization's hooks;
+  a managed `hooks` adds hooks that run beside the guard, and Claude Code does
+  not document how their decisions combine with the guard's. When the run has
+  the guard, a managed source that sets any of these keys, or may set them
+  because it was not read completely, is named in a note, and
+  `permissions.strict` refuses the run ([Strict](#strict)).
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
   The `Edit` rule covers a listed directory only if it lies inside the working
   directory. In `build`, listed directories get their `Read` rule without
@@ -396,10 +404,18 @@ can or may widen the run:
   the [Claude Code keys](#managed-settings) table; another key under
   `sandbox`, such as `sandbox.filesystem.denyWrite`, is not checked), which
   can disable or loosen the sandbox delega passes;
+- in `read` and `write` with delega's command guard (`permissions.commands`
+  with a hook configured), one that sets `disableAllHooks`,
+  `allowManagedHooksOnly` or `hooks`, which can stop the guard from running or
+  add a hook whose decision combines with the guard's in ways Claude Code does
+  not document ([Commands and directories](#commands-and-directories)). Runs
+  without the guard rely on no hook, so these keys are not checked for them;
 - one that exists and was not read completely (`not_inspected`, `unreadable`
   or `partly_read`), such as the managed preferences file or a drop-in
-  directory that cannot be listed. It may set either kind of key, so it may
-  widen the run. `managed-mcp.json` holds no settings keys and is not counted.
+  directory that cannot be listed. It may set any of the keys the run is
+  checked for, so it may widen the run, and its part says which: hook keys
+  only with the guard, sandbox keys only in `build`. `managed-mcp.json` holds
+  no settings keys and is not counted.
 
 The users' managed preferences under `/Library/Managed Preferences` are one
 source, named by that directory only, never by a user. Only the current
@@ -427,8 +443,8 @@ Each source is one part of the `permissions_not_enforceable` message, with
 its path and key names, or why it was not read. Values are never reported.
 Without `permissions.strict` the run goes ahead and each source is a provider note
 starting `managed settings can widen this run:`. `full` asks for no scope and no
-sandbox, so it is not checked. A managed `hooks` key and settings Claude Code
-fetches from a server are not checked.
+sandbox, so it is not checked. Settings Claude Code fetches from a server are
+not checked.
 
 ### What cannot be enforced
 
@@ -882,7 +898,9 @@ blocking problem for the same condition. See the
 
 Claude planning also notes, and with `permissions.strict` refuses, a managed
 source that sets `permissions.allow`, a recognized `sandbox` key in `build`,
-or that was not read completely and so may widen the run ([Strict](#strict)).
+a `hooks` category key (`disableAllHooks`, `allowManagedHooksOnly`, `hooks`)
+when the run has delega's command guard, or that was not read completely and
+so may widen the run ([Strict](#strict)).
 
 **Sources looked for.** Windows is out of scope.
 
@@ -914,7 +932,7 @@ the key does is in Claude Code's
 | Category | Keys |
 | --- | --- |
 | `permissions` | `allowManagedPermissionRulesOnly`, `permissions.allow`, `permissions.deny`, `permissions.ask`, `permissions.additionalDirectories`, `permissions.blockReadsOutsideWorkingDirectories`, `permissions.blockWritesOutsideWorkingDirectories` |
-| `hooks` | `allowManagedHooksOnly`, `disableAllHooks` |
+| `hooks` | `allowManagedHooksOnly`, `disableAllHooks`, `hooks` |
 | `plugins` | `strictPluginOnlyCustomization` |
 | `mcp` | `disableSideloadFlags`, `allowManagedMcpServersOnly`, `allowedMcpServers`, `deniedMcpServers` |
 | `sandbox` | `sandbox.enabled`, `sandbox.autoAllowBashIfSandboxed`, `sandbox.allowUnsandboxedCommands`, `sandbox.failIfUnavailable`, `sandbox.excludedCommands`, `sandbox.filesystem.allowWrite`, `sandbox.network.allowedDomains`, `sandbox.filesystem.allowManagedReadPathsOnly`, `sandbox.network.allowManagedDomainsOnly` |

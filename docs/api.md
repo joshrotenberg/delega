@@ -87,8 +87,11 @@ and what each provider cannot enforce is in
 Code `build` request or `permissions.commands` without a command guard. It
 also refuses a Claude Code `read`, `write` or `build` request when a managed
 settings source sets `permissions.allow`, sets a recognized `sandbox` key
-(`build` only), or exists and was not read completely and so may widen the
-run, such as the managed preferences file. A user's managed preferences file
+(`build` only), sets `disableAllHooks`, `allowManagedHooksOnly` or `hooks`
+(`read` and `write` with `permissions.commands` and a command guard, since
+these keys can stop the guard from running or add a hook beside it), or
+exists and was not read completely and so may widen the run, such as the
+managed preferences file. A user's managed preferences file
 refuses even when it is another user's, since delega does not tell whose it
 is. On macOS a managed preferences location delega could not check (a lookup
 or listing that fails for a reason other than absence) also refuses. The part

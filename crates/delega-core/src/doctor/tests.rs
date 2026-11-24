@@ -353,7 +353,10 @@ fn report_with_managed_settings() -> (tempfile::TempDir, Report) {
     );
     write(
         &format!("{claude}/managed-settings.d/20-x\nproblems: forged-{MANAGED_SECRET}.json"),
-        r#"{"disableAllHooks":true}"#.to_string(),
+        format!(
+            r#"{{"disableAllHooks":true,"hooks":{{"PreToolUse":[{{"matcher":"Bash",
+                "hooks":[{{"type":"command","command":"/bin/{MANAGED_SECRET}"}}]}}]}}}}"#
+        ),
     );
     write(
         &format!(
@@ -408,7 +411,7 @@ fn managed_settings_are_shown_by_path_and_key_name_and_never_by_value() {
         "      authentication: apiKeyHelper\n".to_string(),
         "      environment: env\n".to_string(),
         format!("    {dir}/managed-settings.d (partly read; 2 files, 1 not read)\n"),
-        "      hooks: disableAllHooks\n".to_string(),
+        "      hooks: disableAllHooks, hooks\n".to_string(),
         "Library/Managed Preferences (present, not inspected; 1 file)\n".to_string(),
         format!("    {dir}/managed-mcp.json (present)"),
         "com.anthropic.claudecode.plist (present, not inspected)".to_string(),
@@ -488,6 +491,8 @@ fn the_json_names_managed_keys_and_holds_no_value_and_satisfies_the_schema() {
     }
     assert_eq!(claude[0]["files"], Value::Null);
     assert_eq!(claude[1]["keys"][0]["name"], "disableAllHooks");
+    assert_eq!(claude[1]["keys"][1]["name"], "hooks");
+    assert_eq!(claude[1]["keys"][1]["category"], "hooks");
     assert_eq!(
         claude[1]["files"],
         json!({"found": 2, "limit_reached": false, "unreadable": 1})

@@ -151,7 +151,11 @@ fn build_with(
     };
     if request.provider == Provider::Claude {
         // Managed settings sit above what delega passes; see `claude_widening`.
-        for phrase in managed::claude_widening(&options.system_paths, scope.mode) {
+        // `needs_hook_version` is set exactly when the command guard is
+        // installed.
+        for phrase in
+            managed::claude_widening(&options.system_paths, scope.mode, built.needs_hook_version)
+        {
             built
                 .notes
                 .push(format!("managed settings can widen this run: {phrase}"));

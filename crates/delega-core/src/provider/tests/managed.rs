@@ -324,7 +324,7 @@ fn a_key_that_does_not_change_what_delega_passes_is_not_listed() {
     );
     // A name that is relevant at the top level is not looked for elsewhere.
     assert_eq!(
-        claude_names(r#"{"permissions":{"env":{},"disableAllHooks":true},"hooks":{"allow":[]}}"#),
+        claude_names(r#"{"permissions":{"env":{},"disableAllHooks":true},"plugins":{"allow":[]}}"#),
         Vec::<String>::new()
     );
 }
@@ -965,7 +965,8 @@ fn counts(found: usize, unreadable: usize, limit_reached: bool) -> Option<Manage
 fn every_claude_key(value: &str) -> String {
     format!(
         r#"{{"allowManagedPermissionRulesOnly":{v},"allowManagedHooksOnly":{v},
-            "disableAllHooks":{v},"strictPluginOnlyCustomization":{v},"disableSideloadFlags":{v},
+            "disableAllHooks":{v},"hooks":{v},"strictPluginOnlyCustomization":{v},
+            "disableSideloadFlags":{v},
             "allowManagedMcpServersOnly":{v},"allowedMcpServers":{v},"deniedMcpServers":{v},
             "permissions":{{"allow":{v},"deny":{v},"ask":{v},"additionalDirectories":{v},
               "blockReadsOutsideWorkingDirectories":{v},
@@ -987,7 +988,7 @@ fn a_key_that_is_present_is_listed_whatever_its_value() {
     // doctor does not decide whether a key is on: how Claude Code reads a
     // value is not reproduced, so the same keys are listed for every value.
     let with_true = claude_names(&every_claude_key("true"));
-    assert_eq!(with_true.len(), 35, "{with_true:?}");
+    assert_eq!(with_true.len(), 36, "{with_true:?}");
     for value in ["false", r#""false""#, "null", "[]", "{}", "0", r#""x""#] {
         assert_eq!(claude_names(&every_claude_key(value)), with_true, "{value}");
     }
@@ -1080,6 +1081,7 @@ fn every_listed_key_has_the_category_of_its_table() {
             ("allowManagedPermissionRulesOnly", Permissions),
             ("allowManagedHooksOnly", Hooks),
             ("disableAllHooks", Hooks),
+            ("hooks", Hooks),
             ("strictPluginOnlyCustomization", Plugins),
             ("disableSideloadFlags", Mcp),
             ("allowManagedMcpServersOnly", Mcp),

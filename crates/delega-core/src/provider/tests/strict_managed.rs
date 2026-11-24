@@ -28,6 +28,9 @@ struct Setup {
     rig: Rig,
     root: TempDir,
     platform: Platform,
+    /// `permissions.commands` of every request. When it is not empty the
+    /// options carry a hook program, so read and write get the command guard.
+    commands: Vec<String>,
 }
 
 impl Setup {
@@ -36,6 +39,16 @@ impl Setup {
             rig: Rig::new(),
             root: tempfile::tempdir().expect("temporary root"),
             platform,
+            commands: Vec::new(),
+        }
+    }
+
+    /// A setup whose requests list a command and whose options configure the
+    /// command guard.
+    fn guarded(platform: Platform) -> Self {
+        Self {
+            commands: vec!["make test".to_string()],
+            ..Self::new(platform)
         }
     }
 
@@ -52,6 +65,9 @@ impl Setup {
             root: self.root.path().to_path_buf(),
             platform: self.platform,
         };
+        if !self.commands.is_empty() {
+            options.hook = Some(Rig::guard_hook());
+        }
         options
     }
 
@@ -59,6 +75,7 @@ impl Setup {
         let mut request = self.rig.request(Provider::Claude, "p");
         request.permissions.mode = mode;
         request.permissions.strict = strict;
+        request.permissions.commands = self.commands.clone();
         request
     }
 
@@ -483,6 +500,289 @@ fn a_drop_in_directory_with_one_malformed_file_refuses_strict() {
     assert!(
         refusal.message.contains(&format!(
             "the managed source {} was only partly read, so it may set",
+            text(&dir)
+        )),
+        "{}",
+        refusal.message
+    );
+}
+
+/// The three managed keys that can stop delega's command guard from running
+/// or deciding alone, each as a settings file that sets it, with [`SECRET`]
+/// in a value.
+fn hook_key_files() -> [(&'static str, String); 3] {
+    [
+        (
+            "disableAllHooks",
+            format!(r#"{{"disableAllHooks":true,"model":"{SECRET}"}}"#),
+        ),
+        (
+            "allowManagedHooksOnly",
+            format!(r#"{{"allowManagedHooksOnly":true,"model":"{SECRET}"}}"#),
+        ),
+        (
+            "hooks",
+            format!(
+                r#"{{"hooks":{{"PreToolUse":[{{"matcher":"Bash","hooks":[{{"type":"command",
+                    "command":"/bin/{SECRET}"}}]}}]}}}}"#
+            ),
+        ),
+    ]
+}
+
+/// Every hook key in one file.
+const ALL_HOOK_KEYS: &str = r#"{"disableAllHooks":true,"allowManagedHooksOnly":true,
+    "hooks":{"PreToolUse":[]}}"#;
+
+fn names_a_hook_key(message: &str) -> bool {
+    [
+        "disableAllHooks",
+        "allowManagedHooksOnly",
+        "sets hooks",
+        "hook keys",
+    ]
+    .iter()
+    .any(|name| message.contains(name))
+}
+
+#[test]
+fn a_managed_hook_key_refuses_strict_read_and_write_that_rely_on_the_command_guard() {
+    for (key, content) in hook_key_files() {
+        for (platform, dir) in [
+            (Platform::Macos, MAC_CLAUDE),
+            (Platform::Linux, LINUX_CLAUDE),
+        ] {
+            let setup = Setup::guarded(platform);
+            let path = setup.write(&format!("{dir}/managed-settings.json"), &content);
+            for mode in [Mode::Read, Mode::Write] {
+                let refusal = setup.refusal(mode);
+                assert_eq!(
+                    refusal.kind, "permissions_not_enforceable",
+                    "{key} {mode:?}"
+                );
+                let entry = format!(
+                    "the managed source {} sets {key}, and Claude Code applies managed settings \
+                     above the settings delega passes",
+                    text(&path)
+                );
+                assert!(
+                    refusal.message.contains(&entry),
+                    "{key} {mode:?}: {}",
+                    refusal.message
+                );
+                assert!(!refusal.message.contains(SECRET), "{}", refusal.message);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_managed_hook_key_is_a_note_on_read_and_write_with_the_command_guard_without_strict() {
+    for (key, content) in hook_key_files() {
+        let setup = Setup::guarded(Platform::Linux);
+        let path = setup.write(&format!("{LINUX_CLAUDE}/managed-settings.json"), &content);
+        for mode in [Mode::Read, Mode::Write] {
+            let notes = setup.notes(mode);
+            assert_eq!(notes.len(), 1, "{key} {mode:?}: {notes:?}");
+            assert!(
+                notes[0].contains(&format!("the managed source {} sets {key},", text(&path))),
+                "{notes:?}"
+            );
+            assert!(!notes[0].contains(SECRET), "{notes:?}");
+        }
+    }
+}
+
+#[test]
+fn a_drop_in_with_a_managed_hook_key_refuses_strict_with_the_guard_naming_the_directory_only() {
+    let setup = Setup::guarded(Platform::Linux);
+    setup.write(
+        &format!("{LINUX_CLAUDE}/managed-settings.d/{SECRET}.json"),
+        r#"{"allowManagedHooksOnly":true}"#,
+    );
+    let dir = setup
+        .root
+        .path()
+        .join(format!("{LINUX_CLAUDE}/managed-settings.d"));
+    let refusal = setup.refusal(Mode::Read);
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} sets allowManagedHooksOnly,",
+            text(&dir)
+        )),
+        "{}",
+        refusal.message
+    );
+    assert!(!refusal.message.contains(SECRET), "{}", refusal.message);
+}
+
+#[test]
+fn managed_hook_keys_are_named_beside_permissions_allow_with_the_guard() {
+    let setup = Setup::guarded(Platform::Macos);
+    let path = setup.write(
+        &format!("{MAC_CLAUDE}/managed-settings.json"),
+        r#"{"disableAllHooks":true,"allowManagedHooksOnly":true,"hooks":{},
+            "permissions":{"allow":["Bash"]}}"#,
+    );
+    let refusal = setup.refusal(Mode::Write);
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} sets allowManagedHooksOnly, disableAllHooks, hooks, \
+             permissions.allow,",
+            text(&path)
+        )),
+        "{}",
+        refusal.message
+    );
+}
+
+#[test]
+fn managed_hook_keys_do_not_affect_read_and_write_without_permissions_commands() {
+    for (key, content) in hook_key_files() {
+        let setup = Setup::new(Platform::Macos);
+        setup.write(&format!("{MAC_CLAUDE}/managed-settings.json"), &content);
+        for mode in [Mode::Read, Mode::Write] {
+            setup.runs_strict(mode);
+            assert_eq!(setup.notes(mode), Vec::<String>::new(), "{key} {mode:?}");
+        }
+    }
+    // Beside permissions.allow, which refuses, the hook keys are not named.
+    let setup = Setup::new(Platform::Macos);
+    setup.write(
+        &format!("{MAC_CLAUDE}/managed-settings.json"),
+        r#"{"disableAllHooks":true,"hooks":{},"permissions":{"allow":["Bash"]}}"#,
+    );
+    let refusal = setup.refusal(Mode::Read);
+    assert!(
+        refusal.message.contains("sets permissions.allow,"),
+        "{}",
+        refusal.message
+    );
+    assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
+}
+
+#[test]
+fn managed_hook_keys_are_not_named_when_permissions_commands_has_no_guard_configured() {
+    // Without a hook program, permissions.commands is not granted and no
+    // guard is installed; strict refuses for that reason alone.
+    let setup = Setup::guarded(Platform::Linux);
+    setup.write(
+        &format!("{LINUX_CLAUDE}/managed-settings.json"),
+        ALL_HOOK_KEYS,
+    );
+    let mut options = setup.options();
+    options.hook = None;
+    let refusal = match dry_run(&setup.request(Mode::Read, true), &options) {
+        Ok(_) => panic!("expected a refusal"),
+        Err(refusal) => refusal,
+    };
+    assert!(
+        refusal.message.contains("no command guard is configured"),
+        "{}",
+        refusal.message
+    );
+    assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
+}
+
+#[test]
+fn managed_hook_keys_do_not_affect_full_with_or_without_permissions_commands() {
+    for setup in [Setup::new(Platform::Macos), Setup::guarded(Platform::Macos)] {
+        setup.write(
+            &format!("{MAC_CLAUDE}/managed-settings.json"),
+            ALL_HOOK_KEYS,
+        );
+        setup.runs_strict(Mode::Full);
+        assert_eq!(setup.notes(Mode::Full), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn strict_builds_refusal_does_not_name_managed_hook_keys() {
+    let setup = Setup::new(Platform::Linux);
+    setup.write(
+        &format!("{LINUX_CLAUDE}/managed-settings.json"),
+        ALL_HOOK_KEYS,
+    );
+    // Strict build is refused for command reads whatever is managed.
+    let refusal = setup.refusal(Mode::Build);
+    assert_eq!(refusal.kind, "permissions_not_enforceable");
+    assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
+    assert_eq!(setup.notes(Mode::Build), Vec::<String>::new());
+}
+
+#[test]
+fn sources_not_read_say_they_may_set_hook_keys_only_with_the_guard() {
+    let setup = Setup::guarded(Platform::Macos);
+    let settings = setup.write(&format!("{MAC_CLAUDE}/managed-settings.json"), "{");
+    let preferences = setup.write(
+        &format!("{PREFERENCES}/com.anthropic.claudecode.plist"),
+        SECRET,
+    );
+    setup.write(
+        &format!("{PREFERENCES}/sentinel-user-2207/com.anthropic.claudecode.plist"),
+        SECRET,
+    );
+    let users = setup.root.path().join(PREFERENCES);
+    let refusal = setup.refusal(Mode::Read);
+    for entry in [
+        format!(
+            "the managed source {} could not be read or parsed, so it may set permissions.allow \
+             or hook keys,",
+            text(&settings)
+        ),
+        format!(
+            "the managed source {} is managed preferences, which delega does not open, so it may \
+             set permissions.allow or hook keys,",
+            text(&preferences)
+        ),
+        format!(
+            "the managed source {} holds a managed preferences file in a user's directory; only \
+             the current user's applies and delega does not tell whose it is, so it may set \
+             permissions.allow or hook keys,",
+            text(&users)
+        ),
+    ] {
+        assert!(
+            refusal.message.contains(&entry),
+            "{entry}\n{}",
+            refusal.message
+        );
+    }
+    assert!(!refusal.message.contains(SECRET), "{}", refusal.message);
+    assert!(
+        !refusal.message.contains("sentinel-user-2207"),
+        "{}",
+        refusal.message
+    );
+    // Without the guard the same sources say permissions.allow alone.
+    let plain = Setup {
+        commands: Vec::new(),
+        ..setup
+    };
+    let refusal = plain.refusal(Mode::Read);
+    assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
+    assert!(
+        refusal
+            .message
+            .contains("so it may set permissions.allow, and Claude Code"),
+        "{}",
+        refusal.message
+    );
+}
+
+#[test]
+fn unchecked_managed_preferences_say_they_may_set_hook_keys_with_the_guard() {
+    let setup = Setup::guarded(Platform::Macos);
+    let dir = setup.root.path().join(PREFERENCES);
+    std::fs::create_dir_all(&dir).expect("create directory");
+    let Some(_restore) = deny_listing(&dir, 0o311) else {
+        return;
+    };
+    let refusal = setup.refusal(Mode::Write);
+    assert!(
+        refusal.message.contains(&format!(
+            "delega could not check the managed preferences directory {}, so managed \
+             preferences may set permissions.allow or hook keys,",
             text(&dir)
         )),
         "{}",
