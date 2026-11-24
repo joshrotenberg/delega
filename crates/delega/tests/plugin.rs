@@ -14,6 +14,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -523,6 +524,63 @@ fn a_repeated_install_updates_files_and_repeats_the_commands() {
         rig.marker()["hosts"],
         serde_json::json!(["claude", "codex"])
     );
+}
+
+#[test]
+fn a_signal_interrupts_plugin_install_and_stops_the_host_descendant() {
+    for signal in ["INT", "TERM", "HUP", "QUIT"] {
+        let rig = Rig::new();
+        fs::write(
+            rig.hosts.join("claude"),
+            r#"#!/bin/sh
+/bin/sleep 60 &
+printf '%s\n' "$!" > "$HOME/descendant.tmp"
+/bin/mv "$HOME/descendant.tmp" "$HOME/descendant.pid"
+wait
+"#,
+        )
+        .expect("write fake Claude host");
+        let mut child = rig
+            .command(&["plugin", "install", "--output", "json"])
+            .captured()
+            .guarded_spawn()
+            .expect("start plugin install");
+        let record = rig.home.join("descendant.pid");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let descendant = loop {
+            if let Ok(pid) = fs::read_to_string(&record) {
+                break pid.trim().parse::<i32>().expect("fake host descendant PID");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("fake host never recorded its descendant for SIG{signal}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        support::signal(child.id(), signal);
+        let out = support::wait_bounded_for(child, Duration::from_secs(30));
+
+        assert!(
+            !support::is_running(descendant),
+            "SIG{signal} left the host descendant {descendant} running"
+        );
+        assert_eq!(out.status.code(), Some(1), "SIG{signal}: {out:?}");
+        let doc: Value = serde_json::from_slice(&out.stdout).expect("interrupted install report");
+        let commands = &doc["hosts"][0]["commands"];
+        assert_eq!(doc["hosts"][0]["status"], "failed", "{doc}");
+        assert_eq!(commands[0]["status"], "failed", "{doc}");
+        assert!(
+            commands[0]["output"]
+                .as_str()
+                .unwrap()
+                .ends_with(" was interrupted"),
+            "{doc}"
+        );
+        assert_eq!(commands[1]["status"], "not_run", "{doc}");
+        assert!(rig.log("codex", true).is_empty(), "SIG{signal}: {doc}");
+    }
 }
 
 #[test]
