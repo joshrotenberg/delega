@@ -554,8 +554,10 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
     // The case from the review: nobody reads standard output while delega
     // writes a large result, standard error is full so delega stays alive a
     // while after deciding its status, a signal arrives, and standard output is
-    // drained later. Whatever the reader ends up with must agree with the exit
-    // status: a whole `completed` result with 0, anything less with 130.
+    // drained later. The signal asks the write to stop before anything is
+    // drained, and the write is megabytes from its end, so the reader must get
+    // less than a whole result and delega must exit 130. A whole result, or
+    // exit 0, means the write was not cancelled or the status ignored it.
     for provider in PROVIDERS {
         let rig = Rig::new();
         let (stderr_reader, stderr_writer) = guarded_pipe().expect("a pipe");
@@ -600,7 +602,6 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         let result: Option<delega_core::contract::result::RunResult> =
             serde_json::from_slice(&delivered).ok();
         match (status.code(), result) {
-            (Some(0), Some(result)) => assert_eq!(result.outcome, Outcome::Completed, "{provider}"),
             (Some(130), None) => {}
             (code, result) => panic!(
                 "{provider}: exit {code:?} with {} bytes, a whole result: {}; stderr ends: {}",
