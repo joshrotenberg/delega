@@ -1536,6 +1536,87 @@ mod tests {
     }
 
     #[test]
+    fn an_unparsed_line_in_the_middle_is_counted_and_quoted_and_still_fails() {
+        let text = format!("{}12 1 12 S\n{}not a row\n{}", row(1), row(10), row(2));
+        match validate_listing(&text, 10) {
+            Err(InspectError::Failed(message)) => assert_eq!(
+                message,
+                "the process listing had 2 lines that could not be parsed, \
+                 the first: \"12 1 12 S\""
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_quoted_listing_line_keeps_no_control_character_or_separator() {
+        // `lines` drops a `\r` before the newline, so this one is inside.
+        let text = format!("{}1 2\t3;\u{1b}[0m \r\"\\\n", row(10));
+        match validate_listing(&text, 10) {
+            Err(InspectError::Failed(message)) => {
+                assert_eq!(
+                    message,
+                    "the process listing had 1 lines that could not be parsed, \
+                     the first: \"1 2\\u{9}3\\u{3b}\\u{1b}[0m \\u{d}\\\"\\\\\""
+                );
+                assert!(!message.contains(';'), "{message}");
+                assert!(!message.chars().any(char::is_control), "{message}");
+                assert!(
+                    crate::cleanup_reason::is_listing_error(&message),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_long_listing_line_is_clipped_at_the_bound_without_splitting_an_escape() {
+        use crate::cleanup_reason::UNPARSED_LINE_MAX_CHARS;
+        let quoted = |message: &str| {
+            let start = message.find(": \"").expect("quote") + 3;
+            let end = message.rfind('"').expect("closing quote");
+            (
+                message[start..end].to_string(),
+                message[end + 1..].to_string(),
+            )
+        };
+        // Exactly the bound: kept whole.
+        let exact = "x".repeat(UNPARSED_LINE_MAX_CHARS);
+        let Err(InspectError::Failed(message)) =
+            validate_listing(&format!("{}{exact}\n", row(10)), 10)
+        else {
+            panic!("a line at the bound did not fail");
+        };
+        assert_eq!(quoted(&message), (exact.clone(), String::new()));
+        // One over: clipped to the bound and marked.
+        let Err(InspectError::Failed(message)) =
+            validate_listing(&format!("{}{exact}y\n", row(10)), 10)
+        else {
+            panic!("a line over the bound did not fail");
+        };
+        assert_eq!(quoted(&message), (exact, "...".to_string()));
+        assert!(
+            crate::cleanup_reason::is_listing_error(&message),
+            "{message}"
+        );
+        // An escape that would cross the bound is left out whole.
+        let line = format!("{};", "x".repeat(UNPARSED_LINE_MAX_CHARS - 3));
+        let Err(InspectError::Failed(message)) =
+            validate_listing(&format!("{}{line}\n", row(10)), 10)
+        else {
+            panic!("a line with an escape at the bound did not fail");
+        };
+        let (body, cut) = quoted(&message);
+        assert_eq!(body, "x".repeat(UNPARSED_LINE_MAX_CHARS - 3));
+        assert_eq!(cut, "...");
+        assert!(
+            crate::cleanup_reason::is_listing_error(&message),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn a_listing_with_our_process_and_every_line_parsed_is_accepted() {
         let text = format!("{}{}", row(1), row(10));
         assert_eq!(validate_listing(&text, 10).map(|r| r.len()), Ok(2));

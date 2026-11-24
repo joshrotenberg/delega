@@ -305,6 +305,23 @@ fn listing_errors_with_bounded_diagnostic_text_are_recognised() {
         format!("ps failed (exit Some({}))", i32::MIN),
         format!("{NOT_STARTED_START}/opt/ps: not found, /bin/ps: denied)"),
         format!("{NOT_STARTED_START}anything{NOT_STARTED_CUT}"),
+        // A quoted line with every escape, and at the bound, whole or cut.
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"a\\\\b\\\"c\\u{{3b}}\\u{{9}}\\u{{2028}}\""
+        ),
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"{}\"",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS)
+        ),
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"{}\"...",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS)
+        ),
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"{}\\u{{3b}}\"",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS - 6)
+        ),
+        format!("{UNPARSED_START}1{UNPARSED_END}, the first: \"x\"..."),
     ] {
         assert!(is_listing_error(&error), "{error:?}");
         let stopping = format!("{STOPPING_START}1.0 s: {INSPECTION_FAILED}{error}");
@@ -316,6 +333,8 @@ fn listing_errors_with_bounded_diagnostic_text_are_recognised() {
 
 #[test]
 fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
+    let unparsed = |tail: &str| format!("{UNPARSED_START}1{UNPARSED_END}{tail}");
+    let quoted = |body: &str| unparsed(&format!(", the first: \"{body}\""));
     let over = |prefix: &str| {
         let mut s = prefix.to_string();
         while s.chars().count() <= MAX_ERROR_CHARS {
@@ -354,6 +373,44 @@ fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
         "ps failed (exit Some(1)); unknown reason".to_string(),
         "the process listing had 0 lines that could not be parsed".to_string(),
         "the process listing had many lines that could not be parsed".to_string(),
+        // The count without the quoted line, and quoted lines outside the
+        // escaped form or the bound.
+        "the process listing had 1 lines that could not be parsed".to_string(),
+        unparsed("abc"),
+        unparsed(" \"abc"),
+        unparsed(" \"abc\"\""),
+        unparsed(" \"abc\".."),
+        unparsed(" \"abc\"...."),
+        unparsed(" \"abc\"... "),
+        unparsed(" \"abc\" and more"),
+        unparsed(", the first: abc"),
+        "the process listing had 0 lines that could not be parsed, the first: \"x\"".to_string(),
+        quoted(""),
+        quoted("a;b"),
+        quoted("a\nb"),
+        quoted("a\rb"),
+        quoted("a\tb"),
+        quoted("a\u{1b}b"),
+        quoted("a\u{2028}b"),
+        quoted("a\"b"),
+        quoted("a\\"),
+        quoted("a\\nb"),
+        quoted("a\\tb"),
+        quoted("a\\u{3B}b"),
+        quoted("a\\u{03b}b"),
+        quoted("a\\u{+3b}b"),
+        quoted("a\\u{61}b"),
+        quoted("a\\u{20}b"),
+        quoted("a\\u{}b"),
+        quoted("a\\u{d800}b"),
+        quoted("a\\u{3b"),
+        quoted("a\\u3b"),
+        quoted(&"x".repeat(UNPARSED_LINE_MAX_CHARS + 1)),
+        format!("{}...", quoted(&"x".repeat(UNPARSED_LINE_MAX_CHARS + 1))),
+        quoted(&format!(
+            "{}\\u{{3b}}",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS - 5)
+        )),
     ];
     for error in errors {
         assert!(!is_listing_error(&error), "{error:?}");
