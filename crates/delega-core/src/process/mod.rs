@@ -586,14 +586,15 @@
 //! for the keeper.
 //!
 //! CI runs the workspace tests and the full acceptance matrix on
-//! `macos-latest` and `ubuntu-latest`. The Linux job repeats keeper and gap
-//! tests five more times. The `perl is installed` step ensures the group and
+//! `macos-latest` and `ubuntu-latest`. The Linux leg of the `check` job
+//! repeats the keeper and gap tests five more times. The `perl is installed` step ensures the group and
 //! session fixtures run.
 //!
 //! On Linux, the stopped-leader and stopped-descendant tests in `tests/stop.rs`
 //! exercise `waitid` with `WNOWAIT` and SIGCONT after TERM. The missing-`ps`
-//! test in `tests/cleanup.rs` exercises the group probe after reaping. Session
-//! sweeps and exit-time adoption are covered by the session-member tests in
+//! test in `tests/cleanup.rs` exercises the group probe after reaping. Every
+//! listing reads the session of processes in other sessions. Session sweeps
+//! and exit-time adoption are covered by the session-member tests in
 //! `tests/cleanup.rs` and the live-parent `setsid` tests in `tests/gaps.rs`.
 //! The keeper and gap tests exercise subreaper adoption, the `/proc` walk,
 //! freeze and orphan cleanup. The environment test in `tests/environment.rs`
