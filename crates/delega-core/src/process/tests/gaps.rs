@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, assert_gone, await_record, is_running,
-    is_running_async, own_group_recorded, own_session_recorded, run_guarded, sh,
+    AWAIT, OWN_GROUP, OWN_SESSION, Reaper, Record, Scratch, assert_gone, await_record, is_running,
+    is_running_async, own_group_recorded, own_session_recorded, read_record, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::Ending;
@@ -54,11 +54,81 @@ pub(super) fn marking_lister(marker: std::path::PathBuf) -> Lister {
 
 const WAIT_FOR_SCAN: &str = "while [ ! -e scanned ]; do sleep 0.02; done;";
 
-/// Waits until the last listing of `CAPTURE_RAMP` (200 ms after spawn) has
-/// passed, so a descendant started after it can only be seen by the periodic
-/// listing, 500 ms after the ramp ends. The first listing ends just after
-/// spawn, so 0.3 s from there is after 200 ms with room to spare.
-const AFTER_RAMP: &str = "sleep 0.3;";
+/// Wait in a lister until `path` exists, for at most [`AWAIT`]; past that the
+/// listing goes ahead and the test fails on what it then sees.
+async fn listing_waits_for(path: &std::path::Path) {
+    let began = std::time::Instant::now();
+    while !path.exists() && began.elapsed() < AWAIT {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The listings of a run whose leader (`leader`) starts a descendant that
+/// publishes `gc` itself once it has left the session, put in an order that no
+/// schedule of listings and no load can change.
+///
+/// - The first listing reads the table and writes `scanned`; the scripts start
+///   the descendant only after it ([`WAIT_FOR_SCAN`]).
+/// - With `witness`, the second listing, the first of `CAPTURE_RAMP`, waits
+///   until `gc` is published, then reads the table and writes `seen`. The
+///   leader waits for `seen` before it ends, so this listing sees the
+///   descendant while the leader is its parent.
+/// - Every other listing waits until `gc` is published, then reads the table
+///   until the leader is no longer a live process in it, and answers with that
+///   reading. None of them can see the descendant with the leader as its
+///   parent: the ramp and periodic listings are held, not raced. The listing
+///   taken when the leader ends is one of them and goes ahead at once.
+///
+/// With `hide_group_leaders`, a reading taken once the leader is recorded
+/// shows no group leader but the leader (see the test that uses it).
+fn ordered_listings(s: &Scratch, witness: bool, hide_group_leaders: bool) -> Lister {
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (scanned, seen, gc, leader) = (
+        s.path("scanned"),
+        s.path("seen"),
+        s.path("gc"),
+        s.path("leader"),
+    );
+    Arc::new(move || {
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (scanned, seen, gc, leader) =
+            (scanned.clone(), seen.clone(), gc.clone(), leader.clone());
+        Box::pin(async move {
+            let hide = |rows: Vec<crate::process::tree::ProcessRow>| match read_record(&leader) {
+                Record::Pid(leader) if hide_group_leaders => rows
+                    .into_iter()
+                    .filter(|r| r.group != r.pid || r.pid == leader)
+                    .collect(),
+                _ => rows,
+            };
+            if call == 0 {
+                let rows = list_processes().await;
+                let _ = std::fs::write(&scanned, "scanned");
+                return rows.map(hide);
+            }
+            listing_waits_for(&gc).await;
+            if call == 1 && witness {
+                let rows = list_processes().await;
+                let _ = std::fs::write(&seen, "seen");
+                return rows.map(hide);
+            }
+            let began = std::time::Instant::now();
+            loop {
+                let rows = list_processes().await;
+                let leader_live = match (&rows, read_record(&leader)) {
+                    (Ok(rows), Record::Pid(leader)) => {
+                        rows.iter().any(|r| r.pid == leader && !r.zombie)
+                    }
+                    _ => false,
+                };
+                if !leader_live || began.elapsed() >= AWAIT {
+                    return rows.map(hide);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    })
+}
 
 /// The wanted behaviour: when a descendant is left running, the result must not
 /// claim cleanup is confirmed.
@@ -172,22 +242,26 @@ async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing
 
 /// The periodic interval is the default here, so the listings are the one at
 /// spawn, the early ramp (`CAPTURE_RAMP`) and then the 500 ms interval. The
-/// descendant calls `setsid` straight after the first listing and the leader
-/// crashes about 0.2 s later, long before the first periodic listing. Only a
-/// ramp listing can see the descendant while the leader is its parent. Without
-/// the ramp the descendant outlives the run, and the result says Confirmed.
+/// descendant calls `setsid` straight after the first listing. The first ramp
+/// listing is held until it has, and the leader crashes as soon as that
+/// listing has read the table; every later listing is held until the leader
+/// is gone ([`ordered_listings`]). So that ramp listing, and no other, sees
+/// the descendant while the leader is its parent, and what it saw must be
+/// enough to stop the descendant after the crash. That the ramp listing comes
+/// before the first periodic one is a matter of the schedule, which
+/// `each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing`
+/// pins.
 #[tokio::test]
 async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_leader_crashes_before_the_first_periodic_listing()
  {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} \
-         sleep 0.2; kill -KILL $$; sleep 5",
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} kill -KILL $$; sleep 5",
         own_session_recorded("gc"),
-        await_record("gc")
+        await_record("seen")
     );
-    let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
+    let spec = sh(&s, &script, LONG).with_lister(ordered_listings(&s, true, false));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
@@ -200,34 +274,38 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
 /// marker), stopped, and the verdict is `Confirmed` only once it is gone. The
 /// descendant runs this test binary, not `sleep`: on macOS `ps -E` shows no
 /// environment for Apple's own programs, so an orphan running one of them is
-/// the documented residual there.
+/// the documented residual there. No owner listing after the first can see
+/// the descendant with the leader alive ([`ordered_listings`]).
 #[tokio::test]
 async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & {} exit 0",
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} exit 0",
         own_session_sleeper("gc"),
         await_record("gc")
     );
-    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
+    let spec = kept(sh(&s, &script, LONG).with_lister(ordered_listings(&s, false, false)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
     assert_gone("orphaned setsid descendant", &pids).await;
 }
 
+/// The descendant leaves the session after the first listing and the leader
+/// crashes once it has; every owner listing after the first is held until the
+/// leader is gone ([`ordered_listings`]), so none sees the two together and
+/// only the keeper can find the descendant.
 #[tokio::test]
 async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped_in_a_kept_run() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & {} \
-         sleep 0.15; kill -KILL $$; sleep 5",
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} kill -KILL $$; sleep 5",
         own_session_sleeper("gc"),
         await_record("gc")
     );
-    let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
+    let spec = kept(sh(&s, &script, LONG).with_lister(ordered_listings(&s, false, false)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
@@ -249,34 +327,16 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
         super::fixtures::perl_record_self("gc")
     );
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {detach} >/dev/null 2>&1 & {} exit 0",
+        "{WAIT_FOR_SCAN} record leader $$; {detach} >/dev/null 2>&1 & {} exit 0",
         await_record("gc")
     );
     // The owner's listings never show it: once the leader is known they hide
     // every group leader but the leader, which the orphan is from its
-    // `setsid` on. Only the keeper's own walk of its tree can find it, so a
-    // broken walk ends Confirmed with the orphan alive and fails here.
-    let marker = s.path("scanned");
-    let leader_file = s.path("leader");
-    let hiding: Lister = Arc::new(move || {
-        let marker = marker.clone();
-        let leader_file = leader_file.clone();
-        Box::pin(async move {
-            let rows = list_processes().await;
-            let _ = std::fs::write(&marker, "scanned");
-            let leader: Option<i32> = std::fs::read_to_string(&leader_file)
-                .ok()
-                .and_then(|t| t.trim().parse().ok());
-            rows.map(|rows| match leader {
-                Some(leader) => rows
-                    .into_iter()
-                    .filter(|r| r.group != r.pid || r.pid == leader)
-                    .collect(),
-                None => rows,
-            })
-        })
-    });
-    let spec = kept(sh(&s, &script, LONG).with_lister(hiding));
+    // `setsid` on, and no listing after the first sees it with the leader
+    // alive ([`ordered_listings`]). Only the keeper's own walk of its tree
+    // can find it, so a broken walk ends Confirmed with the orphan alive and
+    // fails here.
+    let spec = kept(sh(&s, &script, LONG).with_lister(ordered_listings(&s, false, true)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
     assert_no_false_confirmation(pids[0], &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
