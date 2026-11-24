@@ -387,6 +387,10 @@ guard when it can resolve an absolute path.
   adds a warning.
 - `full` keeps sub-agents, MCP and background tasks disabled and notes this.
   Without `on_request: ask`, `write` and `build` omit `NotebookEdit`.
+- In `full`, Claude Code can still refuse an individual Bash command that it
+  judges needs approval. Under `dontAsk` that refusal is a denial, which
+  delega reports in `permissions.denied`. Which commands trigger it is not
+  known (see the 2026-11-24 observation below).
 - Claude Code skips automatic `CLAUDE.md` and auto-memory loading and notes
   this. A worker can read repository instructions with its tools.
 - Managed policy can override the launch settings.
@@ -751,6 +755,21 @@ See `crates/delega-core/src/provider/env.rs`.
   processes with `ps`. When delega supervises a build worker, its own process
   inspection runs outside the worker's sandbox and was not affected.
 
+### 2026-11-24, Claude Code 2.1.331 on macOS (#215)
+
+- A `full` worker had one Bash command denied while its other commands,
+  including `cargo test`, ran. The command started `cd $(mktemp -d); bad=0;`
+  and looped 100 times over a body that started and stopped background
+  processes. delega listed it in `permissions.denied` with the reason that
+  Claude Code was running in don't ask mode.
+- A probe of three `delega run --provider claude --full` runs asked for 21
+  commands one per Bash call. Each ran without a denial: `cd` outside the
+  working directory, command substitution, `for` and `until` loops, a
+  background `&` with `$!` and `wait`, `kill -0`, `kill -STOP` and
+  `kill -KILL`, `/bin/sh -c`, `case`, `ps -o stat= -p`, redirection to
+  `/dev/null`, and the denied command's loop body run once.
+- The denial did not reproduce, and no single construct explains it.
+
 ### Claude Code 2.1.330, date unrecorded
 
 - In ask mode the init event reported `default`. The stdio flag enabled
@@ -771,7 +790,7 @@ Dates and versions are unrecorded unless indicated.
 
 | Open question | Current mapping or evidence |
 | --- | --- |
-| Does Claude `full` work without `bypassPermissions`? | Grants the nine built-in tools under `dontAsk`. |
+| Does Claude `full` work without `bypassPermissions`? | Grants the nine built-in tools under `dontAsk`. Claude Code can still refuse an individual Bash command (2026-11-24, see above). |
 | Does Codex honour the explicit `network_access=false` override? | 2026-11-22, codex-cli 0.171.0 blocked network access, which is also the workspace-write default. |
 | Does Codex drop explicitly passed secret-looking variables from commands? | `--env` passes them to Codex. Command inheritance is untested. |
 | Does Codex emit declined commands as `item.completed` with `status: "declined"`? | The parser uses that shape for `permissions.denied`. |
