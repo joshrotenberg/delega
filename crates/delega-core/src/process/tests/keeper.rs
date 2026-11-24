@@ -494,14 +494,19 @@ async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
 /// tree again from the keeper's own children until a pass finds nothing new
 /// with every process stopped, so a generation reparented to the keeper
 /// between two reads is not missed. The race is a matter of timing, so the
-/// case is repeated 20 times; any surviving generation fails it.
+/// case is repeated 20 times; any surviving generation fails it. The owner is
+/// killed once the relay has made one handoff, and the relay's lifeline says
+/// when its last process is gone and whether it ran its course by itself
+/// first (see `gaps::RELAY`); the relay outlives any stop by many seconds.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
     require_perl!();
+    use super::gaps::{RelayFate, await_handoffs, relay_fate};
     use crate::test_spawn::Guarded;
     for attempt in 1..=20 {
         let s = Scratch::new();
+        let mut lifeline = super::fixtures::Lifeline::new(&s, "life");
         let exe = std::env::current_exe().expect("the test binary's path");
         let mut owner = std::process::Command::new(exe)
             .args([
@@ -518,38 +523,28 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
             .guarded_spawn()
             .expect("start the owner");
         let owner_pid = i32::try_from(owner.id()).expect("a pid");
-        s.exists("beat").await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        await_handoffs(&mut lifeline, 1).await;
         let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
         let _ = owner.wait();
-        // The keeper's grace is 0.5 s; give it ample time, then require the
-        // heartbeat to have stopped changing.
-        let began = std::time::Instant::now();
-        let mut stopped = false;
-        let mut survivors = Vec::new();
-        while began.elapsed() < Duration::from_secs(15) {
-            let before = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let after = std::fs::read_to_string(s.path("beat")).unwrap_or_default();
-            // A quiet heartbeat alone is not death: a stopped or unscheduled
-            // generation writes nothing. No process may name the case
-            // directory on its command line either.
-            survivors = super::fixtures::case_processes(&s.dir())
-                .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
-            if before == after
-                && super::gaps::heartbeat_age(&s) > Duration::from_millis(300)
-                && survivors.is_empty()
-            {
-                stopped = true;
-                break;
+        // Generations go on running until the keeper stops them; only the
+        // end of the lifeline, or the relay's own end, decides.
+        let fate = loop {
+            match relay_fate(&mut lifeline).await {
+                RelayFate::Running => {}
+                fate => break fate,
             }
-        }
+        };
+        // A census that does not depend on the lifeline: no process may name
+        // the case directory on its command line either.
+        let survivors = super::fixtures::case_processes(&s.dir())
+            .unwrap_or_else(|e| panic!("attempt {attempt}: survivors unknown: {e}"));
+        let stopped = fate == RelayFate::Stopped && survivors.is_empty();
         if !stopped {
-            super::fixtures::end_relay_leftovers(&s.dir()).await;
+            super::fixtures::end_relay_leftovers(&s.dir(), &mut lifeline).await;
         }
         assert!(
             stopped,
-            "attempt {attempt}: the relay outlived the keeper's cleanup; survivors {survivors:?}"
+            "attempt {attempt}: the relay outlived the keeper's cleanup ({fate:?}); survivors {survivors:?}"
         );
     }
 }

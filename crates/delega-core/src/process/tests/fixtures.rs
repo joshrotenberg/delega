@@ -149,15 +149,6 @@ impl Scratch {
         .await
     }
 
-    /// Wait until a file exists and is not empty.
-    pub(super) async fn exists(&self, name: &str) {
-        let path = self.path(name);
-        await_event(&format!("the script writing {name}"), || {
-            std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
-        })
-        .await;
-    }
-
     /// The pid in a record that must already be published.
     pub(super) fn pid_now(&self, name: &str) -> i32 {
         match read_record(&self.path(name)) {
@@ -186,14 +177,6 @@ impl Scratch {
         pids.sort_unstable();
         (pids, incomplete)
     }
-}
-
-/// The pid in the relay's heartbeat file. The heartbeat is rewritten in place
-/// by every generation and is not a published record, so this read accepts
-/// whatever parses; the caller checks the identity before it signals.
-#[cfg(not(target_os = "linux"))]
-fn read_heartbeat_pid(path: &Path) -> Option<i32> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// The process observed at registration. A pidfd pins the identity on Linux.
@@ -485,6 +468,108 @@ pub(super) fn process_state(pid: i32) -> String {
         .unwrap_or_default()
 }
 
+/// The read end of a FIFO in a case's scratch directory that the case's
+/// processes hold open for writing. A process that opens it passes it to
+/// every process it forks from then on, at the fork itself, before the child
+/// has run a single instruction, so the read end reaches end of file exactly
+/// when the last of them is gone, however it ended and whether or not it ever
+/// published a record. A process can also write a byte on it to say what
+/// phase it reached. The read end is nonblocking and is opened before the
+/// case starts, so the case's `open` for writing does not block.
+pub(super) struct Lifeline {
+    reader: std::fs::File,
+    /// Whether a writer has been seen: a nonblocking read of a FIFO that no
+    /// process has opened for writing yet also reads as end of file.
+    opened: bool,
+}
+
+/// What a [`Lifeline`] said next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Heard {
+    /// A byte a writer wrote.
+    Byte(u8),
+    /// Every writer is gone.
+    Ended,
+}
+
+impl Lifeline {
+    pub(super) fn new(scratch: &Scratch, name: &str) -> Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = scratch.path(name);
+        // rustix has no `mkfifoat` on macOS, and this crate has no unsafe
+        // code for `libc::mkfifo`.
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .env_clear()
+            .guarded_status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed: {made:?}");
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(&path)
+            .expect("open the lifeline for reading");
+        Self {
+            reader,
+            opened: false,
+        }
+    }
+
+    /// One nonblocking read: a byte, the end, or nothing yet (`None`).
+    pub(super) fn try_hear(&mut self) -> Option<Heard> {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        match self.reader.read(&mut byte) {
+            Ok(1) => {
+                self.opened = true;
+                Some(Heard::Byte(byte[0]))
+            }
+            Ok(_) if self.opened => Some(Heard::Ended),
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                self.opened = true;
+                None
+            }
+            Err(e) => panic!("read the lifeline: {e}"),
+        }
+    }
+
+    /// Wait for the next byte or the end, for at most `within`; `None` when
+    /// neither came.
+    pub(super) async fn hear_within(&mut self, within: Duration) -> Option<Heard> {
+        let began = Instant::now();
+        loop {
+            if let Some(heard) = self.try_hear() {
+                return Some(heard);
+            }
+            if began.elapsed() >= within {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Wait for the next byte or the end (see [`AWAIT`]).
+    pub(super) async fn hear(&mut self, what: &str) -> Heard {
+        self.hear_within(AWAIT)
+            .await
+            .unwrap_or_else(|| panic!("waited {AWAIT:?} and never heard: {what}"))
+    }
+
+    /// Read every byte already written, without waiting: the end if every
+    /// writer is gone, else the last byte read, if any.
+    pub(super) fn drain(&mut self) -> Option<Heard> {
+        let mut last = None;
+        while let Some(heard) = self.try_hear() {
+            last = Some(heard);
+            if heard == Heard::Ended {
+                break;
+            }
+        }
+        last
+    }
+}
+
 /// Whether the run marker shows for Apple's own programs here: `ps -E` shows
 /// the environment of a `/bin/sleep` started with a marker value. macOS hides
 /// it under System Integrity Protection; a machine without it shows it, and
@@ -753,20 +838,22 @@ pub(super) fn process_names_path(pid: i32, path: &[u8]) -> bool {
     command.is_some_and(|command| holds_path(&command, path))
 }
 
-/// End the relay processes whose command lines name the case directory.
-/// Linux signals through a pidfd. Elsewhere the heartbeat supplies a candidate
-/// PID and the start time must still match. Retry for up to five seconds.
-pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
+/// End the relay processes whose command lines name the case directory, until
+/// the relay's lifeline ends (every relay process is gone). Linux signals
+/// through a pidfd. Elsewhere the heartbeat supplies a candidate PID and the
+/// start time must still match. Retry for up to five seconds: this is
+/// teardown, and nothing is asserted on it; the 2 ms between tries is only a
+/// retry cadence.
+pub(super) async fn end_relay_leftovers(dir: &std::path::Path, lifeline: &mut Lifeline) {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(5) {
+        if lifeline.drain() == Some(Heard::Ended) {
+            return;
+        }
         #[cfg(target_os = "linux")]
         {
-            // An unknown answer is retried; the test has failed already
-            // when this runs, so the teardown only does what it can.
+            // An unknown answer is retried; the teardown only does what it can.
             let left = case_processes(dir).unwrap_or_default();
-            if left.is_empty() && case_processes(dir).is_ok() {
-                return;
-            }
             let names = path_names(dir).unwrap_or_default();
             for pid in left {
                 if let Some(process) = ProcessIdentity::capture(pid)
@@ -778,16 +865,7 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let beat = dir.join("beat");
-            let fresh = std::fs::metadata(&beat)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age < Duration::from_millis(300));
-            if !fresh {
-                return;
-            }
-            if let Some(pid) = read_heartbeat_pid(&beat)
+            if let Record::Pid(pid) = read_record(&dir.join("beat"))
                 && let Some(process) = ProcessIdentity::from_pid_file(pid, dir)
                 && process_names_path(pid, dir.as_os_str().as_encoded_bytes())
             {
