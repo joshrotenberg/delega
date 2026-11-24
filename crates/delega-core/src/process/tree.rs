@@ -1725,6 +1725,206 @@ mod tests {
         );
     }
 
+    /// The row seen on Linux CI (#217).
+    const OBSERVED: &str = "  17328       0 4294967295 X+ Tue Nov 24 10:44:54 2026";
+
+    /// Unparsable rows that are not the exiting-row shape.
+    const NOT_EXITING: [&str; 15] = [
+        "17328 0 X+ Tue Nov 24 10:44:54 2026",
+        "17328 0 S Xday Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X+ Tue Nov 24",
+        "17328 0 4294967295 X+ Tue Nov 24 10:44:54 2026 extra",
+        "17328 0 4294967295 S+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 R+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 Z+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 XT Tue Nov 24 10:44:54 2026",
+        "0 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "+17328 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "4294967295 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "17328 1 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X+ Tue Nov 24 10:44 2026",
+        "17328 0 4294967295 X+ Tue Nov 24 10:44:54 26",
+        "17328\t0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+    ];
+
+    fn quoting(line: &str) -> String {
+        cleanup_reason::unparsed_lines(1, line)
+    }
+
+    /// A lister that validates `texts` in order, as the system lister would,
+    /// and counts its calls.
+    fn listings(texts: Vec<String>) -> (Lister, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let texts = Arc::new(Mutex::new(VecDeque::from(texts)));
+        let counted = calls.clone();
+        let lister: Lister = Arc::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = texts.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(async move { validate_listing(&text, std::process::id()) })
+        });
+        (lister, calls)
+    }
+
+    fn own_row() -> String {
+        row(std::process::id())
+    }
+
+    fn retries(tree: &ProcessTree) -> u64 {
+        tree.observations.lock().unwrap().stats.exiting_row_retries
+    }
+
+    #[test]
+    fn only_the_exact_exiting_row_shape_matches() {
+        for line in [
+            OBSERVED,
+            "17328 0 4294967295 X Mon Jan 1 00:00:00 2026",
+            "1 0 4294967295 X<NLsl+ Sat Dec 31 23:59:60 9999",
+        ] {
+            assert!(exiting_row_signature(line), "{line:?} did not match");
+        }
+        // A pgid of -1 parses as a row, so it is here and not in NOT_EXITING.
+        for line in NOT_EXITING
+            .into_iter()
+            .chain(["17328 0 -1 X+ Tue Nov 24 10:44:54 2026"])
+        {
+            assert!(!exiting_row_signature(line), "{line:?} matched");
+        }
+    }
+
+    #[test]
+    fn only_linux_takes_a_listing_with_an_exiting_row_again() {
+        assert_eq!(retry_trigger(OBSERVED), cfg!(target_os = "linux"));
+        match validate_listing(&format!("{}{OBSERVED}\n", own_row()), std::process::id()) {
+            Err(InspectError::ExitingRow(message)) if cfg!(target_os = "linux") => {
+                assert_eq!(message, quoting(OBSERVED))
+            }
+            Err(InspectError::Failed(message)) if !cfg!(target_os = "linux") => {
+                assert_eq!(message, quoting(OBSERVED))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_exiting_row_beside_another_bad_line_fails_without_a_retry() {
+        let text = format!("{}{OBSERVED}\nnot a row\n", own_row());
+        match validate_listing(&text, std::process::id()) {
+            Err(InspectError::Failed(message)) => assert_eq!(
+                message,
+                format!(
+                    "the process listing had 2 lines that could not be parsed, \
+                     the first: \"{OBSERVED}\""
+                )
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exiting_row_then_a_clean_listing_counts_after_one_retry_on_linux() {
+        let (lister, calls) = listings(vec![
+            format!("{}{OBSERVED}\n", own_row()),
+            format!("{}{}", row(1), own_row()),
+        ]);
+        let tree = ProcessTree::new(123, lister, true);
+        let result = tree.rows().await;
+        let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        if cfg!(target_os = "linux") {
+            assert_eq!(result.map(|rows| rows.len()), Ok(2));
+            assert_eq!((retries(&tree), calls), (1, 2));
+        } else {
+            assert_eq!(result, Err(InspectError::Failed(quoting(OBSERVED))));
+            assert_eq!((retries(&tree), calls), (0, 1));
+        }
+        assert_eq!(tree.observations.lock().unwrap().stats.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn an_exiting_row_past_the_retry_limit_fails_quoting_the_line() {
+        let text = format!("{}{OBSERVED}\n", own_row());
+        let (lister, calls) = listings(vec![text; 4]);
+        let tree = ProcessTree::new(123, lister, true);
+        let result = tree.rows().await;
+        let message = quoting(OBSERVED);
+        assert_eq!(
+            message,
+            "the process listing had 1 lines that could not be parsed, the first: \
+             \"  17328       0 4294967295 X+ Tue Nov 24 10:44:54 2026\""
+        );
+        assert!(cleanup_reason::is_listing_error(&message), "{message}");
+        assert_eq!(result, Err(InspectError::Failed(message)));
+        let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let limit = u64::from(EXITING_ROW_RETRIES);
+        if cfg!(target_os = "linux") {
+            assert_eq!((retries(&tree), calls as u64), (limit, limit + 1));
+        } else {
+            assert_eq!((retries(&tree), calls), (0, 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_row_that_is_not_the_exiting_shape_fails_without_a_retry() {
+        for line in NOT_EXITING {
+            let (lister, calls) = listings(vec![
+                format!("{}{line}\n", own_row()),
+                format!("{}{}", row(1), own_row()),
+            ]);
+            let tree = ProcessTree::new(123, lister, true);
+            assert_eq!(
+                tree.rows().await,
+                Err(InspectError::Failed(quoting(line))),
+                "{line:?}"
+            );
+            assert_eq!(retries(&tree), 0, "{line:?}");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{line:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_never_runs_past_one_listing_deadline() {
+        let exiting = format!("{}{OBSERVED}\n", own_row());
+        // The first listing takes the whole deadline: no retry starts.
+        let slow = exiting.clone();
+        let lister: Lister = Arc::new(move || {
+            let slow = slow.clone();
+            Box::pin(async move {
+                tokio::time::sleep(ps_timeout()).await;
+                validate_listing(&slow, std::process::id())
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert_eq!(retries(&tree), 0);
+        // A retry that hangs is given up at the deadline.
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let lister: Lister = Arc::new(move || {
+            let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let text = exiting.clone();
+            Box::pin(async move {
+                if !first {
+                    std::future::pending::<()>().await;
+                }
+                validate_listing(&text, std::process::id())
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        let started = Instant::now();
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert!(started.elapsed() <= ps_timeout());
+        let expected = u64::from(cfg!(target_os = "linux"));
+        assert_eq!(retries(&tree), expected);
+    }
+
     #[test]
     fn a_listing_with_our_process_and_every_line_parsed_is_accepted() {
         let text = format!("{}{}", row(1), row(10));
