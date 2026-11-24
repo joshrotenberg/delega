@@ -494,7 +494,9 @@ pub const NO_REAP_ACK_REASON: &str = "the keeper did not acknowledge that it rea
 
 /// The reason of an `Unconfirmed` verdict when an answer of the keeper during
 /// the run was unproven in a way no later answer repairs: a refused hold, a
-/// failed read of `/proc`, or a freeze that did not complete.
+/// failed read of `/proc`, or a freeze task that failed; or a freeze that did
+/// not complete, when no final census proved the tree empty (Linux, a
+/// subreaper keeper) to supersede it.
 pub const KEEPER_UNPROVEN_REASON: &str = "the keeper could not prove its tree empty at some point \
      of the run (a process it could not verify, a failed read, or a freeze that did not \
      complete), so a later empty answer does not confirm cleanup";
@@ -573,9 +575,12 @@ fn only_late_listing_reasons(reason: &str) -> bool {
 /// What the verdict needs to know about refusals and the keeper's proof.
 #[derive(Debug, Clone, Copy, Default)]
 struct Refusals {
-    /// The keeper reported a refused hold, a failed read, or a freeze that did
-    /// not complete, in any answer of the run.
+    /// The keeper reported a refused hold, a failed read, or a failed freeze
+    /// task, in any answer of the run.
     keeper_unproven: bool,
+    /// The keeper reported a freeze that only did not complete (no refused
+    /// hold, no failed read), in any answer of the run.
+    keeper_incomplete: bool,
     /// Signals the owner did not send because their process could not be
     /// verified.
     owner_refused: u64,
@@ -588,11 +593,12 @@ struct Refusals {
 
 /// The reason refusals leave the verdict `Unconfirmed`, if they do. The
 /// narrower Rule A: the keeper's proof supersedes the owner's refusals of
-/// group and session members and tracked processes, and nothing else. A hole
-/// the keeper reported (a refused hold included) and a refusal meant for a
-/// marker-only process always stand.
+/// group and session members and tracked processes, and the keeper's freezes
+/// that only did not complete, and nothing else. A hole the keeper reported
+/// (a refused hold, a failed read, a failed freeze task) and a refusal meant
+/// for a marker-only process always stand.
 fn refusal_reason(r: Refusals) -> Option<&'static str> {
-    if r.keeper_unproven {
+    if r.keeper_unproven || (r.keeper_incomplete && !r.tree_proven_empty) {
         Some(KEEPER_UNPROVEN_REASON)
     } else if r.owner_refused_marked > 0 || (r.owner_refused > 0 && !r.tree_proven_empty) {
         Some(UNVERIFIED_SIGNAL_REASON)
@@ -1113,6 +1119,7 @@ impl OwnedProcess {
                 let tree_proven_empty = answer.proves_empty(cfg!(target_os = "linux"));
                 let refusal = refusal_reason(Refusals {
                     keeper_unproven: shared.keeper.as_ref().is_some_and(|k| k.unproven()),
+                    keeper_incomplete: shared.keeper.as_ref().is_some_and(|k| k.incomplete()),
                     owner_refused: unverified,
                     owner_refused_marked: unverified_marked,
                     tree_proven_empty,
@@ -1378,6 +1385,7 @@ mod refusal_tests {
     fn with(keeper_unproven: bool, owner: u64, marked: u64, proven: bool) -> Option<&'static str> {
         refusal_reason(Refusals {
             keeper_unproven,
+            keeper_incomplete: false,
             owner_refused: owner,
             owner_refused_marked: marked,
             tree_proven_empty: proven,
@@ -1464,6 +1472,89 @@ mod refusal_tests {
         ] {
             assert!(!other.proof_missing(true), "{other:?}");
         }
+    }
+
+    fn incomplete(reap: ReapAnswer, linux: bool) -> Option<&'static str> {
+        refusal_reason(Refusals {
+            keeper_incomplete: true,
+            tree_proven_empty: reap.proves_empty(linux),
+            ..Refusals::default()
+        })
+    }
+
+    /// The narrower Rule A on Linux: a freeze that only did not complete is
+    /// superseded by a final census that proves the tree empty.
+    #[test]
+    fn a_linux_proof_supersedes_a_freeze_that_only_did_not_complete() {
+        assert!(!super::super::keeper::link_reply_unproven(
+            "freeze",
+            "passes=64 complete=false refused=0 read_failures=0"
+        ));
+        assert_eq!(incomplete(CLEAN_REAP, true), None);
+    }
+
+    /// Without the proof the incomplete freeze stands, whatever stood in the
+    /// way of the proof.
+    #[test]
+    fn a_freeze_that_did_not_complete_stands_without_the_linux_proof() {
+        for reap in [
+            ReapAnswer {
+                proven: false,
+                ..CLEAN_REAP
+            },
+            ReapAnswer {
+                subreaper: false,
+                ..CLEAN_REAP
+            },
+            ReapAnswer {
+                lost: true,
+                ..CLEAN_REAP
+            },
+            ReapAnswer {
+                acknowledged: false,
+                ..CLEAN_REAP
+            },
+            ReapAnswer {
+                leftover: 1,
+                ..CLEAN_REAP
+            },
+        ] {
+            assert_eq!(
+                incomplete(reap, true),
+                Some(KEEPER_UNPROVEN_REASON),
+                "{reap:?}"
+            );
+        }
+    }
+
+    /// macOS has no proof, so an incomplete freeze stands there as before,
+    /// even with a reap answer that would be the proof on Linux.
+    #[test]
+    fn a_freeze_that_did_not_complete_stands_on_macos() {
+        assert_eq!(incomplete(CLEAN_REAP, false), Some(KEEPER_UNPROVEN_REASON));
+    }
+
+    /// A refused hold, a failed read or a failed task inside a freeze answer
+    /// is not merely incomplete, and the proof does not supersede it.
+    #[test]
+    fn a_refusal_or_failed_read_inside_a_freeze_is_not_superseded_by_the_proof() {
+        for detail in [
+            "passes=2 complete=false refused=1 read_failures=0",
+            "passes=2 complete=false refused=0 read_failures=1",
+            "passes=0 complete=false refused=0 read_failures=0 task=failed",
+        ] {
+            assert!(
+                super::super::keeper::link_reply_unproven("freeze", detail),
+                "{detail}"
+            );
+        }
+        let r = Refusals {
+            keeper_unproven: true,
+            keeper_incomplete: true,
+            tree_proven_empty: CLEAN_REAP.proves_empty(true),
+            ..Refusals::default()
+        };
+        assert_eq!(refusal_reason(r), Some(KEEPER_UNPROVEN_REASON));
     }
 
     #[test]

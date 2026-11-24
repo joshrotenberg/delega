@@ -186,13 +186,15 @@ pub(crate) enum FromKeeper {
     /// The program is reaped; how many processes of the tree were still alive
     /// after the last freeze (Linux; 0 elsewhere), and whether the final
     /// census before the reap proved the tree empty (Linux with a subreaper
-    /// only; see `Walked::proves_empty`), and whether any answer of the run
-    /// was unproven in a way no later answer repairs (`unproven`, recorded
-    /// by the keeper before it sent that answer).
+    /// only; see `Walked::proves_empty`), whether any answer of the run
+    /// was unproven in a way no later answer repairs (`unproven`), and
+    /// whether any was a freeze that only did not complete (`incomplete`),
+    /// each recorded by the keeper before it sent that answer.
     Reaped {
         live: usize,
         proven: bool,
         unproven: bool,
+        incomplete: bool,
     },
     /// The keeper is about to reap the program on its own (a signal, its
     /// ceiling, or a new parent): the owner must send no more signals that
@@ -222,10 +224,12 @@ impl FromKeeper {
                 live,
                 proven,
                 unproven,
+                incomplete,
             } => format!(
-                "reaped {live}{}{}",
+                "reaped {live}{}{}{}",
                 if *proven { " proven" } else { "" },
-                if *unproven { " unproven" } else { "" }
+                if *unproven { " unproven" } else { "" },
+                if *incomplete { " incomplete" } else { "" }
             ),
             FromKeeper::Releasing => "releasing".into(),
             FromKeeper::Warn(text) => format!("warn {}", one_line(text)),
@@ -262,17 +266,24 @@ impl FromKeeper {
             "reaped" => {
                 // The count is required: a line without it claims nothing.
                 let live = words.next()?.parse().ok()?;
-                let (proven, unproven) = match words.collect::<Vec<_>>().as_slice() {
-                    [] => (false, false),
-                    ["proven"] => (true, false),
-                    ["unproven"] => (false, true),
-                    ["proven", "unproven"] => (true, true),
-                    _ => return None,
-                };
+                // Each flag at most once, in this order; anything else is not
+                // a `reaped` line.
+                let mut flags = [
+                    ("proven", false),
+                    ("unproven", false),
+                    ("incomplete", false),
+                ];
+                let mut next = 0;
+                for word in words {
+                    let at = flags[next..].iter().position(|(name, _)| *name == word)?;
+                    flags[next + at].1 = true;
+                    next += at + 1;
+                }
                 FromKeeper::Reaped {
                     live,
-                    proven,
-                    unproven,
+                    proven: flags[0].1,
+                    unproven: flags[1].1,
+                    incomplete: flags[2].1,
                 }
             }
             "releasing" => FromKeeper::Releasing,
@@ -409,21 +420,37 @@ mod tests {
                 live: 0,
                 proven: false,
                 unproven: false,
+                incomplete: false,
             },
             FromKeeper::Reaped {
                 live: 0,
                 proven: true,
                 unproven: false,
+                incomplete: false,
             },
             FromKeeper::Reaped {
                 live: 0,
                 proven: true,
                 unproven: true,
+                incomplete: false,
             },
             FromKeeper::Reaped {
                 live: 3,
                 proven: false,
                 unproven: true,
+                incomplete: false,
+            },
+            FromKeeper::Reaped {
+                live: 0,
+                proven: true,
+                unproven: false,
+                incomplete: true,
+            },
+            FromKeeper::Reaped {
+                live: 1,
+                proven: false,
+                unproven: true,
+                incomplete: true,
             },
             FromKeeper::Releasing,
             FromKeeper::Warn("x y".into()),
@@ -444,6 +471,11 @@ mod tests {
         assert_eq!(FromKeeper::parse("reaped 0 proven extra"), None);
         assert_eq!(FromKeeper::parse("reaped 0 unproven proven"), None);
         assert_eq!(FromKeeper::parse("reaped 0 unprovenx"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 incomplete unproven"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 incomplete proven"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 proven proven"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 incomplete incomplete"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 incompletex"), None);
         // A missing or non-numeric count is not zero.
         assert_eq!(FromKeeper::parse("reaped  proven"), None);
         assert_eq!(FromKeeper::parse("reaped proven"), None);
