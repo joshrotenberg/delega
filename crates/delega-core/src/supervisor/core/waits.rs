@@ -36,6 +36,8 @@ pub(super) struct Waiter {
     /// time has passed; the registration then stays only until the caller has
     /// its view, and does not count as a wait in flight.
     blocked: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "test-support"))]
+    removal_ack: Option<super::super::wait_test_support::RemovalAck>,
 }
 
 impl Waiter {
@@ -100,6 +102,8 @@ impl Core {
             after,
             wake,
             blocked: Arc::clone(&blocked),
+            #[cfg(any(test, feature = "test-support"))]
+            removal_ack: None,
         };
         if self.waiter_ready(&waiter) {
             return Ok(WaitStart::Ready);
@@ -124,6 +128,13 @@ impl Core {
         self.next_waiter += 1;
         let id = self.next_waiter;
         self.waiters.insert(id, waiter);
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(observer) = &self.wait_observer {
+            self.waiters
+                .get_mut(&id)
+                .expect("just registered")
+                .removal_ack = super::super::wait_test_support::acknowledge_registration(observer);
+        }
         Ok(WaitStart::Pending { id, rx, blocked })
     }
 

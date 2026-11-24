@@ -72,6 +72,10 @@ mod runner;
 mod state;
 mod views;
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod wait_test_support;
+
 #[cfg(test)]
 mod tests;
 
