@@ -63,7 +63,7 @@ async fn stop_while_the_listing_is_held(how: How) -> Option<ProcessReport> {
         _ => LONG,
     };
     let held = Held::new(true);
-    let mut spec = sh(&s, "echo $$ > leader; sleep 60", limit).with_lister(held.lister());
+    let mut spec = sh(&s, "record leader $$; sleep 60", limit).with_lister(held.lister());
     // No periodic scan after the first, so the stop's listing is the one held.
     spec.capture_interval = Some(Duration::from_secs(3600));
     // A budget that runs out for the stops that are meant to wait for it, and
@@ -167,7 +167,7 @@ async fn a_normal_interrupt_is_one_listing_and_confirmed() {
     // it arrives; no duration is asserted.
     let s = Scratch::new();
     let held = Held::new(false);
-    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG).with_lister(held.lister());
+    let mut spec = sh(&s, "record leader $$; sleep 60", LONG).with_lister(held.lister());
     spec.capture_interval = Some(Duration::from_secs(3600));
     let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
@@ -191,8 +191,8 @@ async fn a_normal_interrupt_is_one_listing_and_confirmed() {
 
 /// A descendant in a session of its own that holds the output pipes and ends on
 /// TERM, started by a leader that also ends on TERM.
-const SESSION_DESCENDANT: &str = "echo $$ > leader; \
-     perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)' & echo $! > gc; wait";
+const SESSION_DESCENDANT: &str = "record leader $$; \
+     perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)' & record gc $!; wait";
 
 fn term_to_descendants(report: &ProcessReport) -> usize {
     report
@@ -284,7 +284,7 @@ async fn a_stop_whose_listing_never_completes_still_ends_at_the_grace_with_kill(
     let held = Held::new(true);
     let mut spec = sh(
         &s,
-        "trap '' TERM; echo $$ > leader; while :; do sleep 1; done",
+        "trap '' TERM; record leader $$; while :; do sleep 1; done",
         LONG,
     )
     .with_lister(held.lister());
@@ -349,9 +349,9 @@ fn slow_stop_lister(s: &Scratch, calls: Arc<AtomicU32>) -> crate::process::tree:
 async fn stop_with_slow_listings(term_handler: &str, grace: Duration) -> (ProcessReport, u32) {
     let s = Scratch::new();
     let script = format!(
-        "echo $$ > leader; perl -e 'use POSIX; POSIX::setsid(); \
+        "record leader $$; perl -e 'use POSIX; POSIX::setsid(); \
          {term_handler} open my $ready, q(>), q(ready) or die $!; close $ready; \
-         exec q(sleep), q(60)' & echo $! > gc; wait"
+         exec q(sleep), q(60)' & record gc $!; wait"
     );
     let calls = Arc::new(AtomicU32::new(0));
     let mut spec = sh(&s, &script, LONG).with_lister(slow_stop_lister(&s, calls.clone()));

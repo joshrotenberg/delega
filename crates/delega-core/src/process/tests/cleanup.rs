@@ -73,7 +73,7 @@ async fn a_crash_while_a_descendant_holds_the_output_pipe_does_not_hang() {
     // The background sleep inherits both pipes and outlives its parent.
     let spec = sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; kill -KILL $$; sleep 5",
+        "record leader $$; sleep 60 & record gc $!; kill -KILL $$; sleep 5",
         LONG,
     );
     let started = Instant::now();
@@ -93,7 +93,7 @@ async fn a_grandchild_that_outlives_its_parent_in_the_same_group_is_cleaned_up()
     let s = Scratch::new();
     let spec = sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; exit 0",
+        "record leader $$; sleep 60 & record gc $!; exit 0",
         LONG,
     );
     let started = Instant::now();
@@ -108,7 +108,7 @@ async fn a_grandchild_that_ignores_terminate_is_killed_after_its_parent_exits() 
     let s = Scratch::new();
     let spec = sh(
         &s,
-        "echo $$ > leader; (trap '' TERM; exec sleep 60) & echo $! > gc; exit 0",
+        "record leader $$; (trap '' TERM; exec sleep 60) & record gc $!; exit 0",
         LONG,
     );
     let started = Instant::now();
@@ -126,7 +126,7 @@ both!(
         let s = Scratch::new();
         // Its own group, the child's session: the group signal cannot reach it, the
         // session sweep can, whether or not a scan ever saw it.
-        let script = format!("echo $$ > leader; {OWN_GROUP} & echo $! > gc; {WAIT_ESCAPED} exit 0");
+        let script = format!("record leader $$; {OWN_GROUP} & record gc $!; {WAIT_ESCAPED} exit 0");
         let started = Instant::now();
         let (report, pids, _reaper) = run_guarded(&s, sh(&s, &script, LONG), &["gc"]).await;
         assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
@@ -145,7 +145,7 @@ both!(
         // its parent lived can track it. The leader stays until the test has seen
         // the scan track the descendant, however long that takes, then exits.
         let script = format!(
-            "echo $$ > leader; {OWN_SESSION} & echo $! > gc; while [ ! -e go ]; do sleep 0.02; done; exit 0"
+            "record leader $$; {OWN_SESSION} & record gc $!; while [ ! -e go ]; do sleep 0.02; done; exit 0"
         );
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         let mut reaper = Reaper::default();
@@ -171,7 +171,7 @@ both!(
         // The descendant is in its own session, inherits the pipes and is tracked.
         // It must get TERM when the group does, not when cleanup starts: with a
         // long grace and drain it would otherwise hold the report for a minute.
-        let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; wait");
+        let script = format!("record leader $$; {OWN_SESSION} & record gc $!; wait");
         let mut spec = sh(&s, &script, LONG);
         spec.stop_grace = Duration::from_secs(60);
         spec.drain_bound = Duration::from_secs(60);
@@ -200,8 +200,8 @@ both!(
         // The descendant starts after the first scan and the interrupt comes before
         // the next periodic one, so only the scan a stop makes first can see it.
         let script = format!(
-            "while [ ! -e scanned ]; do sleep 0.02; done; echo $$ > leader; \
-         {OWN_SESSION} & echo $! > gc; wait"
+            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; \
+         {OWN_SESSION} & record gc $!; wait"
         );
         let mut spec =
             sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
@@ -232,7 +232,7 @@ both!(
         require_perl!();
         for round in 0..5 {
             let s = Scratch::new();
-            let script = format!("echo $$ > leader; {OWN_GROUP} & echo $! > gc; wait");
+            let script = format!("record leader $$; {OWN_GROUP} & record gc $!; wait");
             let handle = ProcessHandle::start(sh(&s, &script, LONG));
             let mut reaper = Reaper::default();
             let gc = reaper.watch(&s, "gc").await;
@@ -305,7 +305,7 @@ both!(
         // that follows the exit finds a child born after the snapshot.
         let child = detached_own_group();
         let script = format!(
-            "trap \"{child} & echo \\$! > gc; exit 0\" TERM; echo $$ > leader; \
+            "trap \"{child} & record gc \\$!; exit 0\" TERM; record leader $$; \
          while :; do sleep 0.05; done"
         );
         let mut spec = sh(&s, &script, LONG);
@@ -338,7 +338,7 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     // children do not hold the output pipes.
     let child = detached_own_group();
     let script = format!(
-        "trap \"{child} & echo \\$! >> gcs\" TERM; echo $$ > leader; \
+        "trap \"{child} & echo \\$! >> gcs\" TERM; record leader $$; \
          while [ ! -e quit ]; do sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
@@ -395,8 +395,8 @@ both!(
         // It starts after the first scan, and the leader exits before the next, so
         // no scan can have seen it with its parent alive.
         let script = format!(
-            "while [ ! -e scanned ]; do sleep 0.02; done; echo $$ > leader; \
-         {OWN_SESSION} & echo $! > gc; {WAIT_ESCAPED} exit 0"
+            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; \
+         {OWN_SESSION} & record gc $!; {WAIT_ESCAPED} exit 0"
         );
         let mut spec =
             sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
@@ -465,7 +465,7 @@ both!(
         let broken: Lister = Arc::new(|| {
             Box::pin(async { Err(InspectError::Failed("listing unavailable".into())) })
         });
-        let mut spec = sh(&s, "echo $$ > leader; exit 0", LONG).with_lister(broken);
+        let mut spec = sh(&s, "record leader $$; exit 0", LONG).with_lister(broken);
         // A deadline that would show if cleanup waited it out.
         spec.cleanup_deadline = Duration::from_secs(600);
         let started = Instant::now();
@@ -506,7 +506,7 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     let missing = lister_for(vec!["/nonexistent/delega-ps".into()]);
     let mut spec = sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; exit 0",
+        "record leader $$; sleep 60 & record gc $!; exit 0",
         LONG,
     )
     .with_lister(missing);
@@ -626,7 +626,7 @@ async fn assert_bad_listing_is_unconfirmed(ps_output: &str) {
     let lister = fake_ps(&s, ps_output);
     let mut spec = sh(
         &s,
-        "echo $$ > leader; sh -c 'trap \"\" TERM; echo $$ > gc; while :; do sleep 1; done' & \
+        "record leader $$; sh -c 'trap \"\" TERM; echo $$ > gc.tmp && /bin/mv gc.tmp gc; while :; do sleep 1; done' & \
          while [ ! -e gc ]; do sleep 0.02; done; exit 0",
         LONG,
     )
@@ -664,7 +664,7 @@ async fn without_descendant_tracking_the_group_and_session_are_still_swept() {
     let s = Scratch::new();
     let mut spec = sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; exit 0",
+        "record leader $$; sleep 60 & record gc $!; exit 0",
         LONG,
     );
     spec.track_descendants = false;
@@ -686,7 +686,7 @@ both!(
         let s = Scratch::new();
         // Wait until the descendant has left the group, so the group signal cannot
         // be what reaches it.
-        let script = format!("echo $$ > leader; {OWN_GROUP} & echo $! > gc; {WAIT_ESCAPED} exit 0");
+        let script = format!("record leader $$; {OWN_GROUP} & record gc $!; {WAIT_ESCAPED} exit 0");
         let mut spec = sh(&s, &script, LONG);
         spec.track_descendants = false;
         let started = Instant::now();
@@ -726,7 +726,7 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     });
     let mut spec = sh(
         &s,
-        "trap '' TERM; echo $$ > leader; sleep 60 & echo $! > gc; wait",
+        "trap '' TERM; record leader $$; sleep 60 & record gc $!; wait",
         LONG,
     )
     .with_lister(hung);
