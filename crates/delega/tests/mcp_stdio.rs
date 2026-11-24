@@ -725,7 +725,11 @@ fn a_signal_stops_the_workers_and_the_server_exits_though_the_client_stopped_rea
     });
     // Let the server fill the pipe. Whether it is blocked yet is not observable,
     // so the flood is large and given this long; the signal then arrives in
-    // whichever state the server is in, and must be handled in either.
+    // whichever state the server is in, and must be handled in either. A test
+    // seam cannot replace the sleep: the blocked write happens inside
+    // tower-mcp's transport, and a full pipe seen from outside it (poll on
+    // standard output) is not that write, and macOS can report a full pipe as
+    // writable (#186).
     std::thread::sleep(Duration::from_secs(3));
     support::signal(session.pid(), "TERM");
     // Generous: the transport is given up on after its 15 s bound at the latest.

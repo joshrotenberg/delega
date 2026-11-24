@@ -161,6 +161,7 @@ async fn stop_writing(
     printed: &OnceLock<ExitCode>,
 ) -> Option<ExitCode> {
     stop.request();
+    crate::commands::ack::acknowledge(crate::commands::ack::Ack::ResultStopRequested);
     match tokio::time::timeout(PRINT_STOP_WAIT, receiver).await {
         Ok(Ok(code)) => Some(code),
         _ => printed.get().copied(),

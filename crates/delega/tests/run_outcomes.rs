@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{
     Guarded, PROVIDERS, Rig, assert_stop_cleanup, guarded_pipe, result_of, signal, text,
-    wait_bounded, wait_exit_only,
+    wait_bounded, wait_exit_only, wait_for_ack,
 };
 
 #[test]
@@ -179,18 +179,33 @@ fn a_timed_out_run_in_text_mode_says_so_on_stderr() {
     rig.assert_nothing_left();
 }
 
-/// Start `hang`, send `names` in turn once it is running, and return the result
-/// after it exits.
+/// Start `hang`, send `names` in turn once it is running, each once delega has
+/// handled the one before, and return the result after it exits.
 fn interrupted(provider: &str, names: &[&str]) -> (std::process::Output, Rig) {
     let rig = Rig::new();
-    let child = rig.spawn_run(provider, "hang", &["--output", "json"]);
+    let handled = rig.path("signal");
+    // Killed and reaped if a wait below fails.
+    let mut child = Reaped(Some(
+        rig.command()
+            .args(rig.run_args(provider, "hang", &["--output", "json"]))
+            .env("DELEGA_TEST_ACK_RUN_SIGNAL", &handled)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .guarded_spawn()
+            .expect("spawn delega"),
+    ));
     rig.wait_started();
-    for name in names {
+    for (count, name) in names.iter().enumerate() {
         signal(child.id(), name);
-        // Far enough apart that each one is a signal of its own.
-        std::thread::sleep(Duration::from_millis(100));
+        // Each one handled before the next is sent, so each is a signal of
+        // its own, taken while the run is still being waited for.
+        wait_for_ack(
+            &rig.path(&format!("signal-{}", count + 1)),
+            &mut child,
+            &format!("it handled signal {} ({name})", count + 1),
+        );
     }
-    (wait_bounded(child), rig)
+    (wait_bounded(child.take()), rig)
 }
 
 #[test]
@@ -539,15 +554,23 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
     // The case from the review: nobody reads standard output while delega
     // writes a large result, standard error is full so delega stays alive a
     // while after deciding its status, a signal arrives, and standard output is
-    // drained later. Whatever the reader ends up with must agree with the exit
-    // status: a whole `completed` result with 0, anything less with 130.
+    // drained later. The signal asks the write to stop before anything is
+    // drained, and the write is megabytes from its end, so the writer must
+    // abandon it (it says so through DELEGA_TEST_ACK_RESULT_WRITE_STOPPED), the
+    // reader must get less than a whole result and delega must exit 130. Exit
+    // 130 with a partial result alone is not enough: delega's own deadline for
+    // the print thread gives that too, with a writer that ignored the stop.
     for provider in PROVIDERS {
         let rig = Rig::new();
         let (stderr_reader, stderr_writer) = guarded_pipe().expect("a pipe");
         fill(&stderr_writer);
+        let stop_requested = rig.path("stop-requested");
+        let write_stopped = rig.path("write-stopped");
         let mut child = Reaped(Some(
             rig.command()
                 .args(rig.run_args(provider, "large", &["--output", "json"]))
+                .env("DELEGA_TEST_ACK_RESULT_STOP_REQUESTED", &stop_requested)
+                .env("DELEGA_TEST_ACK_RESULT_WRITE_STOPPED", &write_stopped)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::from(stderr_writer))
                 .guarded_spawn()
@@ -558,9 +581,14 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         // writing it, and blocks once the pipe is full.
         wait_readable(&stdout, Duration::from_secs(120));
         signal(child.id(), "TERM");
-        // Long enough for delega to have taken the signal; the reader then
-        // drains while delega is still alive, held by its full standard error.
-        std::thread::sleep(Duration::from_millis(450));
+        // delega has taken the signal and asked the write to stop; the reader
+        // then drains while delega is still alive, held by its full standard
+        // error.
+        wait_for_ack(
+            &stop_requested,
+            &mut child,
+            "the signal asked the result write to stop",
+        );
         let reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
             let _ = std::io::Read::read_to_end(&mut { stdout }, &mut bytes);
@@ -577,8 +605,16 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         let stderr = stderr.join().expect("stderr reader");
         let result: Option<delega_core::contract::result::RunResult> =
             serde_json::from_slice(&delivered).ok();
+        // Written by the writer itself, before it returns, at the one place it
+        // abandons the rest of the write.
+        assert!(
+            write_stopped.exists(),
+            "{provider}: the result writer never abandoned the write it was asked \
+             to stop (exit {:?}, {} bytes delivered)",
+            status.code(),
+            delivered.len()
+        );
         match (status.code(), result) {
-            (Some(0), Some(result)) => assert_eq!(result.outcome, Outcome::Completed, "{provider}"),
             (Some(130), None) => {}
             (code, result) => panic!(
                 "{provider}: exit {code:?} with {} bytes, a whole result: {}; stderr ends: {}",
@@ -599,6 +635,10 @@ fn a_blocked_standard_error_does_not_delay_stopping_the_worker() {
         // holds, and nobody reads standard error.
         let mut child = rig.spawn_run(provider, "chatty-hang", &["--progress", "--output", "json"]);
         rig.wait_started();
+        // Slept, not acknowledged: delega cannot say reliably that its write
+        // to standard error is blocked. A poll before the write is no proof (a
+        // short line can still fit, and macOS can report a full pipe as
+        // writable), and a blocking write cannot report itself (#186).
         std::thread::sleep(Duration::from_millis(500));
         signal(child.id(), "TERM");
         let status = wait_exit_only(&mut child, Duration::from_secs(90));
@@ -703,6 +743,9 @@ fn a_signal_ends_delega_that_is_only_waiting_for_a_reader_of_a_large_result() {
             std::thread::sleep(Duration::from_millis(10));
         }
         rig.assert_nothing_left();
+        // Slept, not acknowledged: delega cannot say reliably that its write
+        // is blocked. Its poll is no proof (macOS can report a full pipe as
+        // writable), and a blocking write cannot report itself (#186).
         std::thread::sleep(Duration::from_millis(500));
         assert!(
             child.try_wait().expect("poll").is_none(),
@@ -728,6 +771,9 @@ fn every_terminal_signal_ends_a_delega_blocked_writing_its_result() {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+        // Slept, not acknowledged: delega cannot say reliably that its write
+        // is blocked. Its poll is no proof (macOS can report a full pipe as
+        // writable), and a blocking write cannot report itself (#186).
         std::thread::sleep(Duration::from_millis(800));
         signal(child.id(), name);
         let status = wait_exit_only(&mut child, Duration::from_secs(90));
