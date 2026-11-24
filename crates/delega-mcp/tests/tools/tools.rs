@@ -734,8 +734,7 @@ async fn a_cursorless_wait_released_by_shutdown_says_so_and_a_timed_out_wait_doe
     gate.started().await;
     let run = started["run"].clone();
 
-    // The timeout is the behavior under test. Registration alone cannot
-    // exercise the timeout response.
+    // A wait that times out is not a release.
     let timed_out = rig
         .call("wait", json!({"runs": [run.clone()], "timeout_secs": 1}))
         .await;
@@ -828,8 +827,7 @@ async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_no
     assert_eq!(listed["limits"]["max_waits_in_flight"], 2, "{listed}");
     assert_eq!(listed["limits"]["waits_in_flight"], 2, "{listed}");
 
-    // Keep the elapsed bound as a responsiveness assertion while the other
-    // calls remain parked. Their registration only establishes ordering.
+    // Far below the 120 s the parked waits asked for.
     let at_once = Duration::from_secs(10);
     let begun = std::time::Instant::now();
     let refused = rig

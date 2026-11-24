@@ -37,7 +37,8 @@ impl RegisteredWait {
 
 impl Supervisor {
     /// Observe registrations on this supervisor from this point onward.
-    /// Install before starting the waits under test.
+    /// Install before starting the waits under test. Calling this again
+    /// replaces the previous observer.
     #[doc(hidden)]
     pub fn observe_waits(&self) -> WaitObserver {
         let (tx, rx) = mpsc::unbounded_channel();
