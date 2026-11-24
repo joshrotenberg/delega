@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::link::{ReplyHole, reply_hole};
-use super::protocol::{FromKeeper, Hello, Lines, ToKeeper};
+use super::protocol::{Frame, FromKeeper, Hello, Lines, ToKeeper};
 use crate::process::limits::{KEEPER_RELEASE_WAIT, KEEPER_TICK};
 use crate::process::sys::{self, Signal};
 
@@ -316,8 +316,11 @@ fn read_commands(tx: &mpsc::UnboundedSender<Event>) {
         match rustix::io::read(rustix::stdio::stdin(), &mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                for line in lines.push(&buffer[..n]) {
-                    if let Some(command) = ToKeeper::parse(&line) {
+                for frame in lines.push(&buffer[..n]) {
+                    // An oversized or unknown line from the owner is ignored.
+                    if let Frame::Line(line) = frame
+                        && let Some(command) = ToKeeper::parse(&line)
+                    {
                         let _ = tx.send(Event::Command(command));
                     }
                 }

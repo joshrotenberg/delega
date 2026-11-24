@@ -17,7 +17,7 @@ use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
 use tokio::sync::oneshot;
 
 use super::KeeperCommand;
-use super::protocol::{FromKeeper, Hello, Lines, ToKeeper};
+use super::protocol::{Frame, FromKeeper, Hello, Lines, ToKeeper};
 use crate::process::limits::{KEEPER_ABANDON_WAIT, KEEPER_REPLY_TIMEOUT, KEEPER_START_TIMEOUT};
 use crate::process::sys::{self, ExitSummary};
 use crate::process::tree::GroupPin;
@@ -93,6 +93,8 @@ struct State {
     unproven: AtomicBool,
     /// See [`LinkHandle::incomplete`].
     incomplete: AtomicBool,
+    /// The keeper wrote a line outside the protocol (warned once).
+    malformed: AtomicBool,
 }
 
 /// A census or freeze request waiting for its answer.
@@ -131,6 +133,32 @@ impl State {
                     .to_string(),
             );
         }
+    }
+
+    /// A frame from the keeper as a message, or `None` for one that is
+    /// outside the protocol: a line longer than the limit, or one that does
+    /// not parse. Such a frame may have been an answer whose content cannot
+    /// be read (a refused hold among it), so it makes the run unproven, as a
+    /// hole no later answer repairs, and is never dispatched.
+    fn keeper_frame(&self, frame: Frame) -> Option<FromKeeper> {
+        let message = match &frame {
+            Frame::Line(line) => FromKeeper::parse(line),
+            Frame::Oversized => None,
+        };
+        if message.is_none() {
+            self.note(ReplyHole::Unproven);
+            if !self.malformed.swap(true, Ordering::SeqCst) {
+                let what = match frame {
+                    Frame::Oversized => "a line longer than the protocol allows",
+                    Frame::Line(_) => "a line outside the protocol",
+                };
+                lock(&self.warnings).push(format!(
+                    "The keeper wrote {what}; it was not read as an answer, and cleanup cannot \
+                     be confirmed"
+                ));
+            }
+        }
+        message
     }
 
     fn note(&self, hole: ReplyHole) {
@@ -700,8 +728,8 @@ fn follow(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        for line in lines.push(&buffer[..n]) {
-            let Some(message) = FromKeeper::parse(&line) else {
+        for frame in lines.push(&buffer[..n]) {
+            let Some(message) = state.keeper_frame(frame) else {
                 continue;
             };
             match message {
@@ -910,6 +938,57 @@ mod tests {
             handle.state.tree_answer(1, 1, detail.into());
             assert!(handle.unproven(), "{detail}");
             assert!(!handle.incomplete(), "{detail}");
+        }
+    }
+
+    /// Feed bytes from the keeper through the reader's splitter and frame
+    /// check, dispatching tree answers as the reader does.
+    fn read_from_keeper(handle: &LinkHandle, lines: &mut Lines, bytes: &[u8]) {
+        for frame in lines.push(bytes) {
+            if let Some(FromKeeper::Tree { id, live, detail }) = handle.state.keeper_frame(frame) {
+                handle.state.tree_answer(id, live, detail);
+            }
+        }
+    }
+
+    /// A freeze answer padded past the line limit, whose `task=failed` comes
+    /// only after the limit: it is never read as an answer (so never as an
+    /// incomplete freeze), it makes the run unproven, and the next line is
+    /// read as usual.
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_answer_is_never_dispatched_and_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        assert_eq!(handle.freeze().await, None);
+        let mut lines = Lines::default();
+        let padded = format!(
+            "tree 1 1 passes=1 complete=false refused=0 read_failures=0{}",
+            " ".repeat(super::super::protocol::MAX_LINE)
+        );
+        read_from_keeper(&handle, &mut lines, padded.as_bytes());
+        read_from_keeper(&handle, &mut lines, b" task=failed\n");
+        assert!(handle.unproven());
+        assert!(!handle.incomplete());
+        assert_eq!(handle.tree_log(), vec!["freeze: no answer".to_string()]);
+        assert_eq!(handle.warnings().len(), 1, "{:?}", handle.warnings());
+        // The request is still pending: the oversized frame answered nothing.
+        assert!(lock(&handle.state.pending).contains_key(&1));
+        read_from_keeper(
+            &handle,
+            &mut lines,
+            b"tree 1 0 passes=1 complete=true refused=0 read_failures=0\n",
+        );
+        assert_eq!(handle.tree_log().len(), 2, "{:?}", handle.tree_log());
+        assert!(handle.unproven());
+    }
+
+    /// A line from the keeper that does not parse may have been an answer;
+    /// it leaves the run unproven.
+    #[test]
+    fn a_keeper_line_outside_the_protocol_leaves_the_run_unproven() {
+        for bytes in [&b"tree x 0 passes=1\n"[..], b"nonsense\n", b"reaped\n"] {
+            let (handle, _keeper) = silent_link();
+            read_from_keeper(&handle, &mut Lines::default(), bytes);
+            assert!(handle.unproven(), "{bytes:?}");
         }
     }
 

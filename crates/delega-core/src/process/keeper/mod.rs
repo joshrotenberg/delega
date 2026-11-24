@@ -49,6 +49,12 @@
 //!   proof supersede), `releasing`, `warn <text>`.
 //! - owner: `census <id>` (count the live processes in the keeper's tree),
 //!   `freeze <id>` (stop, kill and count them), `reap`, `released`.
+//!
+//! No line either side writes is longer than 4096 bytes (free text is cut to
+//! fit). A longer line is never read, in part or whole, through its newline.
+//! The owner counts such a line from the keeper, and any keeper line that
+//! does not parse, as a hole no later answer repairs: it may have been an
+//! answer whose content cannot be read, so the run cannot end `Confirmed`.
 
 mod link;
 mod protocol;

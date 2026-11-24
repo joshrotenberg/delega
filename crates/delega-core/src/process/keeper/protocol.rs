@@ -331,26 +331,62 @@ fn one_line(text: &str) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    flat.chars().take(MAX_LINE / 2).collect()
+    // Cut by bytes, at a character boundary, so every line either side
+    // writes stays within [`MAX_LINE`] with its verb and numbers.
+    let mut end = flat.len().min(MAX_LINE / 2);
+    while !flat.is_char_boundary(end) {
+        end -= 1;
+    }
+    flat[..end].to_string()
+}
+
+/// One frame of a line stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// A line, without its newline.
+    Line(String),
+    /// A line longer than [`MAX_LINE`]: nothing of it is a line, from its
+    /// first byte through the next newline. Neither side writes one, so it
+    /// is a protocol failure.
+    Oversized,
 }
 
 /// Splits a byte stream into lines, keeping what is left of an unfinished
-/// line for the next read. A line longer than [`MAX_LINE`] is cut there.
+/// line for the next read. A line longer than [`MAX_LINE`] is never handed
+/// out, in part or whole: it is reported once as [`Frame::Oversized`] and
+/// discarded through the next newline, so its tail cannot be read as a line
+/// either.
 #[derive(Debug, Default)]
 pub(crate) struct Lines {
     pending: Vec<u8>,
+    /// Inside an oversized line already reported: discard up to and
+    /// including the next newline.
+    discarding: bool,
 }
 
 impl Lines {
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<Frame> {
         self.pending.extend_from_slice(bytes);
         let mut out = Vec::new();
         while let Some(at) = self.pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=at).collect();
-            out.push(String::from_utf8_lossy(&line[..line.len() - 1]).into_owned());
+            let line = &line[..line.len() - 1];
+            if std::mem::take(&mut self.discarding) {
+                continue;
+            }
+            out.push(if line.len() > MAX_LINE {
+                Frame::Oversized
+            } else {
+                Frame::Line(String::from_utf8_lossy(line).into_owned())
+            });
         }
         if self.pending.len() > MAX_LINE {
-            out.push(String::from_utf8_lossy(&self.pending).into_owned());
+            if !self.discarding {
+                out.push(Frame::Oversized);
+                self.discarding = true;
+            }
+            self.pending.clear();
+        } else if self.discarding {
             self.pending.clear();
         }
         out
@@ -483,11 +519,82 @@ mod tests {
         assert_eq!(FromKeeper::parse("reaped "), None);
     }
 
+    fn line(text: &str) -> Frame {
+        Frame::Line(text.to_string())
+    }
+
     #[test]
     fn lines_are_split_across_reads() {
         let mut lines = Lines::default();
         assert!(lines.push(b"star").is_empty());
-        assert_eq!(lines.push(b"ted 1\nreaped\nx"), vec!["started 1", "reaped"]);
-        assert_eq!(lines.push(b"\n"), vec!["x"]);
+        assert_eq!(
+            lines.push(b"ted 1\nreaped\nx"),
+            vec![line("started 1"), line("reaped")]
+        );
+        assert_eq!(lines.push(b"\n"), vec![line("x")]);
+    }
+
+    /// A line of exactly [`MAX_LINE`] bytes is a line; one byte more is not.
+    #[test]
+    fn a_line_up_to_the_limit_is_a_line() {
+        let mut lines = Lines::default();
+        let full = "a".repeat(MAX_LINE);
+        assert_eq!(
+            lines.push(format!("{full}\n").as_bytes()),
+            vec![line(&full)]
+        );
+        assert_eq!(
+            lines.push(format!("{full}b\nok\n").as_bytes()),
+            vec![Frame::Oversized, line("ok")]
+        );
+    }
+
+    /// An oversized line that arrives unterminated is reported once and
+    /// nothing of it is handed out as a line: not the part before the limit,
+    /// not the tail that follows in later reads, up to its newline. The line
+    /// after it is read as usual.
+    #[test]
+    fn an_oversized_unterminated_line_is_never_handed_out() {
+        let mut lines = Lines::default();
+        let padded = format!(
+            "tree 3 1 passes=1 complete=false refused=0 read_failures=0{}",
+            " ".repeat(MAX_LINE)
+        );
+        assert_eq!(lines.push(padded.as_bytes()), vec![Frame::Oversized]);
+        assert!(lines.push(&[b' '; 100]).is_empty());
+        assert!(lines.push(&vec![b' '; MAX_LINE * 2]).is_empty());
+        assert_eq!(
+            lines.push(b" task=failed\nexited code 0\n"),
+            vec![line("exited code 0")]
+        );
+        assert_eq!(lines.push(b"reaped 0\n"), vec![line("reaped 0")]);
+    }
+
+    /// No line a side writes is oversized, whatever text it carries.
+    #[test]
+    fn a_long_text_is_cut_to_fit_one_line() {
+        for text in ["x".repeat(MAX_LINE * 2), "\u{1F600}".repeat(MAX_LINE)] {
+            for msg in [
+                FromKeeper::Warn(text.clone()),
+                FromKeeper::SpawnFailed {
+                    errno: i32::MAX,
+                    message: text.clone(),
+                },
+                FromKeeper::Subreaper(Err(text.clone())),
+                FromKeeper::Tree {
+                    id: u64::MAX,
+                    live: usize::MAX,
+                    detail: text.clone(),
+                },
+            ] {
+                let written = msg.line();
+                assert!(written.len() <= MAX_LINE, "{}", written.len());
+                let mut lines = Lines::default();
+                assert_eq!(
+                    lines.push(format!("{written}\n").as_bytes()),
+                    vec![line(&written)]
+                );
+            }
+        }
     }
 }
