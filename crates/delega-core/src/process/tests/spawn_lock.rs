@@ -49,7 +49,11 @@
 //! stuck holding the spawn lock (a spawn that takes it twice, say) then fails
 //! that case without blocking every other spawn in the test binary, and no
 //! other test's spawn can add to the waiting count or fork inside the window.
-//! The siblings are `cat` reading a pipe from the inner process, so they also
+//! The outer test passes the inner one a nonce, and the inner test prints a
+//! line naming its case and that nonce only after its assertions and cleanup
+//! are done. The outer test requires that exact line as well as libtest's
+//! pass line, because an inner test run without the nonce skips, and libtest
+//! counts the skip as a pass. The siblings are `cat` reading a pipe from the inner process, so they also
 //! end by themselves if that process is killed; otherwise every sibling is
 //! killed and reaped, on failure paths too.
 
@@ -73,8 +77,14 @@ use crate::test_spawn::Guarded;
 const DEADLINE: Duration = Duration::from_secs(10);
 /// How long the outer test lets a case's process run before it kills it.
 const OUTER_DEADLINE: Duration = Duration::from_secs(60);
-/// Set by the outer test for the inner one, which does nothing without it.
+/// Set by the outer test for the inner one, which does nothing without it:
+/// the path of a file holding a nonce for this run of the case.
 const FIXTURE: &str = "DELEGA_SPAWN_LOCK_FIXTURE";
+/// The inner tests, named once for the outer test that runs each and for the
+/// completion marker each prints.
+const GUARDED: &str = "a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner";
+#[cfg(target_os = "macos")]
+const UNGUARDED: &str = "an_unguarded_spawn_in_the_window_inherits_the_pipe_inner";
 
 /// One started sibling. Dropping it kills the child and waits, for at most
 /// [`DEADLINE`], until it is reaped, so every sibling is reaped however the
@@ -305,20 +315,34 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("build a runtime")
 }
 
-/// Whether this is the case's own process. Run any other way, an inner test
-/// does nothing: in the shared test process other tests' spawns would wait
-/// on the lock and fork beside it.
-fn in_fixture_process() -> bool {
-    if std::env::var_os(FIXTURE).is_some() {
-        return true;
-    }
-    eprintln!("SKIPPED: run by its outer test in a process of its own");
-    false
+/// The nonce the outer test left for this run of the case, when this is the
+/// case's own process. Run any other way, an inner test does nothing: in the
+/// shared test process other tests' spawns would wait on the lock and fork
+/// beside it. It then prints no completion marker, so its outer test fails.
+fn fixture_nonce() -> Option<String> {
+    let Some(path) = std::env::var_os(FIXTURE) else {
+        eprintln!("SKIPPED: run by its outer test in a process of its own");
+        return None;
+    };
+    let nonce = std::fs::read_to_string(path).expect("read the case's nonce");
+    Some(nonce.trim().to_string())
+}
+
+/// The line an inner test prints once its assertions and cleanup are done.
+fn completion_marker(case: &str, nonce: &str) -> String {
+    format!("spawn-lock case finished: {case} {nonce}")
+}
+
+/// Print the completion marker on a line of its own (libtest has written
+/// `test <name> ... ` before the test runs).
+fn finished(case: &str, nonce: &str) {
+    println!("\n{}", completion_marker(case, nonce));
 }
 
 /// Re-run this test binary on the inner test `name` alone, kill it if it
 /// takes longer than [`OUTER_DEADLINE`] and fail with its output unless it
-/// ran exactly that one test and passed.
+/// ran exactly that one test, passed and printed the completion marker for
+/// this case and this run's nonce.
 fn run_case(name: &str) {
     let module = module_path!()
         .split_once("::")
@@ -327,13 +351,24 @@ fn run_case(name: &str) {
     let test = format!("{module}::{name}");
     let dir = tempfile::tempdir().expect("create scratch directory");
     let out = dir.path().join("out");
+    let nonce_file = dir.path().join("nonce");
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_nanos()
+    );
+    std::fs::write(&nonce_file, &nonce).expect("write the case's nonce");
+    let marker = completion_marker(name, &nonce);
     // One open file for both streams, so they share an offset and neither
     // overwrites the other.
     let file = std::fs::File::create(&out).expect("create the output file");
     let mut case = std::process::Command::new(std::env::current_exe().expect("this test binary"))
         .args([test.as_str(), "--exact", "--ignored", "--nocapture"])
         .args(["--test-threads=1"])
-        .env(FIXTURE, "1")
+        .env(FIXTURE, &nonce_file)
         .stdin(std::process::Stdio::null())
         .stdout(file.try_clone().expect("share the output file"))
         .stderr(file)
@@ -357,24 +392,31 @@ fn run_case(name: &str) {
             panic!("{test} did not finish within {OUTER_DEADLINE:?}; killed. Output:\n{output}")
         }
         Some(status) if !status.success() => panic!("{test} failed ({status}). Output:\n{output}"),
-        Some(_) => assert!(
-            output.contains("test result: ok. 1 passed"),
-            "{test} did not run as the one test of its process. Output:\n{output}"
-        ),
+        Some(_) => {
+            assert!(
+                output.contains("test result: ok. 1 passed"),
+                "{test} did not run as the one test of its process. Output:\n{output}"
+            );
+            assert!(
+                output.lines().any(|line| line == marker),
+                "{test} passed without printing its completion marker, so it did not run \
+                 its case (it skips without {FIXTURE}). Output:\n{output}"
+            );
+        }
     }
 }
 
 #[test]
 fn a_guarded_sibling_never_holds_a_pipe_from_another_spawns_cloexec_window() {
-    run_case("a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner");
+    run_case(GUARDED);
 }
 
 #[test]
 #[ignore = "run by its outer test in a process of its own"]
 fn a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner() {
-    if !in_fixture_process() {
+    let Some(nonce) = fixture_nonce() else {
         return;
-    }
+    };
     let runtime = runtime();
     let dir = tempfile::tempdir().expect("create scratch directory");
     let seen = open_window(&runtime, dir.path(), 4, true);
@@ -385,6 +427,7 @@ fn a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner() {
         "a sibling started through the spawn lock holds the write end of a pipe from \
          another spawn's close-on-exec window"
     );
+    finished(GUARDED, &nonce);
 }
 
 /// The check can see the bug: a sibling that skips the lock and starts inside
@@ -393,16 +436,16 @@ fn a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_unguarded_sibling_started_in_the_cloexec_window_is_seen_holding_the_pipe() {
-    run_case("an_unguarded_spawn_in_the_window_inherits_the_pipe_inner");
+    run_case(UNGUARDED);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "run by its outer test in a process of its own"]
 fn an_unguarded_spawn_in_the_window_inherits_the_pipe_inner() {
-    if !in_fixture_process() {
+    let Some(nonce) = fixture_nonce() else {
         return;
-    }
+    };
     let runtime = runtime();
     let dir = tempfile::tempdir().expect("create scratch directory");
     let seen = open_window(&runtime, dir.path(), 1, false);
@@ -417,4 +460,5 @@ fn an_unguarded_spawn_in_the_window_inherits_the_pipe_inner() {
         "the write end is still held after the sibling was reaped, so it was not the sibling \
          that held it"
     );
+    finished(UNGUARDED, &nonce);
 }
