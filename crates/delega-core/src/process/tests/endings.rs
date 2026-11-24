@@ -121,6 +121,13 @@ async fn a_child_that_ignores_terminate_is_killed_after_the_grace_period() {
     // Stopped by an interrupt once the script has set its trap and started its
     // child (it writes `gc` after the trap). A time limit would race the
     // script's start on a loaded machine; the stop path is the same.
+    //
+    // The one-second grace stays on the real clock: it runs against a real
+    // process that ignores TERM, from a stop that comes only after the child
+    // is ready, so load can only make it later, and the test bounds the end
+    // from above. On a paused clock, the wait for the TERM to be delivered and
+    // for the child's exit would let the clock jump past the grace and the
+    // cleanup deadline.
     let handle = ProcessHandle::start(sh(
         &s,
         "trap '' TERM; record leader $$; sleep 60 & record gc $!; wait",
