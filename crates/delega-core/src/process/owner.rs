@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::cleanup_reason::{self, GroupCheck, StopDetail};
+use crate::cleanup_reason::{self, GroupCheck, MAX_MERGED_REPORTS, StopDetail};
 use crate::contract::result::Cleanup;
 
 use super::keeper::{KeeperLink, LaunchSpec, LinkHandle, StartError};
@@ -534,11 +534,11 @@ pub const LATE_LISTING_REASON: &str = "the process listing taken before the firs
 
 /// Whether a verdict is `Unconfirmed` for the late listing and for nothing
 /// else: no pids and no process groups, and a reason that is
-/// [`LATE_LISTING_REASON`] once, or that text repeated any number of times
-/// joined by `"; "` (each report of a provider run that missed its listing,
-/// which `merge_cleanup` joins that way: the version probe, MCP discovery and
-/// the run itself). Any other text, such as a failed stop, or any pid, is not
-/// this verdict.
+/// [`LATE_LISTING_REASON`] once, or that text repeated up to three times
+/// (`cleanup_reason::MAX_MERGED_REPORTS`) joined by `"; "` (each report of a
+/// provider run that missed its listing, which `merge_cleanup` joins that way:
+/// the version probe, MCP discovery and the run itself). Any other text, such
+/// as a failed stop, more repeats, or any pid, is not this verdict.
 ///
 /// Public only so that the tests of the binary and of the acceptance harness
 /// can recognise the verdict; it is not part of the supported API.
@@ -555,11 +555,12 @@ pub fn is_late_listing_only(cleanup: &Cleanup) -> bool {
     pids.is_empty() && process_groups.is_empty() && only_late_listing_reasons(reason)
 }
 
-/// Whether `reason` is [`LATE_LISTING_REASON`] one or more times, joined by
-/// `"; "`. The reason itself contains `"; "`, so it is matched by prefix.
+/// Whether `reason` is [`LATE_LISTING_REASON`] one to
+/// [`MAX_MERGED_REPORTS`] times, joined by `"; "`. The reason itself contains
+/// `"; "`, so it is matched by prefix.
 fn only_late_listing_reasons(reason: &str) -> bool {
     let mut rest = reason;
-    loop {
+    for _ in 0..MAX_MERGED_REPORTS {
         let Some(after) = rest.strip_prefix(LATE_LISTING_REASON) else {
             return false;
         };
@@ -571,6 +572,7 @@ fn only_late_listing_reasons(reason: &str) -> bool {
             None => return false,
         }
     }
+    false
 }
 
 /// What the verdict needs to know about refusals and the keeper's proof.

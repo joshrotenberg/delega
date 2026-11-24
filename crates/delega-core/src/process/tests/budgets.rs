@@ -107,11 +107,14 @@ fn the_late_listing_verdict_has_the_reason_the_library_produces() {
         vec![],
         format!("{}; {}; {}", late(), late(), late())
     )));
-    assert!(is_late_listing_only(&unconfirmed(
-        vec![],
-        vec![],
-        vec![late(); 5].join("; ")
-    )));
+    // No provider run merges more than three reports.
+    for repeats in [4, 5] {
+        assert!(!is_late_listing_only(&unconfirmed(
+            vec![],
+            vec![],
+            vec![late(); repeats].join("; ")
+        )));
+    }
     // A repeat must be the whole reason, joined by the separator, with nothing
     // before, between or after.
     for reason in [
