@@ -260,10 +260,8 @@ impl FromKeeper {
                 detail: words.collect::<Vec<_>>().join(" "),
             },
             "reaped" => {
-                let live = match words.next() {
-                    None | Some("") => 0,
-                    Some(n) => n.parse().ok()?,
-                };
+                // The count is required: a line without it claims nothing.
+                let live = words.next()?.parse().ok()?;
                 let (proven, unproven) = match words.collect::<Vec<_>>().as_slice() {
                     [] => (false, false),
                     ["proven"] => (true, false),
@@ -446,6 +444,11 @@ mod tests {
         assert_eq!(FromKeeper::parse("reaped 0 proven extra"), None);
         assert_eq!(FromKeeper::parse("reaped 0 unproven proven"), None);
         assert_eq!(FromKeeper::parse("reaped 0 unprovenx"), None);
+        // A missing or non-numeric count is not zero.
+        assert_eq!(FromKeeper::parse("reaped  proven"), None);
+        assert_eq!(FromKeeper::parse("reaped proven"), None);
+        assert_eq!(FromKeeper::parse("reaped"), None);
+        assert_eq!(FromKeeper::parse("reaped "), None);
     }
 
     #[test]
