@@ -412,6 +412,9 @@ const CLAUDE_KEYS: &[ClaudeKey] = {
         (&["allowManagedPermissionRulesOnly"], Permissions),
         (&["allowManagedHooksOnly"], Hooks),
         (&["disableAllHooks"], Hooks),
+        // A managed hooks configuration can add a hook beside delega's
+        // command guard.
+        (&["hooks"], Hooks),
         (&["strictPluginOnlyCustomization"], Plugins),
         (&["disableSideloadFlags"], Mcp),
         (&["allowManagedMcpServersOnly"], Mcp),
@@ -563,12 +566,22 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
 
 /// The managed Claude Code sources that can widen a run in `mode`, one phrase
 /// per source naming its path and the keys found, or why it was not read.
+/// `guard` is whether the run has delega's exact-command guard, the blocking
+/// `PreToolUse` hook passed for `permissions.commands` in `read` and `write`.
 ///
 /// Claude Code applies managed settings above the `--settings` block delega
 /// passes. A managed `permissions.allow` can grant what the mode does not, in
 /// `read`, `write` and `build`; in `build` a managed `sandbox` key can disable
-/// or loosen the sandbox delega passes. A source that exists and was not read
-/// completely may hold either, so it is named too; for the users' managed
+/// or loosen the sandbox delega passes. With the guard, a managed
+/// `disableAllHooks: true` can turn off the guard, a managed
+/// `allowManagedHooksOnly: true` can limit hooks to managed ones, and a
+/// managed `hooks` configuration can add a matching hook beside the guard,
+/// whose decision may combine with the guard's in ways Claude Code does not
+/// document. Each of these keys is named when present, without reading its
+/// value, and such a phrase ends with [`HOOK_CLAUSE`]. Without the guard
+/// delega relies on no hook, so these keys are not named. A source that
+/// exists and was not read
+/// completely may hold any of these, so it is named too; for the users' managed
 /// preferences that is conservative, since only the current user's file
 /// applies and which one that is goes unchecked. The managed MCP file holds
 /// no settings keys and is left out. `full` grants the built-in tools without
@@ -577,13 +590,17 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
 /// [`unchecked_preferences`], which says why settings files are not.
 ///
 /// Only fixed paths and key names from [`CLAUDE_KEYS`] are used, never a value.
-pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String> {
+pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode, guard: bool) -> Vec<String> {
     if mode == RunMode::Full {
         return Vec::new();
     }
     let build = mode == RunMode::Build;
+    // The guard is never installed in `build` or `full`.
+    let guard = guard && !build;
     let could = if build {
         "permissions.allow or sandbox keys"
+    } else if guard {
+        "permissions.allow or hook keys"
     } else {
         "permissions.allow"
     };
@@ -597,6 +614,7 @@ pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String
                 .filter(|key| {
                     key.name == "permissions.allow"
                         || (build && key.category == ManagedKeyCategory::Sandbox)
+                        || (guard && key.category == ManagedKeyCategory::Hooks)
                 })
                 .map(|key| key.name.as_str())
                 .collect();
@@ -626,8 +644,9 @@ pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String
                 };
                 return Some(format!(
                     "the managed source {} {what}, and Claude Code applies managed settings \
-                     above the settings delega passes",
-                    source.path
+                     above the settings delega passes{}",
+                    source.path,
+                    if guard { HOOK_CLAUSE } else { "" }
                 ));
             }
             let what = match (keys.is_empty(), unread) {
@@ -641,15 +660,35 @@ pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String
                     )
                 }
             };
+            let names_hooks = guard
+                && source
+                    .keys
+                    .iter()
+                    .any(|key| key.category == ManagedKeyCategory::Hooks);
+            let hooks = if names_hooks || (guard && unread.is_some()) {
+                HOOK_CLAUSE
+            } else {
+                ""
+            };
             Some(format!(
                 "the managed source {} {what}, and Claude Code applies managed settings above the \
-                 settings delega passes",
+                 settings delega passes{hooks}",
                 source.path
             ))
         })
-        .chain(unchecked_preferences(system, &Limits::default(), could))
+        .chain(unchecked_preferences(
+            system,
+            &Limits::default(),
+            could,
+            if guard { HOOK_CLAUSE } else { "" },
+        ))
         .collect()
 }
+
+/// Ends a phrase that names hook keys, or a source that may set them, when the
+/// run has delega's command guard.
+const HOOK_CLAUSE: &str = ", so these hook settings may stop delega's exact-command guard from \
+                           running or change how Claude Code resolves its decision";
 
 /// Whether an error says that nothing is at a path. Any other error, such as
 /// a denied permission, leaves open that something is there.
@@ -680,8 +719,14 @@ fn is_absence(error: &std::io::Error) -> bool {
 /// directory. It uses the same listing bound as the scan and the same
 /// injected-root check, which keeps the lookups of a stable test root inside
 /// it; like the scan's, it does not guard a path swapped for a link between
-/// the check and the lookup.
-fn unchecked_preferences(system: &SystemPaths, limits: &Limits, could: &str) -> Vec<String> {
+/// the check and the lookup. `hooks` ends each phrase: empty, or
+/// [`HOOK_CLAUSE`] when the run has the command guard.
+fn unchecked_preferences(
+    system: &SystemPaths,
+    limits: &Limits,
+    could: &str,
+    hooks: &str,
+) -> Vec<String> {
     const FILE: &str = "com.anthropic.claudecode.plist";
     if system.platform != Platform::Macos {
         return Vec::new();
@@ -730,7 +775,7 @@ fn unchecked_preferences(system: &SystemPaths, limits: &Limits, could: &str) -> 
         .map(|what| {
             format!(
                 "delega could not check {what}, so managed preferences may set {could}, and \
-                 Claude Code applies managed settings above the settings delega passes"
+                 Claude Code applies managed settings above the settings delega passes{hooks}"
             )
         })
         .collect()
