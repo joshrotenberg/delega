@@ -136,8 +136,12 @@ pub(crate) async fn marked(
                 // of the process whose environment carried the marker; a pid
                 // replaced in between gets no start time, and then no signal.
                 let before = super::sys::start_ticks(pid);
-                let marked = std::fs::read(format!("/proc/{pid}/environ"))
-                    .is_ok_and(|block| environ_has(&block, &token));
+                let block = std::fs::read(format!("/proc/{pid}/environ"));
+                #[cfg(test)]
+                if block.is_ok() {
+                    examined::note(&token, &[(pid, true)]);
+                }
+                let marked = block.is_ok_and(|block| environ_has(&block, &token));
                 let after = super::sys::start_ticks(pid);
                 let ticks = before.filter(|t| after == Some(*t));
                 marked.then_some((pid, started, stopped, ticks))
@@ -185,6 +189,8 @@ pub(crate) fn parse_marked(
     own_pid: u32,
 ) -> Result<Vec<MarkedRow>, InspectError> {
     let mut marked = Vec::new();
+    #[cfg(test)]
+    let mut parsed_pids = Vec::new();
     let mut seen_own = false;
     let mut lines = 0usize;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -205,6 +211,8 @@ pub(crate) fn parse_marked(
             seen_own = true;
         }
         let rest: Vec<&str> = words.collect();
+        #[cfg(test)]
+        parsed_pids.push((pid, rest.iter().any(|w| w.contains(examined::PROBE_ENV))));
         if state.starts_with('Z') || pid <= 1 {
             continue;
         }
@@ -227,7 +235,49 @@ pub(crate) fn parse_marked(
             "the marker listing does not contain this process".into(),
         ));
     }
+    #[cfg(test)]
+    examined::note(token, &parsed_pids);
     Ok(marked)
+}
+
+/// Test-only record of which processes a marker reading examined, per run
+/// token, each with whether the reading saw its environment: on Linux each pid
+/// whose `/proc/<pid>/environ` the reader read (always seen), on macOS each
+/// pid of a `ps -E` listing that parsed, seen when its command column held
+/// the name [`examined::PROBE_ENV`]. It holds pids and booleans only, never
+/// environment text, and is not compiled outside tests.
+#[cfg(test)]
+pub(crate) mod examined {
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::{Mutex, OnceLock};
+
+    /// The variable the leak test's sibling carries its probe value under.
+    pub(crate) const PROBE_ENV: &str = "DELEGA_TEST_ENV_LEAK_PROBE";
+
+    /// Per run token, each examined pid with whether its environment was seen.
+    type Table = Mutex<HashMap<String, BTreeSet<(i32, bool)>>>;
+
+    fn table() -> &'static Table {
+        static TABLE: OnceLock<Table> = OnceLock::new();
+        TABLE.get_or_init(Default::default)
+    }
+
+    pub(crate) fn note(token: &str, pids: &[(i32, bool)]) {
+        let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
+        table
+            .entry(token.to_owned())
+            .or_default()
+            .extend(pids.iter().copied());
+    }
+
+    /// Whether a marker reading for `token` examined `pid` and saw its
+    /// environment.
+    pub(crate) fn saw_environment(token: &str, pid: i32) -> bool {
+        let table = table().lock().unwrap_or_else(|e| e.into_inner());
+        table
+            .get(token)
+            .is_some_and(|pids| pids.contains(&(pid, true)))
+    }
 }
 
 #[cfg(test)]
@@ -308,5 +358,97 @@ mod tests {
         assert!(parse_marked(&text, T, 99).is_err());
         assert!(parse_marked("", T, 13).is_err());
         assert!(parse_marked("13 S garbage\n", T, 13).is_err());
+    }
+
+    /// A value from another process's environment, as `ps -E` shows it.
+    const SECRET: &str = "leakprobe5ec2e7c0ffee5ec2e7c0ffee";
+
+    fn listing_with_secret() -> String {
+        format!(
+            "  13 S    Sun Nov 22 17:41:04 2026 sleep 60 {MARKER_ENV}={T}\n\
+               14 S    Sun Nov 22 17:41:04 2026 other PROBE={SECRET}\n"
+        )
+    }
+
+    fn assert_no_secret(error: &InspectError) {
+        assert!(
+            !error.to_string().contains(SECRET) && !format!("{error:?}").contains(SECRET),
+            "the error carries listing text ({} bytes of it)",
+            SECRET.len()
+        );
+    }
+
+    /// The error of a call that must fail, without formatting what it returned
+    /// when it did not.
+    fn failure<T>(result: Result<T, InspectError>, what: &str) -> InspectError {
+        match result {
+            Ok(_) => panic!("{what} succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    /// Assert the error is a failed inspection whose message holds `kind`,
+    /// without printing the message (a regression could put listing text in
+    /// it).
+    fn assert_kind(error: &InspectError, kind: &str) {
+        assert!(
+            matches!(error, InspectError::Failed(message) if message.contains(kind)),
+            "the error is not the failed inspection that says {kind:?}"
+        );
+    }
+
+    #[test]
+    fn a_marker_listing_line_that_cannot_be_parsed_is_not_quoted_in_the_error() {
+        let text = format!(
+            "{}  15 S    SECRET={SECRET} cannot be parsed\n",
+            listing_with_secret()
+        );
+        let error = failure(parse_marked(&text, T, 13), "parsing a broken listing");
+        assert_no_secret(&error);
+        assert_kind(&error, "could not be parsed");
+    }
+
+    #[test]
+    fn a_marker_listing_without_this_process_does_not_quote_the_listing_in_the_error() {
+        let error = failure(
+            parse_marked(&listing_with_secret(), T, 99),
+            "parsing a listing without this process",
+        );
+        assert_no_secret(&error);
+        assert_kind(&error, "this process");
+    }
+
+    fn printing(script: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[tokio::test]
+    async fn a_listing_program_that_fails_after_printing_does_not_quote_its_output() {
+        let error = super::super::tree::run_listing(
+            printing(&format!(
+                "echo PROBE={SECRET}; echo PROBE={SECRET} >&2; exit 3"
+            )),
+            1 << 20,
+        )
+        .await;
+        let error = failure(error, "a listing that exits non-zero");
+        assert_no_secret(&error);
+        assert_kind(&error, "exit");
+    }
+
+    #[tokio::test]
+    async fn a_listing_too_large_does_not_quote_its_output() {
+        let error = super::super::tree::run_listing(
+            printing(&format!(
+                "i=0; while [ $i -lt 200 ]; do echo PROBE={SECRET}; i=$((i+1)); done"
+            )),
+            64,
+        )
+        .await;
+        let error = failure(error, "a listing over the bound");
+        assert_no_secret(&error);
+        assert_kind(&error, "too large");
     }
 }

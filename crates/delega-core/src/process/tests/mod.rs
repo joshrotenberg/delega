@@ -40,6 +40,7 @@ macro_rules! both {
 mod budgets;
 mod cleanup;
 mod endings;
+mod environment;
 mod fixtures;
 mod gaps;
 mod io;
