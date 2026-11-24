@@ -30,6 +30,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use delega_core::canonical::sorted;
 use delega_core::contract::SCHEMA_VERSION;
+use delega_core::process::Ending;
 use serde_json::json;
 
 use super::report::{CommandRecord, HostRecord};
@@ -146,7 +147,7 @@ impl Report {
     }
 }
 
-pub fn run(args: Args) -> ExitCode {
+pub async fn run(args: Args) -> ExitCode {
     let configured = match super::configured_dir(args.install_dir) {
         Ok(dir) => dir,
         Err(error) => {
@@ -172,16 +173,19 @@ pub fn run(args: Args) -> ExitCode {
             .map_err(|error| format!("cannot resolve this executable: {error}"))
     });
     let report = match prepared {
-        Ok((dir, executable)) => install(&Request {
-            dir,
-            explicit,
-            hosts: wanted
-                .into_iter()
-                .map(|host| (host, super::find_host(host)))
-                .collect(),
-            executable,
-            dry_run: args.dry_run,
-        }),
+        Ok((dir, executable)) => {
+            install(&Request {
+                dir,
+                explicit,
+                hosts: wanted
+                    .into_iter()
+                    .map(|host| (host, super::find_host(host)))
+                    .collect(),
+                executable,
+                dry_run: args.dry_run,
+            })
+            .await
+        }
         // Still a document, so a caller that asked for JSON always gets one.
         Err(error) => Report {
             dry_run: args.dry_run,
@@ -209,7 +213,7 @@ pub fn run(args: Args) -> ExitCode {
 }
 
 /// Install, or with `dry_run` report what would be done.
-pub(super) fn install(request: &Request) -> Report {
+pub(super) async fn install(request: &Request) -> Report {
     let dir = &request.dir;
     let mut report = Report {
         dry_run: request.dry_run,
@@ -301,15 +305,15 @@ pub(super) fn install(request: &Request) -> Report {
             } else if broke {
                 row.commands.push(CommandRecord::new(args, "not_run", ""));
             } else {
-                match exec::run(program, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES) {
-                    Ok(ran) if ran.success => {
+                match exec::run(program, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES).await {
+                    Ok(ran) if matches!(ran.ending, Ending::Exited { code: 0 }) => {
                         row.commands
-                            .push(CommandRecord::new(args, "ran", &ran.shown()));
+                            .push(CommandRecord::new(args, "ran", &exec::shown(&ran)));
                     }
                     Ok(ran) => {
                         broke = true;
                         row.commands
-                            .push(CommandRecord::new(args, "failed", &ran.shown()));
+                            .push(CommandRecord::new(args, "failed", &exec::shown(&ran)));
                     }
                     Err(error) => {
                         broke = true;

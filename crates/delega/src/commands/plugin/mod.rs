@@ -31,9 +31,21 @@ pub enum Command {
 
 impl Command {
     pub(super) fn run(self) -> ExitCode {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                super::output::report(&format!(
+                    "delega plugin: cannot start the async runtime: {err}"
+                ));
+                return ExitCode::FAILURE;
+            }
+        };
         match self {
-            Self::Install(args) => install::run(args),
-            Self::Uninstall(args) => uninstall::run(args),
+            Self::Install(args) => runtime.block_on(install::run(args)),
+            Self::Uninstall(args) => runtime.block_on(uninstall::run(args)),
         }
     }
 }

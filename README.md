@@ -27,6 +27,10 @@ delega doctor     # what a run would meet, without starting a worker
 [Install](https://github.com/joshrotenberg/delega/blob/main/docs/getting-started/install.md)
 has the details and [Plugin setup](https://github.com/joshrotenberg/delega/blob/main/docs/getting-started/plugin.md)
 covers the MCP tools and skills in Claude Code and Codex.
+Plugin install and uninstall run host commands in an owned process session.
+On exit or timeout, delega stops remaining processes in the session and sweeps
+tracked descendants. A host command's exit determines its success separately
+from cleanup.
 
 ## Example
 
