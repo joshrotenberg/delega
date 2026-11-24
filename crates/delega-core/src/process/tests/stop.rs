@@ -152,7 +152,6 @@ both!(
         );
         assert_confirmed(&report);
         let pid = report.pid.expect("it started") as i32;
-        let _reaper = Reaper::new([pid]);
         assert_gone("child after a loop panic", &[pid]).await;
     }
 );
