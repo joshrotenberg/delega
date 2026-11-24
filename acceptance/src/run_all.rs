@@ -37,13 +37,17 @@ pub fn run_all(
     list.into_iter().map(|(_, _, m)| m).collect()
 }
 
-/// Whether a row's provider leaves a process beyond its run's own tree
-/// (an orphan, a detached or `setsid` descendant, a relay), or kills delega
-/// and its keeper together.
+/// Whether a row leaves a process beyond its run's own tree: its provider
+/// leaves an orphan, a detached or `setsid` descendant or a relay, or the
+/// row kills delega with SIGKILL, which orphans its keeper (or kills the
+/// keeper too) while the run is stopped.
 fn leaves_orphans(row: &Row) -> bool {
     matches!(
         row.variant,
         "setsid" | "orphan" | "orphan-late" | "relay" | "bare"
+    ) || matches!(
+        row.case.action,
+        crate::matrix::Action::Signal(crate::matrix::Sig::Kill, _)
     ) || row.case.id == "kk"
 }
 
