@@ -276,19 +276,25 @@
 //! One exception, the narrower Rule A for Linux kept runs: the
 //! keeper is a child subreaper, so every live descendant is in its tree. At
 //! the reap the keeper takes a final census after the child has exited, and
-//! says in its `reaped` line whether it proves the tree empty: complete (two
-//! passes agree and the scan of every `/proc/*/stat` confirms), nothing alive,
-//! no hold refused, and no read of `/proc` failed in the keeper at any point
-//! of the run, decided after its last walk. That proof supersedes two things,
-//! both about processes that while alive are in the keeper's tree: the
-//! owner's refusals of group and session members and tracked processes, and
-//! the keeper's freezes that only did not complete (an incomplete freeze says
-//! the keeper had not stopped everything yet, not that a process escaped).
-//! Everything else stays sticky: a refusal meant for a process found only by
-//! the run marker, a hold the keeper refused and a read it failed (also when
-//! reported inside a freeze answer), a freeze task that failed, a lost
-//! keeper ([`KEEPER_LOST_REASON`]) and an unacknowledged reap
-//! ([`NO_REAP_ACK_REASON`]). The proof is also required: a Linux kept run
+//! says in its `reaped` line (`proven`) whether that census proves the tree
+//! empty: complete (two passes agree and the scan of every `/proc/*/stat`
+//! confirms), nothing alive, no hold refused within that census, and no read
+//! of `/proc` failed in the keeper at any point of the run, decided after
+//! its last walk. The proof is about the tree at the reap and nothing else:
+//! it is not the verdict, and it says nothing about holds refused earlier in
+//! the run. The verdict lets it supersede two things, both about processes
+//! that while alive are in the keeper's tree: the owner's refusals of group
+//! and session members and tracked processes, and the keeper's freezes that
+//! only did not complete (an incomplete freeze says the keeper had not
+//! stopped everything yet, not that a process escaped). Everything else is
+//! sticky and keeps cleanup `Unconfirmed` independently of the proof: a
+//! refusal meant for a process found only by the run marker, a hold the
+//! keeper refused and a read it failed (also when reported inside a freeze
+//! answer), a freeze task that failed or a keeper line outside the protocol
+//! (the keeper can say `proven` and `unproven` in the same `reaped` line,
+//! and such a run is `Unconfirmed`), a lost keeper ([`KEEPER_LOST_REASON`])
+//! and an unacknowledged reap ([`NO_REAP_ACK_REASON`]). The proof is also
+//! required: a Linux kept run
 //! whose keeper is a subreaper, acknowledged the reap and left nothing alive,
 //! but did not prove the tree empty, is `Unconfirmed`
 //! ([`FINAL_CENSUS_UNPROVEN_REASON`]) even when nothing was refused. macOS
