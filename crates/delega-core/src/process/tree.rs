@@ -1372,6 +1372,106 @@ mod tests {
         assert!(tree.verified_ticks(&row).is_none());
     }
 
+    /// A tree whose child is this test process, sharing `pin`, with a
+    /// listing that shows the child in every snapshot.
+    fn tree_of_this_process(pin: &Arc<GroupPin>) -> (ProcessTree, i32) {
+        let own = i32::try_from(std::process::id()).expect("a pid");
+        let frames = (0..3)
+            .map(|_| table(vec![(own, 1, own, "root", false)]))
+            .collect();
+        let tree = ProcessTree::new(own, fixed(frames), true).with_pin(pin.clone());
+        (tree, own)
+    }
+
+    /// While the pin holds, the first snapshot that shows the child learns
+    /// its identity (and on Linux its start time), so the cases below fail
+    /// for the release, not for the setup.
+    #[tokio::test]
+    async fn a_pinned_child_seen_in_a_snapshot_has_its_identity_learned() {
+        let pin = Arc::new(GroupPin::default());
+        let (mut tree, own) = tree_of_this_process(&pin);
+        tree.capture().await;
+        assert_eq!(tree.root_started.as_deref(), Some("root"));
+        assert_eq!(tree.root_ticks, sys::start_ticks(own));
+        assert_eq!(tree.ticks.get(&own).copied(), sys::start_ticks(own));
+    }
+
+    /// The pin is released after the snapshot checked it and before the
+    /// child's identity is learned: nothing is learned, so the start time of
+    /// whatever holds the pid by then never becomes the child's, not at
+    /// adoption and not when a later snapshot unpins.
+    #[tokio::test]
+    async fn a_pin_released_between_the_snapshots_check_and_adoption_teaches_no_identity() {
+        let pin = Arc::new(GroupPin::default());
+        let (mut tree, own) = tree_of_this_process(&pin);
+        let releaser = pin.clone();
+        tree.after_pin_check = Some(Box::new(move || releaser.release()));
+        tree.capture().await;
+        assert!(tree.after_pin_check.is_none(), "the seam did not run");
+        assert!(tree.pinned, "the snapshot saw the release before the seam");
+        assert_eq!(tree.root_started, None);
+        assert_eq!(tree.root_ticks, None);
+        assert!(!tree.ticks.contains_key(&own));
+        assert!(
+            !tree
+                .observations
+                .lock()
+                .unwrap()
+                .stats
+                .root_identity_observed
+        );
+        // The next snapshot unpins; still no identity for the child.
+        tree.capture().await;
+        assert!(!tree.pinned);
+        assert!(!tree.known.contains_key(&own));
+        assert!(!tree.ticks.contains_key(&own));
+    }
+
+    /// A release that comes while the child's identity is being learned
+    /// waits until it is read and stored: the read is made under the pin.
+    #[tokio::test]
+    async fn a_release_waits_until_the_childs_identity_is_read_and_stored() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pin = Arc::new(GroupPin::default());
+        let (mut tree, own) = tree_of_this_process(&pin);
+        let released = Arc::new(AtomicBool::new(false));
+        let released_mid_read = Arc::new(AtomicBool::new(false));
+        let releasing = Arc::new(Mutex::new(None));
+        {
+            let pin = pin.clone();
+            let released = released.clone();
+            let released_mid_read = released_mid_read.clone();
+            let releasing = releasing.clone();
+            tree.before_root_read = Some(Box::new(move || {
+                let flag = released.clone();
+                *releasing.lock().unwrap() = Some(std::thread::spawn(move || {
+                    pin.release();
+                    flag.store(true, Ordering::SeqCst);
+                }));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                released_mid_read.store(released.load(Ordering::SeqCst), Ordering::SeqCst);
+            }));
+        }
+        tree.capture().await;
+        let handle = releasing.lock().unwrap().take();
+        handle
+            .expect("the seam did not run")
+            .join()
+            .expect("the release finished");
+        assert!(
+            !released_mid_read.load(Ordering::SeqCst),
+            "the pin was released while the identity was read"
+        );
+        assert!(released.load(Ordering::SeqCst));
+        assert_eq!(tree.root_started.as_deref(), Some("root"));
+        assert_eq!(tree.root_ticks, sys::start_ticks(own));
+        // Unpinned, the child is followed by what was read under the pin.
+        tree.capture().await;
+        assert!(!tree.pinned);
+        assert_eq!(tree.known.get(&own).map(String::as_str), Some("root"));
+        assert_eq!(tree.ticks.get(&own).copied(), sys::start_ticks(own));
+    }
+
     #[test]
     fn an_empty_listing_is_a_failed_inspection_not_nothing_found() {
         for text in ["", "\n  \n"] {
