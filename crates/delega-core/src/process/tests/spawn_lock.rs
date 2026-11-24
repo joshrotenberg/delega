@@ -39,9 +39,21 @@
 //! started without a `pre_exec` hook, so std may use `posix_spawn` there; that
 //! path is not exercised here.
 //!
-//! Whether a child holds the write end is read from the pipe: once the test
-//! closes its own write end, a nonblocking read gives end of input if no other
-//! process holds one and `EAGAIN` if one does.
+//! Whether a child holds the write end is read from the pipe, once the test
+//! has closed its own write end. A held write end never gives end of input,
+//! so the guarded case waits, for at most [`DEADLINE`], for end of input to
+//! arrive and fails if it does not. It does not read once and take `EAGAIN`
+//! as held: on macOS a nonblocking read can give `EAGAIN` for a moment after
+//! every holder has closed. A listing of every process's descriptors (libproc)
+//! taken at such a moment found no process holding the write end, and the
+//! next read gave end of input. Under load it was seen in 14 and in 21 of two
+//! runs of 8000 spawns with the write end at a low descriptor number, in 6 of
+//! 8000 when the read waited until the sibling had echoed a byte (so its
+//! `exec` had finished), and in none of 16000 with the write end moved above
+//! the descriptors the spawn makes. That one read is the likely cause of the
+//! guarded case's failures on 2026-11-24 (#186). The unguarded case does read
+//! once: its sibling holds the write end without close-on-exec until it is
+//! reaped, so `EAGAIN` there is stable.
 //!
 //! Each case runs in a process of its own: the outer test re-runs this test
 //! binary on one ignored inner test, as due does, and kills it if it has not
@@ -65,6 +77,7 @@ use std::time::{Duration, Instant};
 
 use rustix::io::{Errno, FdFlags};
 use tokio::process::{Child, Command};
+use tokio::runtime::Handle;
 
 use crate::process::run::command;
 use crate::process::spawn::{WAITING, spawn};
@@ -86,36 +99,35 @@ const GUARDED: &str = "a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_o
 #[cfg(target_os = "macos")]
 const UNGUARDED: &str = "an_unguarded_spawn_in_the_window_inherits_the_pipe_inner";
 
-/// One started sibling. Dropping it kills the child and waits, for at most
-/// [`DEADLINE`], until it is reaped, so every sibling is reaped however the
-/// case ends, each on its own.
-struct Sibling(Option<Child>);
+/// One started sibling, received by the case's thread. Dropping it kills the
+/// child and waits, for at most [`DEADLINE`], until it is reaped, so every
+/// sibling is reaped however the case ends, each on its own. The handle is the
+/// case's runtime, which outlives every `Sibling` (the inner tests drop their
+/// siblings before their runtime, and unwinding drops `open_window`'s locals
+/// before the caller's runtime).
+struct Sibling {
+    child: Option<Child>,
+    runtime: Handle,
+}
 
 impl Sibling {
     fn pid(&self) -> i32 {
-        self.0
+        self.child
             .as_ref()
             .and_then(Child::id)
             .and_then(|id| i32::try_from(id).ok())
             .expect("a sibling's pid")
     }
 
-    /// Kill and reap the child; whether it was reaped in time.
+    /// Kill the child and wait for its exit; whether it was reaped in time.
     fn reap(&mut self) -> bool {
-        let Some(mut child) = self.0.take() else {
+        let Some(mut child) = self.child.take() else {
             return true;
         };
         let _ = child.start_kill();
-        let began = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return true,
-                Ok(None) if began.elapsed() < DEADLINE => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(None) | Err(_) => return false,
-            }
-        }
+        self.runtime
+            .block_on(async { tokio::time::timeout(DEADLINE, child.wait()).await })
+            .is_ok_and(|waited| waited.is_ok())
     }
 }
 
@@ -140,15 +152,12 @@ fn reap_all(siblings: Vec<Sibling>) {
     );
 }
 
-/// What one run of the window saw.
+/// One run of the window, after it has closed and the test has closed its own
+/// write end.
 struct Seen {
-    /// Whether some child held the window's write end once the test closed its
-    /// own.
-    held: bool,
-    /// The window's read end, still open, for the check after the children
-    /// are gone. Only the unguarded case reads it, and that case is macOS only.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// The window's read end.
     read: OwnedFd,
+    /// Every sibling, started and still running.
     siblings: Vec<Sibling>,
 }
 
@@ -166,11 +175,9 @@ fn provider_command(dir: &Path) -> Command {
     command
 }
 
-/// Whether a process other than this one holds the write end of the pipe
-/// whose read end is `read`, once this process has closed its own. Taken under
-/// the spawn lock, so no spawn can be between fork and exec holding a copy.
-fn write_end_held(read: &OwnedFd) -> bool {
-    let _held = spawn_guard();
+/// One nonblocking read of the pipe whose read end is `read`: whether it gave
+/// `EAGAIN` rather than end of input.
+fn read_would_block(read: &OwnedFd) -> bool {
     rustix::io::ioctl_fionbio(read, true).expect("make the read end nonblocking");
     let mut byte = [0u8; 1];
     match rustix::io::read(read, &mut byte) {
@@ -181,10 +188,58 @@ fn write_end_held(read: &OwnedFd) -> bool {
     }
 }
 
+/// Whether a process other than this one holds the write end of the pipe
+/// whose read end is `read`, once this process has closed its own, read once.
+/// Only for a holder that keeps it until it is reaped (see the module
+/// documentation). Taken under the spawn lock, so no spawn can be between
+/// fork and exec holding a copy.
+#[cfg(target_os = "macos")]
+fn write_end_held(read: &OwnedFd) -> bool {
+    let _held = spawn_guard();
+    read_would_block(read)
+}
+
+/// Whether end of input arrives, within [`DEADLINE`], on the pipe whose read
+/// end is `read`, once this process has closed its write end: no other
+/// process holds the write end. Waits on the read end becoming readable, not
+/// on time; a write end that stays held fails after [`DEADLINE`]. Taken under
+/// the spawn lock, so no spawn can fork a copy meanwhile.
+fn write_end_released(read: &OwnedFd) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let _held = spawn_guard();
+    let until = Instant::now() + DEADLINE;
+    loop {
+        if !read_would_block(read) {
+            return true;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let timeout = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(read, PollFlags::IN)];
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(_) | Err(Errno::INTR) => {}
+            Err(e) => panic!("poll the window's pipe: {e}"),
+        }
+    }
+}
+
 /// Receive one sibling before `until`, or fail saying `what`.
-fn receive(rx: &mpsc::Receiver<std::io::Result<Sibling>>, until: Instant, what: &str) -> Sibling {
+fn receive(
+    rx: &mpsc::Receiver<std::io::Result<Child>>,
+    runtime: &Handle,
+    until: Instant,
+    what: &str,
+) -> Sibling {
     match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-        Ok(started) => started.expect("start a sibling"),
+        Ok(started) => Sibling {
+            child: Some(started.expect("start a sibling")),
+            runtime: runtime.clone(),
+        },
         Err(mpsc::RecvTimeoutError::Timeout) => {
             panic!("{what} within {DEADLINE:?}: a spawn may be stuck on the lock")
         }
@@ -196,8 +251,9 @@ fn receive(rx: &mpsc::Receiver<std::io::Result<Sibling>>, until: Instant, what: 
 
 /// Open a pipe without close-on-exec under the spawn lock, start `count`
 /// siblings from other threads, close the window once the case's condition
-/// holds and report whether any child holds the write end. `guarded` siblings
-/// start through the process layer's `spawn`; the others spawn directly.
+/// holds, close this process's write end and hand back the read end with the
+/// running siblings. `guarded` siblings start through the process layer's
+/// `spawn`; the others spawn directly.
 fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guarded: bool) -> Seen {
     let window = spawn_guard();
     assert_eq!(
@@ -216,14 +272,15 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
         );
     }
 
-    let (tx, rx) = mpsc::channel::<std::io::Result<Sibling>>();
+    let (tx, rx) = mpsc::channel::<std::io::Result<Child>>();
     for _ in 0..count {
         let tx = tx.clone();
         let handle = runtime.handle().clone();
         let mut command = provider_command(dir);
         // Not joined: a sibling stuck on the lock must not hang the case. If
-        // the case has given up, the send fails and dropping the sibling
-        // reaps it.
+        // the case has given up, the send fails and dropping the child kills
+        // it (`kill_on_drop`); it is `cat` reading a pipe from this process,
+        // so it also ends when this process does.
         std::thread::spawn(move || {
             // tokio's Command registers the child with the runtime.
             let _runtime = handle.enter();
@@ -238,7 +295,7 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
                 #[allow(clippy::disallowed_methods)]
                 command.spawn()
             };
-            let _ = tx.send(started.map(|child| Sibling(Some(child))));
+            let _ = tx.send(started);
         });
     }
     drop(tx);
@@ -247,7 +304,11 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
     let until = Instant::now() + DEADLINE;
     if guarded {
         // Proof of contention: every sibling waits on the lock while the
-        // window is open, and none gets through.
+        // window is open, and none gets through. This polls a state, not a
+        // time: it waits until the count shows every sibling, however long
+        // that takes within DEADLINE, and the order of events does not depend
+        // on the poll interval. `WAITING` is a counter in `spawn.rs`; making
+        // it notify would change that file, which this test does not need.
         loop {
             match rx.try_recv() {
                 Ok(_) => panic!(
@@ -273,7 +334,12 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
     } else {
         // The window stays open until each unguarded sibling has started.
         for _ in 0..count {
-            siblings.push(receive(&rx, until, "an unguarded sibling did not start"));
+            siblings.push(receive(
+                &rx,
+                runtime.handle(),
+                until,
+                "an unguarded sibling did not start",
+            ));
         }
     }
 
@@ -286,7 +352,12 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
 
     let until = Instant::now() + DEADLINE;
     while siblings.len() < count {
-        siblings.push(receive(&rx, until, "a guarded sibling did not start"));
+        siblings.push(receive(
+            &rx,
+            runtime.handle(),
+            until,
+            "a guarded sibling did not start",
+        ));
     }
     for sibling in &siblings {
         let pid = sibling.pid();
@@ -299,12 +370,7 @@ fn open_window(runtime: &tokio::runtime::Runtime, dir: &Path, count: usize, guar
     }
 
     drop(write);
-    let held = write_end_held(&read);
-    Seen {
-        held,
-        read,
-        siblings,
-    }
+    Seen { read, siblings }
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -374,6 +440,10 @@ fn run_case(name: &str) {
         .stderr(file)
         .guarded_spawn()
         .expect("start the case's process");
+    // A watchdog on a process exit, not synchronisation: the case's own
+    // events order it, and this only bounds how long it may run. std's Child
+    // has no bounded wait, and killing from another thread would race the
+    // waiter's reap.
     let began = Instant::now();
     let status = loop {
         if let Some(status) = case.try_wait().expect("wait for the case's process") {
@@ -420,12 +490,14 @@ fn a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner() {
     let runtime = runtime();
     let dir = tempfile::tempdir().expect("create scratch directory");
     let seen = open_window(&runtime, dir.path(), 4, true);
-    let held = seen.held;
+    // Checked while every sibling still runs, so one that inherited the write
+    // end still holds it.
+    let released = write_end_released(&seen.read);
     reap_all(seen.siblings);
     assert!(
-        !held,
+        released,
         "a sibling started through the spawn lock holds the write end of a pipe from \
-         another spawn's close-on-exec window"
+         another spawn's close-on-exec window: no end of input within {DEADLINE:?}"
     );
     finished(GUARDED, &nonce);
 }
@@ -449,14 +521,14 @@ fn an_unguarded_spawn_in_the_window_inherits_the_pipe_inner() {
     let runtime = runtime();
     let dir = tempfile::tempdir().expect("create scratch directory");
     let seen = open_window(&runtime, dir.path(), 1, false);
-    let (held, read) = (seen.held, seen.read);
+    let held = write_end_held(&seen.read);
     reap_all(seen.siblings);
     assert!(
         held,
         "an unguarded sibling started in the window was not seen holding the pipe's write end"
     );
     assert!(
-        !write_end_held(&read),
+        write_end_released(&seen.read),
         "the write end is still held after the sibling was reaped, so it was not the sibling \
          that held it"
     );
