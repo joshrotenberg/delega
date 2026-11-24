@@ -512,7 +512,7 @@ pub fn run_case(ctx: &Context, case: &Case, repeat: u32) -> Measured {
 
     read_stdout(&mut m, &stdout_bytes, case.expect.docs);
 
-    judge(&mut m, case);
+    judge(&mut m, case, std::env::consts::OS);
     m
 }
 
@@ -575,7 +575,7 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
 }
 
 /// Check the result and cleanup guarantees independently of the gap observation.
-fn judge(m: &mut Measured, case: &Case) {
+fn judge(m: &mut Measured, case: &Case, os: &str) {
     let documented_residual = case.expect.leak == LeakClass::DocumentedGap;
     if m.hang {
         m.problems
@@ -638,11 +638,11 @@ fn judge(m: &mut Measured, case: &Case) {
                     if !documented_residual
                         && m.cleanup_confirmed != Some(true)
                         && !(m.cleanup_confirmed == Some(false)
-                            && no_survivors
-                            && late_listing_only(m)) =>
+                            && late_listing_with_allowed_survivors(m, os)) =>
                 {
                     m.problems.push(
-                        "expected Confirmed or a late listing alone with no survivors".into(),
+                        "expected Confirmed or a late listing alone with only allowed survivors"
+                            .into(),
                     );
                 }
                 _ => {}
@@ -689,14 +689,19 @@ fn judge(m: &mut Measured, case: &Case) {
     .to_string();
 }
 
-fn late_listing_only(m: &Measured) -> bool {
-    m.cleanup_reason.as_ref().is_some_and(|reason| {
-        delega_core::process::is_late_listing_only(&Cleanup::Unconfirmed {
-            reason: reason.clone(),
-            pids: m.cleanup_pids.clone(),
-            process_groups: m.cleanup_groups.clone(),
+fn late_listing_with_allowed_survivors(m: &Measured, os: &str) -> bool {
+    // A late listing can miss an orphan in its own session on macOS.
+    m.survivors_at_exit
+        .iter()
+        .chain(&m.survivors)
+        .all(|role| os == "macos" && matches!(role.as_str(), "leaf-setsid" | "bare"))
+        && m.cleanup_reason.as_ref().is_some_and(|reason| {
+            delega_core::process::is_late_listing_only(&Cleanup::Unconfirmed {
+                reason: reason.clone(),
+                pids: m.cleanup_pids.clone(),
+                process_groups: m.cleanup_groups.clone(),
+            })
         })
-    })
 }
 
 /// Cleanup can combine the probe and provider reasons with "; ". Match
@@ -800,7 +805,7 @@ mod judge_tests {
                 &mut m.survivors
             };
             survivors.push("relay-heartbeat".into());
-            judge(&mut m, &case);
+            judge(&mut m, &case, "linux");
             assert_eq!(m.gap_shown, None);
             assert_eq!(m.honest, Some(false));
             assert_eq!(m.verdict, "fail");
@@ -819,7 +824,7 @@ mod judge_tests {
                     m.survivors_at_exit.push("relay-heartbeat".into());
                     m.survivors.push("relay-heartbeat".into());
                 }
-                judge(&mut m, &case);
+                judge(&mut m, &case, "macos");
                 assert_eq!(m.gap_shown, Some(gap_shown));
                 assert_eq!(m.honest, None);
                 assert_eq!(m.verdict, "pass");
@@ -833,7 +838,7 @@ mod judge_tests {
             let (case, mut m) = relay_run("macos");
             m.stdout_docs = Some(docs);
             m.result_valid = Some(valid);
-            judge(&mut m, &case);
+            judge(&mut m, &case, "macos");
             assert_eq!(m.verdict, "fail");
         }
     }
@@ -848,7 +853,7 @@ mod judge_tests {
         ] {
             let (case, mut m) = fixture_run(os, id);
             m.outcome = Some(outcome.into());
-            judge(&mut m, &case);
+            judge(&mut m, &case, os);
             assert_eq!(m.verdict, "fail", "{id} on {os}");
             assert!(m.problems[0].starts_with("expected outcome "));
         }
@@ -860,18 +865,18 @@ mod judge_tests {
             let (case, mut m) = fixture_run("macos", id);
             assert_eq!(m.outcome.as_deref(), Some("timed_out"));
             m.exit_code = Some(0);
-            judge(&mut m, &case);
+            judge(&mut m, &case, "macos");
             assert_eq!(m.verdict, "fail");
             assert_eq!(m.problems, ["expected exit 124, got 0"]);
         }
     }
 
     #[test]
-    fn a_late_listing_is_allowed_only_when_nothing_survived() {
+    fn a_late_listing_on_linux_is_allowed_only_when_nothing_survived() {
         let (case, mut m) = relay_run("linux");
         m.cleanup_confirmed = Some(false);
         m.cleanup_reason = Some(delega_core::process::LATE_LISTING_REASON.into());
-        judge(&mut m, &case);
+        judge(&mut m, &case, "linux");
         assert_eq!(m.verdict, "pass");
 
         for at_exit in [true, false] {
@@ -882,8 +887,34 @@ mod judge_tests {
                 &mut m.survivors
             };
             survivors.push("relay-heartbeat".into());
-            judge(&mut m, &case);
+            judge(&mut m, &case, "linux");
             assert_eq!(m.verdict, "fail");
+        }
+    }
+
+    #[test]
+    fn a_late_listing_allows_only_detached_survivors_on_macos() {
+        for (os, role, expected) in [
+            ("macos", "leaf-setsid", "pass"),
+            ("macos", "bare", "pass"),
+            ("macos", "child", "fail"),
+            ("macos", "child-ignore", "fail"),
+            ("macos", "relay-heartbeat", "fail"),
+            ("linux", "leaf-setsid", "fail"),
+        ] {
+            for at_exit in [true, false] {
+                let (case, mut m) = fixture_run(os, "claude-d-setsid");
+                m.cleanup_confirmed = Some(false);
+                m.cleanup_reason = Some(delega_core::process::LATE_LISTING_REASON.into());
+                let survivors = if at_exit {
+                    &mut m.survivors_at_exit
+                } else {
+                    &mut m.survivors
+                };
+                survivors.push(role.into());
+                judge(&mut m, &case, os);
+                assert_eq!(m.verdict, expected, "{os}: {role}, at_exit={at_exit}");
+            }
         }
     }
 
@@ -892,11 +923,11 @@ mod judge_tests {
         let (case, mut m) = relay_run("linux");
         m.cleanup_confirmed = Some(false);
         m.cleanup_reason = Some(delega_core::process::PIPES_HELD_REASON.into());
-        judge(&mut m, &case);
+        judge(&mut m, &case, "linux");
         assert_eq!(m.verdict, "fail");
         assert_eq!(
             m.problems,
-            ["expected Confirmed or a late listing alone with no survivors"]
+            ["expected Confirmed or a late listing alone with only allowed survivors"]
         );
     }
 
@@ -904,7 +935,7 @@ mod judge_tests {
     fn a_result_cannot_confirm_cleanup_with_listing_disabled() {
         for os in ["linux", "macos"] {
             let (case, mut m) = fixture_run(os, "claude-u-setsid");
-            judge(&mut m, &case);
+            judge(&mut m, &case, os);
             assert_eq!(m.verdict, "fail");
             assert_eq!(
                 m.problems,
@@ -915,12 +946,16 @@ mod judge_tests {
 
     #[test]
     fn linux_keeper_must_clean_up_even_with_listing_disabled() {
-        for id in ["claude-u-setsid", "claude-u-orphan", "claude-u-bare"] {
+        for (id, role) in [
+            ("claude-u-setsid", "leaf-setsid"),
+            ("claude-u-orphan", "leaf-setsid"),
+            ("claude-u-bare", "bare"),
+        ] {
             let (case, mut m) = fixture_run("linux", id);
             m.cleanup_confirmed = Some(false);
             m.cleanup_reason = Some(delega_core::process::PIPES_HELD_REASON.into());
-            m.survivors.push(case.variant.into());
-            judge(&mut m, &case);
+            m.survivors.push(role.into());
+            judge(&mut m, &case, "linux");
             assert_eq!(m.verdict, "fail");
             assert!(
                 m.problems[0].starts_with("unexpected survivors with process listing disabled")
@@ -935,7 +970,7 @@ mod judge_tests {
         let (case, mut m) = relay_run("macos");
         m.cleanup_confirmed = Some(false);
         m.cleanup_reason = Some("could not be checked".into());
-        judge(&mut m, &case);
+        judge(&mut m, &case, "macos");
         assert_eq!(m.verdict, "fail");
         assert!(documented_cleanup_reason(&format!(
             "{LATE_LISTING_REASON}; {PIPES_HELD_REASON}"
