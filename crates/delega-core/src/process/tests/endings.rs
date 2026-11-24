@@ -184,7 +184,7 @@ both!(
     interrupting_before_the_child_has_run_still_ends_clean_kept,
     async {
         let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+        let handle = ProcessHandle::start(sh(&s, "record leader $$; sleep 60", LONG));
         handle.interrupt();
         let report = handle.wait().await;
         assert!(
@@ -192,8 +192,11 @@ both!(
             "{report:#?}"
         );
         assert_confirmed(&report);
-        if let Ok(text) = std::fs::read_to_string(s.path("leader")) {
-            let leader: i32 = text.trim().parse().expect("pid");
+        // The interrupt can end the shell before it published its pid, even
+        // after it created the temporary file: then there is no record, and
+        // nothing of the leader to check. A record that was published is
+        // complete.
+        if let Some(leader) = s.published_pid("leader") {
             assert_gone("leader", &[leader]).await;
         }
     }

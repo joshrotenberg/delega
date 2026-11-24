@@ -166,6 +166,16 @@ impl Scratch {
             other => panic!("{name} holds no complete pid record: {other:?}"),
         }
     }
+    /// The pid in a record if it was published, `None` if it never was. A
+    /// record is published by renaming a complete file into place, so a file
+    /// under the name that is not complete is a failure, never absence.
+    pub(super) fn published_pid(&self, name: &str) -> Option<i32> {
+        match read_record(&self.path(name)) {
+            Record::Absent => None,
+            Record::Pid(pid) => Some(pid),
+            Record::Incomplete(text) => panic!("{name} holds an incomplete pid record: {text}"),
+        }
+    }
 }
 
 /// The pid in the relay's heartbeat file. The heartbeat is rewritten in place
