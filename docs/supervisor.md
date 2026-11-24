@@ -261,13 +261,15 @@ How drop works: the `Drop` impl in
 ## Answers at the limit
 
 `wait`, `interrupt` and `close` each wait in the caller's task, for at most a
-limit: the applied timeout of `wait`, and `interrupt_bound` (30 s) of
-`interrupt` and `close`. The limit is counted as in
-[How the bounds count time](#how-the-bounds-count-time). This section lists
-every answer each call gives, including when its limit passes, when shutdown
-comes first and when retention has dropped a result. None of them is an error.
-The errors are those of [Operations](#operations); a call whose supervisor task
-ended while it waited returns `Stopped` or `Failed`.
+limit: `wait` for its applied timeout, and `interrupt` and `close` for a
+running run to settle, up to `interrupt_bound` (30 s by default). The limit is
+counted as in [How the bounds count time](#how-the-bounds-count-time). It
+bounds only that wait: each call sends the supervisor a command before it, and
+`interrupt` and `close` send one more after a run settles in time. None of the
+answers below is an error. The errors are those of [Operations](#operations);
+a call whose supervisor command fails because the supervisor's task ended
+returns `Stopped` or `Failed`. An `interrupt` or `close` whose bound passed
+returns without another command.
 
 The MCP tools return the same responses as JSON. `released_by_shutdown` is
 left out when false, and `limit_reached`, `state`, `stopped_run` and `result`
@@ -276,43 +278,53 @@ when absent.
 ### Wait at its limit
 
 The applied timeout is `timeout_secs`, or `wait_default` (30 s) without one,
-capped at `wait_ceiling` (300 s). The response's `timeout_secs` is the applied
-timeout, or 0 where the table says so.
+capped at `wait_ceiling` (300 s).
 
-Something named is ready when:
+An id that names nothing when the call arrives is listed in `unknown` and not
+waited for. A named run or worker that ages out ([Retention](#retention)) while
+the wait blocks counts as ready. Otherwise what is ready depends on
+`after_cursor`:
 
-- a named run is finished or has a pending interaction;
-- a named worker's current run, the one it had when the wait began, is finished
-  or has a pending interaction, or the worker had no unfinished run then;
-- with `after_cursor`, a named run, or a run of a named worker, finished after
-  the cursor or had its interactions change after it;
-- a named run or worker has aged out ([Retention](#retention)) while the wait
-  blocks. It is listed in `unknown`.
+| Named | Without `after_cursor` | With `after_cursor` |
+| --- | --- | --- |
+| A run | It is finished or has a pending interaction. | It finished after the cursor, or its interactions changed after it. |
+| A worker | The run it had when the wait began (its running run, else its first queued run) is finished or has a pending interaction. A worker with no such run is ready at once. | One of its runs finished after the cursor, or the interactions of its running run changed after it. |
+
+A wait answers at once by the first of these that applies:
 
 | When | `timed_out` | `released_by_shutdown` | `timeout_secs` |
 | --- | --- | --- | --- |
-| Something named is ready when the call arrives, or every id is unknown. Answers at once. | `false` | absent | applied |
-| Something named becomes ready before the time passes. | `false` | absent | applied |
-| The time passes and nothing named is ready. | `true` | absent | applied |
-| The time passes, and something named becomes ready before the answer is built. | `false` | absent | applied |
-| The time passes, and another call is handled before the answer is built, with nothing named ready. | `true` | absent | applied |
-| Shutdown begins while the wait blocks. | `false` | `true` | applied |
-| The time passes, and shutdown begins before the answer is built. | `false` | `true` | applied |
-| Shutdown begins and makes something named ready in the same step, such as a named queued run it discards. | `false` | absent | applied |
-| A wait with `after_cursor` arrives after shutdown began and nothing named is ready. Answers at once. | `false` | `true` | applied |
-| A wait without `after_cursor` arrives after shutdown began. It is not released at once: it blocks until a named run stops or the time passes. | as above | as above | applied |
-| The applied timeout is 0. Answers at once and blocks nothing. | `true`, or `false` if something named is ready | absent | 0 |
-| `max_waits_in_flight` waits already block and nothing named is ready. Answers at once with `limit_reached: "max_waits_in_flight"`. | `true` | absent | 0 |
+| Every id is unknown. | `false` | absent | applied |
+| Something named is ready. | `false` | absent | applied |
+| It has `after_cursor` and shutdown has begun. | `false` | `true` | applied |
+| The applied timeout is 0: a poll. | `true` | absent | 0 |
+| `max_waits_in_flight` waits already block. The answer has `limit_reached: "max_waits_in_flight"`. | `true` | absent | 0 |
 
-- Every answer carries the current states of everything named and a `cursor`.
-  The cursor is good for the next call, also from a poll or a `limit_reached`
-  answer.
-- With `after_cursor`, each named run and worker carries `changed`. After a
-  timeout each `changed` is `false`.
-- `timed_out: false` does not mean something finished. Shutdown releases waits
-  when it begins, before their runs have stopped, so a wait with
-  `released_by_shutdown: true` can name runs still `running`. A wait without
-  `after_cursor` follows them until they stop.
+Otherwise it blocks, and answers when one of these ends it:
+
+| Ended by | `timed_out` | `released_by_shutdown` | `timeout_secs` |
+| --- | --- | --- | --- |
+| Something named became ready. | `false` | absent | applied |
+| The time passed. | `true`, or `false` if something named was ready or shutdown released the wait when the answer was built | absent, or `true` if shutdown released the wait | applied |
+| Shutdown released it. | `false` | `true` | applied |
+
+A wait without `after_cursor` that arrives after shutdown began is not released
+at once: it answers by the tables above, and a later shutdown call releases it.
+
+What the fields mean:
+
+- `timed_out: true`: nothing named was ready when the answer was built.
+- `released_by_shutdown: true`: shutdown released the wait while nothing named
+  was ready. Shutdown releases waits when it begins, before its runs have
+  stopped, so named runs can still be `running`. A wait that shutdown made
+  ready in the same step, such as one on a queued run it discarded, is not
+  marked.
+- `timed_out: false` alone does not mean something finished: check
+  `released_by_shutdown`, the states and `unknown`.
+
+Every answer carries the current states of the known ids and a `cursor`, which
+is good for the next call, also from a poll or a `limit_reached` answer. With
+`after_cursor`, each known run and worker carries `changed`.
 
 ### Interrupt at its limit
 
@@ -321,23 +333,25 @@ Something named is ready when:
 | A worker with no run kept | at once, with no `run` | `true` | absent | absent |
 | A finished run | at once | `true` | `finished` | its result, unchanged |
 | A queued run | at once, with `was_queued: true` | `true` | `finished` | `interrupted`, never started |
-| A running run that settles within `interrupt_bound` | when it settles | `true` | `finished` | its result, `interrupted` when the stop ended it |
+| A running run that settles within `interrupt_bound`, whose result is still kept when the call looks it up | when it settles | `true` | `finished` | its result |
 | A running run that has not settled when `interrupt_bound` passes | at the limit | `false` | `running` | absent |
 | A running run that settled in time, whose result retention dropped before the call looked it up | when it settles | `false` | `running` | absent |
 
-A run that did not settle in time is still being stopped and ends
-`interrupted`; read it later. A run whose result retention dropped is unknown
-to `read`.
+The outcome is `interrupted` when the stop ends the run. A run can also finish
+on its own or fail before the stop takes effect, and then keeps that outcome.
+After `settled: false`, a later `read` reports the run's state or result while
+it is kept, and the run is unknown once retention has dropped it.
 
 ### Close at its limit
 
-| Worker | Answers | `settled` | `stopped_run` | `result` |
-| --- | --- | --- | --- | --- |
-| No running run: idle, or only queued runs | at once | `true` | absent | absent |
-| A running run that settles within `interrupt_bound` | when it settles | `true` | the run | its result, `interrupted` when the stop ended it |
-| A running run that has not settled when `interrupt_bound` passes | at the limit | `false` | the run | absent |
-| A running run that settled in time, whose result retention dropped before the call looked it up | when it settles | `false` | the run | absent |
+| Worker | Answers | `state` | `settled` | `stopped_run` | `result` |
+| --- | --- | --- | --- | --- | --- |
+| No running run: idle, or only queued runs | at once | `closed` | `true` | absent | absent |
+| A running run that settles within `interrupt_bound`, whose result is still kept when the call looks it up | when it settles | `closed` | `true` | the run | its result |
+| A running run that has not settled when `interrupt_bound` passes | at the limit | `closed` | `false` | the run | absent |
+| A running run that settled in time, whose result retention dropped before the call looked it up | when it settles | `closed` | `false` | the run | absent |
 
+The stopped run's outcome follows the same rule as for `interrupt`.
 `discarded` lists the queued runs this call discarded. Closing a closed worker
 answers with `already_closed: true` and nothing discarded; if its run is still
 stopping, the call waits for it again by the same rows.

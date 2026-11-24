@@ -614,9 +614,9 @@ supervisor behind it is described in [supervisor.md](supervisor.md).
 | `wait` | `runs`, `workers` or both (at most 256 ids together), `timeout_secs`, `after` (cursor) | When a run finishes, an interaction needs an answer, or on timeout: `timed_out`, the `timeout_secs` applied, each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`, with `released_by_shutdown` and `limit_reached` when they apply. Every answer: [Wait at its limit](supervisor.md#wait-at-its-limit). |
 | `read` | `run` or `worker`, `detail`, `after`, `text_offset` | The result if finished; otherwise state, pending interactions and `progress`. `text_window` with `text_offset`, and a `cursor`. |
 | `list` | none | Live workers, then closed ones still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; limits in force and in use (including `default_wait_secs`, `wait_ceiling_secs`, `max_waits_in_flight`, `waits_in_flight`); a `cursor`; and [`stale_server`](#stale-server) when it applies. |
-| `interrupt` | `run` or `worker` | When the run stops, after 30 s at most: `settled`, `state`, `was_queued` and the compact result. Every answer: [Interrupt at its limit](supervisor.md#interrupt-at-its-limit). |
+| `interrupt` | `run` or `worker` | When the run stops: `settled`, `state`, `was_queued` and the compact result. If it has not stopped within 30 s: `settled: false` and no result. Every answer: [Interrupt at its limit](supervisor.md#interrupt-at-its-limit). |
 | `respond` | `interaction`, `decision` (`allow`, `deny`), optional `note` (at most 256 bytes, discarded) | `accepted`, `unknown_interaction`, `already_answered`, `timed_out` or `closed`. |
-| `close` | `worker` | Stops the running run (waits at most 30 s), discards queued ones, frees the slot: `already_closed`, `discarded`, `stopped_run`, `settled`, and the stopped run's compact result. Every answer: [Close at its limit](supervisor.md#close-at-its-limit). |
+| `close` | `worker` | Stops the running run, discards queued ones, frees the slot: `state: "closed"`, `already_closed`, `discarded`, `stopped_run`, `settled`, and the stopped run's compact result. If the run has not stopped within 30 s: `settled: false` and no result. Every answer: [Close at its limit](supervisor.md#close-at-its-limit). |
 
 Rules:
 
