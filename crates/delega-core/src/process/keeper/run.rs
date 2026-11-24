@@ -249,7 +249,14 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     }
                 }
                 Some(Event::Command(ToKeeper::Census(id))) => {
-                    let (live, detail) = census_report(pid);
+                    #[cfg(all(test, target_os = "linux"))]
+                    let answer = match late_refusal().await {
+                        Some(answer) => answer,
+                        None => census_report(pid),
+                    };
+                    #[cfg(not(all(test, target_os = "linux")))]
+                    let answer = census_report(pid);
+                    let (live, detail) = answer;
                     sticky.note("census", &detail);
                     say(&FromKeeper::Tree { id, live, detail });
                 }
@@ -374,6 +381,23 @@ impl Sticky {
             self.unproven = true;
         }
     }
+}
+
+/// With [`super::LATE_REFUSAL_ENV`] set, the keeper's first census is
+/// answered with a refused hold, without a walk, once the owner's request has
+/// timed out (a test seam).
+#[cfg(all(test, target_os = "linux"))]
+async fn late_refusal() -> Option<(usize, String)> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static USED: AtomicBool = AtomicBool::new(false);
+    if std::env::var_os(super::LATE_REFUSAL_ENV).is_none() || USED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    tokio::time::sleep(crate::process::limits::KEEPER_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+    Some((
+        1,
+        "passes=1 complete=false refused=1 read_failures=0".into(),
+    ))
 }
 
 /// What the keeper says when it has reaped the program.
@@ -779,6 +803,34 @@ mod tests {
                 live: 2,
                 proven: false,
                 unproven: false,
+            }
+        );
+    }
+
+    /// An unproven answer is noted before it is sent and stays noted through
+    /// later clean answers, so the reap carries it to the owner even when the
+    /// owner never received that answer.
+    #[test]
+    fn a_keeper_answer_that_refused_a_hold_is_carried_by_the_reap_after_clean_answers() {
+        let mut sticky = Sticky::default();
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert!(!sticky.unproven);
+        sticky.note(
+            "freeze",
+            "passes=2 complete=false refused=1 read_failures=0",
+        );
+        sticky.note("freeze", "passes=1 complete=true refused=0 read_failures=0");
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert_eq!(
+            reap_reply(Ok(Finished {
+                live: 0,
+                proven: true,
+                unproven: sticky.unproven,
+            })),
+            FromKeeper::Reaped {
+                live: 0,
+                proven: true,
+                unproven: true,
             }
         );
     }

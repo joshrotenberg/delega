@@ -720,6 +720,82 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst));
     }
 
+    /// A link whose keeper end is returned and never answers by itself; the
+    /// test plays the socket reader with [`State::tree_answer`].
+    fn silent_link() -> (LinkHandle, UnixStream) {
+        let (owner, keeper) = UnixStream::pair().expect("a socket pair");
+        let handle = LinkHandle {
+            keeper_pid: 0,
+            provider_pid: 0,
+            stream: owner,
+            state: Arc::new(State::default()),
+            next_id: AtomicU64::new(1),
+            shut: AtomicBool::new(false),
+        };
+        (handle, keeper)
+    }
+
+    const REFUSED: &str = "passes=2 complete=false refused=1 read_failures=0";
+
+    /// The keeper's refusal arrives after the owner's freeze request timed
+    /// out: the reader still records it, and the run stays unproven.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_answered_after_its_request_timed_out_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        assert_eq!(handle.freeze().await, None);
+        assert!(!handle.unproven());
+        handle.state.tree_answer(1, 1, REFUSED.into());
+        assert!(handle.unproven());
+        assert_eq!(
+            handle.tree_log(),
+            vec![
+                "freeze: no answer".to_string(),
+                format!("freeze: late live=1 {REFUSED}")
+            ]
+        );
+    }
+
+    /// The same for a request whose future was dropped before the answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_answered_after_its_request_was_cancelled_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), handle.census())
+                .await
+                .is_err()
+        );
+        handle.state.tree_answer(1, 1, REFUSED.into());
+        assert!(handle.unproven());
+    }
+
+    /// A late answer is judged by the verb of its request: a census of a
+    /// tree that keeps changing claimed nothing, and a freeze that did not
+    /// complete did.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_is_judged_by_the_verb_of_its_request() {
+        let changing = "passes=64 complete=false refused=0 read_failures=0";
+        let (handle, _keeper) = silent_link();
+        assert_eq!(handle.census().await, None);
+        handle.state.tree_answer(1, 1, changing.into());
+        assert!(!handle.unproven());
+        assert_eq!(handle.freeze().await, None);
+        handle.state.tree_answer(2, 1, changing.into());
+        assert!(handle.unproven());
+    }
+
+    /// What the keeper carried in `reaped` makes the run unproven before the
+    /// reap receives the answer.
+    #[test]
+    fn a_reap_answer_that_carries_an_unproven_answer_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        handle.state.reaped(Reaped {
+            live: 0,
+            proven: true,
+            unproven: true,
+        });
+        assert!(handle.unproven());
+    }
+
     #[test]
     fn which_answers_are_unproven() {
         assert!(reply_unproven(

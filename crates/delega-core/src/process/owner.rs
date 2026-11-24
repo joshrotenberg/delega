@@ -1410,6 +1410,62 @@ mod refusal_tests {
         assert_eq!(with(true, 1, 0, true), Some(KEEPER_UNPROVEN_REASON));
     }
 
+    const CLEAN_REAP: ReapAnswer = ReapAnswer {
+        acknowledged: true,
+        leftover: 0,
+        proven: true,
+        subreaper: true,
+        lost: false,
+    };
+
+    /// A Linux kept run whose final census proved nothing, with nothing
+    /// left alive and no owner refusal, is not `Confirmed`.
+    #[test]
+    fn a_linux_reap_of_nothing_alive_without_the_proof_is_unconfirmed() {
+        let unproven = ReapAnswer {
+            proven: false,
+            ..CLEAN_REAP
+        };
+        assert!(unproven.proof_missing(true));
+        assert!(!unproven.proves_empty(true));
+        assert!(!CLEAN_REAP.proof_missing(true));
+        assert!(CLEAN_REAP.proves_empty(true));
+    }
+
+    /// macOS has no subreaper and no proof, so a missing proof is not held
+    /// against it; and where the keeper could not prove anything (no
+    /// subreaper, lost, no acknowledgement, something left) another reason
+    /// decides.
+    #[test]
+    fn a_missing_proof_counts_only_where_the_keeper_could_give_one() {
+        let unproven = ReapAnswer {
+            proven: false,
+            ..CLEAN_REAP
+        };
+        assert!(!unproven.proof_missing(false));
+        assert!(!CLEAN_REAP.proves_empty(false));
+        for other in [
+            ReapAnswer {
+                subreaper: false,
+                ..unproven
+            },
+            ReapAnswer {
+                lost: true,
+                ..unproven
+            },
+            ReapAnswer {
+                acknowledged: false,
+                ..unproven
+            },
+            ReapAnswer {
+                leftover: 1,
+                ..unproven
+            },
+        ] {
+            assert!(!other.proof_missing(true), "{other:?}");
+        }
+    }
+
     #[test]
     fn nothing_refused_leaves_the_verdict_to_the_other_checks() {
         assert_eq!(with(false, 0, 0, false), None);

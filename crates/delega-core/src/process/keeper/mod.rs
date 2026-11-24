@@ -76,6 +76,12 @@ pub(crate) const FREEZE_GATE_ENV: &str = "DELEGA_TEST_KEEPER_FREEZE_GATE";
 #[cfg(test)]
 pub(crate) use run::gate_expired_marker;
 
+/// Test seam: a keeper started by the tests with this variable answers its
+/// first census (Linux) with a refused hold, without walking, after
+/// `KEEPER_REPLY_TIMEOUT` and a second, so the owner's request has timed out
+/// when the answer arrives.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) const LATE_REFUSAL_ENV: &str = "DELEGA_TEST_KEEPER_LATE_REFUSAL";
 pub use run::keeper_main;
 
 /// A program and arguments that run [`keeper_main`].
