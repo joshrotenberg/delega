@@ -81,9 +81,10 @@ jobs:
         with:
           name: acceptance-k-relay-repeats
           path: acceptance-k-relay.jsonl
-      # Repeat the Linux relay rows to check result validity and cleanup
-      # honesty under process churn, including the keeper's cleanup after
-      # delega receives SIGKILL.
+      # Repeat the Linux relay rows to check the expected outcome and exit,
+      # one valid result, and no survivors under process churn. Readable runs
+      # must report Confirmed or the late-listing reason alone. The SIGKILL
+      # rows check signal exit, no result, and the keeper's cleanup.
       - name: Every relay row, five repeats (Linux)
         if: runner.os == 'Linux'
         run: cargo run --release --locked -p delega-acceptance -- --filter=-relay --repeat 5 --out acceptance-relay.jsonl
