@@ -82,7 +82,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: acceptance-results-${{ matrix.os }}
+          name: acceptance-results-${{ matrix.os }}-attempt-${{ github.run_attempt }}
           path: acceptance-results.jsonl
       # On Linux the keeper alone must stop a fork relay after a SIGKILL of
       # delega (the k-relay rows). Whether a generation slips past depends on
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
-          name: acceptance-k-relay-repeats
+          name: acceptance-k-relay-repeats-attempt-${{ github.run_attempt }}
           path: acceptance-k-relay.jsonl
       # Repeat the Linux relay rows to check the expected outcome and exit,
       # one valid result, and no survivors under process churn. Readable runs
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
-          name: acceptance-relay-repeats
+          name: acceptance-relay-repeats-attempt-${{ github.run_attempt }}
           path: acceptance-relay.jsonl
       # The console output of the relay repeats, kept per attempt when the job
       # fails so a rerun does not replace the first attempt's logs.
