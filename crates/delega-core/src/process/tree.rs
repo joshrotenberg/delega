@@ -1636,6 +1636,87 @@ mod tests {
         );
     }
 
+    /// The row seen on Linux CI (#217): pid 17328, ppid 0, pgid -1 printed
+    /// as unsigned, with `{state}` in the state column.
+    fn churn_row(state: &str) -> String {
+        format!("  17328       0 4294967295 {state} Tue Nov 24 10:44:54 2026\n")
+    }
+
+    #[test]
+    fn the_observed_dead_row_is_skipped_and_the_listing_counts() {
+        let text = format!("{}{}{}", row(1), churn_row("X+"), row(10));
+        let rows = validate_listing(&text, 10).expect("the listing counts");
+        assert_eq!(
+            rows.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![1, 10],
+            "a dead row was kept"
+        );
+    }
+
+    #[test]
+    fn the_observed_columns_in_a_live_or_zombie_state_still_fail_the_listing() {
+        for state in ["S", "S+", "Z", "Z+", "R", "R+"] {
+            let line = churn_row(state);
+            match validate_listing(&format!("{}{line}", row(10)), 10) {
+                Err(InspectError::Failed(message)) => {
+                    assert!(
+                        message.contains("could not be parsed"),
+                        "{state}: {message}"
+                    );
+                    assert!(message.contains(line.trim_end()), "{state}: {message}");
+                    assert!(
+                        crate::cleanup_reason::is_listing_error(&message),
+                        "{state}: {message}"
+                    );
+                }
+                other => panic!("{state}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_dead_row_whose_pid_does_not_parse_or_is_not_positive_still_fails_the_listing() {
+        for pid in ["x17328", "0", "-5", "4294967295", ""] {
+            let line = format!("{pid} 0 4294967295 X+ Tue Nov 24 10:44:54 2026\n");
+            assert!(
+                matches!(
+                    validate_listing(&format!("{}{line}", row(10)), 10),
+                    Err(InspectError::Failed(_))
+                ),
+                "pid {pid:?} was skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listing_of_dead_rows_and_our_process_counts() {
+        let text = format!("{}{}2 1 2 X\n{}", churn_row("X+"), churn_row("X"), row(10));
+        let rows = validate_listing(&text, 10).expect("the listing counts");
+        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![10]);
+    }
+
+    #[test]
+    fn a_listing_of_only_dead_rows_has_no_rows_and_fails() {
+        let text = format!("{}{}", churn_row("X+"), churn_row("X"));
+        assert!(matches!(
+            validate_listing(&text, 10),
+            Err(InspectError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn a_bad_line_beside_a_dead_row_is_still_quoted() {
+        let text = format!("{}{}not a row\n{}", churn_row("X+"), row(10), row(1));
+        match validate_listing(&text, 10) {
+            Err(InspectError::Failed(message)) => assert_eq!(
+                message,
+                "the process listing had 1 lines that could not be parsed, \
+                 the first: \"not a row\""
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn a_listing_with_our_process_and_every_line_parsed_is_accepted() {
         let text = format!("{}{}", row(1), row(10));
