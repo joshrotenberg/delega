@@ -406,10 +406,13 @@ source, named by that directory only, never by a user. Only the current
 user's file applies, and delega does not tell which user a file belongs to,
 so the check can refuse conservatively on another user's file.
 
-A managed settings file or drop-in that delega cannot look up at all, for
-example under a directory that denies search, counts as absent. Claude Code
-runs as the same user as delega and reads these files by path, so a file
-delega cannot look up is one Claude Code cannot read either. Managed
+A fixed managed settings location that delega cannot look up counts as
+absent, as in doctor. When that is a lasting permission denial, such as a
+directory that denies search, Claude Code, running as the same user and
+reading by path, cannot read it either. A lookup error that clears between
+planning and launch is not covered. A `.json` drop-in that was listed but
+could not be opened or parsed does not count as absent: it makes the drop-in
+source `unreadable` or `partly_read`, which refuses a strict run. Managed
 preferences differ: macOS serves them to the process through the preferences
 system, so delega's file lookup is only a proxy for them. On macOS the run
 check therefore adds one more case: when looking up

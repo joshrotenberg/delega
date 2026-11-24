@@ -428,8 +428,11 @@ fn a_settings_directory_that_denies_search_adds_nothing_because_claude_code_runs
 {
     let setup = Setup::new(Platform::Macos);
     let dir = setup.root.path().join(MAC_CLAUDE);
-    std::fs::create_dir_all(&dir).expect("create directory");
-    let Some(_restore) = deny_listing(&dir, 0o000) else {
+    let path = setup.write(
+        &format!("{MAC_CLAUDE}/managed-settings.json"),
+        r#"{"permissions":{"allow":["Bash"]}}"#,
+    );
+    let Some(restore) = deny_listing(&dir, 0o000) else {
         return;
     };
     for mode in [Mode::Read, Mode::Write] {
@@ -437,6 +440,18 @@ fn a_settings_directory_that_denies_search_adds_nothing_because_claude_code_runs
         assert_eq!(setup.notes(mode), Vec::<String>::new());
     }
     assert_eq!(setup.notes(Mode::Build), Vec::<String>::new());
+    // With search allowed again the same file refuses, so it was hidden by
+    // the denial, not ignored.
+    drop(restore);
+    let refusal = setup.refusal(Mode::Read);
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} sets permissions.allow,",
+            text(&path)
+        )),
+        "{}",
+        refusal.message
+    );
 }
 
 #[test]

@@ -663,25 +663,32 @@ fn is_absence(error: &std::io::Error) -> bool {
 /// For the run check only: the managed preferences locations on macOS that
 /// delega could not check, one phrase per fixed path.
 ///
-/// Settings files and drop-ins are not checked this way, and [`scan`] counts a
-/// path it cannot look up as absent. Claude Code runs as the same user as
-/// delega and reads those files by path, so a file delega cannot look up is
-/// one Claude Code cannot read either. Managed preferences differ: macOS
+/// Settings files and drop-ins are not checked this way: [`scan`] counts a
+/// fixed location it cannot look up as absent, as doctor does. When that is a
+/// lasting permission denial, such as a directory that denies search, Claude
+/// Code, running as the same user and reading by path, cannot read it either.
+/// A lookup error that clears between planning and launch is not covered. A
+/// `.json` drop-in the scan listed but could not open or parse is not absent:
+/// it makes the drop-in source unreadable or partly read, which this check
+/// names. Managed preferences differ: macOS
 /// serves them to the process through the preferences system, so delega's
 /// file lookup is only a proxy for them. When looking up the system file,
 /// listing the directory, or looking up the file in a user's directory fails
 /// for a reason other than absence, managed preferences may widen the run.
 ///
 /// The phrase names the system file or the directory, never a user's
-/// directory. It follows the same rules for an injected root and the same
-/// listing bound as the scan.
+/// directory. It uses the same listing bound as the scan and the same
+/// injected-root check, which keeps the lookups of a stable test root inside
+/// it; like the scan's, it does not guard a path swapped for a link between
+/// the check and the lookup.
 fn unchecked_preferences(system: &SystemPaths, limits: &Limits, could: &str) -> Vec<String> {
     const FILE: &str = "com.anthropic.claudecode.plist";
     if system.platform != Platform::Macos {
         return Vec::new();
     }
     let dir = system.join("/Library/Managed Preferences");
-    // Under an injected root nothing outside it is looked at.
+    // Under a stable injected root, nothing outside it is looked at. A test
+    // seam: a link swapped in after this check would be followed.
     if !system.inside(&dir) {
         return Vec::new();
     }
