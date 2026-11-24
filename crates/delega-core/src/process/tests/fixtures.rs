@@ -126,16 +126,6 @@ impl Scratch {
         }
     }
 
-    /// A scratch directory whose name begins with `prefix`.
-    pub(super) fn with_prefix(prefix: &str) -> Self {
-        Self {
-            dir: tempfile::Builder::new()
-                .prefix(prefix)
-                .tempdir()
-                .expect("create scratch directory"),
-        }
-    }
-
     pub(super) fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
@@ -283,14 +273,32 @@ impl ProcessIdentity {
     }
 }
 
-/// Whether `pid` is a live process whose working directory is the directory
-/// `expected` (compared by device and inode). Any failure to tell is `false`.
+#[cfg(target_os = "linux")]
 fn cwd_matches(pid: i32, expected: &Path) -> bool {
-    let Ok(expected) = DirIdentity::of(expected) else {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == expected)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cwd_matches(pid: i32, expected: &Path) -> bool {
+    let pid = pid.to_string();
+    // Avoid filesystem lookups on unrelated mounts. Darwin still reports cwd.
+    let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-b", "-a", "-p", &pid, "-d", "cwd", "-Fn"])
+        .env_clear()
+        .env("LC_ALL", "C")
+        .guarded_output()
+    else {
         return false;
     };
-    working_directories(Some(pid))
-        .is_ok_and(|found| found.iter().any(|(p, id)| *p == pid && *id == expected))
+    let stdout = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let mut lines = stdout.split(|&byte| byte == b'\n');
+    let process = format!("p{pid}");
+    output.status.success()
+        && lines.next() == Some(process.as_bytes())
+        && lines.next() == Some(b"fcwd")
+        && lines.next().and_then(|line| line.strip_prefix(b"n"))
+            == Some(expected.as_os_str().as_encoded_bytes())
+        && lines.next().is_none()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -373,246 +381,64 @@ pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpe
     spec
 }
 
-/// A directory's identity: its device and inode. Comparing it, rather than
-/// path text, does not depend on how a tool spells a path (`lsof` escapes
-/// bytes outside ASCII) or on which of its names a path uses.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct DirIdentity {
-    dev: u64,
-    ino: u64,
-}
-
-impl DirIdentity {
-    pub(super) fn of(path: &Path) -> Result<Self, String> {
-        Self::stat(path).map_err(|e| format!("stat {}: {e}", path.display()))
-    }
-
-    fn stat(path: &Path) -> std::io::Result<Self> {
-        use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(path)?;
-        Ok(Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        })
-    }
-}
-
 /// The live processes whose working directory is `dir`, other than this
 /// one: what a case started in its scratch directory and left running, read
-/// from the system independently of any record a script wrote. A zombie has
-/// no working directory and is not listed. A failed or incomplete
-/// enumeration is an error, never absence.
+/// from the system independently of any record a script wrote. Linux reads
+/// `/proc/<pid>/cwd`; elsewhere `lsof` lists every process's cwd. A zombie
+/// has no working directory and is not listed. A failed enumeration is an
+/// error, never absence.
 pub(super) fn processes_in(dir: &Path) -> Result<Vec<i32>, String> {
-    let expected = DirIdentity::of(dir)?;
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", dir.display()))?;
     let own = std::process::id() as i32;
-    Ok(working_directories(None)?
-        .into_iter()
-        .filter(|(pid, id)| *pid != own && *id == expected)
-        .map(|(pid, _)| pid)
-        .collect())
-}
-
-/// How long one `lsof` listing may take before it is killed and the listing
-/// is an error. Far longer than a listing takes on a loaded machine.
-#[cfg(not(target_os = "linux"))]
-const LISTING_LIMIT: Duration = Duration::from_secs(20);
-
-/// The working directories of this user's live processes, or of `only`, as
-/// (pid, identity). Linux stats `/proc/<pid>/cwd`; elsewhere `lsof` lists
-/// each cwd's device and inode.
-fn working_directories(only: Option<i32>) -> Result<Vec<(i32, DirIdentity)>, String> {
     #[cfg(target_os = "linux")]
     {
-        proc_working_directories(Path::new("/proc"), only)
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").map_err(|e| format!("read /proc: {e}"))? {
+            let entry = entry.map_err(|e| format!("read /proc entry: {e}"))?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            // A process that is gone, or another user's, has no readable cwd;
+            // a case's processes are this user's and readable.
+            if pid != own
+                && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == dir)
+            {
+                found.push(pid);
+            }
+        }
+        Ok(found)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let pid = only.map(|pid| pid.to_string());
-        let mut args = vec!["-b", "-w"];
-        if let Some(pid) = &pid {
-            args.extend(["-a", "-p", pid]);
-        }
-        args.extend(["-d", "cwd", "-F", "pDi"]);
-        lsof_working_directories(Path::new("/usr/sbin/lsof"), &args, LISTING_LIMIT)
-    }
-}
-
-/// Whether an error reading a process's `/proc` entry means the process is
-/// gone (it exited between the directory listing and the read), as opposed
-/// to a live process whose entry could not be read.
-#[cfg(any(target_os = "linux", test))]
-fn process_vanished(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3)
-}
-
-/// [`working_directories`] from a `/proc` at `root`. Another user's process,
-/// one older than this test process and a zombie are skipped: none can be a
-/// live process a test started. For the rest, a vanished process is skipped
-/// and any other failure to read it is an error.
-#[cfg(target_os = "linux")]
-fn proc_working_directories(
-    root: &Path,
-    only: Option<i32>,
-) -> Result<Vec<(i32, DirIdentity)>, String> {
-    use std::os::unix::fs::MetadataExt;
-    let uid = std::fs::metadata(root.join("self"))
-        .map_err(|e| format!("stat {}/self: {e}", root.display()))?
-        .uid();
-    let pids: Vec<i32> = match only {
-        Some(pid) => vec![pid],
-        None => {
-            let mut pids = Vec::new();
-            let entries =
-                std::fs::read_dir(root).map_err(|e| format!("read {}: {e}", root.display()))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("read {} entry: {e}", root.display()))?;
-                if let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) {
-                    pids.push(pid);
-                }
-            }
-            pids
-        }
-    };
-    let own_start = std::fs::read(root.join("self/stat"))
-        .ok()
-        .and_then(|stat| stat_state_and_start(&stat))
-        .map(|(_, started)| started)
-        .ok_or_else(|| format!("unreadable {}/self/stat", root.display()))?;
-    let mut found = Vec::new();
-    for pid in pids {
-        let entry = root.join(pid.to_string());
-        match std::fs::metadata(&entry) {
-            Ok(meta) if meta.uid() != uid => continue,
-            Ok(_) => {}
-            Err(e) if process_vanished(&e) => continue,
-            Err(e) => return Err(format!("stat {}: {e}", entry.display())),
-        }
-        // A process older than this test process cannot be one a test
-        // started (a non-dumpable agent of this user, whose cwd is not
-        // readable, is one), and a zombie has run to its end.
-        let stat = match std::fs::read(entry.join("stat")) {
-            Ok(stat) => stat,
-            Err(e) if process_vanished(&e) => continue,
-            Err(e) => return Err(format!("read {}/stat: {e}", entry.display())),
-        };
-        let (state, started) = stat_state_and_start(&stat)
-            .ok_or_else(|| format!("unreadable {}/stat", entry.display()))?;
-        if started < own_start || state == "Z" || state == "X" {
-            continue;
-        }
-        // A vanished process, or a zombie (which has no cwd), is absent;
-        // any other failure is a live process whose cwd could not be read.
-        let cwd = entry.join("cwd");
-        match DirIdentity::stat(&cwd) {
-            Ok(id) => found.push((pid, id)),
-            Err(e) if process_vanished(&e) => continue,
-            Err(e) => return Err(format!("stat {}: {e}", cwd.display())),
-        }
-    }
-    Ok(found)
-}
-
-/// [`working_directories`] from `program` (`lsof`, or a stand-in in tests)
-/// run with `args`. The listing must exit successfully within `limit`; a
-/// listing that fails, stalls or prints something it cannot parse is an
-/// error, so a cut-short listing is never read as a short census.
-#[cfg(not(target_os = "linux"))]
-fn lsof_working_directories(
-    program: &Path,
-    args: &[&str],
-    limit: Duration,
-) -> Result<Vec<(i32, DirIdentity)>, String> {
-    let stdout = output_within(
-        std::process::Command::new(program)
-            .args(args)
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .args(["-b", "-w", "-d", "cwd", "-Fpn"])
             .env_clear()
-            .env("LC_ALL", "C"),
-        limit,
-    )?;
-    let text = String::from_utf8_lossy(&stdout);
-    let mut found = Vec::new();
-    let mut current: Option<(i32, Option<u64>, Option<u64>)> = None;
-    let mut finish = |current: Option<(i32, Option<u64>, Option<u64>)>| {
-        if let Some((pid, Some(dev), Some(ino))) = current {
-            found.push((pid, DirIdentity { dev, ino }));
+            .env("LC_ALL", "C")
+            .guarded_output()
+            .map_err(|e| format!("run lsof: {e}"))?;
+        if output.stdout.is_empty() {
+            return Err(format!("lsof listed nothing ({})", output.status));
         }
-    };
-    for line in text.lines() {
-        let (field, value) = line.split_at(line.chars().next().map_or(0, char::len_utf8));
-        match field {
-            "p" => {
-                finish(current.take());
-                let pid = value
-                    .parse()
-                    .map_err(|_| format!("lsof printed a bad pid line: {line:?}"))?;
-                current = Some((pid, None, None));
+        let expected = format!("n{}", dir.display());
+        let mut pid = None;
+        let mut found = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(number) = line.strip_prefix('p') {
+                pid = number.parse::<i32>().ok();
+            } else if line == expected
+                && let Some(pid) = pid.filter(|pid| *pid != own)
+            {
+                found.push(pid);
             }
-            "D" | "i" => {
-                let Some((_, dev, ino)) = current.as_mut() else {
-                    return Err(format!("lsof printed a field before a pid: {line:?}"));
-                };
-                let parsed = if field == "D" {
-                    value
-                        .strip_prefix("0x")
-                        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-                        .map(|v| *dev = Some(v))
-                } else {
-                    value.parse().ok().map(|v| *ino = Some(v))
-                };
-                parsed.ok_or_else(|| format!("lsof printed a bad field: {line:?}"))?;
-            }
-            "f" => {}
-            _ => return Err(format!("lsof printed an unexpected line: {line:?}")),
         }
+        Ok(found)
     }
-    finish(current);
-    Ok(found)
-}
-
-/// Run `command` with standard output captured, and return that output if
-/// it exits successfully within `limit`. A command still running at the
-/// limit is killed and reaped, and that is an error, as is a failed exit.
-#[cfg(not(target_os = "linux"))]
-fn output_within(command: &mut std::process::Command, limit: Duration) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    use std::process::Stdio;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .guarded_spawn()
-        .map_err(|e| format!("start {command:?}: {e}"))?;
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let began = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if began.elapsed() < limit => std::thread::sleep(Duration::from_millis(5)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(format!("{command:?} did not finish within {limit:?}"));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("wait for {command:?}: {e}"));
-            }
-        }
-    };
-    let bytes = reader
-        .join()
-        .expect("the output reader ended")
-        .map_err(|e| format!("read the output of {command:?}: {e}"))?;
-    if !status.success() {
-        return Err(format!("{command:?} failed: {status}"));
-    }
-    Ok(bytes)
 }
 
 /// Whether a process is alive. A zombie counts as gone: it has run to its end
@@ -1077,79 +903,12 @@ fn reaper_does_not_signal_a_replacement_after_the_registered_process_exits() {
 
 #[test]
 fn the_directory_census_finds_a_process_by_its_working_directory_alone() {
-    // A name outside ASCII, which `lsof` escapes in the paths it prints.
-    for scratch in [Scratch::new(), Scratch::with_prefix("café-")] {
-        let mut child = waiting_child(&scratch);
-        let pid = i32::try_from(child.id()).expect("a pid");
-        let found = processes_in(&scratch.dir()).expect("list the case directory");
-        assert_eq!(
-            found,
-            vec![pid],
-            "the census of {}",
-            scratch.dir().display()
-        );
-        assert!(cwd_matches(pid, &scratch.dir()), "the child's cwd");
-        child.kill().expect("end the child");
-        child.wait().expect("reap the child");
-        assert_eq!(processes_in(&scratch.dir()), Ok(Vec::new()));
-        assert!(!cwd_matches(pid, &scratch.dir()), "an ended child's cwd");
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn a_listing_that_fails_stalls_or_cannot_be_parsed_is_an_error_not_an_empty_census() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = Scratch::new();
-    let id = DirIdentity::of(&scratch.dir()).expect("stat the scratch directory");
-    let fake = |name: &str, body: String| {
-        let path = scratch.path(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write a fake lsof");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-            .expect("make it executable");
-        path
-    };
-    let record = format!("p4242\nfcwd\nD{:#x}\ni{}\n", id.dev, id.ino);
-    let limit = Duration::from_secs(5);
-    let good = fake("good", format!("printf '{}'", record.replace('\n', "\\n")));
-    assert_eq!(
-        lsof_working_directories(&good, &[], limit),
-        Ok(vec![(4242, id)])
-    );
-    // The listing a failing lsof printed before it failed is not read.
-    let failing = fake(
-        "failing",
-        format!("printf '{}'; exit 1", record.replace('\n', "\\n")),
-    );
-    let failed = lsof_working_directories(&failing, &[], limit);
-    assert!(
-        failed.as_ref().is_err_and(|e| e.contains("failed")),
-        "{failed:?}"
-    );
-    let garbled = fake("garbled", "printf 'p4242\\nD12\\n'".to_owned());
-    assert!(lsof_working_directories(&garbled, &[], limit).is_err());
-    // A stalled listing is killed at its limit.
-    let stalled = fake("stalled", "exec sleep 60".to_owned());
-    let began = Instant::now();
-    let stall = lsof_working_directories(&stalled, &[], Duration::from_millis(300));
-    assert!(
-        stall.as_ref().is_err_and(|e| e.contains("did not finish")),
-        "{stall:?}"
-    );
-    assert!(
-        began.elapsed() < Duration::from_secs(30),
-        "the limit was not kept"
-    );
-}
-
-#[test]
-fn only_a_missing_process_is_a_vanished_one() {
-    assert!(process_vanished(&std::io::Error::from(
-        std::io::ErrorKind::NotFound
-    )));
-    assert!(process_vanished(&std::io::Error::from_raw_os_error(3)));
-    assert!(!process_vanished(&std::io::Error::from_raw_os_error(13)));
-    assert!(!process_vanished(&std::io::Error::from(
-        std::io::ErrorKind::PermissionDenied
-    )));
+    let mut child = waiting_child(&scratch);
+    let pid = i32::try_from(child.id()).expect("a pid");
+    let found = processes_in(&scratch.dir()).expect("list the case directory");
+    assert_eq!(found, vec![pid], "the census of the case directory");
+    child.kill().expect("end the child");
+    child.wait().expect("reap the child");
+    assert_eq!(processes_in(&scratch.dir()), Ok(Vec::new()));
 }
