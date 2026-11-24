@@ -205,15 +205,23 @@ fn split_nul(bytes: &[u8]) -> Vec<String> {
     parts
 }
 
-/// Whether a process is alive. A zombie counts as gone.
-pub(super) fn is_running(pid: i32) -> bool {
-    let out = std::process::Command::new("/bin/ps")
+/// Whether a process is alive, if the listing is available. A zombie counts as gone.
+pub(super) fn is_running(pid: i32) -> Option<bool> {
+    ps_is_running(std::path::Path::new("/bin/ps"), pid)
+}
+
+fn ps_is_running(ps: &std::path::Path, pid: i32) -> Option<bool> {
+    let out = std::process::Command::new(ps)
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .guarded_output()
-        .expect("run ps");
+        .ok()?;
     let stat = String::from_utf8_lossy(&out.stdout);
     let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
+    if out.status.success() {
+        return Some(!stat.is_empty() && !stat.starts_with('Z'));
+    }
+    // ps exits with status 1 and no output when there is no matching PID.
+    (out.status.code() == Some(1) && stat.is_empty() && out.stderr.is_empty()).then_some(false)
 }
 
 /// How long a test waits for an event it does not control. Far longer than any
@@ -223,7 +231,9 @@ pub(super) const AWAIT: Duration = Duration::from_secs(90);
 /// Wait for a process to be gone (see [`AWAIT`]), then assert it.
 pub(super) async fn assert_gone(what: &str, pid: i32) {
     let began = Instant::now();
-    while is_running(pid) {
+    while is_running(pid)
+        .unwrap_or_else(|| panic!("could not check whether {what} (pid {pid}) is running"))
+    {
         assert!(
             began.elapsed() < AWAIT,
             "{what} (pid {pid}) is still running after {AWAIT:?}"

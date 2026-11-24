@@ -1,5 +1,6 @@
 //! Live progress events, for each provider, against the fakes.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -135,6 +136,39 @@ both!(
     no_summary_carries_a_command_or_the_environment
 );
 
+struct ReleaseSink(Arc<AtomicBool>);
+
+impl Drop for ReleaseSink {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn release_after_provider_exit(
+    _release: ReleaseSink,
+    pid_file: &Path,
+    give_up: Duration,
+    is_running: impl Fn(i32) -> Option<bool>,
+) -> Result<(), &'static str> {
+    let began = Instant::now();
+    while began.elapsed() < give_up {
+        if let Ok(text) = std::fs::read_to_string(pid_file)
+            && let Ok(pid) = text.trim().parse::<i32>()
+        {
+            while began.elapsed() < give_up {
+                match is_running(pid) {
+                    Some(false) => return Ok(()),
+                    None => return Err("could not check whether the fake provider is running"),
+                    Some(true) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            return Err("the fake provider did not exit within the wait bound");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Err("the fake provider did not record its PID within the wait bound")
+}
+
 async fn a_slow_sink_loses_output_and_the_run_says_so(provider: Provider) {
     // Proves: when the sink cannot take events the output is dropped whole
     // chunks at a time, counted, announced before `Finished` and noted in the
@@ -164,31 +198,16 @@ async fn a_slow_sink_loses_output_and_the_run_says_so(provider: Provider) {
     options.progress = Some(sink);
     // Released from a thread of its own: the run cannot end while the sink is
     // stuck, so nothing on the runtime can be the one to release it.
-    let record = rig.record.clone();
+    let pid_file = rig.record.join("pid");
+    let release = ReleaseSink(release);
     let releaser = std::thread::spawn(move || {
-        // A fake that is slow because the machine is busy is waited for; one
-        // that never finishes is not waited for forever, so the run can end and
-        // the test fail with what it saw instead of hanging.
-        let give_up = Duration::from_secs(120);
-        let began = Instant::now();
-        let pid = loop {
-            if let Ok(text) = std::fs::read_to_string(record.join("pid"))
-                && let Ok(pid) = text.trim().parse::<i32>()
-            {
-                break Some(pid);
-            }
-            if began.elapsed() > give_up {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        while pid.is_some_and(is_running) && began.elapsed() < give_up {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        release.store(true, Ordering::SeqCst);
+        release_after_provider_exit(release, &pid_file, Duration::from_secs(120), is_running)
     });
     let result = run_checked(rig.request(provider, "chatty"), options).await;
-    releaser.join().expect("the releasing thread");
+    releaser
+        .join()
+        .expect("the releasing thread")
+        .expect("waiting for the fake provider to exit");
     assert_eq!(result.outcome, Outcome::Completed);
 
     let events = events.lock().expect("lock").clone();
@@ -213,6 +232,50 @@ both!(
     a_slow_sink_gets_a_dropped_event_and_a_note,
     a_slow_sink_loses_output_and_the_run_says_so
 );
+
+#[test]
+fn slow_sink_is_released_promptly_when_ps_cannot_start() {
+    let rig = Rig::new();
+    let pid_file = rig.record.join("pid");
+    std::fs::write(&pid_file, "123").expect("write a fake PID");
+    let missing_ps = rig.record.join("missing-ps");
+    let release = Arc::new(AtomicBool::new(false));
+    let guard = ReleaseSink(release.clone());
+    let (done, result) = std::sync::mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+        let result =
+            release_after_provider_exit(guard, &pid_file, Duration::from_secs(120), |pid| {
+                super::ps_is_running(&missing_ps, pid)
+            });
+        let _ = done.send(result);
+    });
+
+    assert_eq!(
+        result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the releaser should finish promptly when ps cannot start"),
+        Err("could not check whether the fake provider is running")
+    );
+    releaser.join().expect("the releasing thread");
+    assert!(release.load(Ordering::SeqCst), "the sink is still blocked");
+}
+
+#[test]
+fn slow_sink_is_released_if_the_releaser_panics() {
+    let rig = Rig::new();
+    let pid_file = rig.record.join("pid");
+    std::fs::write(&pid_file, "123").expect("write a fake PID");
+    let release = Arc::new(AtomicBool::new(false));
+    let guard = ReleaseSink(release.clone());
+    let result = std::panic::catch_unwind(move || {
+        release_after_provider_exit(guard, &pid_file, Duration::from_secs(10), |_| {
+            panic!("liveness check panicked")
+        })
+    });
+
+    assert!(result.is_err(), "the liveness check should be called");
+    assert!(release.load(Ordering::SeqCst), "the sink is still blocked");
+}
 
 fn messages(events: &[ProgressEvent]) -> Vec<&str> {
     events
