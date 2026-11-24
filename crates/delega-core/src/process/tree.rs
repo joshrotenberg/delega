@@ -32,6 +32,8 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
+use crate::cleanup_reason::{self, ListingFailure};
+
 use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
 use super::marker::MarkedRow;
 use super::sys::{self, Signal};
@@ -51,7 +53,7 @@ pub(crate) enum InspectError {
 impl fmt::Display for InspectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InspectError::TimedOut => f.write_str("process listing timed out"),
+            InspectError::TimedOut => f.write_str(ListingFailure::TimedOut.text()),
             InspectError::Unavailable(message) => f.write_str(message),
             InspectError::Failed(message) => f.write_str(message),
         }
@@ -97,7 +99,7 @@ pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
 }
 
 /// Where `ps` is looked for, in order.
-const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
+pub(crate) const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
 
 /// The deadline for one `ps` run. A test build allows far longer than any
 /// listing takes, so a busy machine cannot turn a slow `ps` into a failed
@@ -147,11 +149,11 @@ async fn read_listing(
     mut child: tokio::process::Child,
     max: usize,
 ) -> Result<String, InspectError> {
-    let failed = |e: std::io::Error| InspectError::Failed(format!("ps: {e}"));
+    let failed = |e: std::io::Error| InspectError::Failed(cleanup_reason::ps_io_error(&e));
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| InspectError::Failed("ps: no stdout pipe".into()))?;
+        .ok_or_else(|| InspectError::Failed(ListingFailure::NoStdout.text().into()))?;
     let read = async {
         let mut bytes = Vec::new();
         let mut chunk = vec![0u8; PS_READ_CHUNK];
@@ -162,15 +164,12 @@ async fn read_listing(
             }
             bytes.extend_from_slice(&chunk[..n]);
             if bytes.len() > max {
-                return Err(InspectError::Failed("ps: output too large".into()));
+                return Err(InspectError::Failed(ListingFailure::TooLarge.text().into()));
             }
         }
         let status = child.wait().await.map_err(failed)?;
         if !status.success() {
-            return Err(InspectError::Failed(format!(
-                "ps failed (exit {:?})",
-                status.code()
-            )));
+            return Err(InspectError::Failed(cleanup_reason::ps_exit(status.code())));
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
@@ -193,7 +192,7 @@ async fn read_listing(
 /// [`MAX_ERROR_CHARS`] is cut to that length, ending in "...".
 pub(crate) fn not_started(failures: &[(PathBuf, std::io::Error)]) -> InspectError {
     let detail = if failures.is_empty() {
-        "no ps program configured".to_string()
+        cleanup_reason::NO_PS_PROGRAM.to_string()
     } else {
         failures
             .iter()
@@ -201,11 +200,11 @@ pub(crate) fn not_started(failures: &[(PathBuf, std::io::Error)]) -> InspectErro
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let message = format!("ps could not be started ({detail})");
+    let message = format!("{}{detail})", cleanup_reason::NOT_STARTED_START);
     if message.chars().count() <= MAX_ERROR_CHARS {
         return InspectError::Unavailable(message);
     }
-    const CUT: &str = "...";
+    const CUT: &str = cleanup_reason::NOT_STARTED_CUT;
     InspectError::Unavailable(format!(
         "{}{CUT}",
         clip(&message, MAX_ERROR_CHARS - CUT.len())
@@ -272,14 +271,11 @@ pub(crate) fn validate_listing(
     let lines = stdout.lines().filter(|l| !l.trim().is_empty()).count();
     let rows = parse_rows(stdout);
     if rows.is_empty() {
-        return Err(InspectError::Failed(
-            "the process listing held no rows".into(),
-        ));
+        return Err(InspectError::Failed(ListingFailure::NoRows.text().into()));
     }
     if rows.len() < lines {
-        return Err(InspectError::Failed(format!(
-            "the process listing had {} lines that could not be parsed",
-            lines - rows.len()
+        return Err(InspectError::Failed(cleanup_reason::unparsed_lines(
+            lines - rows.len(),
         )));
     }
     if !rows
@@ -287,7 +283,7 @@ pub(crate) fn validate_listing(
         .any(|row| u32::try_from(row.pid).is_ok_and(|pid| pid == own_pid))
     {
         return Err(InspectError::Failed(
-            "the process listing does not contain this process".into(),
+            ListingFailure::OwnMissing.text().into(),
         ));
     }
     Ok(rows)
@@ -718,10 +714,12 @@ impl ProcessTree {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lister())) {
             Ok(future) => match tokio::spawn(future).await {
                 Ok(rows) => rows,
-                Err(_) => Err(InspectError::Failed("process inspector panicked".into())),
+                Err(_) => Err(InspectError::Failed(
+                    ListingFailure::InspectorPanicked.text().into(),
+                )),
             },
             Err(_) => Err(InspectError::Failed(
-                "process inspector factory panicked".into(),
+                ListingFailure::FactoryPanicked.text().into(),
             )),
         };
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
