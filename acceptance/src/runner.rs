@@ -585,11 +585,26 @@ fn judge(m: &mut Measured, case: &Case) {
         .exit_code
         .map(Exit::Code)
         .or(m.exit_signal.map(Exit::Signal));
+    if exit != Some(case.expect.exit) {
+        m.problems.push(format!(
+            "expected exit {}, got {}",
+            case.expect.exit.label(),
+            exit.map_or_else(|| "no exit status".to_string(), Exit::label),
+        ));
+    }
+    let no_survivors = m.survivors_at_exit.is_empty() && m.survivors.is_empty();
     match case.expect.docs {
         Docs::One => {
             if m.stdout_docs != Some(1) || m.result_valid != Some(true) {
                 m.problems
                     .push("standard output must hold exactly one valid RunResult".to_string());
+            }
+            if m.outcome.as_deref() != Some(case.expect.outcome) {
+                m.problems.push(format!(
+                    "expected outcome {}, got {}",
+                    case.expect.outcome,
+                    m.outcome.as_deref().unwrap_or("no outcome"),
+                ));
             }
             if m.cleanup_confirmed == Some(false)
                 && !m
@@ -602,14 +617,40 @@ fn judge(m: &mut Measured, case: &Case) {
                     m.cleanup_reason
                 ));
             }
+            match case.expect.confirmed {
+                Some(false) => {
+                    if m.cleanup_confirmed != Some(false) {
+                        m.problems
+                            .push("expected Unconfirmed with process listing disabled".into());
+                    }
+                    if m.survivors_at_exit
+                        .iter()
+                        .chain(&m.survivors)
+                        .any(|role| !case.expect.survivors.contains(&role.as_str()))
+                    {
+                        m.problems.push(format!(
+                            "unexpected survivors with process listing disabled (at exit: {:?}, after settling: {:?})",
+                            m.survivors_at_exit, m.survivors
+                        ));
+                    }
+                }
+                Some(true) if !documented_residual => {
+                    if m.cleanup_confirmed != Some(true)
+                        && !(m.cleanup_confirmed == Some(false)
+                            && no_survivors
+                            && late_listing_only(m))
+                    {
+                        m.problems.push(
+                            "expected Confirmed or a late listing alone with no survivors".into(),
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
         Docs::None | Docs::Unread => {
             // The caller killed delega or made its result unreadable. Check the
             // observable termination and the cleanup the case can require.
-            if exit != Some(case.expect.exit) {
-                m.problems
-                    .push(format!("expected exit {}", case.expect.exit.label()));
-            }
             if case.expect.docs == Docs::None
                 && (m.stdout_docs != Some(0) || m.result_valid.is_some())
             {
@@ -623,14 +664,11 @@ fn judge(m: &mut Measured, case: &Case) {
             }
         }
     }
-    if exit.is_none() {
-        m.problems.push("delega has no exit status".to_string());
-    }
 
     m.honest = m
         .cleanup_confirmed
         .filter(|_| !documented_residual)
-        .map(|confirmed| !confirmed || (m.survivors_at_exit.is_empty() && m.survivors.is_empty()));
+        .map(|confirmed| !confirmed || no_survivors);
     if m.honest == Some(false) {
         m.problems.push(format!(
             "cleanup was Confirmed with survivors (at exit: {:?}, after settling: {:?})",
@@ -649,6 +687,16 @@ fn judge(m: &mut Measured, case: &Case) {
         "fail"
     }
     .to_string();
+}
+
+fn late_listing_only(m: &Measured) -> bool {
+    m.cleanup_reason.as_ref().is_some_and(|reason| {
+        delega_core::process::is_late_listing_only(&Cleanup::Unconfirmed {
+            reason: reason.clone(),
+            pids: m.cleanup_pids.clone(),
+            process_groups: m.cleanup_groups.clone(),
+        })
+    })
 }
 
 /// Cleanup can combine the probe and provider reasons with "; ". Match
@@ -711,15 +759,15 @@ mod judge_tests {
 
     use crate::matrix::{Machine, all_for};
 
-    fn relay_run(os: &'static str) -> (Case, Measured) {
+    fn fixture_run(os: &'static str, id: &str) -> (Case, Measured) {
         let case = all_for(Machine {
             os,
             hides_system_env: os == "macos",
         })
         .into_iter()
-        .find(|r| r.id == "claude-a-relay")
-        .expect("the relay row");
-        let measured = serde_json::from_str(
+        .find(|r| r.id == id)
+        .expect("the matrix row");
+        let mut measured: Measured = serde_json::from_str(
             r#"{"id":"claude-a-relay","repeat":1,"provider":"claude","case":"a",
             "variant":"relay","behaviour":"success","action":"","exit_code":0,
             "hang":false,"stdout_docs":1,"result_valid":true,
@@ -730,7 +778,15 @@ mod judge_tests {
             "verdict":"","problems":[]}"#,
         )
         .expect("measurement");
+        measured.outcome = Some(case.expect.outcome.into());
+        if let Exit::Code(code) = case.expect.exit {
+            measured.exit_code = Some(code);
+        }
         (case, measured)
+    }
+
+    fn relay_run(os: &'static str) -> (Case, Measured) {
+        fixture_run(os, "claude-a-relay")
     }
 
     #[test]
@@ -779,6 +835,96 @@ mod judge_tests {
             m.result_valid = Some(valid);
             judge(&mut m, &case);
             assert_eq!(m.verdict, "fail");
+        }
+    }
+
+    #[test]
+    fn a_valid_result_with_the_wrong_outcome_fails_on_both_platforms() {
+        for (os, id, outcome) in [
+            ("macos", "claude-d-plain", "failed"),
+            ("macos", "codex-e-plain", "completed"),
+            ("macos", "claude-d-relay", "failed"),
+            ("linux", "claude-d-relay", "failed"),
+        ] {
+            let (case, mut m) = fixture_run(os, id);
+            m.outcome = Some(outcome.into());
+            judge(&mut m, &case);
+            assert_eq!(m.verdict, "fail", "{id} on {os}");
+            assert!(m.problems[0].starts_with("expected outcome "));
+        }
+    }
+
+    #[test]
+    fn a_timed_out_result_with_a_success_exit_fails_even_on_a_residual() {
+        for id in ["codex-e-plain", "codex-e-relay"] {
+            let (case, mut m) = fixture_run("macos", id);
+            assert_eq!(m.outcome.as_deref(), Some("timed_out"));
+            m.exit_code = Some(0);
+            judge(&mut m, &case);
+            assert_eq!(m.verdict, "fail");
+            assert_eq!(m.problems, ["expected exit 124, got 0"]);
+        }
+    }
+
+    #[test]
+    fn a_late_listing_is_allowed_only_when_nothing_survived() {
+        let (case, mut m) = relay_run("linux");
+        m.cleanup_confirmed = Some(false);
+        m.cleanup_reason = Some(delega_core::process::LATE_LISTING_REASON.into());
+        judge(&mut m, &case);
+        assert_eq!(m.verdict, "pass");
+
+        for at_exit in [true, false] {
+            let mut m = m.clone();
+            let survivors = if at_exit {
+                &mut m.survivors_at_exit
+            } else {
+                &mut m.survivors
+            };
+            survivors.push("relay-heartbeat".into());
+            judge(&mut m, &case);
+            assert_eq!(m.verdict, "fail");
+        }
+    }
+
+    #[test]
+    fn another_documented_reason_cannot_replace_expected_confirmation() {
+        let (case, mut m) = relay_run("linux");
+        m.cleanup_confirmed = Some(false);
+        m.cleanup_reason = Some(delega_core::process::PIPES_HELD_REASON.into());
+        judge(&mut m, &case);
+        assert_eq!(m.verdict, "fail");
+        assert_eq!(
+            m.problems,
+            ["expected Confirmed or a late listing alone with no survivors"]
+        );
+    }
+
+    #[test]
+    fn a_result_cannot_confirm_cleanup_with_listing_disabled() {
+        for os in ["linux", "macos"] {
+            let (case, mut m) = fixture_run(os, "claude-u-setsid");
+            judge(&mut m, &case);
+            assert_eq!(m.verdict, "fail");
+            assert_eq!(
+                m.problems,
+                ["expected Unconfirmed with process listing disabled"]
+            );
+        }
+    }
+
+    #[test]
+    fn linux_keeper_must_clean_up_even_with_listing_disabled() {
+        for id in ["claude-u-setsid", "claude-u-orphan", "claude-u-bare"] {
+            let (case, mut m) = fixture_run("linux", id);
+            m.cleanup_confirmed = Some(false);
+            m.cleanup_reason = Some(delega_core::process::PIPES_HELD_REASON.into());
+            m.survivors.push(case.variant.into());
+            judge(&mut m, &case);
+            assert_eq!(m.verdict, "fail");
+            assert!(
+                m.problems[0].starts_with("unexpected survivors with process listing disabled")
+            );
         }
     }
 
