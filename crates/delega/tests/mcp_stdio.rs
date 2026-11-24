@@ -66,6 +66,7 @@ impl Rig {
             path
         };
         let fakes = make("fakes");
+        std::fs::create_dir(fakes.join("pids")).expect("create fixture ledger");
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes");
         for name in [
             "fake-claude.sh",
@@ -213,13 +214,19 @@ impl Rig {
         }
     }
 
-    /// How many lines of `pids` (written by the fakes' `acc:` behaviours) begin
-    /// with `role`.
+    /// Count the complete PID records for this role.
     fn recorded(&self, role: &str) -> usize {
-        std::fs::read_to_string(self.fakes.join("pids"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.split_whitespace().next() == Some(role))
+        std::fs::read_dir(self.fakes.join("pids"))
+            .expect("read fixture ledger")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                name.to_str()
+                    .and_then(|name| name.split_once('.'))
+                    .is_some_and(|(entry_role, pid)| {
+                        entry_role == role && pid.parse::<u32>().is_ok_and(|pid| pid > 0)
+                    })
+            })
             .count()
     }
 
