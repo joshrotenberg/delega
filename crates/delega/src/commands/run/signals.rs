@@ -71,6 +71,7 @@ pub async fn follow(handle: RunHandle, signals: &mut Signals, log: &Log) -> (Run
     tokio::pin!(wait);
     let mut stopping = false;
     let mut told = false;
+    let mut handled = 0;
     loop {
         tokio::select! {
             result = &mut wait => return (result, stopping),
@@ -92,6 +93,8 @@ pub async fn follow(handle: RunHandle, signals: &mut Signals, log: &Log) -> (Run
                     interrupter.interrupt();
                     log.line(STOPPING);
                 }
+                handled += 1;
+                crate::commands::ack::signal(handled);
             }
         }
     }

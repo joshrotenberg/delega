@@ -71,6 +71,7 @@ pub fn run(args: Args) -> ExitCode {
     // file cannot be recorded the server never reports itself stale.
     let executable = delega_mcp::Executable::current();
     let log = Log::start();
+    super::ack::watch_stdout(super::ack::Ack::McpStdoutBlocked);
     let code = go(&args, executable, &log);
     // Bounded: a blocked standard error cannot hold the exit.
     log.finish();

@@ -119,6 +119,7 @@ type WithLock = dyn Fn(&mut dyn FnMut(&mut dyn Write));
 
 /// Run `write` on standard error with its lock held for that call only.
 fn stderr_locked(write: &mut dyn FnMut(&mut dyn Write)) {
+    crate::commands::ack::if_full(std::io::stderr(), crate::commands::ack::Ack::StderrBlocked);
     write(&mut std::io::stderr().lock());
 }
 

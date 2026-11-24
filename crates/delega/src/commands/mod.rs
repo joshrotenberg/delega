@@ -1,6 +1,7 @@
 //! One module per subcommand. Adding a subcommand adds a file here and a line
 //! in [`Command`].
 
+pub(crate) mod ack;
 mod config;
 mod doctor;
 mod hook;
