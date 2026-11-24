@@ -437,6 +437,49 @@ fn claude_sub_agent_result_neither_ends_nor_names_the_run() {
 }
 
 #[test]
+fn codex_content_policy_names_the_kind_only_for_the_observed_wording_at_the_start() {
+    for (message, kind) in [
+        (
+            "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.",
+            Some("provider_content_policy"),
+        ),
+        (
+            "This content was flagged for possible cybersecurity risk. Apply for access before retrying; usage limit and rate limit do not apply.",
+            Some("provider_content_policy"),
+        ),
+        (
+            "  this content was FLAGGED for possible cybersecurity risk.",
+            Some("provider_content_policy"),
+        ),
+        (
+            "This content was flagged for possible review. The request failed because you exceeded your current quota.",
+            Some("provider_usage_limit"),
+        ),
+        ("This content was flagged for possible review.", None),
+        ("This content was flagged", None),
+        ("Error: this content was flagged for possible review", None),
+        (
+            "Your content was flagged for possible cybersecurity risk.",
+            None,
+        ),
+    ] {
+        let line = serde_json::json!({"type": "turn.failed", "error": {"message": message}});
+        let parsed = codex::parse(line.to_string().as_bytes());
+        assert_eq!(failure_code(&parsed), kind, "{message}");
+    }
+}
+
+#[test]
+fn codex_content_policy_error_event_without_a_terminal_names_the_kind() {
+    let line = serde_json::json!({
+        "type": "error",
+        "message": "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request."
+    });
+    let parsed = codex::parse(line.to_string().as_bytes());
+    assert_eq!(parsed.error_code, Some("provider_content_policy"));
+}
+
+#[test]
 fn codex_words_that_only_mention_a_model_or_a_quota_name_no_kind() {
     for message in [
         "Working directory /tmp/model-tests does not exist",

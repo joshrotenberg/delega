@@ -307,14 +307,26 @@ fn names_missing_model(lower: &str) -> bool {
     })
 }
 
+/// The start of Codex's content-policy refusal, as codex-cli 0.171.0 reported
+/// it on 2026-11-24 in an `error` event and the `turn.failed` after it, with no
+/// code: "This content was flagged for possible cybersecurity risk. If this
+/// seems wrong, try rephrasing your request. ..." Only this observed category
+/// is matched. Another wording, such as "flagged for possible review", keeps
+/// `provider_error` (or the kind its other words name) until it is observed.
+const CONTENT_POLICY_TEXT: &str = "this content was flagged for possible cybersecurity risk";
+
 /// The error kind of a message by its words. Codex 0.170.0 gives no codes in
 /// `codex exec --json`, only text.
 fn text_kind(message: &str) -> Option<&'static str> {
     let lower = message.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
-    // The same order as the structured kinds: usage limit, auth, model,
-    // context, capacity (Codex text names no billing failure).
-    if has(&[
+    // A content-policy refusal first: its text starts with the observed
+    // phrase, and the rest of it may mention access or limits. Then the same order as
+    // the structured kinds: usage limit, auth, model, context, capacity (Codex
+    // text names no billing failure).
+    if lower.trim_start().starts_with(CONTENT_POLICY_TEXT) {
+        Some("provider_content_policy")
+    } else if has(&[
         "usage limit",
         "exceeded your current quota",
         "insufficient_quota",
