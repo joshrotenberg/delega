@@ -74,28 +74,29 @@ pub(crate) struct ProcessRow {
 }
 
 /// Parse one process table including state and group membership.
+#[cfg(test)]
 pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let parent = parts.next()?.parse().ok()?;
-            let group = parts.next()?.parse().ok()?;
-            let state = parts.next()?;
-            let zombie = state.starts_with('Z');
-            let stopped = state.starts_with('T');
-            let started = parts.collect::<Vec<_>>().join(" ");
-            (!started.is_empty()).then_some(ProcessRow {
-                pid,
-                parent,
-                group,
-                zombie,
-                stopped,
-                started,
-            })
-        })
-        .collect()
+    stdout.lines().filter_map(parse_row).collect()
+}
+
+/// Parse one line of a `ps -axo pid=,ppid=,pgid=,stat=,lstart=` listing.
+fn parse_row(line: &str) -> Option<ProcessRow> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let parent = parts.next()?.parse().ok()?;
+    let group = parts.next()?.parse().ok()?;
+    let state = parts.next()?;
+    let zombie = state.starts_with('Z');
+    let stopped = state.starts_with('T');
+    let started = parts.collect::<Vec<_>>().join(" ");
+    (!started.is_empty()).then_some(ProcessRow {
+        pid,
+        parent,
+        group,
+        zombie,
+        stopped,
+        started,
+    })
 }
 
 /// Where `ps` is looked for, in order.
@@ -264,18 +265,34 @@ fn system_programs() -> Vec<PathBuf> {
 /// listing is never empty, holds this process (`own_pid`), and has no line
 /// that does not parse. Anything else is a failed inspection, never "nothing
 /// found": a listing that shows no descendants must not confirm cleanup.
+///
+/// The error for unparsed lines quotes the first of them, escaped and
+/// bounded by `cleanup_reason::unparsed_lines`. That is safe only because
+/// this listing (`ps -axo pid=,ppid=,pgid=,stat=,lstart=`) carries no command
+/// or environment text; the marker listing (`ps -Eww`) is parsed by
+/// `marker::parse_marked`, which never quotes a line, and never reaches here.
 pub(crate) fn validate_listing(
     stdout: &str,
     own_pid: u32,
 ) -> Result<Vec<ProcessRow>, InspectError> {
-    let lines = stdout.lines().filter(|l| !l.trim().is_empty()).count();
-    let rows = parse_rows(stdout);
+    let mut rows = Vec::new();
+    let mut unparsed = 0usize;
+    let mut first_unparsed = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        match parse_row(line) {
+            Some(row) => rows.push(row),
+            None => {
+                unparsed += 1;
+                first_unparsed.get_or_insert(line);
+            }
+        }
+    }
     if rows.is_empty() {
         return Err(InspectError::Failed(ListingFailure::NoRows.text().into()));
     }
-    if rows.len() < lines {
+    if let Some(first) = first_unparsed {
         return Err(InspectError::Failed(cleanup_reason::unparsed_lines(
-            lines - rows.len(),
+            unparsed, first,
         )));
     }
     if !rows

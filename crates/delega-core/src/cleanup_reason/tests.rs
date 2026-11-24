@@ -22,8 +22,17 @@ fn every_listing_error() -> Vec<String> {
     all.push(ps_exit(Some(1)));
     all.push(ps_exit(Some(-1)));
     all.push(ps_exit(None));
-    all.push(unparsed_lines(1));
-    all.push(unparsed_lines(42));
+    all.push(unparsed_lines(1, "12 1 12 S"));
+    all.push(unparsed_lines(
+        42,
+        "1 2\t3;\u{1b}[0m \r\"\\ \u{2028} \u{e9}",
+    ));
+    // Clipped, and clipped where an escape would cross the bound.
+    all.push(unparsed_lines(3, &"x".repeat(5 * UNPARSED_LINE_MAX_CHARS)));
+    all.push(unparsed_lines(
+        2,
+        &format!("{};;", "x".repeat(UNPARSED_LINE_MAX_CHARS - 3)),
+    ));
     all.push(not_started(&[]).to_string());
     let enoent = || io::Error::from_raw_os_error(2);
     let eacces = || io::Error::from_raw_os_error(13);
