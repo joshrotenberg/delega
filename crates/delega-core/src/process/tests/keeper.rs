@@ -200,16 +200,6 @@ async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     assert_gone("setsid descendant", &[gc]).await;
 }
 
-/// The state letter `ps` shows for a process, empty when it is gone.
-fn state_of(pid: i32) -> String {
-    use crate::test_spawn::Guarded;
-    std::process::Command::new("/bin/ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .guarded_output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 /// A process the run did not start, carrying another run's marker value, is
 /// never signalled, not even stopped: the marker matches one run's value
 /// exactly. The process is this test binary sleeping, whose environment `ps
@@ -241,14 +231,22 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
     let watching = done.clone();
     // Stops the watcher however the test ends.
     let stop_watching = super::fixtures::SetOnDrop(done.clone());
+    let (first_sample, sampled) = tokio::sync::oneshot::channel();
     let watcher = tokio::task::spawn_blocking(move || {
         let mut states = Vec::new();
+        let mut first_sample = Some(first_sample);
         while !watching.load(std::sync::atomic::Ordering::SeqCst) {
-            states.push(state_of(pid));
+            states.push(super::fixtures::process_state(pid));
+            if let Some(first) = first_sample.take() {
+                let _ = first.send(());
+            }
+            // How often it samples, not a wait for anything.
             std::thread::sleep(Duration::from_millis(5));
         }
         states
     });
+    // The runs start only once the watcher is watching.
+    sampled.await.expect("the watcher took its first sample");
     let s = Scratch::new();
     let report = ProcessHandle::start(kept(sh(&s, "exit 0", LONG)))
         .wait()

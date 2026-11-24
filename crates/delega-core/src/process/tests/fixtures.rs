@@ -438,6 +438,15 @@ pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sle
 /// `sleep 60` in a session of its own, beyond what the session sweep reaches.
 pub(super) const OWN_SESSION: &str = "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)'";
 
+/// The state letters `ps` shows for a process, empty when it is gone.
+pub(super) fn process_state(pid: i32) -> String {
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .guarded_output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Whether the run marker shows for Apple's own programs here: `ps -E` shows
 /// the environment of a `/bin/sleep` started with a marker value. macOS hides
 /// it under System Integrity Protection; a machine without it shows it, and
