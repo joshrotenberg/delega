@@ -9,11 +9,9 @@
 //! marked for a run when one element of the list equals the run's value.
 //!
 //! The value is read on Linux from `/proc/<pid>/environ` and elsewhere from
-//! `ps -E`. Both read the memory where `exec` placed the process's environment,
-//! not the process's current environment: `unsetenv` does not hide a process,
-//! but a process that overwrites that memory in place can remove the marker,
-//! and a process started with an environment that leaves the variable out does
-//! not carry it.
+//! `ps -E`. Both read the process's environment area as the kernel exposes it:
+//! `unsetenv` does not remove the marker from it, while a process that
+//! overwrites that area can.
 //!
 //! The worker can read the value. It grants nothing: knowing it only lets a
 //! process make itself a target of that run's cleanup.

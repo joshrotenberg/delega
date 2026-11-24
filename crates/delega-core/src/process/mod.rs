@@ -185,7 +185,7 @@
 //!   the child's session and whose parent is gone can still be found. Cleanup
 //!   sweeps read it from `/proc/<pid>/environ` on Linux and from one `ps -U
 //!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both read
-//!   the memory where `exec` placed the process's environment (see module
+//!   the process's environment area as the kernel exposes it (see module
 //!   `marker`). A marked process that is in the
 //!   child's session when it is read (it started after the ordinary listing)
 //!   is a member and is signalled as one. A process found only by the marker is
@@ -300,7 +300,8 @@
 //! This describes cleanup after a kept run started a child; a run that started
 //! none has nothing to sweep. On macOS the keeper is not a subreaper, so it
 //! cannot adopt orphans. Cleanup finds descendants through the child's process
-//! group, its session, earlier listings, the run marker and held output pipes.
+//! group, its session, earlier listings and the run marker. An output pipe
+//! still held when the drain bound runs out makes the verdict `Unconfirmed`.
 //! A descendant that none of these reach (for example one that left the
 //! session and does not show the marker, or a fast fork relay) can be missed,
 //! and the run can then end `Confirmed` while it runs. The evidence and
@@ -366,10 +367,10 @@
 //!   `a_fork_relay_is_stopped_in_a_kept_run` in `tests/gaps.rs` run in the Linux
 //!   CI job; they have not run on a developer machine.
 //! - On macOS there is no subreaper. A descendant that left the session, whose
-//!   parent is gone, and that does not show the marker is not found. Among
+//!   parent is gone, and that does not show the marker can be missed. Among
 //!   these are a process started with an environment that leaves the marker
-//!   out, and, measured on macOS 27.2 with
-//!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
+//!   out, and, measured on macOS 27.2 with System Integrity Protection enabled,
+//!   the Apple programs measured: `ps -E` showed no
 //!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
 //!   for a Homebrew binary and for this crate's test binary. Whether this applies
 //!   depends on the machine: a macOS system that does not hide the environment
@@ -378,10 +379,8 @@
 //!   it (start `/bin/sleep` with a marker value and look for it in `ps -E`) and
 //!   expect accordingly, and so does the acceptance harness, which records the
 //!   answer in its results. Where it is hidden, such a descendant
-//!   ends with `Confirmed` while it runs, as without a keeper, unless it holds
-//!   the output pipes past the drain bound, which makes the verdict
-//!   `Unconfirmed`.
-//! - On macOS a fast fork relay is not stopped. In 50 interrupted kept runs of
+//!   can end with `Confirmed` while it runs, as without a keeper.
+//! - On macOS a fast fork relay can escape the freeze. In 50 interrupted kept runs of
 //!   the relay in `tests/gaps.rs` (perl, a new generation about every 5 ms, 4000
 //!   generations), measured on macOS 27.2 arm64 at a load average of about 15
 //!   (`measure_the_relay_freeze`), the freeze stopped it in none: each listing
@@ -390,7 +389,7 @@
 //!   That relay holds the output pipes, and with the held-pipe verdict all 50
 //!   runs of a second measurement (load average about 20) ended `Unconfirmed`
 //!   and none `Confirmed`; before it, all 50 had ended `Confirmed` with a relay
-//!   process alive. A relay that does not hold the output still ends
+//!   process alive. A relay that does not hold the output can end
 //!   `Confirmed` while it runs.
 //! - On Linux, two windows remain. The keeper is started with a synchronous
 //!   spawn, so an `exec` of the keeper that stalls (on a hung file system, for
