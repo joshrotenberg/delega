@@ -145,10 +145,19 @@ fn build_with(
         native: &native,
         deny: &deny,
     };
-    let built: Built = match request.provider {
+    let mut built: Built = match request.provider {
         Provider::Claude => claude::build(&inputs)?,
         Provider::Codex => codex::build(&inputs)?,
     };
+    if request.provider == Provider::Claude {
+        // Managed settings sit above what delega passes; see `claude_widening`.
+        for phrase in managed::claude_widening(&options.system_paths, scope.mode) {
+            built
+                .notes
+                .push(format!("managed settings can widen this run: {phrase}"));
+            built.unenforceable.push(phrase);
+        }
+    }
     if request.permissions.strict && !built.unenforceable.is_empty() {
         return Err(Refusal::new(
             "permissions_not_enforceable",

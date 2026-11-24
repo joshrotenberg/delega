@@ -67,6 +67,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::contract::permissions::Mode as RunMode;
 use crate::contract::request::Provider;
 
 use super::refusal::Refusal;
@@ -558,6 +559,67 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
         ));
     }
     Ok(())
+}
+
+/// The managed Claude Code sources that can widen a run in `mode`, one phrase
+/// per source naming its path and the keys found, or why it was not read.
+///
+/// Claude Code applies managed settings above the `--settings` block delega
+/// passes. A managed `permissions.allow` can grant what the mode does not, in
+/// `read`, `write` and `build`; in `build` a managed `sandbox` key can disable
+/// or loosen the sandbox delega passes. A source that exists and was not read
+/// completely can hold either, so it is named too. The managed MCP file holds
+/// no settings keys and is left out. `full` grants the built-in tools without
+/// a scope and asks for no sandbox, so nothing managed can widen it.
+///
+/// Only fixed paths and key names from [`CLAUDE_KEYS`] are used, never a value.
+pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String> {
+    if mode == RunMode::Full {
+        return Vec::new();
+    }
+    let build = mode == RunMode::Build;
+    let could = if build {
+        "permissions.allow or sandbox keys"
+    } else {
+        "permissions.allow"
+    };
+    scan(Provider::Claude, system)
+        .into_iter()
+        .filter(|source| source.kind != ManagedSourceKind::McpFile)
+        .filter_map(|source| {
+            let keys: Vec<&str> = source
+                .keys
+                .iter()
+                .filter(|key| {
+                    key.name == "permissions.allow"
+                        || (build && key.category == ManagedKeyCategory::Sandbox)
+                })
+                .map(|key| key.name.as_str())
+                .collect();
+            let unread = match source.state {
+                ManagedSourceState::Read => None,
+                ManagedSourceState::PartlyRead => Some("it was only partly read"),
+                ManagedSourceState::Unreadable => Some("it could not be read or parsed"),
+                ManagedSourceState::NotInspected => {
+                    Some("delega does not open managed preferences")
+                }
+            };
+            let what = match (keys.is_empty(), unread) {
+                (true, None) => return None,
+                (false, None) => format!("sets {}", keys.join(", ")),
+                (true, Some(why)) => format!("was not read ({why}), so it may set {could}"),
+                (false, Some(why)) => format!(
+                    "sets {} and was not read completely ({why}), so it may set more {could}",
+                    keys.join(", ")
+                ),
+            };
+            Some(format!(
+                "the managed source {} {what}, and Claude Code applies managed settings above the \
+                 settings delega passes",
+                source.path
+            ))
+        })
+        .collect()
 }
 
 /// The managed sources of `provider` that exist under `system`, in a fixed
