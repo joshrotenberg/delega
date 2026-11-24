@@ -556,6 +556,17 @@ impl Lifeline {
             .unwrap_or_else(|| panic!("waited {AWAIT:?} and never heard: {what}"))
     }
 
+    /// Wait until a writer has opened it (see [`AWAIT`]). Bytes read on the
+    /// way are dropped, so only a caller that ignores them uses this.
+    pub(super) async fn await_opened(&mut self, what: &str) {
+        await_value(what, || match self.try_hear() {
+            Some(Heard::Ended) => Err("every writer had already gone".to_owned()),
+            _ if self.opened => Ok(()),
+            _ => Err(String::new()),
+        })
+        .await;
+    }
+
     /// Read every byte already written, without waiting: the end if every
     /// writer is gone, else the last byte read, if any.
     pub(super) fn drain(&mut self) -> Option<Heard> {

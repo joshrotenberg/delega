@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::fixtures::{
-    OWN_GROUP, Reaper, Scratch, assert_confirmed, assert_gone, await_event, await_record,
-    is_running, own_group_recorded, own_session_recorded, run_guarded, sh, wait_tracked,
+    Heard, Lifeline, OWN_GROUP, Reaper, Scratch, assert_confirmed, assert_gone, await_event,
+    await_record, is_running, own_group_recorded, own_session_recorded, run_guarded, sh,
+    wait_tracked,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -255,8 +256,15 @@ both!(
     async {
         require_perl!();
         let s = Scratch::new();
+        // The leader records each child after it forks it, so a leader stopped
+        // between the fork and the record leaves a child without one. The
+        // leader opens the lifeline before its first fork, so every child holds
+        // it from the fork on: the lifeline ends only once the leader and every
+        // child it forked are gone, recorded or not.
+        let mut lifeline = Lifeline::new(&s, "life");
         let script = format!(
-            "exec perl -e 'use POSIX; open L, q(>), q(leader); print L qq($$\n); close L; \
+            "exec perl -e 'use POSIX; open W, q(>), q(life) or die; \
+         open L, q(>), q(leader); print L qq($$\n); close L; \
          for (1..400) {{ my $p = fork(); \
          if (!defined $p) {{ next }} \
          if (!$p) {{ setpgid(0,0); {WAIT_WHILE_GUARDED}; exit 0 }} \
@@ -270,6 +278,9 @@ both!(
             s.published_pids_in("kids").0.len() >= 3
         })
         .await;
+        lifeline
+            .await_opened("the leader opening the lifeline")
+            .await;
         let stopped = Instant::now();
         handle.interrupt();
         let report = handle.wait().await;
@@ -278,6 +289,17 @@ both!(
         assert!(kids.len() >= 3, "only {} children were started", kids.len());
         assert_confirmed(&report);
         assert_stopped_in_time("children forked until the stop", &kids, stopped).await;
+        // The children wait until the lifetime file is removed, so one that
+        // outlived the cleanup holds the lifeline open until the bound.
+        let left = stopped + BOUND;
+        let ended = lifeline
+            .hear_within(left.saturating_duration_since(Instant::now()))
+            .await;
+        assert_eq!(
+            ended,
+            Some(Heard::Ended),
+            "a process the leader forked, recorded or not, was still running {BOUND:?} after the stop"
+        );
     }
 );
 
