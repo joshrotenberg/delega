@@ -30,6 +30,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The process tests that start a descendant in its own group or session
+      # use perl. Locally they skip without it; here a missing perl fails the
+      # job instead of reporting those tests as passed.
+      - name: perl is installed
+        run: perl -e 'use POSIX; exit 0'
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
