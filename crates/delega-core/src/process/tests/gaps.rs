@@ -278,7 +278,7 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
 /// starts a descendant that calls `setsid` and then writes its own pid to `gc`.
 /// The descendant's parent is the middle process, not the leader.
 const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid(); \
-    open F, q(>), q(gc.tmp); print F $$; close F; rename q(gc.tmp), q(gc); \
+    open F, q(>), q(gc.tmp); print F qq($$\\n); close F; rename q(gc.tmp), q(gc); \
     exec q(sleep), q(60)' &\nwait\n";
 
 /// The script of a leader that starts the middle process after the first scan
