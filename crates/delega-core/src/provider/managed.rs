@@ -67,6 +67,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
+use crate::contract::permissions::Mode as RunMode;
 use crate::contract::request::Provider;
 
 use super::refusal::Refusal;
@@ -558,6 +559,181 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
         ));
     }
     Ok(())
+}
+
+/// The managed Claude Code sources that can widen a run in `mode`, one phrase
+/// per source naming its path and the keys found, or why it was not read.
+///
+/// Claude Code applies managed settings above the `--settings` block delega
+/// passes. A managed `permissions.allow` can grant what the mode does not, in
+/// `read`, `write` and `build`; in `build` a managed `sandbox` key can disable
+/// or loosen the sandbox delega passes. A source that exists and was not read
+/// completely may hold either, so it is named too; for the users' managed
+/// preferences that is conservative, since only the current user's file
+/// applies and which one that is goes unchecked. The managed MCP file holds
+/// no settings keys and is left out. `full` grants the built-in tools without
+/// a scope and asks for no sandbox, so nothing managed can widen it. Managed
+/// preferences locations delega could not check are added by
+/// [`unchecked_preferences`], which says why settings files are not.
+///
+/// Only fixed paths and key names from [`CLAUDE_KEYS`] are used, never a value.
+pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String> {
+    if mode == RunMode::Full {
+        return Vec::new();
+    }
+    let build = mode == RunMode::Build;
+    let could = if build {
+        "permissions.allow or sandbox keys"
+    } else {
+        "permissions.allow"
+    };
+    scan(Provider::Claude, system)
+        .into_iter()
+        .filter(|source| source.kind != ManagedSourceKind::McpFile)
+        .filter_map(|source| {
+            let keys: Vec<&str> = source
+                .keys
+                .iter()
+                .filter(|key| {
+                    key.name == "permissions.allow"
+                        || (build && key.category == ManagedKeyCategory::Sandbox)
+                })
+                .map(|key| key.name.as_str())
+                .collect();
+            let unread = match source.state {
+                ManagedSourceState::Read => None,
+                ManagedSourceState::PartlyRead => Some("was only partly read"),
+                ManagedSourceState::Unreadable => Some("could not be read or parsed"),
+                ManagedSourceState::NotInspected => {
+                    Some("is managed preferences, which delega does not open")
+                }
+            };
+            if source.kind == ManagedSourceKind::UserManagedPreferences {
+                // Only the current user's file applies, and which directory
+                // is the current user's is not looked into: no user is named,
+                // and the check may refuse on another user's file.
+                let what = if source.state == ManagedSourceState::NotInspected {
+                    format!(
+                        "holds a managed preferences file in a user's directory; only the \
+                         current user's applies and delega does not tell whose it is, so it \
+                         may set {could}"
+                    )
+                } else {
+                    format!(
+                        "could not be listed completely, so it may hold the current user's \
+                         managed preferences file, which may set {could}"
+                    )
+                };
+                return Some(format!(
+                    "the managed source {} {what}, and Claude Code applies managed settings \
+                     above the settings delega passes",
+                    source.path
+                ));
+            }
+            let what = match (keys.is_empty(), unread) {
+                (true, None) => return None,
+                (false, None) => format!("sets {}", keys.join(", ")),
+                (true, Some(why)) => format!("{why}, so it may set {could}"),
+                (false, Some(why)) => {
+                    format!(
+                        "sets {} and {why}, so it may set more {could}",
+                        keys.join(", ")
+                    )
+                }
+            };
+            Some(format!(
+                "the managed source {} {what}, and Claude Code applies managed settings above the \
+                 settings delega passes",
+                source.path
+            ))
+        })
+        .chain(unchecked_preferences(system, &Limits::default(), could))
+        .collect()
+}
+
+/// Whether an error says that nothing is at a path. Any other error, such as
+/// a denied permission, leaves open that something is there.
+fn is_absence(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// For the run check only: the managed preferences locations on macOS that
+/// delega could not check, one phrase per fixed path.
+///
+/// Settings files and drop-ins are not checked this way: [`scan`] counts a
+/// fixed location it cannot look up as absent, as doctor does. When that is a
+/// lasting permission denial, such as a directory that denies search, Claude
+/// Code, running as the same user and reading by path, cannot read it either.
+/// A lookup error that clears between planning and launch is not covered. A
+/// `.json` drop-in the scan listed but could not open or parse is not absent:
+/// it makes the drop-in source unreadable or partly read, which this check
+/// names. Managed preferences differ: macOS
+/// serves them to the process through the preferences system, so delega's
+/// file lookup is only a proxy for them. When looking up the system file,
+/// listing the directory, or looking up the file in a user's directory fails
+/// for a reason other than absence, managed preferences may widen the run.
+///
+/// The phrase names the system file or the directory, never a user's
+/// directory. It uses the same listing bound as the scan and the same
+/// injected-root check, which keeps the lookups of a stable test root inside
+/// it; like the scan's, it does not guard a path swapped for a link between
+/// the check and the lookup.
+fn unchecked_preferences(system: &SystemPaths, limits: &Limits, could: &str) -> Vec<String> {
+    const FILE: &str = "com.anthropic.claudecode.plist";
+    if system.platform != Platform::Macos {
+        return Vec::new();
+    }
+    let dir = system.join("/Library/Managed Preferences");
+    // Under a stable injected root, nothing outside it is looked at. A test
+    // seam: a link swapped in after this check would be followed.
+    if !system.inside(&dir) {
+        return Vec::new();
+    }
+    let unchecked = |error: std::io::Error| !is_absence(&error);
+    let mut what = Vec::new();
+    let whole = dir.join(FILE);
+    if std::fs::symlink_metadata(&whole)
+        .err()
+        .is_some_and(unchecked)
+    {
+        what.push(format!("the managed preferences file {}", whole.display()));
+    }
+    match std::fs::read_dir(&dir) {
+        Err(error) => {
+            if unchecked(error) {
+                what.push(format!(
+                    "the managed preferences directory {}",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(entries) => {
+            let user_unchecked = entries
+                .take(limits.directory_entries)
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|user| system.inside(user) && user.is_dir())
+                .any(|user| {
+                    std::fs::symlink_metadata(user.join(FILE))
+                        .err()
+                        .is_some_and(unchecked)
+                });
+            if user_unchecked {
+                what.push(format!("a user's directory in {}", dir.display()));
+            }
+        }
+    }
+    what.into_iter()
+        .map(|what| {
+            format!(
+                "delega could not check {what}, so managed preferences may set {could}, and \
+                 Claude Code applies managed settings above the settings delega passes"
+            )
+        })
+        .collect()
 }
 
 /// The managed sources of `provider` that exist under `system`, in a fixed

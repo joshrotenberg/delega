@@ -36,6 +36,7 @@ mod rules;
 mod sandbox;
 mod streams;
 mod strict;
+mod strict_managed;
 mod usage;
 
 /// A private working area per test: working directory, record directory, home
