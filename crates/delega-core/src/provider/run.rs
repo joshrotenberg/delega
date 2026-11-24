@@ -30,12 +30,11 @@ use super::{claude, codex, program};
 pub const NO_KEEPER_NOTE: &str = "cleanup ran without a keeper: a descendant that detaches \
      between listings, a fork relay, or a SIGKILL of the caller can leave a process running";
 
-/// The note a kept run on macOS carries: what its cleanup verdict covers there
-/// (see "What a macOS verdict covers" in [`crate::process`]).
-pub const MACOS_KEEPER_NOTE: &str = "cleanup on macOS covers the provider's process group, its \
-     session, descendants a listing tracked and processes that show the run marker: a descendant \
-     that left the session after its parent exited and does not show the marker, or a fast fork \
-     relay, can be missed when it holds no output pipe";
+/// The note a kept run on macOS carries: the scope of cleanup once a child
+/// started (see "What a macOS verdict covers" in [`crate::process`]).
+pub const MACOS_KEEPER_NOTE: &str = "on macOS, cleanup after a provider process starts finds \
+     its descendants through its process group, its session, earlier listings, the run marker \
+     and held output pipes; a descendant none of these reach can be missed";
 
 /// The cleanup note a run carries, if any, given whether it has a keeper and
 /// whether it runs on macOS.
