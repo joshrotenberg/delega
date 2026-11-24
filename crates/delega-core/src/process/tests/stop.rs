@@ -72,8 +72,7 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
     // With a long grace, only SIGTERM followed by SIGCONT stops it quickly.
     // On Linux a stopped process holds a TERM pending until it is continued,
     // so removing the SIGCONT makes this fail there. On macOS TERM ends a
-    // stopped process by itself, so this cannot fail there; the Linux run in
-    // the checklist in the module docs is what checks it.
+    // stopped process by itself. CI on ubuntu-latest checks the SIGCONT path.
     //
     // The leader is perl, so that it can wait for its child to have stopped
     // (`waitpid` with `WUNTRACED`), which `kill -STOP` returning does not say;
