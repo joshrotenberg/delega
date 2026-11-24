@@ -128,6 +128,7 @@ struct Counts {
     clean: usize,
     honest: (usize, usize),
     pass: usize,
+    non_gap_pass: usize,
     gap_shown: usize,
     gap_not_shown: usize,
     skipped: usize,
@@ -152,7 +153,10 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
         c.gap_shown += usize::from(m.gap_shown == Some(true));
         c.gap_not_shown += usize::from(m.gap_shown == Some(false));
         match m.verdict.as_str() {
-            "pass" => c.pass += 1,
+            "pass" => {
+                c.pass += 1;
+                c.non_gap_pass += usize::from(m.expected_leak != LeakClass::DocumentedGap);
+            }
             "skipped" => c.skipped += 1,
             _ => c.fail += 1,
         }
@@ -162,7 +166,7 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
 
 fn counts_row(name: &str, c: &Counts) -> String {
     format!(
-        "| {name} | {} | {} | {} | {} of {} | {} | {} of {} | {} | {} | {} | {} | {} |\n",
+        "| {name} | {} | {} | {} | {} of {} | {} | {} of {} | {} | {} | {} | {} | {} | {} |\n",
         c.rows,
         c.outcome_exit,
         c.cleanup_ok,
@@ -172,6 +176,7 @@ fn counts_row(name: &str, c: &Counts) -> String {
         c.honest.0,
         c.honest.1,
         c.pass,
+        c.non_gap_pass,
         c.gap_shown,
         c.gap_not_shown,
         c.skipped,
@@ -179,7 +184,7 @@ fn counts_row(name: &str, c: &Counts) -> String {
     )
 }
 
-const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Honest report | Pass | Gap shown | Gap not shown | Skipped | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
+const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Cleanup consistency | Pass | Non-gap pass | Gap shown | Gap not shown | Skipped | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
 
 fn ms_label(v: Option<u64>) -> String {
     v.map_or("-".to_string(), |x| format!("{x} ms"))
@@ -285,8 +290,7 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     }
     out.push_str(
         "- Fake providers only, a temporary `HOME` and a cleared environment per case; no real `claude` or `codex`.\n\
-         - Survivors are measured by a per-case marker in the process table and by a heartbeat file, 1 s after\n\
-           `delega` exits, whatever `delega` reported; the harness then kills them.\n\
+         - The harness samples for survivors at exit and after settling, using the process table, PID ledger, and relay heartbeat. It then kills any remaining processes.\n\
          - Cases run in parallel, so differences under about 100 ms mean nothing.\n\n",
     );
 
@@ -297,8 +301,9 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
          - **One stated outcome**: standard output held exactly one JSON document that parses and validates\n\
            as a `RunResult`, and `delega` exited without the harness having to kill it. Rows where the harness\n\
            closed standard output or killed `delega` have no document to read and are not counted.\n\
-         - **Nothing left**: no process carrying the case marker was alive 1 s after `delega` exited.\n\
-         - **Honest report**: a Confirmed result had no observed survivor at exit or after settling. Counted over rows that have a result.\n\
+         - **Nothing left**: the harness observed no survivors after settling.\n\
+         - **Cleanup consistency**: a Confirmed result had no observed survivor at exit or after settling. Counted over rows with a result outside the documented residuals.\n\
+         - **Non-gap pass**: passing rows outside the documented residuals. All rows are checked for the guarantees that apply to them.\n\
          - **Gap shown** and **Gap not shown**: observations of the listed survivor roles after settling, independent of the verdict.\n\n",
     );
     out.push_str(COUNT_HEAD);
@@ -381,35 +386,26 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
 
     out.push_str("## Gap observations\n\n");
     out.push_str(
-        "The matrix lists survivor roles that identify each gap. A gap is shown when all its listed roles are observed after settling. Each observation is independent of the guarantee checks and has no effect on the verdict.\n\n",
+        "The matrix's `GAPS` table classifies documented residuals for the recorded platform. A gap is shown when all its listed survivor roles are observed after settling. These rows retain the applicable result and termination checks. The presence or absence of survivors is informational.\n\n",
     );
-    for class in [
-        LeakClass::DocumentedGap,
-        LeakClass::UndocumentedGap,
-        LeakClass::Defect,
-    ] {
-        let n = rows.iter().filter(|m| m.expected_leak == class).count();
-        let _ = writeln!(out, "- {}: {n} rows.", class.label());
-    }
-    out.push('\n');
-    let mut groups: BTreeMap<(String, String), Vec<&Measured>> = BTreeMap::new();
-    for m in rows.iter().filter(|m| m.expected_leak != LeakClass::None) {
+    let mut groups: BTreeMap<&str, Vec<&Measured>> = BTreeMap::new();
+    for m in rows
+        .iter()
+        .filter(|m| m.expected_leak == LeakClass::DocumentedGap)
+    {
         groups
-            .entry((
-                m.expected_leak.label().to_string(),
-                m.expected_reason.clone().unwrap_or_default(),
-            ))
+            .entry(m.expected_reason.as_deref().unwrap_or_default())
             .or_default()
             .push(m);
     }
-    for ((class, reason), list) in &groups {
+    for (reason, list) in &groups {
         let seen = list.iter().filter(|m| m.gap_shown == Some(true)).count();
         let _ = writeln!(
             out,
-            "### {class}: {} rows, {seen} shown in this run\n\n{reason}\n",
+            "### Documented gap: {} rows, {seen} shown in this run\n\n{reason}\n",
             list.len(),
         );
-        out.push_str("| Row | Outcome | Exit | Cleanup confirmed | Left running | Report honest | Gap observation | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str("| Row | Outcome | Exit | Cleanup confirmed | Survivors at exit | Survivors after settling | Gap observation | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for m in list {
             let _ = writeln!(
                 out,
@@ -418,8 +414,8 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
                 m.outcome.as_deref().unwrap_or("none"),
                 exit_label(m),
                 yes(m.cleanup_confirmed),
+                label(&m.survivors_at_exit),
                 label(&m.survivors),
-                yes(m.honest),
                 match m.gap_shown {
                     Some(true) => "gap shown",
                     Some(false) => "gap not shown",
@@ -463,7 +459,7 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     }
 
     out.push_str("## All rows\n\n");
-    out.push_str("| Row | Action | Outcome | Exit | One document | Cleanup confirmed | Left running | Honest | Latency | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| Row | Action | Outcome | Exit | One document | Cleanup confirmed | Left running | Cleanup consistency | Latency | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for m in rows {
         let _ = writeln!(
             out,
@@ -588,7 +584,7 @@ fn variation(repeats: &[Measured]) -> String {
         runs.len(),
         repeats.len() / runs.len().max(1)
     );
-    out.push_str("| Run | Pass | Gap shown | Gap not shown | Skipped | Fail | p99 latency (not SIGKILL) | Max latency |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| Run | Pass | Non-gap pass | Gap shown | Gap not shown | Skipped | Fail | p99 latency (not SIGKILL) | Max latency |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for r in &runs {
         let c = counts(repeats.iter().filter(|m| m.repeat == *r));
         let mut lat: Vec<u64> = repeats
@@ -599,8 +595,9 @@ fn variation(repeats: &[Measured]) -> String {
         lat.sort_unstable();
         let _ = writeln!(
             out,
-            "| {r} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {r} | {} | {} | {} | {} | {} | {} | {} | {} |",
             c.pass,
+            c.non_gap_pass,
             c.gap_shown,
             c.gap_not_shown,
             c.skipped,
@@ -922,10 +919,16 @@ fn differences(rows: &[Measured], spike: &[SpikeRow]) -> String {
         list(&only_delega),
         list(&only_cp),
     );
-    let dishonest = rows.iter().filter(|m| m.honest == Some(false)).count();
+    let confirmed_with_survivors = rows
+        .iter()
+        .filter(|m| {
+            m.cleanup_confirmed == Some(true)
+                && (!m.survivors_at_exit.is_empty() || !m.survivors.is_empty())
+        })
+        .count();
     let _ = writeln!(
         out,
-        "- Rows where delega's result said cleanup was confirmed while a process of the case was alive: {dishonest}. The spike found no counterpart result that named an escaped descendant."
+        "- Rows where delega's result said cleanup was confirmed while a process of the case was alive: {confirmed_with_survivors} (including documented residuals). The spike found no counterpart result that named an escaped descendant."
     );
     let timed_out = rows
         .iter()

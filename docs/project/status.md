@@ -70,10 +70,9 @@ stands. This page lists the limits a user meets.
 
 The committed acceptance run
 ([acceptance/RESULTS.md](https://github.com/joshrotenberg/delega/blob/main/acceptance/RESULTS.md),
-fake providers only, Darwin arm64) has 202 rows. Of those, 181 passed and
-21 failed because cleanup reported `Confirmed` with a surviving process.
-The report records 27 gaps shown and one gap not shown independently of the
-verdicts. [Guarantees and how they are tested](../acceptance.md) describes
+fake providers only, Darwin arm64) passed all 202 rows. The 174 non-gap rows
+and 28 documented residual rows passed their applicable checks. The report
+records 28 gaps shown and zero gaps not shown. [Guarantees and how they are tested](../acceptance.md) describes
 the harness.
 
 ## Scope

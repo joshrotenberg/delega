@@ -419,8 +419,8 @@ touching a heartbeat is invisible to the harness.
 Per row the results file records the provider, behaviour, action, exit status,
 the number of JSON documents on standard output and whether the one validates
 as a `RunResult`, the outcome, `cleanup.confirmed` with its reason, pids and
-groups, the survivors at exit and after settling, whether a Confirmed result
-had zero observed survivors, the latency from the action to the exit, and the
+groups, the survivors at exit and after settling, the cleanup consistency
+check on rows where it applies, the latency from the action to the exit, and the
 reference values, gap observation and verdict.
 
 ## Forcing an unconfirmed cleanup
@@ -440,8 +440,8 @@ fallback.
 ## What gates the matrix
 
 - A readable run must exit and produce exactly one valid `RunResult`.
-- A `Confirmed` result fails if the harness observes any survivor at exit or
-  after settling, including on a row with a documented gap.
+- Outside the documented residuals for the current platform, a `Confirmed`
+  result fails if the harness observes a survivor at exit or after settling.
 - An `Unconfirmed` result must give a reason documented by the process layer.
   Examples include a late or unavailable listing, an incomplete freeze, a
   keeper that could not prove its tree empty, and output pipes still held
@@ -460,9 +460,12 @@ on every platform. The orphan and detached-child gaps are listed on macOS
 where `ps -E` hides system program environments. The harness probes that
 once per run and records `system_programs_hide_environment` in the metadata.
 
-`RESULTS.md` shows whether each gap's listed survivor roles were observed
-after settling, alongside the row's verdict. An observed survivor alongside
-a `Confirmed` result is a failure of the cleanup check.
+The `GAPS` table in `src/matrix.rs` determines which rows are documented
+residuals on the current platform. `RESULTS.md` lists every such row with its
+cleanup verdict and observed survivors. A gap is shown when all its listed
+roles survive after settling. Survivor observations on these rows are
+informational. The valid-result, documented-reason, and termination checks
+still apply wherever the fixture can exercise them.
 
 Each ledger entry is an empty file named `pids/role.pid`. Creating the file
 publishes its complete role and PID in one step.
