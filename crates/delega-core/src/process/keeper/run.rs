@@ -523,7 +523,13 @@ async fn finish(
         None
     };
     let reaped = tokio::task::spawn_blocking(move || {
-        consume_reap(pid, sys::reap_if_exited, Duration::from_secs(5))
+        consume_reap(
+            pid,
+            sys::reap_if_exited,
+            Duration::from_secs(5),
+            #[cfg(test)]
+            None,
+        )
     })
     .await
     .unwrap_or_else(|_| Err("the reap panicked".into()));
@@ -555,19 +561,37 @@ fn consume_reap(
     pid: i32,
     mut reap: impl FnMut(i32) -> bool,
     bound: Duration,
+    #[cfg(test)] elapsed: Option<&std::cell::Cell<Duration>>,
 ) -> Result<(), String> {
-    let until = std::time::Instant::now() + bound;
+    let began = std::time::Instant::now();
+    // The blocking loop uses a test-only elapsed clock to exercise its bound
+    // without sleeping or relying on a paused async runtime.
+    let now = || {
+        #[cfg(test)]
+        if let Some(elapsed) = elapsed {
+            return began + elapsed.get();
+        }
+        std::time::Instant::now()
+    };
+    let until = began + bound;
+    let interval = Duration::from_millis(10);
     loop {
         if reap(pid) {
             return Ok(());
         }
-        if std::time::Instant::now() >= until {
+        if now() >= until {
             return Err(format!(
                 "the program could not be reaped within {} s",
                 bound.as_secs()
             ));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        #[cfg(test)]
+        if let Some(elapsed) = elapsed {
+            assert!(elapsed.get() < bound, "the reap deadline did not fire");
+            elapsed.set(elapsed.get() + interval);
+            continue;
+        }
+        std::thread::sleep(interval);
     }
 }
 
@@ -846,7 +870,10 @@ mod tests {
 
     #[test]
     fn a_reap_that_never_succeeds_is_not_acknowledged() {
-        let result = consume_reap(1, |_| false, Duration::from_millis(30));
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let bound = Duration::from_millis(30);
+        let result = consume_reap(1, |_| false, bound, Some(&elapsed));
+        assert_eq!(elapsed.get(), bound);
         assert!(result.is_err());
         let reply = reap_reply(result.map(|()| Finished {
             live: 0,
@@ -867,6 +894,7 @@ mod tests {
                 tries == 3
             },
             Duration::from_secs(5),
+            None,
         );
         assert_eq!(result, Ok(()));
         assert_eq!(
