@@ -148,6 +148,16 @@ async fn finished_result(supervisor: &Supervisor, run: &str) -> crate::contract:
     *result
 }
 
+/// Assert an `Unconfirmed` reason is one delega-core documents.
+fn assert_documented(cleanup: &Cleanup) {
+    if let Cleanup::Unconfirmed { reason, .. } = cleanup {
+        assert!(
+            crate::cleanup_reason::is_documented(reason),
+            "an Unconfirmed reason delega-core does not document: {reason}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_panic_in_one_runs_task_fails_that_run_and_leaves_the_rest_working() {
     let dir = Dir::new();
@@ -168,6 +178,7 @@ async fn a_panic_in_one_runs_task_fails_that_run_and_leaves_the_rest_working() {
     assert_eq!(error.kind, "internal_error");
     assert!(error.message.contains("panicked"), "{error:?}");
     assert!(matches!(result.cleanup, Cleanup::Unconfirmed { .. }));
+    assert_documented(&result.cleanup);
 
     // The bystander runs on, and the supervisor still answers and starts runs.
     let still = supervisor
@@ -384,6 +395,7 @@ async fn an_unconfirmed_run_stays_recorded_after_a_refused_follow_up_replaced_it
         .expect("start");
     let crashed = finished_result(&supervisor, &started.run).await;
     assert!(matches!(crashed.cleanup, Cleanup::Unconfirmed { .. }));
+    assert_documented(&crashed.cleanup);
     let worker = started.worker.expect("worker");
 
     // The crashed run left no session, so the follow-up is refused at dispatch

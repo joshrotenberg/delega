@@ -336,6 +336,12 @@ impl Rig {
 /// [`Rig::assert_nothing_left`].
 pub(crate) fn assert_honest_cleanup(cleanup: &delega_core::contract::result::Cleanup) {
     use delega_core::contract::result::Cleanup;
+    if let Cleanup::Unconfirmed { reason, .. } = cleanup {
+        assert!(
+            delega_core::cleanup_reason::is_documented(reason),
+            "an Unconfirmed reason delega-core does not document: {reason}"
+        );
+    }
     match cleanup {
         Cleanup::Confirmed => {}
         Cleanup::Unconfirmed { reason, .. } => assert!(

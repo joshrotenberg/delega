@@ -21,6 +21,7 @@ use std::io::Read;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use super::tree::{InspectError, ProcessRow};
+use crate::cleanup_reason::ListingFailure;
 
 /// The variable that carries the marker.
 pub const MARKER_ENV: &str = "DELEGA_RUN_MARKER";
@@ -155,7 +156,7 @@ pub(crate) async fn marked(
             .collect()
     })
     .await
-    .map_err(|_| InspectError::Failed("the marker reader panicked".into()))
+    .map_err(|_| InspectError::Failed(ListingFailure::MarkerReaderPanicked.text().into()))
 }
 
 /// Every live process of this user that carries `token`, from one run of
@@ -167,7 +168,7 @@ pub(crate) async fn marked(
 ) -> Result<Vec<MarkedRow>, InspectError> {
     if std::env::var_os(super::tree::NO_LISTING_ENV).is_some() {
         return Err(InspectError::Unavailable(
-            "process listing is switched off".into(),
+            ListingFailure::SwitchedOff.text().into(),
         ));
     }
     let uid = rustix::process::getuid().as_raw().to_string();
@@ -204,7 +205,7 @@ pub(crate) fn parse_marked(
         })();
         let Some((pid, state, started)) = parsed else {
             return Err(InspectError::Failed(
-                "the marker listing had a line that could not be parsed".into(),
+                ListingFailure::MarkerUnparsed.text().into(),
             ));
         };
         if u32::try_from(pid).is_ok_and(|p| p == own_pid) {
@@ -227,12 +228,12 @@ pub(crate) fn parse_marked(
     }
     if lines == 0 {
         return Err(InspectError::Failed(
-            "the marker listing held no rows".into(),
+            ListingFailure::MarkerNoRows.text().into(),
         ));
     }
     if !seen_own {
         return Err(InspectError::Failed(
-            "the marker listing does not contain this process".into(),
+            ListingFailure::MarkerOwnMissing.text().into(),
         ));
     }
     #[cfg(test)]

@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::cleanup_reason::{self, GroupCheck, MAX_MERGED_REPORTS, StopDetail};
 use crate::contract::result::Cleanup;
 
 use super::keeper::{KeeperLink, LaunchSpec, LinkHandle, StartError};
@@ -461,12 +462,6 @@ impl Shared {
     }
 }
 
-/// The reason of an `Unconfirmed` verdict whose only cause is that the listing
-/// taken before the first signal did not complete in time. Exported so that
-/// tests of the binary can recognise exactly this verdict.
-///
-/// Public only so that the tests of the binary and of the acceptance harness
-/// can name the verdict; it is not part of the supported API.
 /// The reason of an `Unconfirmed` verdict when the keeper ended before it
 /// reaped the program.
 pub const KEEPER_LOST_REASON: &str = "the keeper ended before the program was reaped, so the \
@@ -526,6 +521,12 @@ pub const FINAL_CENSUS_UNPROVEN_REASON: &str = "the keeper's final census at the
 pub const NO_SUBREAPER_REASON: &str = "the keeper could not become a child subreaper, so a \
      descendant whose parent exited could have left its tree unseen";
 
+/// The reason of an `Unconfirmed` verdict whose only cause is that the listing
+/// taken before the first signal did not complete in time. Exported so that
+/// tests of the binary can recognise exactly this verdict.
+///
+/// Public only so that the tests of the binary and of the acceptance harness
+/// can name the verdict; it is not part of the supported API.
 #[doc(hidden)]
 pub const LATE_LISTING_REASON: &str = "the process listing taken before the first signal did not \
      complete, so a descendant that left the session when its parent was stopped could not be \
@@ -533,11 +534,11 @@ pub const LATE_LISTING_REASON: &str = "the process listing taken before the firs
 
 /// Whether a verdict is `Unconfirmed` for the late listing and for nothing
 /// else: no pids and no process groups, and a reason that is
-/// [`LATE_LISTING_REASON`] once, or that text repeated any number of times
-/// joined by `"; "` (each report of a provider run that missed its listing,
-/// which `merge_cleanup` joins that way: the version probe, MCP discovery and
-/// the run itself). Any other text, such as a failed stop, or any pid, is not
-/// this verdict.
+/// [`LATE_LISTING_REASON`] once, or that text repeated up to three times
+/// (`cleanup_reason::MAX_MERGED_REPORTS`) joined by `"; "` (each report of a
+/// provider run that missed its listing, which `merge_cleanup` joins that way:
+/// the version probe, MCP discovery and the run itself). Any other text, such
+/// as a failed stop, more repeats, or any pid, is not this verdict.
 ///
 /// Public only so that the tests of the binary and of the acceptance harness
 /// can recognise the verdict; it is not part of the supported API.
@@ -554,11 +555,12 @@ pub fn is_late_listing_only(cleanup: &Cleanup) -> bool {
     pids.is_empty() && process_groups.is_empty() && only_late_listing_reasons(reason)
 }
 
-/// Whether `reason` is [`LATE_LISTING_REASON`] one or more times, joined by
-/// `"; "`. The reason itself contains `"; "`, so it is matched by prefix.
+/// Whether `reason` is [`LATE_LISTING_REASON`] one to
+/// [`MAX_MERGED_REPORTS`] times, joined by `"; "`. The reason itself contains
+/// `"; "`, so it is matched by prefix.
 fn only_late_listing_reasons(reason: &str) -> bool {
     let mut rest = reason;
-    loop {
+    for _ in 0..MAX_MERGED_REPORTS {
         let Some(after) = rest.strip_prefix(LATE_LISTING_REASON) else {
             return false;
         };
@@ -570,6 +572,7 @@ fn only_late_listing_reasons(reason: &str) -> bool {
             None => return false,
         }
     }
+    false
 }
 
 /// What the verdict needs to know about refusals and the keeper's proof.
@@ -1131,10 +1134,7 @@ impl OwnedProcess {
                 } else if let Some(reason) = refusal {
                     unconfirmed(reason)
                 } else if self.reap_leftover > 0 {
-                    unconfirmed(&format!(
-                        "{} {}",
-                        self.reap_leftover, TREE_LEFT_AT_REAP_REASON
-                    ))
+                    unconfirmed(&cleanup_reason::tree_left_at_reap(self.reap_leftover))
                 } else if cfg!(target_os = "linux")
                     && shared.keeper.as_ref().is_some_and(|k| !k.subreaper())
                 {
@@ -1165,7 +1165,8 @@ impl OwnedProcess {
                     // still ours.
                     Err("the child had not exited when cleanup gave up".into())
                 };
-                let cleanup = shared.unconfirmed(leader_gone, deadline_text(first_term, deadline));
+                let cleanup =
+                    shared.unconfirmed(leader_gone, deadline.saturating_duration_since(first_term));
                 Settled { exit, cleanup }
             }
             Ended::InspectionUnavailable(error) => {
@@ -1222,10 +1223,10 @@ impl OwnedProcess {
                 tokio::time::sleep(EXIT_POLL_INTERVAL).await;
             }
             let checked = match sys::probe_group(shared.pid) {
-                sys::GroupProbe::Empty => "no process has the child's group id".to_string(),
+                sys::GroupProbe::Empty => GroupCheck::Empty,
                 sys::GroupProbe::Present => {
                     groups.push(pid);
-                    "a process may still have the child's group id".to_string()
+                    GroupCheck::Present
                 }
             };
             (exit, checked)
@@ -1234,27 +1235,18 @@ impl OwnedProcess {
             groups.push(pid);
             (
                 Err("the child had not exited after the final kill".into()),
-                "the child had not exited".to_string(),
+                GroupCheck::LeaderAlive,
             )
         };
         pids.sort_unstable();
         pids.dedup();
-        let tracked_note = if pids.is_empty() {
-            String::new()
-        } else {
-            " Descendants seen at the latest scan are listed because they cannot be checked."
-                .to_string()
-        };
+        let listed = !pids.is_empty();
         Settled {
             exit,
             cleanup: Cleanup::Unconfirmed {
                 pids,
                 process_groups: groups,
-                reason: format!(
-                    "process inspection was unavailable ({error}); only the child's process \
-                     group was checked with kill(-pgid, 0): {checked}. Descendants outside \
-                     the group and session could not be checked.{tracked_note}"
-                ),
+                reason: cleanup_reason::inspection_unavailable(&error, checked, listed),
             },
         }
     }
@@ -1287,13 +1279,6 @@ impl OwnedProcess {
     }
 }
 
-fn deadline_text(first_term: Instant, deadline: Instant) -> String {
-    format!(
-        "{:.1} s",
-        deadline.saturating_duration_since(first_term).as_secs_f64()
-    )
-}
-
 /// How the settle loop ended.
 enum Ended {
     Clean,
@@ -1303,7 +1288,7 @@ enum Ended {
 
 impl Shared {
     /// The verdict when cleanup could not be confirmed, from the last view.
-    fn unconfirmed(&self, leader_gone: bool, waited: String) -> Cleanup {
+    fn unconfirmed(&self, leader_gone: bool, waited: Duration) -> Cleanup {
         let view = lock(&self.last_view).clone();
         let mut pids: Vec<u32> = Vec::new();
         let mut groups: Vec<u32> = Vec::new();
@@ -1314,24 +1299,24 @@ impl Shared {
                 if !view.group.is_empty() {
                     groups.push(pid);
                 }
-                if !view.group.is_empty() {
-                    "the child's process group still had live members".to_string()
+                Ok(if !view.group.is_empty() {
+                    StopDetail::GroupLive
                 } else if !view.session.is_empty() {
-                    "processes in the child's session were still running".to_string()
+                    StopDetail::SessionRunning
                 } else if !view.tracked.is_empty() {
-                    "tracked descendants were still running".to_string()
+                    StopDetail::TrackedRunning
                 } else {
-                    "the child had not exited or the sweeps were not yet clean".to_string()
-                }
+                    StopDetail::NotClean
+                })
             }
             Some(Err(error)) => {
                 // A failed listing proves nothing, so the group stays listed.
                 groups.push(pid);
-                format!("process inspection failed: {error}")
+                Err(error)
             }
             None => {
                 groups.push(pid);
-                "no process inspection completed".to_string()
+                Ok(StopDetail::NoInspection)
             }
         };
         if !leader_gone {
@@ -1345,7 +1330,10 @@ impl Shared {
         Cleanup::Unconfirmed {
             pids,
             process_groups: groups,
-            reason: format!("stopping was not confirmed within {waited}: {detail}"),
+            reason: cleanup_reason::stopping_unconfirmed(
+                waited,
+                detail.as_ref().copied().map_err(String::as_str),
+            ),
         }
     }
 }

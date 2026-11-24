@@ -530,7 +530,7 @@ fn listing_was_late(out: &Output) -> bool {
         return is_late_listing_only(&result.cleanup);
     }
     // Text mode prints the reason with no pids and no process groups; the
-    // reason may be the late listing any number of times, as in the document.
+    // reason may be the late listing up to three times, as in the document.
     text(&out.stderr).lines().any(|l| {
         l.strip_prefix("delega run: cleanup not confirmed: ")
             .and_then(|rest| rest.strip_suffix(" (pids [], process groups [])"))

@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::cleanup_reason::RunLost;
 use crate::contract::request::Request;
 use crate::provider::{self, ProviderOptions, RunHandle};
 
@@ -56,13 +57,10 @@ pub(super) async fn drive(
 pub(super) async fn watch(join: JoinHandle<()>, tx: UnboundedSender<Command>, run: String) {
     if let Err(error) = join.await {
         let reason = if error.is_panic() {
-            "the task that follows the run panicked"
+            RunLost::FollowerPanicked
         } else {
-            "the task that follows the run was cancelled"
+            RunLost::FollowerCancelled
         };
-        let _ = tx.send(Command::Crashed {
-            run,
-            reason: reason.to_string(),
-        });
+        let _ = tx.send(Command::Crashed { run, reason });
     }
 }

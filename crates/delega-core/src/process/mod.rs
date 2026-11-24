@@ -650,4 +650,6 @@ pub use run::{KEEPER_UNANSWERED_REASON, PIPE_WARNING};
 pub use spawn::{SpawnGuard, spawn_guard};
 pub use spec::{CaptureSpec, EnvPolicy, Keep, OutputTap, ProcessSpec};
 pub use timestamp::rfc3339_utc;
+#[cfg(test)]
+pub(crate) use tree::not_started;
 pub use tree::{InspectionStats, check_inspection};

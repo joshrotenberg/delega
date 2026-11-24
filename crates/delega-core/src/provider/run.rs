@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::cleanup_reason::{self, RunLost};
 use crate::contract::request::{Provider, Request, Session};
 use crate::contract::result::{Cleanup, ErrorDetail, RunResult};
 use crate::process::{CaptureSpec, Ending, Keep, ProcessHandle, ProcessReport, ProcessSpec};
@@ -99,7 +100,7 @@ impl RunHandle {
             return *result;
         }
         let Some(join) = self.join.as_mut() else {
-            return self.abnormal("the result was already taken");
+            return self.abnormal(RunLost::ResultTaken);
         };
         let joined = join.await;
         self.join = None;
@@ -107,23 +108,20 @@ impl RunHandle {
             Ok(result) => result,
             Err(error) => {
                 let why = if error.is_panic() {
-                    "the run task panicked"
+                    RunLost::TaskPanicked
                 } else {
-                    "the runtime shut down before the run finished"
+                    RunLost::RuntimeShutDown
                 };
                 self.abnormal(why)
             }
         }
     }
 
-    fn abnormal(&self, why: &str) -> RunResult {
+    fn abnormal(&self, why: RunLost) -> RunResult {
         let cleanup = Cleanup::Unconfirmed {
             pids: Vec::new(),
             process_groups: Vec::new(),
-            reason: format!(
-                "{why}; the provider process, if one started, was sent an interrupt but nothing \
-                 confirmed it stopped"
-            ),
+            reason: cleanup_reason::run_lost(why),
         };
         let timing = self.facts.timing_unstarted(SystemTime::now());
         let ctx = self.facts.run_context(cleanup, timing, Vec::new());
@@ -131,7 +129,7 @@ impl RunHandle {
             ctx,
             ErrorDetail {
                 kind: "internal_error".to_string(),
-                message: why.to_string(),
+                message: why.text().to_string(),
                 provider_exit_code: None,
             },
             "",
