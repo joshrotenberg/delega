@@ -138,11 +138,6 @@ where
             // A handler that stopped delivering leaves only the first branch.
             Some(()) = signals.next() => {
                 log.line("delega run: signal received while writing the result; exiting");
-                // Requested here as well as in `stop_writing`, so a test seam
-                // can say the request was made before the wait for the print
-                // thread begins.
-                stop.request();
-                crate::commands::ack::acknowledge(crate::commands::ack::Ack::ResultStopRequested);
                 stop_writing(receiver, &stop, &printed).await
             }
         };
@@ -166,6 +161,7 @@ async fn stop_writing(
     printed: &OnceLock<ExitCode>,
 ) -> Option<ExitCode> {
     stop.request();
+    crate::commands::ack::acknowledge(crate::commands::ack::Ack::ResultStopRequested);
     match tokio::time::timeout(PRINT_STOP_WAIT, receiver).await {
         Ok(Ok(code)) => Some(code),
         _ => printed.get().copied(),

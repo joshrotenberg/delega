@@ -16,8 +16,9 @@ pub enum Ack {
     /// The result writer of `delega run` found standard output not writable
     /// (a full pipe) and is waiting for a reader.
     ResultBlocked,
-    /// A signal arrived while `delega run` was writing its result, and the
-    /// write was asked to stop.
+    /// `delega run` asked its result write to stop, after a signal or at the
+    /// write deadline, and is waiting for the print thread to say how the
+    /// write ended.
     ResultStopRequested,
     /// The standard error writer found standard error not writable (a full
     /// pipe) and is about to block writing a line to it.
