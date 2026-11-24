@@ -5,8 +5,8 @@
 # The caller (the harness) copies the fakes and this file into one directory
 # whose name is unique to a case. Every process this file starts runs a script
 # from that directory, so the directory name is in its command line and the
-# harness finds it there, whatever delega reported. Each process also appends
-# `role pid` to `pids` in the directory.
+# harness finds it there, whatever delega reported. Each process also publishes
+# an empty `pids/role.pid` file in the directory.
 #
 # The fake that sources this file defines `init`, `acc_success` (the stream a
 # successful run ends with) and `acc_chatter` (one line of ordinary output).
@@ -44,7 +44,7 @@
 
 ACC_DIR=$(dirname "$0")
 
-acc_record() { printf '%s %s\n' "$1" "$2" >> "$ACC_DIR/pids"; }
+acc_record() { : > "$ACC_DIR/pids/$1.$2"; }
 
 # The stream's opening lines, then a `ready` file: after it the provider has
 # written to its standard output, so a caller that ends the reader (SIGKILL of
@@ -68,12 +68,11 @@ acc_start_variant() {
     orphan-late) acc_spawn sh "$ACC_DIR/acc-child.sh" orphan-late </dev/null >/dev/null 2>&1 ;;
     relay) acc_spawn sh "$ACC_DIR/acc-child.sh" relay </dev/null >/dev/null 2>&1 ;;
     bare)
-      # The path of the marker file travels in the environment, not in the
-      # command line, so the process carries no case directory name before or
-      # after it becomes `sleep 300`. It writes the file once it has left the
-      # session, which is the moment the variant is about.
-      ACC_DETACHED="$ACC_DIR/detached" perl -MPOSIX -e 'POSIX::setsid(); $SIG{INT}="DEFAULT"; open(F, ">", $ENV{ACC_DETACHED}); close(F); exec @ARGV' sleep 300 </dev/null >/dev/null 2>&1 &
-      acc_record bare $!
+      # Register before exec removes the case directory from the command line.
+      perl -MPOSIX -e 'my $dir = shift; POSIX::setsid(); $SIG{INT}="DEFAULT";
+        open(my $pid, ">", "$dir/pids/bare.$$") or die $!; close($pid);
+        open(my $ready, ">", "$dir/detached") or die $!; close($ready);
+        exec @ARGV' "$ACC_DIR/" sleep 300 </dev/null >/dev/null 2>&1 &
       ;;
   esac
 }
@@ -88,9 +87,9 @@ acc_wait_ready() {
   acc_n=0
   while [ $acc_n -lt 1200 ]; do
     case "$1" in
-      child | pipe) grep -q '^child ' "$ACC_DIR/pids" 2>/dev/null && return ;;
-      ignore) grep -q '^child-ignore ' "$ACC_DIR/pids" 2>/dev/null && return ;;
-      setsid | orphan-late) grep -q '^leaf-setsid ' "$ACC_DIR/pids" 2>/dev/null && return ;;
+      child | pipe) acc_pid_for child >/dev/null && return ;;
+      ignore) acc_pid_for child-ignore >/dev/null && return ;;
+      setsid | orphan-late) acc_pid_for leaf-setsid >/dev/null && return ;;
       orphan) acc_orphaned && return ;;
       relay) [ -e "$ACC_DIR/beat" ] && return ;;
       bare) [ -e "$ACC_DIR/detached" ] && return ;;
@@ -101,14 +100,20 @@ acc_wait_ready() {
   done
 }
 
+# Claude's fake disables globbing. Enable it only inside this lookup.
+acc_pid_for() (
+  set +f
+  set -- "$ACC_DIR/pids/$1".*
+  [ -f "$1" ] && printf '%s\n' "${1##*.}"
+)
+
 # Whether the `orphan` variant's grandchild has started its own session and its
 # parent, the short-lived `mid`, is no longer its parent. Only then is the
 # situation the gap describes in place: a descendant in a session of its own
 # whose parent is gone, which no listing can tie to the worker.
 acc_orphaned() {
-  acc_leaf=$(sed -n 's/^leaf-setsid //p' "$ACC_DIR/pids" 2>/dev/null | head -n 1)
-  [ -n "$acc_leaf" ] || return 1
-  acc_mid=$(sed -n 's/^mid //p' "$ACC_DIR/pids" 2>/dev/null | head -n 1)
+  acc_leaf=$(acc_pid_for leaf-setsid) || return 1
+  acc_mid=$(acc_pid_for mid) || return 1
   acc_parent=$(ps -o ppid= -p "$acc_leaf" 2>/dev/null | tr -d ' ')
   [ "$acc_parent" != "$acc_mid" ]
 }
@@ -159,8 +164,8 @@ acc_run() {
   # early listings (spawn, 50, 100 and 200 ms; CAPTURE_RAMP) is often seen:
   # - bare, with success: the detached child must start and the provider
   #   finish between two listings. A fixed delay ran past the first periodic
-  #   listing on a slow CI runner and the row closed its gap in all three
-  #   repeats (#112), so it starts right after one of delega's listings, best
+  #   listing on a slow CI runner (#112), so it starts right after one of
+  #   delega's listings, best
   #   effort. The case has no time limit of its own (delega's default is 600 s
   #   and the harness allows 30 s), so a wait of a few seconds is harmless.
   # - orphan: the grandchild must not be seen before its setsid or beside its

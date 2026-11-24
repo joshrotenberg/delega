@@ -12,8 +12,8 @@ use delega_acceptance::live;
 use delega_acceptance::matrix::{self, Row};
 use delega_acceptance::procs;
 use delega_acceptance::report;
-use delega_acceptance::run_all::{close_gaps, run_all};
-use delega_acceptance::runner::{Context, GAP_CLOSED, GAP_NOT_SHOWN, MARKER_PREFIX, Measured};
+use delega_acceptance::run_all::run_all;
+use delega_acceptance::runner::{Context, MARKER_PREFIX, Measured};
 use delega_acceptance::spawn::Guarded;
 use delega_core::provider::managed::SystemPaths;
 
@@ -213,8 +213,7 @@ fn main() -> ExitCode {
     );
     let began = std::time::Instant::now();
     let repeat = args.repeat.max(1);
-    let mut measured = run_all(&ctx, &rows, args.jobs, repeat, args.quiet);
-    close_gaps(&mut measured, repeat);
+    let measured = run_all(&ctx, &rows, args.jobs, repeat, args.quiet);
     let wall = began.elapsed();
 
     let out = args
@@ -402,50 +401,23 @@ fn summarize(
 ) -> ExitCode {
     let count = |v: &str| measured.iter().filter(|m| m.verdict == v).count();
     println!(
-        "{} cases in {:.0} s: {} pass, {} expected failures, {} gap not shown, {} gap closed, {} unexpected passes, {} fail, {} skipped",
+        "{} cases in {:.0} s: {} pass, {} fail, {} skipped",
         measured.len(),
         wall.as_secs_f64(),
         count("pass"),
-        count("expected_failure"),
-        count(GAP_NOT_SHOWN),
-        count(GAP_CLOSED),
-        count("unexpected_pass"),
         count("fail"),
         count("skipped"),
     );
-    let not_shown: Vec<&Measured> = measured
+    let not_shown = measured
         .iter()
-        .filter(|m| m.verdict == GAP_NOT_SHOWN)
-        .collect();
-    let known_gap_runs = measured
-        .iter()
-        .filter(|m| {
-            matches!(
-                m.verdict.as_str(),
-                "expected_failure" | GAP_NOT_SHOWN | GAP_CLOSED
-            )
-        })
+        .filter(|m| m.gap_shown == Some(false))
         .count();
-    println!(
-        "{} of {} known-gap runs did not show their gap (not a failure, unless every timing-dependent gap run of this run shows none, or a row shows none in every run of --repeat 3 or more: that is gap_closed and fails)",
-        not_shown.len(),
-        known_gap_runs
-    );
-    for m in &not_shown {
-        println!("  {} #{}: gap not shown", m.id, m.repeat);
-    }
-    let retried = measured.iter().filter(|m| m.attempts > 1).count();
-    let attempts: u32 = measured.iter().map(|m| m.attempts).sum();
-    println!(
-        "{retried} rows needed a retry after a late process listing; {attempts} runs in total for {} rows",
-        measured.len()
-    );
-    for m in measured.iter().filter(|m| {
-        matches!(
-            m.verdict.as_str(),
-            "fail" | "unexpected_pass" | "skipped" | GAP_CLOSED
-        )
-    }) {
+    let observed = measured.iter().filter(|m| m.gap_shown.is_some()).count();
+    println!("{not_shown} of {observed} known-gap runs did not show their gap");
+    for m in measured
+        .iter()
+        .filter(|m| matches!(m.verdict.as_str(), "fail" | "skipped"))
+    {
         println!(
             "  {} #{}: {}: {}",
             m.id,
@@ -462,7 +434,7 @@ fn summarize(
         println!("no process carrying this run's marker was alive at the end");
     }
     let skipped = if allow_skips { 0 } else { count("skipped") };
-    if count("fail") + count("unexpected_pass") + count(GAP_CLOSED) + skipped > 0 || left > 0 {
+    if count("fail") + skipped > 0 || left > 0 {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

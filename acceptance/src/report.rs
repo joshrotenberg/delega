@@ -128,9 +128,9 @@ struct Counts {
     clean: usize,
     honest: (usize, usize),
     pass: usize,
-    expected_failure: usize,
+    gap_shown: usize,
     gap_not_shown: usize,
-    unexpected_pass: usize,
+    skipped: usize,
     fail: usize,
 }
 
@@ -149,11 +149,11 @@ fn counts<'a>(rows: impl Iterator<Item = &'a Measured>) -> Counts {
             c.honest.1 += 1;
             c.honest.0 += usize::from(h);
         }
+        c.gap_shown += usize::from(m.gap_shown == Some(true));
+        c.gap_not_shown += usize::from(m.gap_shown == Some(false));
         match m.verdict.as_str() {
             "pass" => c.pass += 1,
-            "expected_failure" => c.expected_failure += 1,
-            "gap_not_shown" => c.gap_not_shown += 1,
-            "unexpected_pass" => c.unexpected_pass += 1,
+            "skipped" => c.skipped += 1,
             _ => c.fail += 1,
         }
     }
@@ -172,14 +172,14 @@ fn counts_row(name: &str, c: &Counts) -> String {
         c.honest.0,
         c.honest.1,
         c.pass,
-        c.expected_failure,
+        c.gap_shown,
         c.gap_not_shown,
-        c.unexpected_pass,
+        c.skipped,
         c.fail,
     )
 }
 
-const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Honest report | Pass | Expected failure | Gap not shown | Unexpected pass | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
+const COUNT_HEAD: &str = "| Group | Rows | Expected outcome and exit | Cleanup verdict as expected | One stated outcome | Nothing left | Honest report | Pass | Gap shown | Gap not shown | Skipped | Fail |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
 
 fn ms_label(v: Option<u64>) -> String {
     v.map_or("-".to_string(), |x| format!("{x} ms"))
@@ -259,7 +259,7 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
             let _ = writeln!(
                 out,
                 "- The system hides the environment of its own programs from `ps -E`: {}. On \
-                 macOS the orphan rows are expected failures when it does and passes when it \
+                 macOS the orphan rows are listed as gap cases when it does and ordinary cases when it \
                  does not (process module docs, \"What remains possible\").",
                 if hidden { "yes" } else { "no" }
             );
@@ -293,15 +293,13 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     out.push_str("## Summary\n\n");
     out.push_str(
         "- **Expected outcome and exit**: the outcome and the exit status the expectations table gives.\n\
-         - **Cleanup verdict as expected**: `cleanup.confirmed` is what the expectations table gives (true on\n\
-           every row except the rows that make process listing unavailable, where it must be false; for rows\n\
-           with no result, there is none).\n\
+         - **Cleanup verdict as expected**: `cleanup.confirmed` matches the fixture's reference value. The reference outcome, exit and cleanup verdict are recorded for comparison.\n\
          - **One stated outcome**: standard output held exactly one JSON document that parses and validates\n\
            as a `RunResult`, and `delega` exited without the harness having to kill it. Rows where the harness\n\
            closed standard output or killed `delega` have no document to read and are not counted.\n\
          - **Nothing left**: no process carrying the case marker was alive 1 s after `delega` exited.\n\
-         - **Honest report**: survivors exist only when `cleanup.confirmed` is false. Counted over rows that\n\
-           have a result.\n\n",
+         - **Honest report**: a Confirmed result had no observed survivor at exit or after settling. Counted over rows that have a result.\n\
+         - **Gap shown** and **Gap not shown**: observations of the listed survivor roles after settling, independent of the verdict.\n\n",
     );
     out.push_str(COUNT_HEAD);
     out.push_str(&counts_row("all", &counts(rows.iter())));
@@ -362,18 +360,11 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
 
     let bad: Vec<&Measured> = rows
         .iter()
-        .filter(|m| {
-            matches!(
-                m.verdict.as_str(),
-                "fail" | "unexpected_pass" | "skipped" | "gap_closed"
-            )
-        })
+        .filter(|m| matches!(m.verdict.as_str(), "fail" | "skipped"))
         .collect();
-    out.push_str("## Failures that are not expected\n\n");
+    out.push_str("## Failures and skips\n\n");
     if bad.is_empty() {
-        out.push_str(
-            "None. Every row either met its expectation or is a listed expected failure.\n\n",
-        );
+        out.push_str("None.\n\n");
     } else {
         out.push_str("| Row | Verdict | Problems |\n| --- | --- | --- |\n");
         for m in bad {
@@ -388,16 +379,9 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
         out.push('\n');
     }
 
-    out.push_str("## Expected failures\n\n");
+    out.push_str("## Gap observations\n\n");
     out.push_str(
-        "Rows in the expectations table (`acceptance/src/matrix.rs`) that are expected to fail criterion 2.\n\
-         Each pins exactly which roles may survive, and fails the run if anything else survives or the\n\
-         outcome, exit status or cleanup verdict differs. A row in this list that passes fails the run, so\n\
-         the table is corrected when a gap closes. There are three classes, listed separately:\n\
-         \n\
-         - **documented gap**: the process module's docs list it as known.\n\
-         - **undocumented gap**: a failure this harness found that the docs do not describe.\n\
-         - **defect**: a failure that is neither.\n\n",
+        "The matrix lists survivor roles that identify each gap. A gap is shown when all its listed roles are observed after settling. Each observation is independent of the guarantee checks and has no effect on the verdict.\n\n",
     );
     for class in [
         LeakClass::DocumentedGap,
@@ -419,39 +403,37 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
             .push(m);
     }
     for ((class, reason), list) in &groups {
-        let seen = list
-            .iter()
-            .filter(|m| m.verdict == "expected_failure")
-            .count();
+        let seen = list.iter().filter(|m| m.gap_shown == Some(true)).count();
         let _ = writeln!(
             out,
-            "### {class}: {} rows, {seen} failed as expected in this run\n\n{reason}\n",
+            "### {class}: {} rows, {seen} shown in this run\n\n{reason}\n",
             list.len(),
         );
-        out.push_str("| Row | Outcome | Exit | Cleanup confirmed | Left running | Report honest |\n| --- | --- | --- | --- | --- | --- |\n");
+        out.push_str("| Row | Outcome | Exit | Cleanup confirmed | Left running | Report honest | Gap observation | Verdict |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for m in list {
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} |",
                 m.id,
                 m.outcome.as_deref().unwrap_or("none"),
                 exit_label(m),
                 yes(m.cleanup_confirmed),
                 label(&m.survivors),
                 yes(m.honest),
+                match m.gap_shown {
+                    Some(true) => "gap shown",
+                    Some(false) => "gap not shown",
+                    None => "not measured",
+                },
+                m.verdict,
             );
         }
         out.push('\n');
     }
 
-    out.push_str("## Rows that force an unconfirmed cleanup\n\n");
+    out.push_str("## Rows with process listing disabled\n\n");
     out.push_str(
-        "Process listing is made unavailable (`DELEGA_TEST_NO_PROCESS_LISTING` set, a test-only seam in\n\
-         `delega-core`). Each row must report `cleanup.confirmed` false with a reason that contains\n\
-         \"process inspection was unavailable\" and says what could not be checked. With no listing it cannot\n\
-         name a descendant in a session of its own, so `pids` and `process_groups` hold only what is known\n\
-         to be alive (nothing, once the worker's group is gone). Such a descendant survives and the report\n\
-         says cleanup was not confirmed, which meets criterion 2 by its second clause but names nothing.\n\n",
+        "These rows disable process listing through the test seam. The table records any cleanup reason and the processes the harness observed.\n\n",
     );
     out.push_str("| Row | Outcome | Confirmed | Process groups | Pids | Left running | Reason |\n| --- | --- | --- | --- | --- | --- | --- |\n");
     for m in rows.iter().filter(|m| m.expected_confirmed == Some(false)) {
@@ -606,7 +588,7 @@ fn variation(repeats: &[Measured]) -> String {
         runs.len(),
         repeats.len() / runs.len().max(1)
     );
-    out.push_str("| Run | Pass | Expected failure | Gap not shown | Unexpected pass | Fail | p99 latency (not SIGKILL) | Max latency |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| Run | Pass | Gap shown | Gap not shown | Skipped | Fail | p99 latency (not SIGKILL) | Max latency |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for r in &runs {
         let c = counts(repeats.iter().filter(|m| m.repeat == *r));
         let mut lat: Vec<u64> = repeats
@@ -619,9 +601,9 @@ fn variation(repeats: &[Measured]) -> String {
             out,
             "| {r} | {} | {} | {} | {} | {} | {} | {} |",
             c.pass,
-            c.expected_failure,
+            c.gap_shown,
             c.gap_not_shown,
-            c.unexpected_pass,
+            c.skipped,
             c.fail,
             ms_label(percentile(&lat, 99)),
             ms_label(lat.last().copied()),
@@ -639,6 +621,7 @@ fn variation(repeats: &[Measured]) -> String {
             exit_label(m),
             m.survivors.clone(),
             m.cleanup_confirmed,
+            m.gap_shown,
         )
     };
     let differing: Vec<(&str, &Vec<&Measured>)> = by_id

@@ -1,8 +1,8 @@
 #!/bin/sh
 # A descendant of a fake provider in the acceptance harness's `acc:` modes.
-# Records its pid in `pids` beside this script, then idles. See acc-lib.sh.
+# Publishes its pid in `pids/` beside this script, then idles. See acc-lib.sh.
 ACC_DIR=$(dirname "$0")
-record() { printf '%s %s\n' "$1" "$2" >> "$ACC_DIR/pids"; }
+record() { : > "$ACC_DIR/pids/$1.$2"; }
 idle() { while :; do sleep 1; done; }
 detach='use POSIX; POSIX::setsid(); $SIG{INT}="DEFAULT"; exec @ARGV'
 case "$1" in
@@ -27,21 +27,21 @@ case "$1" in
     # exits, so no process stays alive for longer than one process listing. It
     # stops by itself after 1500 generations, or as soon as the file `stop`
     # exists (the harness creates it). The first process stays as a plain
-    # child of the provider. Every generation appends `relay-heartbeat PID` to
+    # child of the provider. Every generation publishes `relay-heartbeat.PID` in
     # the ledger as its first act, so the harness attributes it to its role
     # instead of finding it unrecorded.
     record relay $$
     exec perl -e 'use POSIX; my ($beat, $stop, $pids) = @ARGV;
       my $p = fork();
       if ($p == 0) {
-        open L, q(>>), $pids; print L "relay-heartbeat $$\n"; close L;
+        open(my $record, q(>), "$pids/relay-heartbeat.$$") or exit 1; close($record);
         $SIG{TERM} = q(IGNORE);
         for (1..1500) { last if -e $stop; setpgid(0,0);
           open H, q(>), $beat; print H $$; close H;
           select(undef, undef, undef, 0.005);
           my $q = fork();
           if ($q) { exit 0 }
-          open L, q(>>), $pids; print L "relay-heartbeat $$\n"; close L; }
+          open(my $record, q(>), "$pids/relay-heartbeat.$$") or exit 1; close($record); }
         exit 0 }
       sleep 60' "$ACC_DIR/beat" "$ACC_DIR/stop" "$ACC_DIR/pids"
     ;;

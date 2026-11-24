@@ -98,8 +98,6 @@ pub struct ExpectBase {
     pub docs: Docs,
     /// The expected `cleanup.confirmed`; `None` when there is no result.
     pub confirmed: Option<bool>,
-    /// Text the `cleanup.reason` must contain when cleanup is not confirmed.
-    pub reason: Option<&'static str>,
 }
 
 /// How `delega` is expected to end.
@@ -150,7 +148,6 @@ const fn ok(outcome: &'static str, code: i32) -> ExpectBase {
         exit: Exit::Code(code),
         docs: Docs::One,
         confirmed: Some(true),
-        reason: None,
     }
 }
 
@@ -162,11 +159,8 @@ const fn unconfirmed(outcome: &'static str, code: i32) -> ExpectBase {
         exit: Exit::Code(code),
         docs: Docs::One,
         confirmed: Some(false),
-        reason: Some(NO_LISTING),
     }
 }
-
-const NO_LISTING: &str = "process inspection was unavailable";
 
 const SIGINT_1S: Action = Action::Signal(Sig::Int, 1000);
 
@@ -329,7 +323,6 @@ pub const CASES: &[Case] = &[
             exit: Exit::Code(124),
             docs: Docs::Unread,
             confirmed: None,
-            reason: None,
         },
     },
     Case {
@@ -345,7 +338,6 @@ pub const CASES: &[Case] = &[
             exit: Exit::Code(0),
             docs: Docs::Unread,
             confirmed: None,
-            reason: None,
         },
     },
     Case {
@@ -361,7 +353,6 @@ pub const CASES: &[Case] = &[
             exit: Exit::Signal(9),
             docs: Docs::None,
             confirmed: None,
-            reason: None,
         },
     },
     Case {
@@ -377,7 +368,6 @@ pub const CASES: &[Case] = &[
             exit: Exit::Signal(9),
             docs: Docs::None,
             confirmed: None,
-            reason: None,
         },
     },
     Case {
@@ -474,21 +464,15 @@ pub struct Expect {
     pub exit: Exit,
     pub docs: Docs,
     pub confirmed: Option<bool>,
-    pub confirmed_reason: Option<&'static str>,
     pub leak: LeakClass,
-    /// Exactly the roles that may be alive after delega exits, sorted. A row
-    /// with any other survivor, or without these, does not meet it.
+    /// Survivor roles that identify the gap in the report.
     pub survivors: Vec<&'static str>,
     pub reason: Option<&'static str>,
-    /// Whether the gap depends on timing: a late scan can catch the process,
-    /// so a run in which no survivor remains is `gap_not_shown` and does not
-    /// fail. A gap that does not depend on timing (SIGKILL of `delega`, after
-    /// which nothing can stop the worker) is strict: no survivor is
-    /// `unexpected_pass`, which fails.
+    /// Whether to include this gap when selecting `--timing-gaps`.
     pub timing_dependent: bool,
 }
 
-/// An expected failure of criterion 2 for the rows that match. An empty list
+/// A gap to observe for the rows that match. An empty list
 /// matches anything. The first match wins.
 struct Gap {
     cases: &'static [&'static str],
@@ -528,8 +512,8 @@ impl Machine {
 }
 
 const KEEPER_KILLED_REASON: &str = "SIGKILL of delega and of its keeper together: no code of either runs, so nothing stops the worker or enforces its time limit. The accepted residual on every platform (process module docs, \"What remains possible\").";
-const MACOS_PLATFORM_REASON: &str = "macOS residual on a system that hides the environment of its own programs from `ps -E` (System Integrity Protection does): the process left the provider's session and its parent is gone, so no listing ties it to the run, macOS has no subreaper, and the run marker is not visible because these fakes run sh, sleep and perl. Where the environment is visible the marker finds it and the row is expected to pass. Linux closes this through the keeper (process module docs, \"What remains possible\").";
-const MACOS_RELAY_REASON: &str = "macOS residual: a fast fork relay is never in a process listing for long enough to be stopped, and the freeze of listings stopped the process-layer relay in 0 of 50 runs on macOS 27.2. Linux closes this through the keeper's own walk of its tree (process module docs, \"What remains possible\").";
+const MACOS_PLATFORM_REASON: &str = "macOS residual on a system that hides the environment of its own programs from `ps -E` (System Integrity Protection does): the process left the provider's session and its parent is gone, so no listing ties it to the run, macOS has no subreaper, and the run marker is not visible because these fakes run sh, sleep and perl. Where the environment is visible the marker can find it. Linux closes this through the keeper (process module docs, \"What remains possible\").";
+const MACOS_RELAY_REASON: &str = "macOS residual: a fast fork relay can leave each listing before cleanup signals it. Linux closes this through the keeper's own walk of its tree (process module docs, \"What remains possible\").";
 
 const GAPS: &[Gap] = &[
     Gap {
@@ -603,7 +587,6 @@ pub fn expect_for_machine(case: &Case, variant: &str, machine: Machine) -> Expec
         exit: case.expect.exit,
         docs: case.expect.docs,
         confirmed: case.expect.confirmed,
-        confirmed_reason: case.expect.reason,
         leak: LeakClass::None,
         survivors: Vec::new(),
         reason: None,

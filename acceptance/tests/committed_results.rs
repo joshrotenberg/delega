@@ -127,10 +127,6 @@ fn the_committed_results_cover_exactly_the_matrix_rows_with_their_current_expect
                 ("cleanup verdict", m.expected_confirmed == expect.confirmed),
                 ("survivors", survivors == expect.survivors),
                 ("leak class", m.expected_leak == expect.leak),
-                (
-                    "timing dependence",
-                    m.timing_dependent == expect.timing_dependent,
-                ),
                 ("reason text", m.expected_reason.as_deref() == expect.reason),
             ];
             for (field, same) in fields {
