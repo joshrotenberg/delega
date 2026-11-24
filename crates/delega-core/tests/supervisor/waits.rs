@@ -40,12 +40,13 @@ async fn a_wait_returns_when_any_named_run_finishes_and_says_which() {
     ga.started().await;
     gb.started().await;
 
+    let mut waits = supervisor.observe_waits();
     let waiting = {
         let supervisor = supervisor.clone();
         let targets = runs(&[&a.run, &b.run]);
         tokio::spawn(async move { supervisor.wait(targets, Some(30), None).await })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    waits.registered().await;
     assert!(!waiting.is_finished(), "nothing has finished yet");
     gb.open();
     let response = waiting.await.expect("task").expect("wait");
@@ -264,12 +265,13 @@ async fn a_cursor_wait_that_is_pending_wakes_when_a_run_finishes_after_it() {
     gate.started().await;
     let cursor = supervisor.list().await.expect("list").cursor;
 
+    let mut waits = supervisor.observe_waits();
     let waiting = {
         let supervisor = supervisor.clone();
         let targets = runs(&[&started.run]);
         tokio::spawn(async move { supervisor.wait(targets, Some(30), Some(cursor)).await })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    waits.registered().await;
     assert!(!waiting.is_finished());
     gate.open();
     let response = waiting.await.expect("task").expect("wait");
@@ -392,12 +394,13 @@ async fn a_worker_wait_ends_when_the_current_run_finishes_even_if_more_are_queue
         .await
         .expect("follow_up");
 
+    let mut waits = supervisor.observe_waits();
     let waiting = {
         let supervisor = supervisor.clone();
         let targets = workers(&[&worker]);
         tokio::spawn(async move { supervisor.wait(targets, Some(30), None).await })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    waits.registered().await;
     assert!(!waiting.is_finished());
     g1.open();
     let response = waiting.await.expect("task").expect("wait");
@@ -435,6 +438,7 @@ async fn shutdown_releases_a_wait_whose_cursor_no_run_will_pass() {
         .await
         .expect("start");
     gate.started().await;
+    let mut waits = supervisor.observe_waits();
     let waiting = {
         let supervisor = supervisor.clone();
         let targets = runs(&[&started.run]);
@@ -444,11 +448,11 @@ async fn shutdown_releases_a_wait_whose_cursor_no_run_will_pass() {
                 .await
         })
     };
-    // Whether the wait has registered yet or not, it must be released.
-    tokio::task::yield_now().await;
+    let registration = waits.registered().await;
     assert!(!waiting.is_finished());
     let report = supervisor.shutdown().await;
     assert_eq!(report.runs_stopped, 1);
+    registration.removed().await;
     let released = tokio::time::timeout(Duration::from_secs(120), waiting)
         .await
         .expect("shutdown released the wait")
@@ -487,23 +491,9 @@ fn park(
     tokio::spawn(async move { supervisor.wait(targets, Some(PARKED_SECS), None).await })
 }
 
-/// Poll `list` until it reports `count` waits in flight.
-async fn waits_in_flight(supervisor: &Supervisor, count: usize) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut seen = usize::MAX;
-    while Instant::now() < deadline {
-        seen = supervisor
-            .list()
-            .await
-            .expect("list")
-            .limits
-            .waits_in_flight;
-        if seen == count {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("waits in flight stayed at {seen}, expected {count}");
+async fn assert_waits_in_flight(supervisor: &Supervisor, count: usize) {
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, count, "{listed:#?}");
 }
 
 #[tokio::test]
@@ -523,11 +513,13 @@ async fn a_wait_past_the_limit_returns_at_once_and_list_and_interrupt_still_answ
     quick.open();
     result_of(&supervisor, &b.run).await;
 
+    let mut waits = supervisor.observe_waits();
     let parked = [
         park(&supervisor, runs(&[&a.run])),
         park(&supervisor, runs(&[&a.run])),
     ];
-    waits_in_flight(&supervisor, 2).await;
+    let registrations = [waits.registered().await, waits.registered().await];
+    assert_waits_in_flight(&supervisor, 2).await;
 
     // The next wait that would block is answered instead of queued.
     let begun = Instant::now();
@@ -589,13 +581,16 @@ async fn a_wait_past_the_limit_returns_at_once_and_list_and_interrupt_still_answ
     assert!(stopped.settled, "{stopped:#?}");
 
     // The interrupt finished the run, which wakes the parked waits.
+    for registration in registrations {
+        registration.removed().await;
+    }
     for wait in parked {
         let response = wait.await.expect("task").expect("wait");
         assert!(!response.timed_out, "{response:#?}");
         assert_eq!(response.limit_reached, None);
         assert_eq!(response.timeout_secs, PARKED_SECS);
     }
-    waits_in_flight(&supervisor, 0).await;
+    assert_waits_in_flight(&supervisor, 0).await;
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
@@ -611,10 +606,12 @@ async fn a_wait_that_times_out_frees_its_slot() {
         .expect("start");
     gate.started().await;
 
+    let mut waits = supervisor.observe_waits();
     let timed_out = supervisor
         .wait(runs(&[&started.run]), Some(1), None)
         .await
         .expect("wait");
+    waits.registered().await.removed().await;
     assert!(timed_out.timed_out);
     assert_eq!(timed_out.limit_reached, None);
     assert_eq!(timed_out.timeout_secs, 1);
@@ -623,12 +620,14 @@ async fn a_wait_that_times_out_frees_its_slot() {
 
     // The slot is free: the next wait parks instead of being turned away.
     let parked = park(&supervisor, runs(&[&started.run]));
-    waits_in_flight(&supervisor, 1).await;
+    let registration = waits.registered().await;
+    assert_waits_in_flight(&supervisor, 1).await;
     gate.open();
+    registration.removed().await;
     let response = parked.await.expect("task").expect("wait");
     assert_eq!(response.limit_reached, None);
     assert!(!response.timed_out);
-    waits_in_flight(&supervisor, 0).await;
+    assert_waits_in_flight(&supervisor, 0).await;
     supervisor.shutdown().await;
     rig.assert_nothing_left().await;
 }
@@ -648,8 +647,10 @@ async fn a_wait_whose_default_timeout_is_zero_is_a_poll_and_is_never_turned_away
         .await
         .expect("start");
     gate.started().await;
+    let mut waits = supervisor.observe_waits();
     let parked = park(&supervisor, runs(&[&started.run]));
-    waits_in_flight(&supervisor, 1).await;
+    let registration = waits.registered().await;
+    assert_waits_in_flight(&supervisor, 1).await;
 
     for timeout in [None, Some(0)] {
         let poll = supervisor
@@ -665,6 +666,7 @@ async fn a_wait_whose_default_timeout_is_zero_is_a_poll_and_is_never_turned_away
     assert_eq!(listed.limits.waits_in_flight, 1, "{listed:#?}");
     // A poll still reports a finish.
     gate.open();
+    registration.removed().await;
     let woken = parked.await.expect("task").expect("wait");
     assert!(!woken.timed_out, "{woken:#?}");
     let poll = supervisor
@@ -688,8 +690,10 @@ async fn a_wait_whose_caller_went_away_frees_its_slot() {
         .expect("start");
     gate.started().await;
 
+    let mut waits = supervisor.observe_waits();
     let abandoned = park(&supervisor, runs(&[&started.run]));
-    waits_in_flight(&supervisor, 1).await;
+    let registration = waits.registered().await;
+    assert_waits_in_flight(&supervisor, 1).await;
     let refused = supervisor
         .wait(runs(&[&started.run]), Some(PARKED_SECS), None)
         .await
@@ -699,11 +703,16 @@ async fn a_wait_whose_caller_went_away_frees_its_slot() {
     // Dropping the future mid-wait is what a cancelled MCP request does.
     abandoned.abort();
     assert!(abandoned.await.expect_err("aborted").is_cancelled());
-    waits_in_flight(&supervisor, 0).await;
+    // Cancellation drops the receiver. A command makes the actor prune it.
+    let listed = supervisor.list().await.expect("list");
+    registration.removed().await;
+    assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
 
     let parked = park(&supervisor, runs(&[&started.run]));
-    waits_in_flight(&supervisor, 1).await;
+    let registration = waits.registered().await;
+    assert_waits_in_flight(&supervisor, 1).await;
     gate.open();
+    registration.removed().await;
     let response = parked.await.expect("task").expect("wait");
     assert_eq!(response.limit_reached, None);
     assert!(!response.timed_out);
@@ -721,6 +730,7 @@ async fn shutdown_frees_the_slots_of_the_waits_it_releases() {
         .await
         .expect("start");
     gate.started().await;
+    let mut waits = supervisor.observe_waits();
     let parked = {
         let supervisor = supervisor.clone();
         let targets = runs(&[&started.run]);
@@ -730,8 +740,10 @@ async fn shutdown_frees_the_slots_of_the_waits_it_releases() {
                 .await
         })
     };
-    waits_in_flight(&supervisor, 1).await;
+    let registration = waits.registered().await;
+    assert_waits_in_flight(&supervisor, 1).await;
     supervisor.shutdown().await;
+    registration.removed().await;
     let response = parked.await.expect("task").expect("wait");
     assert!(response.released_by_shutdown, "{response:#?}");
     assert_eq!(response.limit_reached, None);
@@ -766,9 +778,12 @@ async fn a_limit_of_no_waits_is_raised_to_one_so_a_wait_can_still_block() {
             .max_waits_in_flight,
         1
     );
+    let mut waits = supervisor.observe_waits();
     let parked = park(&supervisor, runs(&[&started.run]));
-    waits_in_flight(&supervisor, 1).await;
+    let registration = waits.registered().await;
+    assert_waits_in_flight(&supervisor, 1).await;
     gate.open();
+    registration.removed().await;
     let response = parked.await.expect("task").expect("wait");
     assert_eq!(response.limit_reached, None);
     assert!(!response.timed_out);
