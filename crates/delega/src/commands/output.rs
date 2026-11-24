@@ -122,12 +122,7 @@ pub fn write_unless_stopped(bytes: &[u8], stop: &Stop) -> Option<Written> {
         }
         let mut fds = [PollFd::new(&out, PollFlags::OUT)];
         match poll(&mut fds, Some(&STOP_POLL)) {
-            // Not writable within the interval: a reader is not keeping up.
-            Ok(0) => {
-                super::ack::acknowledge(super::ack::Ack::ResultBlocked);
-                continue;
-            }
-            Err(Errno::INTR) => continue,
+            Ok(0) | Err(Errno::INTR) => continue,
             // Writable, or an error or hangup the write itself reports.
             Ok(_) => {}
             Err(err) => {

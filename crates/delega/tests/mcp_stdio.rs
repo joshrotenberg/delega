@@ -697,12 +697,7 @@ fn a_call_in_flight_is_answered_by_the_shutdown_before_the_server_exits() {
 #[test]
 fn a_signal_stops_the_workers_and_the_server_exits_though_the_client_stopped_reading() {
     let rig = Rig::new();
-    let blocked = rig.root.join("stdout-blocked");
-    let blocked_value = blocked.to_str().expect("a UTF-8 path");
-    let mut session = rig.start_with(
-        &[],
-        &[("DELEGA_TEST_ACK_MCP_STDOUT_BLOCKED", blocked_value)],
-    );
+    let mut session = rig.start(&[]);
     session.initialize();
     session.call(
         "start",
@@ -728,9 +723,14 @@ fn a_signal_stops_the_workers_and_the_server_exits_though_the_client_stopped_rea
         // Held open until the test ends: end of input must not be what stops it.
         stdin
     });
-    // The signal arrives once the server's standard output is full, so its
-    // next write blocks.
-    support::wait_for_ack(&blocked, &mut session.child, "its standard output is full");
+    // Let the server fill the pipe. Whether it is blocked yet is not observable,
+    // so the flood is large and given this long; the signal then arrives in
+    // whichever state the server is in, and must be handled in either. A test
+    // seam cannot replace the sleep: the blocked write happens inside
+    // tower-mcp's transport, and a full pipe seen from outside it (poll on
+    // standard output) is not that write, and macOS can report a full pipe as
+    // writable (#186).
+    std::thread::sleep(Duration::from_secs(3));
     support::signal(session.pid(), "TERM");
     // Generous: the transport is given up on after its 15 s bound at the latest.
     let status = session.exit();
