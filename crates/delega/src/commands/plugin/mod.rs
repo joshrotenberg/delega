@@ -53,11 +53,39 @@ impl Command {
                     return ExitCode::FAILURE;
                 }
             };
-            match self {
+            #[cfg(debug_assertions)]
+            hold_before_work();
+            let code = match self {
                 Self::Install(args) => install::run(args, &mut runner).await,
                 Self::Uninstall(args) => uninstall::run(args, &mut runner).await,
+            };
+            if code == ExitCode::SUCCESS && runner.check_interrupt().await {
+                super::output::report("delega plugin: signal received; exiting");
+                ExitCode::from(super::run::signals::exit_status_when_cut_short(0))
+            } else {
+                code
             }
         })
+    }
+}
+
+/// Let a test deliver a signal while the runtime is in synchronous work,
+/// after registering handlers. Deleting the new file releases the command.
+#[cfg(debug_assertions)]
+fn hold_before_work() {
+    use std::time::{Duration, Instant};
+
+    if let Some(path) = std::env::var_os("DELEGA_TEST_HOLD_BEFORE_PLUGIN_WORK")
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .is_ok()
+    {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Path::new(&path).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 

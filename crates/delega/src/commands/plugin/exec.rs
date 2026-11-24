@@ -25,16 +25,40 @@ pub const LISTING_BYTES: usize = 512 * 1024;
 
 /// Host commands share the signal handlers for the entire plugin operation.
 pub struct Runner {
-    signals: Signals,
+    signals: Option<Signals>,
     interrupted: bool,
 }
 
 impl Runner {
     pub fn install() -> std::io::Result<Self> {
         Ok(Self {
-            signals: Signals::install()?,
+            signals: Some(Signals::install()?),
             interrupted: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn without_signal_handlers() -> Self {
+        Self {
+            signals: None,
+            interrupted: false,
+        }
+    }
+
+    /// Record a signal received while the plugin command was doing synchronous work.
+    pub async fn check_interrupt(&mut self) -> bool {
+        if let Some(signals) = &mut self.signals
+            && !self.interrupted
+        {
+            // Give the runtime's signal driver a turn before polling the receivers.
+            tokio::task::yield_now().await;
+            self.interrupted = tokio::select! {
+                biased;
+                _ = signals.next() => true,
+                () = std::future::ready(()) => false,
+            };
+        }
+        self.interrupted
     }
 
     /// Run the host CLI in its own session and stop remaining processes on
@@ -49,15 +73,7 @@ impl Runner {
         limit: Duration,
         max: usize,
     ) -> Result<ProcessReport, String> {
-        // A signal between host commands also stops the sequence.
-        if !self.interrupted {
-            self.interrupted = tokio::select! {
-                biased;
-                _ = self.signals.next() => true,
-                () = std::future::ready(()) => false,
-            };
-        }
-        if self.interrupted {
+        if self.check_interrupt().await {
             return Err(format!("{} was interrupted", program.display()));
         }
 
@@ -76,14 +92,18 @@ impl Runner {
         let interrupter = handle.interrupter();
         let wait = handle.wait();
         tokio::pin!(wait);
-        let report = tokio::select! {
-            biased;
-            _ = self.signals.next() => {
-                self.interrupted = true;
-                interrupter.interrupt();
-                wait.await
+        let report = if let Some(signals) = &mut self.signals {
+            tokio::select! {
+                biased;
+                _ = signals.next() => {
+                    self.interrupted = true;
+                    interrupter.interrupt();
+                    wait.await
+                }
+                report = &mut wait => report,
             }
-            report = &mut wait => report,
+        } else {
+            wait.await
         };
         match &report.ending {
             Ending::Exited { .. } | Ending::Signaled { .. } => Ok(report),
@@ -163,8 +183,7 @@ mod tests {
         );
         let pid_file = tmp.path().join("descendant.pid");
         let limit = Duration::from_secs(3);
-        let error = Runner::install()
-            .unwrap()
+        let error = Runner::without_signal_handlers()
             .run(
                 &host,
                 &[pid_file.display().to_string()],
@@ -193,8 +212,7 @@ mod tests {
         "#,
         );
         let pid_file = tmp.path().join("descendant.pid");
-        let report = Runner::install()
-            .unwrap()
+        let report = Runner::without_signal_handlers()
             .run(
                 &host,
                 &[pid_file.display().to_string()],
@@ -224,8 +242,7 @@ mod tests {
         "#,
         );
         for (limit, max) in [(CHANGE_LIMIT, CHANGE_BYTES), (LISTING_LIMIT, LISTING_BYTES)] {
-            let report = Runner::install()
-                .unwrap()
+            let report = Runner::without_signal_handlers()
                 .run(&host, &[], limit, max)
                 .await
                 .unwrap();

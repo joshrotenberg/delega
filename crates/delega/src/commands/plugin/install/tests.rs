@@ -50,7 +50,7 @@ async fn an_install_with_different_executable_bytes_has_a_different_version_ever
     fs::write(&executable, b"first build").expect("write executable");
     let request = request(&root, &executable);
 
-    let mut runner = exec::Runner::install().expect("install signal handlers");
+    let mut runner = exec::Runner::without_signal_handlers();
     let first = install(&request, &mut runner).await;
     assert_eq!(first.error, None);
     let first_version = first.plugin_version.clone().expect("version");
