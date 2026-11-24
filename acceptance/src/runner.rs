@@ -110,6 +110,7 @@ pub struct Measured {
     pub provider_pid: Option<i32>,
     pub survivors_at_exit: Vec<String>,
     pub survivors: Vec<String>,
+    /// Consistency of the cleanup verdict where the matrix gates on it.
     pub honest: Option<bool>,
     /// Milliseconds from the action to the exit; for a time limit the
     /// overshoot past `--timeout`; for a run left to finish, the whole run.
@@ -575,6 +576,7 @@ fn read_stdout(m: &mut Measured, bytes: &[u8], docs: Docs) {
 
 /// Check the result and cleanup guarantees independently of the gap observation.
 fn judge(m: &mut Measured, case: &Case) {
+    let documented_residual = case.expect.leak == LeakClass::DocumentedGap;
     if m.hang {
         m.problems
             .push("delega did not exit within 30 s".to_string());
@@ -613,7 +615,7 @@ fn judge(m: &mut Measured, case: &Case) {
             {
                 m.problems.push("a killed delega wrote output".to_string());
             }
-            if m.expected_leak == LeakClass::None && !m.survivors.is_empty() {
+            if !documented_residual && !m.survivors.is_empty() {
                 m.problems.push(format!(
                     "survivors after delega exited: {}",
                     m.survivors.join(", ")
@@ -627,6 +629,7 @@ fn judge(m: &mut Measured, case: &Case) {
 
     m.honest = m
         .cleanup_confirmed
+        .filter(|_| !documented_residual)
         .map(|confirmed| !confirmed || (m.survivors_at_exit.is_empty() && m.survivors.is_empty()));
     if m.honest == Some(false) {
         m.problems.push(format!(
@@ -634,10 +637,11 @@ fn judge(m: &mut Measured, case: &Case) {
             m.survivors_at_exit, m.survivors
         ));
     }
-    m.gap_shown = (m.expected_leak != LeakClass::None).then(|| {
-        m.expected_survivors
+    m.gap_shown = documented_residual.then(|| {
+        case.expect
+            .survivors
             .iter()
-            .all(|role| m.survivors.contains(role))
+            .all(|role| m.survivors.iter().any(|observed| observed == role))
     });
     m.verdict = if m.problems.is_empty() {
         "pass"
@@ -705,11 +709,16 @@ fn documented_cleanup_reason(mut reason: &str) -> bool {
 mod judge_tests {
     use super::*;
 
-    fn gap_run() -> (Case, Measured) {
-        let case = crate::matrix::all()
-            .into_iter()
-            .find(|r| r.id == "claude-a-relay")
-            .expect("the relay row");
+    use crate::matrix::{Machine, all_for};
+
+    fn relay_run(os: &'static str) -> (Case, Measured) {
+        let case = all_for(Machine {
+            os,
+            hides_system_env: os == "macos",
+        })
+        .into_iter()
+        .find(|r| r.id == "claude-a-relay")
+        .expect("the relay row");
         let measured = serde_json::from_str(
             r#"{"id":"claude-a-relay","repeat":1,"provider":"claude","case":"a",
             "variant":"relay","behaviour":"success","action":"","exit_code":0,
@@ -725,9 +734,10 @@ mod judge_tests {
     }
 
     #[test]
-    fn a_gap_observation_cannot_excuse_confirmation_with_survivors() {
+    fn a_measured_gap_label_cannot_excuse_a_linux_relay_survivor() {
         for at_exit in [true, false] {
-            let (case, mut m) = gap_run();
+            // The sample claims to be a gap. The Linux matrix row decides.
+            let (case, mut m) = relay_run("linux");
             let survivors = if at_exit {
                 &mut m.survivors_at_exit
             } else {
@@ -735,31 +745,36 @@ mod judge_tests {
             };
             survivors.push("relay-heartbeat".into());
             judge(&mut m, &case);
-            assert_eq!(m.gap_shown, Some(!at_exit));
+            assert_eq!(m.gap_shown, None);
             assert_eq!(m.honest, Some(false));
             assert_eq!(m.verdict, "fail");
         }
     }
 
     #[test]
-    fn a_gap_can_show_or_disappear_without_changing_a_valid_unconfirmed_runs_verdict() {
-        for gap_shown in [true, false] {
-            let (case, mut m) = gap_run();
-            m.cleanup_confirmed = Some(false);
-            m.cleanup_reason = Some(delega_core::process::LATE_LISTING_REASON.into());
-            if gap_shown {
-                m.survivors.push("relay-heartbeat".into());
+    fn a_documented_gap_can_show_or_disappear_with_either_cleanup_verdict() {
+        for confirmed in [true, false] {
+            for gap_shown in [true, false] {
+                let (case, mut m) = relay_run("macos");
+                m.cleanup_confirmed = Some(confirmed);
+                m.cleanup_reason =
+                    (!confirmed).then(|| delega_core::process::LATE_LISTING_REASON.into());
+                if gap_shown {
+                    m.survivors_at_exit.push("relay-heartbeat".into());
+                    m.survivors.push("relay-heartbeat".into());
+                }
+                judge(&mut m, &case);
+                assert_eq!(m.gap_shown, Some(gap_shown));
+                assert_eq!(m.honest, None);
+                assert_eq!(m.verdict, "pass");
             }
-            judge(&mut m, &case);
-            assert_eq!(m.gap_shown, Some(gap_shown));
-            assert_eq!(m.verdict, "pass");
         }
     }
 
     #[test]
     fn a_gap_row_requires_one_valid_result() {
         for (docs, valid) in [(0, false), (2, true), (1, false)] {
-            let (case, mut m) = gap_run();
+            let (case, mut m) = relay_run("macos");
             m.stdout_docs = Some(docs);
             m.result_valid = Some(valid);
             judge(&mut m, &case);
@@ -771,7 +786,7 @@ mod judge_tests {
     fn unconfirmed_cleanup_rejects_unknown_reasons_and_accepts_combined_reasons() {
         use delega_core::process::{LATE_LISTING_REASON, PIPES_HELD_REASON};
 
-        let (case, mut m) = gap_run();
+        let (case, mut m) = relay_run("macos");
         m.cleanup_confirmed = Some(false);
         m.cleanup_reason = Some("could not be checked".into());
         judge(&mut m, &case);

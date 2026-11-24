@@ -515,6 +515,7 @@ const KEEPER_KILLED_REASON: &str = "SIGKILL of delega and of its keeper together
 const MACOS_PLATFORM_REASON: &str = "macOS residual on a system that hides the environment of its own programs from `ps -E` (System Integrity Protection does): the process left the provider's session and its parent is gone, so no listing ties it to the run, macOS has no subreaper, and the run marker is not visible because these fakes run sh, sleep and perl. Where the environment is visible the marker can find it. Linux closes this through the keeper (process module docs, \"What remains possible\").";
 const MACOS_RELAY_REASON: &str = "macOS residual: a fast fork relay can leave each listing before cleanup signals it. Linux closes this through the keeper's own walk of its tree (process module docs, \"What remains possible\").";
 
+// Only this table can mark a row as a documented residual on a platform.
 const GAPS: &[Gap] = &[
     Gap {
         cases: &["kk"],
@@ -698,6 +699,47 @@ pub fn needs_perl(variant: &str) -> bool {
 #[cfg(test)]
 mod timing_gap_tests {
     use super::*;
+
+    #[test]
+    fn only_the_listed_platform_residuals_get_the_survivor_exemption() {
+        let relay = [
+            "a-relay", "c-relay", "d-relay", "e-relay", "fd-relay", "k-relay",
+        ];
+        let hidden = [
+            "a-bare",
+            "a-orphan",
+            "c-orphan",
+            "d-orphan",
+            "e-orphan",
+            "fd-orphan",
+            "k-orphan",
+        ];
+        for (os, hides_system_env) in [("linux", false), ("macos", false), ("macos", true)] {
+            let mut expected = vec!["kk-plain"];
+            if os == "macos" {
+                expected.extend(relay);
+                if hides_system_env {
+                    expected.extend(hidden);
+                }
+            }
+            let expected = PROVIDERS
+                .iter()
+                .flat_map(|provider| expected.iter().map(move |id| format!("{provider}-{id}")))
+                .collect::<std::collections::BTreeSet<_>>();
+            let actual = all_for(Machine {
+                os,
+                hides_system_env,
+            })
+            .into_iter()
+            .filter(|row| row.expect.leak == LeakClass::DocumentedGap)
+            .map(|row| row.id)
+            .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                actual, expected,
+                "{os}, hidden environment: {hides_system_env}"
+            );
+        }
+    }
 
     #[test]
     fn timing_gap_selection_is_exactly_the_timing_dependent_gap_rows() {
