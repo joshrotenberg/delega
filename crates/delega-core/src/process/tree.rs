@@ -403,6 +403,13 @@ impl GroupPin {
     pub(crate) fn pinned(&self) -> bool {
         *self.lock()
     }
+
+    /// Test probe: whether the lock is held right now, by any thread
+    /// (this one included), without waiting for it.
+    #[cfg(test)]
+    fn locked(&self) -> bool {
+        matches!(self.0.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    }
 }
 
 /// How a pid was found, which decides what it must still be when it is
@@ -495,6 +502,10 @@ pub(crate) struct ProcessTree {
     /// pin was checked under its lock and before the start time is read.
     #[cfg(test)]
     before_root_read: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Test seam: run once after the child's identity is stored, before the
+    /// pin's lock is let go.
+    #[cfg(test)]
+    after_root_stored: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -577,6 +588,8 @@ impl ProcessTree {
             after_pin_check: None,
             #[cfg(test)]
             before_root_read: None,
+            #[cfg(test)]
+            after_root_stored: None,
         }
     }
 
@@ -839,6 +852,10 @@ impl ProcessTree {
         self.root_ticks = sys::start_ticks(self.pid);
         if let Some(ticks) = self.root_ticks {
             self.ticks.insert(self.pid, ticks);
+        }
+        #[cfg(test)]
+        if let Some(seam) = self.after_root_stored.take() {
+            seam();
         }
         drop(held);
     }
@@ -1427,44 +1444,43 @@ mod tests {
         assert!(!tree.ticks.contains_key(&own));
     }
 
-    /// A release that comes while the child's identity is being learned
-    /// waits until it is read and stored: the read is made under the pin.
+    /// The pin's lock is held from the check of the pin through the read of
+    /// the child's start time and storing it: a probe at the read and one
+    /// after the stores both find it held. Without the guard the first probe
+    /// fails; with the guard dropped right after the check, the second does.
     #[tokio::test]
-    async fn a_release_waits_until_the_childs_identity_is_read_and_stored() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn the_pin_lock_is_held_from_the_check_through_storing_the_childs_identity() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        // 0: the probe did not run; 1: the lock was held; 2: it was not.
+        const NOT_RUN: u8 = 0;
+        const HELD: u8 = 1;
         let pin = Arc::new(GroupPin::default());
         let (mut tree, own) = tree_of_this_process(&pin);
-        let released = Arc::new(AtomicBool::new(false));
-        let released_mid_read = Arc::new(AtomicBool::new(false));
-        let releasing = Arc::new(Mutex::new(None));
-        {
-            let pin = pin.clone();
-            let released = released.clone();
-            let released_mid_read = released_mid_read.clone();
-            let releasing = releasing.clone();
-            tree.before_root_read = Some(Box::new(move || {
-                let flag = released.clone();
-                *releasing.lock().unwrap() = Some(std::thread::spawn(move || {
-                    pin.release();
-                    flag.store(true, Ordering::SeqCst);
-                }));
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                released_mid_read.store(released.load(Ordering::SeqCst), Ordering::SeqCst);
-            }));
-        }
+        let at_read = Arc::new(AtomicU8::new(NOT_RUN));
+        let after_stores = Arc::new(AtomicU8::new(NOT_RUN));
+        let probe = |pin: &Arc<GroupPin>, seen: &Arc<AtomicU8>| {
+            let (pin, seen) = (pin.clone(), seen.clone());
+            Box::new(move || {
+                seen.store(if pin.locked() { HELD } else { 2 }, Ordering::SeqCst);
+            })
+        };
+        tree.before_root_read = Some(probe(&pin, &at_read));
+        tree.after_root_stored = Some(probe(&pin, &after_stores));
         tree.capture().await;
-        let handle = releasing.lock().unwrap().take();
-        handle
-            .expect("the seam did not run")
-            .join()
-            .expect("the release finished");
-        assert!(
-            !released_mid_read.load(Ordering::SeqCst),
-            "the pin was released while the identity was read"
+        assert_eq!(
+            at_read.load(Ordering::SeqCst),
+            HELD,
+            "the pin's lock was not held at the read"
         );
-        assert!(released.load(Ordering::SeqCst));
+        assert_eq!(
+            after_stores.load(Ordering::SeqCst),
+            HELD,
+            "the pin's lock was not held through storing the identity"
+        );
+        assert!(!pin.locked(), "the pin's lock outlived the snapshot");
         assert_eq!(tree.root_started.as_deref(), Some("root"));
         assert_eq!(tree.root_ticks, sys::start_ticks(own));
+        pin.release();
         // Unpinned, the child is followed by what was read under the pin.
         tree.capture().await;
         assert!(!tree.pinned);
