@@ -309,4 +309,74 @@ mod tests {
         assert!(parse_marked("", T, 13).is_err());
         assert!(parse_marked("13 S garbage\n", T, 13).is_err());
     }
+
+    /// A value from another process's environment, as `ps -E` shows it.
+    const SECRET: &str = "leakprobe5ec2e7c0ffee5ec2e7c0ffee";
+
+    fn listing_with_secret() -> String {
+        format!(
+            "  13 S    Sun Nov 22 17:41:04 2026 sleep 60 {MARKER_ENV}={T}\n\
+               14 S    Sun Nov 22 17:41:04 2026 other PROBE={SECRET}\n"
+        )
+    }
+
+    fn assert_no_secret(error: InspectError) {
+        assert!(
+            !error.to_string().contains(SECRET) && !format!("{error:?}").contains(SECRET),
+            "the error carries listing text ({} bytes of it)",
+            SECRET.len()
+        );
+    }
+
+    #[test]
+    fn a_marker_listing_line_that_cannot_be_parsed_is_not_quoted_in_the_error() {
+        let text = format!(
+            "{}  15 S    SECRET={SECRET} cannot be parsed\n",
+            listing_with_secret()
+        );
+        let error = parse_marked(&text, T, 13).expect_err("a line that cannot be parsed");
+        assert!(error.to_string().contains("could not be parsed"), "{error}");
+        assert_no_secret(error);
+    }
+
+    #[test]
+    fn a_marker_listing_without_this_process_does_not_quote_the_listing_in_the_error() {
+        let error = parse_marked(&listing_with_secret(), T, 99).expect_err("no own process");
+        assert!(error.to_string().contains("this process"), "{error}");
+        assert_no_secret(error);
+    }
+
+    fn printing(script: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[tokio::test]
+    async fn a_listing_program_that_fails_after_printing_does_not_quote_its_output() {
+        let error = super::super::tree::run_listing(
+            printing(&format!(
+                "echo PROBE={SECRET}; echo PROBE={SECRET} >&2; exit 3"
+            )),
+            1 << 20,
+        )
+        .await
+        .expect_err("a listing that exits non-zero");
+        assert!(error.to_string().contains("exit"), "{error}");
+        assert_no_secret(error);
+    }
+
+    #[tokio::test]
+    async fn a_listing_too_large_does_not_quote_its_output() {
+        let error = super::super::tree::run_listing(
+            printing(&format!(
+                "i=0; while [ $i -lt 200 ]; do echo PROBE={SECRET}; i=$((i+1)); done"
+            )),
+            64,
+        )
+        .await
+        .expect_err("a listing over the bound");
+        assert!(error.to_string().contains("too large"), "{error}");
+        assert_no_secret(error);
+    }
 }
