@@ -39,9 +39,11 @@
 //!
 //! - keeper: `subreaper on`, `subreaper off <why>`, `started <pid>`,
 //!   `spawn-failed <errno> <message>`, `exited code <n>`, `exited signal <n>`,
-//!   `tree <id> <live> [<details>]`, `reaped <live> [proven]` (`proven` when
-//!   the final census before the reap proved the tree empty, Linux with a
-//!   subreaper only), `releasing`, `warn <text>`.
+//!   `tree <id> <live> [<details>]`, `reaped <live> [proven] [unproven]`
+//!   (`proven` when the final census before the reap proved the tree empty,
+//!   Linux with a subreaper only; `unproven` when any answer of the run, sent
+//!   or worked out at the reap, was unproven in a way no later answer
+//!   repairs), `releasing`, `warn <text>`.
 //! - owner: `census <id>` (count the live processes in the keeper's tree),
 //!   `freeze <id>` (stop, kill and count them), `reap`, `released`.
 
@@ -73,6 +75,7 @@ pub(crate) const INJECT_READ_FAILURES_ENV: &str = "DELEGA_TEST_KEEPER_FAIL_READS
 pub(crate) const FREEZE_GATE_ENV: &str = "DELEGA_TEST_KEEPER_FREEZE_GATE";
 #[cfg(test)]
 pub(crate) use run::gate_expired_marker;
+
 pub use run::keeper_main;
 
 /// A program and arguments that run [`keeper_main`].
