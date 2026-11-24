@@ -530,38 +530,121 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     assert_stopped_in_time("same-group grandchild", &[gc], started).await;
 }
 
+/// A file in `dir` that exists but may not be executed (mode 0644).
+fn unexecutable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write refused ps");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+}
+
+fn os_error(errno: rustix::io::Errno) -> String {
+    std::io::Error::from_raw_os_error(errno.raw_os_error()).to_string()
+}
+
+async fn unavailable_message(programs: &[std::path::PathBuf]) -> String {
+    let error = crate::process::tree::list_processes_from(programs)
+        .await
+        .expect_err("no program can start");
+    match error {
+        InspectError::Unavailable(message) => message,
+        other => panic!("a program that cannot start is unavailable inspection: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_refused_ps_is_reported_as_refused_not_as_missing() {
-    use std::os::unix::fs::PermissionsExt;
     let s = Scratch::new();
     // A listing program that exists but may not be executed, tried before a
-    // missing one, as a sandbox that refuses `/bin/ps` presents it.
+    // missing one, as a sandbox that refuses `/bin/ps` presents it. Both live
+    // in this test's private directory, and the second is never created.
     let refused = s.path("refused-ps");
-    std::fs::write(&refused, "#!/bin/sh\nexit 0\n").expect("write refused ps");
-    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-    let missing = std::path::PathBuf::from("/nonexistent/delega-ps");
-    let error = crate::process::tree::list_processes_from(&[refused.clone(), missing.clone()])
-        .await
-        .expect_err("neither program can start");
-    let InspectError::Unavailable(message) = &error else {
-        panic!("a program that cannot start is unavailable inspection: {error:?}");
+    unexecutable(&refused);
+    let missing = s.path("never-created-ps");
+    let message = unavailable_message(&[refused.clone(), missing.clone()]).await;
+    let refused_text = format!(
+        "{}: {}",
+        refused.display(),
+        os_error(rustix::io::Errno::ACCESS)
+    );
+    let missing_text = format!(
+        "{}: {}",
+        missing.display(),
+        os_error(rustix::io::Errno::NOENT)
+    );
+    assert_eq!(
+        message,
+        format!("ps could not be started ({refused_text}, {missing_text})")
+    );
+}
+
+#[tokio::test]
+async fn an_overlong_ps_path_is_shortened_and_every_error_kept_within_the_limit() {
+    use crate::process::limits::MAX_ERROR_CHARS;
+    let s = Scratch::new();
+    // Nest directories until the refused path is about 990 characters, under
+    // the 1024 bytes exec accepts on macOS, so the error is still a refusal.
+    let mut dir = s.path("");
+    let target = 990;
+    while dir.as_os_str().len() + 200 < target - 20 {
+        dir.push("d".repeat(199));
+    }
+    let pad = target - dir.as_os_str().len() - 1;
+    dir.push("p".repeat(pad.clamp(1, 200)));
+    std::fs::create_dir_all(dir.parent().expect("parent")).expect("create nested dirs");
+    let refused = dir;
+    unexecutable(&refused);
+    assert!(refused.as_os_str().len() > 950, "{}", refused.display());
+    let missing = s.path("never-created-ps");
+    let message = unavailable_message(&[refused.clone(), missing.clone()]).await;
+    assert!(
+        message.chars().count() <= MAX_ERROR_CHARS,
+        "{} chars: {message}",
+        message.chars().count()
+    );
+    assert!(
+        message.starts_with("ps could not be started (..."),
+        "{message}"
+    );
+    assert!(message.ends_with(')'), "{message}");
+    let refusal = format!("p: {}, ", os_error(rustix::io::Errno::ACCESS));
+    assert!(message.contains(&refusal), "{message}");
+    let missing_text = format!(
+        "{}: {})",
+        missing.display(),
+        os_error(rustix::io::Errno::NOENT)
+    );
+    assert!(message.ends_with(&missing_text), "{message}");
+}
+
+#[test]
+fn ps_paths_that_cannot_all_fit_are_counted_not_dropped() {
+    use crate::process::limits::MAX_ERROR_CHARS;
+    // Fifty attempts with long paths: not every error fits, so the message
+    // keeps the first ones whole and says how many it left out.
+    let failures: Vec<_> = (0..50)
+        .map(|n| {
+            (
+                std::path::PathBuf::from(format!("/{}/ps{n}", "x".repeat(300))),
+                std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()),
+            )
+        })
+        .collect();
+    let InspectError::Unavailable(message) = crate::process::tree::not_started(&failures) else {
+        panic!("not started is unavailable inspection");
     };
-    let refusal = std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error());
     assert!(
-        message.starts_with("ps could not be started ("),
-        "{message}"
+        message.chars().count() <= MAX_ERROR_CHARS,
+        "{} chars: {message}",
+        message.chars().count()
     );
+    let refusal = os_error(rustix::io::Errno::ACCESS);
+    let shown = message.matches(refusal.as_str()).count();
+    assert!(shown >= 1, "{message}");
+    let note = format!(", ... and {} more paths)", 50 - shown);
+    assert!(message.ends_with(&note), "{message}");
     assert!(
-        message.contains(&format!("{}: {refusal}", refused.display())),
-        "{message}"
-    );
-    assert!(
-        message.contains(&format!("{}: ", missing.display())),
-        "{message}"
-    );
-    assert!(
-        message.find(&refused.display().to_string()) < message.find(&missing.display().to_string()),
-        "the paths are named in the order tried: {message}"
+        message.contains("/ps0: "),
+        "the first path tried is kept: {message}"
     );
 }
 
