@@ -577,9 +577,12 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         // writing it, and blocks once the pipe is full.
         wait_readable(&stdout, Duration::from_secs(120));
         signal(child.id(), "TERM");
-        // delega has taken the signal and asked the write to stop; the reader
-        // then drains while delega is still alive, held by its full standard
-        // error.
+        // delega has taken the signal and asked the write to stop. The
+        // acknowledgement is made before delega starts its wait of up to 1 s
+        // for the print thread, and the full standard error holds it alive
+        // about a second more, so the drain below begins at once, while the
+        // writer could still resume: a writer that ignored the stop would
+        // finish the result and fail the test.
         wait_for_ack(
             &stop_requested,
             &mut child,
