@@ -611,12 +611,12 @@ supervisor behind it is described in [supervisor.md](supervisor.md).
 | --- | --- | --- |
 | `start` | The request fields, or `profile` plus overrides. An absolute `cwd` is required. | After the request checks (at most 10 s): `run`, `worker` (absent when refused), `state` (`queued`, `running`, or `finished` for a refusal), `ahead` while queued, and `outcome` and `error` when refused. |
 | `follow_up` | `worker`, `prompt`, optional `timeout_secs` | At once: the same fields as `start`, with `worker`. Queues behind a running run. |
-| `wait` | `runs`, `workers` or both (at most 256 ids together), `timeout_secs`, `after` (cursor) | When a run finishes, an interaction needs an answer, or on timeout: `timed_out`, the `timeout_secs` applied, each named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`. Also `released_by_shutdown: true` when shutdown released it, and `limit_reached: "max_waits_in_flight"` when too many waits were open. |
+| `wait` | `runs`, `workers` or both (at most 256 ids together), `timeout_secs`, `after` (cursor) | When a run finishes, an interaction needs an answer, or on timeout: `timed_out`, the `timeout_secs` applied, each known named run and worker (with `changed` when `after` was given), `unknown` ids and a `cursor`, with `released_by_shutdown` and `limit_reached` when they apply. Every answer: [Wait at its limit](supervisor.md#wait-at-its-limit). |
 | `read` | `run` or `worker`, `detail`, `after`, `text_offset` | The result if finished; otherwise state, pending interactions and `progress`. `text_window` with `text_offset`, and a `cursor`. |
 | `list` | none | Live workers, then closed ones still kept, each with state, name, provider, current run, queue length, last run and outcome, session id and `can_follow_up`; limits in force and in use (including `default_wait_secs`, `wait_ceiling_secs`, `max_waits_in_flight`, `waits_in_flight`); a `cursor`; and [`stale_server`](#stale-server) when it applies. |
-| `interrupt` | `run` or `worker` | When the run stops: `settled`, `was_queued` and the compact result. After 30 s without stopping: `settled: false` and no result. |
+| `interrupt` | `run` or `worker` | When the run stops: `settled`, `was_queued`, and `state` and the compact result when they apply. If the call stops waiting first (30 s): `settled: false` and no result. Every answer: [Interrupt at its limit](supervisor.md#interrupt-at-its-limit). |
 | `respond` | `interaction`, `decision` (`allow`, `deny`), optional `note` (at most 256 bytes, discarded) | `accepted`, `unknown_interaction`, `already_answered`, `timed_out` or `closed`. |
-| `close` | `worker` | Stops the running run (waits at most 30 s; `settled: false` if it has not stopped), discards queued ones, frees the slot: `already_closed`, `discarded`, `stopped_run`, `settled`, and the stopped run's compact result when settled. |
+| `close` | `worker` | Stops the running run, discards queued ones, frees the slot: `state: "closed"`, `already_closed`, `discarded`, `settled`, and `stopped_run` and the stopped run's compact result when they apply. If the call stops waiting first (30 s): `settled: false` and no result. Every answer: [Close at its limit](supervisor.md#close-at-its-limit). |
 
 Rules:
 
@@ -638,10 +638,8 @@ Rules:
 - **Wait.** `timeout_secs` defaults to 30 and is capped at 300
   (`mcp.wait_default_secs`, `mcp.wait_ceiling_secs`); 0 returns at once. Keep
   waits short and pass the cursor back. At most 64 waits block at once
-  (`mcp.max_waits_in_flight`); one beyond that returns at once with
-  `timeout_secs: 0`, `timed_out: true` and `limit_reached`. A wait released by
-  shutdown carries `released_by_shutdown: true`, and its runs need not have
-  finished.
+  (`mcp.max_waits_in_flight`). What a wait answers at its timeout, at shutdown
+  and beyond that limit: [Wait at its limit](supervisor.md#wait-at-its-limit).
 - **States.** A worker is `queued`, `running`, `idle`, `waiting_for_answer` or
   `closed`. A run is `queued`, `running`, or finished with an outcome
   ([States](supervisor.md#states)).
