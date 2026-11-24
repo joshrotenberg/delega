@@ -403,6 +403,13 @@ impl GroupPin {
     pub(crate) fn pinned(&self) -> bool {
         *self.lock()
     }
+
+    /// Test probe: whether the lock is held right now, by any thread
+    /// (this one included), without waiting for it.
+    #[cfg(test)]
+    fn locked(&self) -> bool {
+        matches!(self.0.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    }
 }
 
 /// How a pid was found, which decides what it must still be when it is
@@ -487,6 +494,18 @@ pub(crate) struct ProcessTree {
     /// Test seam: created whenever a refused signal is recorded.
     #[cfg(test)]
     pub(crate) refusal_file: Option<std::path::PathBuf>,
+    /// Test seam: run once in a snapshot after its check of the shared pin
+    /// and before adoption, as a release in between would.
+    #[cfg(test)]
+    after_pin_check: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Test seam: run once while the child's identity is learned, after the
+    /// pin was checked under its lock and before the start time is read.
+    #[cfg(test)]
+    before_root_read: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Test seam: run once after the child's identity is stored, before the
+    /// pin's lock is let go.
+    #[cfg(test)]
+    after_root_stored: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -565,6 +584,12 @@ impl ProcessTree {
             refuse_signals: false,
             #[cfg(test)]
             refusal_file: None,
+            #[cfg(test)]
+            after_pin_check: None,
+            #[cfg(test)]
+            before_root_read: None,
+            #[cfg(test)]
+            after_root_stored: None,
         }
     }
 
@@ -756,15 +781,10 @@ impl ProcessTree {
             })
         });
         let root = rows.iter().find(|row| row.pid == self.pid);
-        if self.root_started.is_none() {
-            self.root_started = root.map(|r| r.started.clone());
-            // The child is pinned now (unreaped), so its pid is its own.
-            if self.root_started.is_some() && self.pinned {
-                self.root_ticks = sys::start_ticks(self.pid);
-                if let Some(ticks) = self.root_ticks {
-                    self.ticks.insert(self.pid, ticks);
-                }
-            }
+        if self.root_started.is_none()
+            && let Some(root) = root
+        {
+            self.learn_root(root);
         }
         let mut owned: HashSet<i32> = HashSet::new();
         if let Some(root) = root
@@ -809,6 +829,37 @@ impl ProcessTree {
         }
     }
 
+    /// Learn the child's identity from its row: the start the listing shows
+    /// and, on Linux, its start time in ticks from `/proc`. Only while the
+    /// child is pinned, and the pin's lock is held across the check, the read
+    /// and storing the result: the keeper reaps the child only after the
+    /// owner answered `released`, which takes this lock, so the pid cannot
+    /// name a replacement between the check and the read. With the pin
+    /// released nothing is learned (a replacement's start time would
+    /// otherwise become the child's identity at [`Self::unpin`]). The guard
+    /// ends here, so [`Self::track`] can take the lock afterwards.
+    fn learn_root(&mut self, root: &ProcessRow) {
+        let pin = self.pin.clone();
+        let held = pin.as_deref().map(GroupPin::lock);
+        if !self.pinned || held.as_ref().is_some_and(|pinned| !**pinned) {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(seam) = self.before_root_read.take() {
+            seam();
+        }
+        self.root_started = Some(root.started.clone());
+        self.root_ticks = sys::start_ticks(self.pid);
+        if let Some(ticks) = self.root_ticks {
+            self.ticks.insert(self.pid, ticks);
+        }
+        #[cfg(test)]
+        if let Some(seam) = self.after_root_stored.take() {
+            seam();
+        }
+        drop(held);
+    }
+
     async fn snapshot(&mut self, with_marker: bool) -> Result<Snapshot, InspectError> {
         let token = self.marker.clone().filter(|_| with_marker);
         // Without `/proc` the marker reading is a listing of its own that does
@@ -827,6 +878,10 @@ impl ProcessTree {
         // The keeper may have let go of the child while the listing ran.
         if self.pin.as_ref().is_some_and(|pin| !pin.pinned()) {
             self.unpin();
+        }
+        #[cfg(test)]
+        if let Some(seam) = self.after_pin_check.take() {
+            seam();
         }
         let sessions = self.read_sessions(&rows);
         self.adopt(&rows, &sessions);
@@ -1332,6 +1387,105 @@ mod tests {
         drop(held);
         releasing.join().expect("the release finished");
         assert!(tree.verified_ticks(&row).is_none());
+    }
+
+    /// A tree whose child is this test process, sharing `pin`, with a
+    /// listing that shows the child in every snapshot.
+    fn tree_of_this_process(pin: &Arc<GroupPin>) -> (ProcessTree, i32) {
+        let own = i32::try_from(std::process::id()).expect("a pid");
+        let frames = (0..3)
+            .map(|_| table(vec![(own, 1, own, "root", false)]))
+            .collect();
+        let tree = ProcessTree::new(own, fixed(frames), true).with_pin(pin.clone());
+        (tree, own)
+    }
+
+    /// While the pin holds, the first snapshot that shows the child learns
+    /// its identity (and on Linux its start time), so the cases below fail
+    /// for the release, not for the setup.
+    #[tokio::test]
+    async fn a_pinned_child_seen_in_a_snapshot_has_its_identity_learned() {
+        let pin = Arc::new(GroupPin::default());
+        let (mut tree, own) = tree_of_this_process(&pin);
+        tree.capture().await;
+        assert_eq!(tree.root_started.as_deref(), Some("root"));
+        assert_eq!(tree.root_ticks, sys::start_ticks(own));
+        assert_eq!(tree.ticks.get(&own).copied(), sys::start_ticks(own));
+    }
+
+    /// The pin is released after the snapshot checked it and before the
+    /// child's identity is learned: nothing is learned, so the start time of
+    /// whatever holds the pid by then never becomes the child's, not at
+    /// adoption and not when a later snapshot unpins.
+    #[tokio::test]
+    async fn a_pin_released_between_the_snapshots_check_and_adoption_teaches_no_identity() {
+        let pin = Arc::new(GroupPin::default());
+        let (mut tree, own) = tree_of_this_process(&pin);
+        let releaser = pin.clone();
+        tree.after_pin_check = Some(Box::new(move || releaser.release()));
+        tree.capture().await;
+        assert!(tree.after_pin_check.is_none(), "the seam did not run");
+        assert!(tree.pinned, "the snapshot saw the release before the seam");
+        assert_eq!(tree.root_started, None);
+        assert_eq!(tree.root_ticks, None);
+        assert!(!tree.ticks.contains_key(&own));
+        assert!(
+            !tree
+                .observations
+                .lock()
+                .unwrap()
+                .stats
+                .root_identity_observed
+        );
+        // The next snapshot unpins; still no identity for the child.
+        tree.capture().await;
+        assert!(!tree.pinned);
+        assert!(!tree.known.contains_key(&own));
+        assert!(!tree.ticks.contains_key(&own));
+    }
+
+    /// The pin's lock is held from the check of the pin through the read of
+    /// the child's start time and storing it: a probe at the read and one
+    /// after the stores both find it held. Without the guard the first probe
+    /// fails; with the guard dropped right after the check, the second does.
+    #[tokio::test]
+    async fn the_pin_lock_is_held_from_the_check_through_storing_the_childs_identity() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        // 0: the probe did not run; 1: the lock was held; 2: it was not.
+        const NOT_RUN: u8 = 0;
+        const HELD: u8 = 1;
+        let pin = Arc::new(GroupPin::default());
+        let (mut tree, own) = tree_of_this_process(&pin);
+        let at_read = Arc::new(AtomicU8::new(NOT_RUN));
+        let after_stores = Arc::new(AtomicU8::new(NOT_RUN));
+        let probe = |pin: &Arc<GroupPin>, seen: &Arc<AtomicU8>| {
+            let (pin, seen) = (pin.clone(), seen.clone());
+            Box::new(move || {
+                seen.store(if pin.locked() { HELD } else { 2 }, Ordering::SeqCst);
+            })
+        };
+        tree.before_root_read = Some(probe(&pin, &at_read));
+        tree.after_root_stored = Some(probe(&pin, &after_stores));
+        tree.capture().await;
+        assert_eq!(
+            at_read.load(Ordering::SeqCst),
+            HELD,
+            "the pin's lock was not held at the read"
+        );
+        assert_eq!(
+            after_stores.load(Ordering::SeqCst),
+            HELD,
+            "the pin's lock was not held through storing the identity"
+        );
+        assert!(!pin.locked(), "the pin's lock outlived the snapshot");
+        assert_eq!(tree.root_started.as_deref(), Some("root"));
+        assert_eq!(tree.root_ticks, sys::start_ticks(own));
+        pin.release();
+        // Unpinned, the child is followed by what was read under the pin.
+        tree.capture().await;
+        assert!(!tree.pinned);
+        assert_eq!(tree.known.get(&own).map(String::as_str), Some("root"));
+        assert_eq!(tree.ticks.get(&own).copied(), sys::start_ticks(own));
     }
 
     #[test]
