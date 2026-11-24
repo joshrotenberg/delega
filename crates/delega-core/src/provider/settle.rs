@@ -93,13 +93,14 @@ fn session_not_found(
 /// The kinds a provider failure is given by what it says (see the provider
 /// parsers). A Codex `error` event before the exit can carry one of them, and
 /// `session_not_found` still outranks it.
-const CLASSIFIED: [&str; 6] = [
+const CLASSIFIED: [&str; 7] = [
     "provider_usage_limit",
     "provider_auth",
     "provider_billing",
     "provider_capacity",
     "provider_model_unavailable",
     "provider_context_exhausted",
+    "provider_content_policy",
 ];
 
 /// A provider's message as it goes into a result: secrets redacted from the
