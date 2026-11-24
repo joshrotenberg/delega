@@ -334,11 +334,7 @@
 //!
 //! A process listing that is empty, that does not contain this process, or
 //! that has a line that cannot be parsed is a failed inspection, never "nothing
-//! found", so it cannot confirm cleanup. One kind of row is skipped instead:
-//! a row whose state is `X` (dead) with a pid that parses describes a process
-//! that has exited, and its other columns are not read. That cannot hide a
-//! live descendant: an exited process is not live, and a process that reuses
-//! its pid is a new process that appears in a later listing.
+//! found", so it cannot confirm cleanup.
 //!
 //! The environment variable `DELEGA_TEST_NO_PROCESS_LISTING` is a test-only
 //! seam for `acceptance/`: when it is set, whatever its value, no program is

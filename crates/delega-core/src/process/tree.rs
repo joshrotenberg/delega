@@ -34,7 +34,9 @@ use tokio::time::Instant;
 
 use crate::cleanup_reason::{self, ListingFailure};
 
-use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
+use super::limits::{
+    EXITING_ROW_RETRIES, MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT,
+};
 use super::marker::MarkedRow;
 use super::sys::{self, Signal};
 
@@ -48,6 +50,11 @@ pub(crate) enum InspectError {
     Unavailable(String),
     /// Any other failure, as text.
     Failed(String),
+    /// A listing whose only unparsable lines are rows for an exiting process
+    /// ([`retry_trigger`]), as text. [`ProcessTree`] takes the listing again
+    /// and, if no fresh listing parses fully, reports this as `Failed` with the
+    /// same text.
+    ExitingRow(String),
 }
 
 impl fmt::Display for InspectError {
@@ -55,7 +62,9 @@ impl fmt::Display for InspectError {
         match self {
             InspectError::TimedOut => f.write_str(ListingFailure::TimedOut.text()),
             InspectError::Unavailable(message) => f.write_str(message),
-            InspectError::Failed(message) => f.write_str(message),
+            InspectError::Failed(message) | InspectError::ExitingRow(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -99,20 +108,56 @@ fn parse_row(line: &str) -> Option<ProcessRow> {
     })
 }
 
-/// Whether `line` is a row for a process that has exited: its state column
-/// begins with `X` (procps's dead state) and its pid is a positive integer.
-/// Such a row is skipped, and its other columns are not read: `ps` can print
-/// one for a process exiting while it reads it, with columns such as a pgid
-/// of -1 printed as unsigned. An exited process is not live, so skipping it
-/// cannot hide a live descendant; a process that later reuses the pid appears
-/// in a later listing in its own right. Any other row must parse fully.
-fn is_dead_row(line: &str) -> bool {
-    let mut parts = line.split_whitespace();
-    let pid_ok = parts
-        .next()
-        .and_then(|pid| pid.parse::<i32>().ok())
-        .is_some_and(|pid| pid > 0);
-    pid_ok && parts.nth(2).is_some_and(|state| state.starts_with('X'))
+/// Whether `line` has exactly the shape Linux `ps` can print for a task that is
+/// exiting, or that an exec from another thread of its process has just
+/// replaced: `<pid> 0 4294967295 X<flags> <weekday> <month> <day> <hh:mm:ss>
+/// <year>`, with a positive pid, ppid 0, pgid -1 printed as unsigned, state `X`
+/// followed only by procps's flags (`<NLsl+`), and a complete start time in
+/// the C locale. Every field is anchored; no other shape matches. Such a row
+/// proves nothing about its pid (an exec from a non-leader thread hands the
+/// leader's pid and start time to the thread that called it), so it is never
+/// skipped; it only lets the listing be taken again.
+fn exiting_row_signature(line: &str) -> bool {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    fn number(text: &str, digits: std::ops::RangeInclusive<usize>, max: u32) -> Option<u32> {
+        let n = (digits.contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| text.parse::<u32>().ok())
+            .flatten()?;
+        (n <= max).then_some(n)
+    }
+    if !line.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        return false;
+    }
+    let fields: Vec<&str> = line.split(' ').filter(|f| !f.is_empty()).collect();
+    let [pid, ppid, pgid, state, weekday, month, day, time, year] = fields[..] else {
+        return false;
+    };
+    let clock: Vec<&str> = time.split(':').collect();
+    number(pid, 1..=10, i32::MAX as u32).is_some_and(|pid| pid > 0)
+        && ppid == "0"
+        && pgid == "4294967295"
+        && state
+            .strip_prefix('X')
+            .is_some_and(|flags| flags.chars().all(|c| "<NLsl+".contains(c)))
+        && WEEKDAYS.contains(&weekday)
+        && MONTHS.contains(&month)
+        && number(day, 1..=2, 31).is_some_and(|day| day > 0)
+        && matches!(
+            clock[..],
+            [h, m, s] if number(h, 2..=2, 23).is_some()
+                && number(m, 2..=2, 59).is_some()
+                && number(s, 2..=2, 60).is_some()
+        )
+        && number(year, 4..=4, 9999).is_some()
+}
+
+/// Whether an unparsable `line` lets the listing be taken again: Linux only,
+/// and only [`exiting_row_signature`].
+fn retry_trigger(line: &str) -> bool {
+    cfg!(target_os = "linux") && exiting_row_signature(line)
 }
 
 /// Where `ps` is looked for, in order.
@@ -279,9 +324,11 @@ fn system_programs() -> Vec<PathBuf> {
 
 /// Parse a process listing and refuse one that cannot be right. A valid
 /// listing is never empty, holds this process (`own_pid`), and has no line
-/// that does not parse. A row for an exited process ([`is_dead_row`]) is
-/// skipped before parsing and counts toward none of these. Anything else is a failed inspection, never "nothing
-/// found": a listing that shows no descendants must not confirm cleanup.
+/// that does not parse. Anything else is a failed inspection, never "nothing
+/// found": a listing that shows no descendants must not confirm cleanup. When
+/// every unparsable line is a [`retry_trigger`], the error is
+/// [`InspectError::ExitingRow`] instead of `Failed`, with the same text, so
+/// the caller can take the listing again.
 ///
 /// The error for unparsed lines quotes the first of them, escaped and
 /// bounded by `cleanup_reason::unparsed_lines`. That is safe only because
@@ -295,15 +342,14 @@ pub(crate) fn validate_listing(
     let mut rows = Vec::new();
     let mut unparsed = 0usize;
     let mut first_unparsed = None;
+    let mut only_exiting = true;
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
-        if is_dead_row(line) {
-            continue;
-        }
         match parse_row(line) {
             Some(row) => rows.push(row),
             None => {
                 unparsed += 1;
                 first_unparsed.get_or_insert(line);
+                only_exiting &= retry_trigger(line);
             }
         }
     }
@@ -311,9 +357,12 @@ pub(crate) fn validate_listing(
         return Err(InspectError::Failed(ListingFailure::NoRows.text().into()));
     }
     if let Some(first) = first_unparsed {
-        return Err(InspectError::Failed(cleanup_reason::unparsed_lines(
-            unparsed, first,
-        )));
+        let message = cleanup_reason::unparsed_lines(unparsed, first);
+        return Err(if only_exiting {
+            InspectError::ExitingRow(message)
+        } else {
+            InspectError::Failed(message)
+        });
     }
     if !rows
         .iter()
@@ -380,6 +429,10 @@ pub struct InspectionStats {
     /// Signals not sent because the process could not be verified (Linux: no
     /// pidfd, or no recorded start time). Any makes the verdict `Unconfirmed`.
     pub unverified_signals: u64,
+    /// Fresh listings taken because the only unparsable lines of a listing
+    /// were rows for an exiting process (Linux only). They count within one
+    /// inspection, not in `attempts`.
+    pub exiting_row_retries: u64,
 }
 
 /// The shared receipts: the public numbers plus the instant of the latest
@@ -737,28 +790,44 @@ impl ProcessTree {
     }
 
     /// Bounded inspection; a failed snapshot never proves that a process exited.
+    ///
+    /// A listing whose only unparsable lines are rows for an exiting process
+    /// ([`InspectError::ExitingRow`]) is taken again, up to
+    /// [`EXITING_ROW_RETRIES`] times, and the first fresh listing that parses
+    /// fully is used. A retry starts only before, and is awaited only until,
+    /// one listing deadline (`ps_timeout`) after this inspection started, so
+    /// retries never extend the time one inspection may take. A retry that
+    /// would pass the deadline is not awaited (its listing reaps itself under
+    /// its own deadline). If no fresh listing parses fully, the latest error
+    /// is returned, with `ExitingRow` reported as `Failed` and the same text.
     async fn rows(&self) -> Result<Vec<ProcessRow>, InspectError> {
         let started = Instant::now();
         {
             let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
             obs.stats.attempts += 1;
         }
-        // The production inspector owns its timeout and async reap. Run it as
-        // its own task so cancelling this future never cancels it, and so a
-        // panicking inspector, or a panicking factory, is caught here and
-        // reported as a failure.
-        let lister = self.lister.clone();
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lister())) {
-            Ok(future) => match tokio::spawn(future).await {
-                Ok(rows) => rows,
-                Err(_) => Err(InspectError::Failed(
-                    ListingFailure::InspectorPanicked.text().into(),
-                )),
-            },
-            Err(_) => Err(InspectError::Failed(
-                ListingFailure::FactoryPanicked.text().into(),
-            )),
-        };
+        let deadline = started + ps_timeout();
+        let mut result = self.list_once().await;
+        let mut retries = 0;
+        while matches!(result, Err(InspectError::ExitingRow(_))) && retries < EXITING_ROW_RETRIES {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            retries += 1;
+            {
+                let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+                obs.stats.exiting_row_retries += 1;
+            }
+            match tokio::time::timeout(remaining, self.list_once()).await {
+                Ok(next) => result = next,
+                Err(_) => break,
+            }
+        }
+        let result = result.map_err(|error| match error {
+            InspectError::ExitingRow(message) => InspectError::Failed(message),
+            other => other,
+        });
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
         let finished = Instant::now();
         let duration = finished.saturating_duration_since(started).as_millis() as u64;
@@ -778,6 +847,26 @@ impl ProcessTree {
             }
         }
         result
+    }
+
+    /// One listing from the lister.
+    async fn list_once(&self) -> Result<Vec<ProcessRow>, InspectError> {
+        // The production inspector owns its timeout and async reap. Run it as
+        // its own task so cancelling this future never cancels it, and so a
+        // panicking inspector, or a panicking factory, is caught here and
+        // reported as a failure.
+        let lister = self.lister.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lister())) {
+            Ok(future) => match tokio::spawn(future).await {
+                Ok(rows) => rows,
+                Err(_) => Err(InspectError::Failed(
+                    ListingFailure::InspectorPanicked.text().into(),
+                )),
+            },
+            Err(_) => Err(InspectError::Failed(
+                ListingFailure::FactoryPanicked.text().into(),
+            )),
+        }
     }
 
     /// The session of every live row outside the child's group.
@@ -1634,87 +1723,6 @@ mod tests {
             crate::cleanup_reason::is_listing_error(&message),
             "{message}"
         );
-    }
-
-    /// The row seen on Linux CI (#217): pid 17328, ppid 0, pgid -1 printed
-    /// as unsigned, with `{state}` in the state column.
-    fn churn_row(state: &str) -> String {
-        format!("  17328       0 4294967295 {state} Tue Nov 24 10:44:54 2026\n")
-    }
-
-    #[test]
-    fn the_observed_dead_row_is_skipped_and_the_listing_counts() {
-        let text = format!("{}{}{}", row(1), churn_row("X+"), row(10));
-        let rows = validate_listing(&text, 10).expect("the listing counts");
-        assert_eq!(
-            rows.iter().map(|r| r.pid).collect::<Vec<_>>(),
-            vec![1, 10],
-            "a dead row was kept"
-        );
-    }
-
-    #[test]
-    fn the_observed_columns_in_a_live_or_zombie_state_still_fail_the_listing() {
-        for state in ["S", "S+", "Z", "Z+", "R", "R+"] {
-            let line = churn_row(state);
-            match validate_listing(&format!("{}{line}", row(10)), 10) {
-                Err(InspectError::Failed(message)) => {
-                    assert!(
-                        message.contains("could not be parsed"),
-                        "{state}: {message}"
-                    );
-                    assert!(message.contains(line.trim_end()), "{state}: {message}");
-                    assert!(
-                        crate::cleanup_reason::is_listing_error(&message),
-                        "{state}: {message}"
-                    );
-                }
-                other => panic!("{state}: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn a_dead_row_whose_pid_does_not_parse_or_is_not_positive_still_fails_the_listing() {
-        for pid in ["x17328", "0", "-5", "4294967295", ""] {
-            let line = format!("{pid} 0 4294967295 X+ Tue Nov 24 10:44:54 2026\n");
-            assert!(
-                matches!(
-                    validate_listing(&format!("{}{line}", row(10)), 10),
-                    Err(InspectError::Failed(_))
-                ),
-                "pid {pid:?} was skipped"
-            );
-        }
-    }
-
-    #[test]
-    fn a_listing_of_dead_rows_and_our_process_counts() {
-        let text = format!("{}{}2 1 2 X\n{}", churn_row("X+"), churn_row("X"), row(10));
-        let rows = validate_listing(&text, 10).expect("the listing counts");
-        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![10]);
-    }
-
-    #[test]
-    fn a_listing_of_only_dead_rows_has_no_rows_and_fails() {
-        let text = format!("{}{}", churn_row("X+"), churn_row("X"));
-        assert!(matches!(
-            validate_listing(&text, 10),
-            Err(InspectError::Failed(_))
-        ));
-    }
-
-    #[test]
-    fn a_bad_line_beside_a_dead_row_is_still_quoted() {
-        let text = format!("{}{}not a row\n{}", churn_row("X+"), row(10), row(1));
-        match validate_listing(&text, 10) {
-            Err(InspectError::Failed(message)) => assert_eq!(
-                message,
-                "the process listing had 1 lines that could not be parsed, \
-                 the first: \"not a row\""
-            ),
-            other => panic!("{other:?}"),
-        }
     }
 
     #[test]
