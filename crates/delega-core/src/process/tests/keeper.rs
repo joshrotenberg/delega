@@ -61,7 +61,7 @@ fn keeper_entry() {
 }
 
 /// Set to a number of seconds to make [`sleeper_entry`] sleep that long.
-const SLEEP_ENV: &str = "DELEGA_TEST_SLEEP_SECS";
+pub(super) const SLEEP_ENV: &str = "DELEGA_TEST_SLEEP_SECS";
 
 /// Not a test: a process that sleeps, when this binary is started as one. It
 /// stands in for `sleep` where a test needs a program whose environment `ps -E`
