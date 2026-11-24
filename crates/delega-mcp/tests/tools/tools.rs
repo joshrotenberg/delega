@@ -679,6 +679,7 @@ async fn a_waiting_call_with_an_unreachable_cursor_is_released_by_shutdown() {
         .expect("router");
     let mut other = tower_mcp::TestClient::from_router(router);
     other.initialize().await;
+    let mut waits = rig.supervisor.observe_waits();
     let waiting = tokio::spawn(async move {
         let result = other
             .call_tool(
@@ -688,15 +689,11 @@ async fn a_waiting_call_with_an_unreachable_cursor_is_released_by_shutdown() {
             .await;
         (other, result)
     });
-    // Round trips through the supervisor's one task let the waiting call get as
-    // far as registering. Whether it did or not, the answer must be the same:
-    // shutdown releases it, and a wait made after shutdown began returns at once.
-    for _ in 0..20 {
-        rig.call("list", json!({})).await;
-        assert!(!waiting.is_finished(), "the wait returned before shutdown");
-    }
+    let registration = waits.registered().await;
+    assert!(!waiting.is_finished(), "the wait returned before shutdown");
     let report = rig.supervisor.shutdown().await;
     assert_eq!(report.runs_stopped, 1);
+    registration.removed().await;
     let (_, result) = tokio::time::timeout(Duration::from_secs(120), waiting)
         .await
         .expect("shutdown released the waiting call")
@@ -751,6 +748,7 @@ async fn a_cursorless_wait_released_by_shutdown_says_so_and_a_timed_out_wait_doe
         .expect("router");
     let mut other = tower_mcp::TestClient::from_router(router);
     other.initialize().await;
+    let mut waits = rig.supervisor.observe_waits();
     let waiting = tokio::spawn({
         let run = run.clone();
         async move {
@@ -760,12 +758,11 @@ async fn a_cursorless_wait_released_by_shutdown_says_so_and_a_timed_out_wait_doe
             (other, result)
         }
     });
-    for _ in 0..20 {
-        rig.call("list", json!({})).await;
-        assert!(!waiting.is_finished(), "the wait returned before shutdown");
-    }
+    let registration = waits.registered().await;
+    assert!(!waiting.is_finished(), "the wait returned before shutdown");
     let report = rig.supervisor.shutdown().await;
     assert_eq!(report.runs_stopped, 1);
+    registration.removed().await;
     let (_, result) = tokio::time::timeout(Duration::from_secs(120), waiting)
         .await
         .expect("shutdown released the waiting call")
@@ -810,6 +807,7 @@ async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_no
 
     // Each parked wait is a call on a connection of its own to the same
     // server, so the calls below go on while they wait.
+    let mut waits = rig.supervisor.observe_waits();
     let mut parked = Vec::new();
     for _ in 0..2 {
         let router = delega_mcp::router(rig.supervisor.clone(), &delega_mcp::BuildInfo::default())
@@ -824,19 +822,10 @@ async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_no
             (other, result)
         }));
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let listed = rig.call("list", json!({})).await;
-        assert_eq!(listed["limits"]["max_waits_in_flight"], 2, "{listed}");
-        if listed["limits"]["waits_in_flight"] == 2 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the waits never parked: {listed}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let registrations = [waits.registered().await, waits.registered().await];
+    let listed = rig.call("list", json!({})).await;
+    assert_eq!(listed["limits"]["max_waits_in_flight"], 2, "{listed}");
+    assert_eq!(listed["limits"]["waits_in_flight"], 2, "{listed}");
 
     // Far below the 120 s the parked waits asked for.
     let at_once = Duration::from_secs(10);
@@ -875,6 +864,9 @@ async fn a_wait_past_the_limit_is_answered_at_once_and_interrupt_and_list_are_no
     assert_eq!(stopped["settled"], true, "{stopped}");
 
     // The interrupt finished the run, which wakes the parked waits.
+    for registration in registrations {
+        registration.removed().await;
+    }
     for wait in parked {
         let (_, result) = tokio::time::timeout(Duration::from_secs(60), wait)
             .await

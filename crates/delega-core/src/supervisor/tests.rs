@@ -448,6 +448,7 @@ async fn a_wait_held_between_its_timeout_and_its_view_takes_no_slot_from_the_nex
     assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
     let run = listed.workers[0].brief.current_run.clone().expect("run");
     // The one slot is free: the next wait blocks instead of being turned away.
+    let mut waits = supervisor.observe_waits();
     let next = {
         let supervisor = supervisor.clone();
         let targets = WaitTargets {
@@ -456,31 +457,20 @@ async fn a_wait_held_between_its_timeout_and_its_view_takes_no_slot_from_the_nex
         };
         tokio::spawn(async move { supervisor.wait(targets, Some(120), None).await })
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while supervisor
-        .list()
-        .await
-        .expect("list")
-        .limits
-        .waits_in_flight
-        != 1
-    {
-        assert!(
-            !next.is_finished(),
-            "the next wait was answered instead of blocking"
-        );
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the next wait never blocked"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let registration = waits.registered().await;
+    assert!(
+        !next.is_finished(),
+        "the next wait was answered instead of blocking"
+    );
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 1, "{listed:#?}");
     release.send(()).expect("release the wait");
     let held = waiting.await.expect("task").expect("wait");
     assert!(held.timed_out, "{held:#?}");
     assert_eq!(held.limit_reached, None);
     assert_eq!(held.timeout_secs, 1);
     std::fs::write(dir.gate(), b"").expect("open the gate");
+    registration.removed().await;
     let woken = next.await.expect("task").expect("wait");
     assert!(!woken.timed_out, "{woken:#?}");
     assert_eq!(woken.limit_reached, None);
@@ -532,6 +522,7 @@ async fn a_wait_on_a_queued_run_that_shutdown_discarded_is_not_marked_as_release
         .await
         .expect("follow up");
     assert_eq!(queued.state, RunState::Queued);
+    let mut waits = supervisor.observe_waits();
     let waiting = {
         let supervisor = supervisor.clone();
         let targets = WaitTargets {
@@ -540,12 +531,10 @@ async fn a_wait_on_a_queued_run_that_shutdown_discarded_is_not_marked_as_release
         };
         tokio::spawn(async move { supervisor.wait(targets, Some(300), None).await })
     };
-    // Round trips through the supervisor's one task let the wait register.
-    for _ in 0..20 {
-        supervisor.list().await.expect("list");
-        assert!(!waiting.is_finished(), "the wait returned before shutdown");
-    }
+    let registration = waits.registered().await;
+    assert!(!waiting.is_finished(), "the wait returned before shutdown");
     supervisor.shutdown().await;
+    registration.removed().await;
     let response = waiting.await.expect("task").expect("wait");
     assert!(!response.timed_out, "{response:#?}");
     assert_eq!(response.runs[0].state, RunState::Finished, "{response:#?}");
@@ -1719,27 +1708,16 @@ async fn a_parked_wait_whose_run_aged_out_does_not_hold_its_slot_against_the_nex
     // Parked on the finished run with a cursor past its finish: nothing wakes
     // it until its result ages out. Retention is an hour of the supervisor's
     // clock, which only this test moves, so the result cannot go early.
+    let mut waits = supervisor.observe_waits();
     let stale = {
         let supervisor = supervisor.clone();
         let targets = targets(&old.run);
         tokio::spawn(async move { supervisor.wait(targets, Some(120), Some(done.cursor)).await })
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while supervisor
-        .list()
-        .await
-        .expect("list")
-        .limits
-        .waits_in_flight
-        != 1
-    {
-        assert!(!stale.is_finished(), "the wait was answered, not parked");
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the wait never parked"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let registration = waits.registered().await;
+    assert!(!stale.is_finished(), "the wait was answered, not parked");
+    let listed = supervisor.list().await.expect("list");
+    assert_eq!(listed.limits.waits_in_flight, 1, "{listed:#?}");
 
     // The result ages out between two commands. The wait below is the command
     // that prunes it, and it must find the one slot free.
@@ -1752,6 +1730,7 @@ async fn a_parked_wait_whose_run_aged_out_does_not_hold_its_slot_against_the_nex
     assert_eq!(next.timeout_secs, 1);
     assert!(next.timed_out, "{next:#?}");
 
+    registration.removed().await;
     let gone = tokio::time::timeout(Duration::from_secs(60), stale)
         .await
         .expect("pruning woke the parked wait")

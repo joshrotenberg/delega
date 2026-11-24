@@ -88,6 +88,8 @@ pub(super) struct ShutdownStart {
 }
 
 pub(super) enum Command {
+    #[cfg(any(test, feature = "test-support"))]
+    ObserveWaits(tokio::sync::mpsc::UnboundedSender<super::wait_test_support::RegisteredWait>),
     InteractionChanged,
     Respond {
         interaction: String,

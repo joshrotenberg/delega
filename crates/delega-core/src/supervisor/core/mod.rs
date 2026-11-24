@@ -54,6 +54,8 @@ pub(super) struct Core {
     running: usize,
     waiters: HashMap<u64, waits::Waiter>,
     next_waiter: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    wait_observer: Option<UnboundedSender<super::wait_test_support::RegisteredWait>>,
     mode: Mode,
     shutdown_waiters: Vec<oneshot::Sender<()>>,
     tx: UnboundedSender<Command>,
@@ -109,6 +111,8 @@ impl Core {
             running: 0,
             waiters: HashMap::new(),
             next_waiter: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            wait_observer: None,
             mode: Mode::Active,
             shutdown_waiters: Vec::new(),
             tx,
@@ -128,6 +132,8 @@ impl Core {
     pub fn handle(&mut self, command: Command) {
         self.prune_and_wake(self.retention_now());
         match command {
+            #[cfg(any(test, feature = "test-support"))]
+            Command::ObserveWaits(observer) => self.wait_observer = Some(observer),
             Command::Start {
                 request,
                 preflight,

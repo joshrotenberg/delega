@@ -12,6 +12,9 @@ keywords = ["claude", "codex", "agents", "supervisor"]
 categories = ["development-tools"]
 publish = true
 
+[features]
+test-support = []
+
 [dependencies]
 jsonschema.workspace = true
 schemars.workspace = true
@@ -29,6 +32,8 @@ toml.workspace = true
 rustix = { workspace = true, features = ["fs", "net", "stdio", "pipe", "event"] }
 
 [dev-dependencies]
+# Cargo strips this path-only self-dependency when packaging.
+delega-core = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
