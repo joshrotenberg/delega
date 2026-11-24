@@ -344,53 +344,87 @@ impl KeeperLink {
 /// keeper both classify it (before the answer is delivered or sent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplyHole {
-    /// Nothing: a complete answer with nothing refused and no failed read, a
-    /// census incomplete only because the tree keeps changing (it reports a
-    /// nonzero count and never claimed an empty tree), or an answer without
-    /// details (no walk).
+    /// Nothing: a well-formed walk record that is complete with nothing
+    /// refused and no failed read, a census record incomplete only because
+    /// the tree keeps changing (it reports a nonzero count and never claimed
+    /// an empty tree), or an answer without details (no walk).
     None,
-    /// A freeze that did not complete for no other reason: exactly the four
-    /// fields of a walk, `complete=false`, `refused=0`, `read_failures=0`
-    /// (passes disagreed, the tree was in flux, or the budget ran out). It
-    /// says the keeper had not stopped everything yet, not that a process
-    /// escaped; on Linux with a subreaper a final census that proves the tree
-    /// empty supersedes it.
+    /// A freeze that did not complete for no other reason: a well-formed
+    /// walk record with `complete=false refused=0 read_failures=0` (passes
+    /// disagreed, the tree was in flux, or the budget ran out). It says the
+    /// keeper had not stopped everything yet, not that a process escaped; on
+    /// Linux with a subreaper a final census that proves the tree empty
+    /// supersedes it.
     Incomplete,
     /// A hole no later answer repairs: a refused hold (a process that was
-    /// never signalled), a failed read of `/proc`, in any answer; or a freeze
-    /// whose details do not show a walk that only did not complete (a freeze
-    /// task that failed, or anything else that is not exactly the four
-    /// fields).
+    /// never signalled) or a failed read of `/proc`, in either verb's
+    /// answer; or details that are not a well-formed walk record (a freeze
+    /// task that failed, or anything malformed; see [`walk_record`]).
     Unproven,
 }
 
-/// Classify a census or freeze answer (see [`ReplyHole`]).
-pub(crate) fn reply_hole(verb: &str, detail: &str) -> ReplyHole {
-    let field = |name: &str| -> Option<&str> {
-        detail
-            .split_ascii_whitespace()
-            .find_map(|word| word.strip_prefix(name)?.strip_prefix('='))
-    };
-    let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
-    if nonzero("refused") || nonzero("read_failures") {
-        return ReplyHole::Unproven;
+/// A walk's record as the keeper writes it (`Walked::detail`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalkRecord {
+    complete: bool,
+    refused: u32,
+    read_failures: u32,
+}
+
+/// The details of a walk, read only in the exact shapes the keeper writes:
+/// `passes=<n> complete=<true|false> refused=<n> read_failures=<n>`, those
+/// four fields in that order, each once, separated by single spaces, every
+/// `<n>` a `u32` in plain decimal (no sign, no leading zero). `None` for
+/// anything else: a missing, repeated, reordered or unknown field, a value
+/// out of range, or extra text.
+fn walk_record(detail: &str) -> Option<WalkRecord> {
+    fn count(value: &str) -> Option<u32> {
+        let plain = !value.is_empty()
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && (value == "0" || !value.starts_with('0'));
+        if plain { value.parse().ok() } else { None }
     }
-    if verb != "freeze" || detail.is_empty() || field("complete") == Some("true") {
+    let mut words = detail.split(' ');
+    let mut field = |name: &str| words.next()?.strip_prefix(name)?.strip_prefix('=');
+    let _passes = count(field("passes")?)?;
+    let complete = match field("complete")? {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    let refused = count(field("refused")?)?;
+    let read_failures = count(field("read_failures")?)?;
+    if words.next().is_some() {
+        return None;
+    }
+    Some(WalkRecord {
+        complete,
+        refused,
+        read_failures,
+    })
+}
+
+/// Classify a census or freeze answer (see [`ReplyHole`]). Empty details (no
+/// walk) leave nothing open. Any other details are read only in the shapes
+/// the keeper writes ([`walk_record`]); details in no such shape, a failed
+/// freeze task included, are [`ReplyHole::Unproven`] for either verb.
+pub(crate) fn reply_hole(verb: &str, detail: &str) -> ReplyHole {
+    if detail.is_empty() {
         return ReplyHole::None;
     }
-    // Only the exact shape of a walk that did not complete is incomplete
-    // alone; a failed task (`task=failed`), a freeze that did not run, or
-    // details that cannot be read stay unproven.
-    let words: Vec<&str> = detail.split_ascii_whitespace().collect();
-    let walk_only = matches!(
-        words.as_slice(),
-        [passes, "complete=false", "refused=0", "read_failures=0"]
-            if passes.strip_prefix("passes=").is_some_and(|n| n.parse::<u64>().is_ok())
-    );
-    if walk_only {
-        ReplyHole::Incomplete
-    } else {
+    // A failed freeze task (`... task=failed`) is not a walk's record, and
+    // neither is anything malformed: both are unproven.
+    let Some(walk) = walk_record(detail) else {
+        return ReplyHole::Unproven;
+    };
+    if walk.refused > 0 || walk.read_failures > 0 {
         ReplyHole::Unproven
+    } else if verb != "freeze" || walk.complete {
+        // A census incomplete because the tree keeps changing never claimed
+        // an empty tree.
+        ReplyHole::None
+    } else {
+        ReplyHole::Incomplete
     }
 }
 
@@ -982,6 +1016,69 @@ mod tests {
         for (verb, detail, hole) in cases {
             assert_eq!(reply_hole(verb, detail), hole, "{verb} {detail}");
         }
+    }
+
+    /// Details that are not exactly a walk record the keeper writes are
+    /// unproven for either verb, whatever their fields seem to say: a hidden
+    /// refusal, a complete freeze with extra fields, a value the keeper's
+    /// `u32` counts cannot hold.
+    #[test]
+    fn a_malformed_walk_record_is_unproven() {
+        let malformed = [
+            // Duplicate fields: the second value must not hide behind the
+            // first, nor the first behind the second.
+            "passes=1 complete=false refused=0 refused=1 read_failures=0",
+            "passes=1 complete=false refused=0 read_failures=0 read_failures=1",
+            "passes=1 complete=true refused=0 read_failures=0 complete=false",
+            "passes=1 passes=1 complete=false refused=0 read_failures=0",
+            // Reordered fields.
+            "complete=false passes=1 refused=0 read_failures=0",
+            "passes=1 complete=false read_failures=0 refused=0",
+            // Unknown or extra fields, after a complete record too.
+            "passes=1 complete=true refused=0 read_failures=0 task=failed",
+            "passes=1 complete=true refused=0 read_failures=0 x",
+            "passes=1 complete=false refused=0 read_failures=0 gate=expired",
+            "passes=1 complete=false refused=0 read_failures=0 extra=0",
+            "passes=1 done=false refused=0 read_failures=0",
+            // Out of range or not plain decimal.
+            "passes=4294967296 complete=false refused=0 read_failures=0",
+            "passes=1 complete=false refused=4294967296 read_failures=0",
+            "passes=01 complete=false refused=0 read_failures=0",
+            "passes=+1 complete=false refused=0 read_failures=0",
+            "passes=-1 complete=false refused=0 read_failures=0",
+            "passes= complete=false refused=0 read_failures=0",
+            "passes=1 complete=False refused=0 read_failures=0",
+            "passes=1 complete=false refused=00 read_failures=0",
+            // Spacing the keeper never writes.
+            "passes=1  complete=false refused=0 read_failures=0",
+            " passes=1 complete=false refused=0 read_failures=0",
+            "passes=1 complete=false refused=0 read_failures=0 ",
+            "passes=1\tcomplete=false refused=0 read_failures=0",
+        ];
+        for detail in malformed {
+            for verb in ["freeze", "census"] {
+                assert_eq!(
+                    reply_hole(verb, detail),
+                    ReplyHole::Unproven,
+                    "{verb} {detail}"
+                );
+            }
+        }
+        // The bounds the keeper can write are well formed.
+        assert_eq!(
+            reply_hole(
+                "freeze",
+                "passes=4294967295 complete=false refused=0 read_failures=0"
+            ),
+            ReplyHole::Incomplete
+        );
+        assert_eq!(
+            reply_hole(
+                "freeze",
+                "passes=4294967295 complete=true refused=0 read_failures=0"
+            ),
+            ReplyHole::None
+        );
     }
 
     #[test]
