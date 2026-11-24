@@ -408,8 +408,8 @@
 //!     run in another test process: stopped in 20, `Unconfirmed` in 8 (the
 //!     other process's orphans), `Confirmed` with a relay alive in 0.
 //!   - Live runs, measured by the supervising session on 2026-11-23 with
-//!     the branch binary at ee46250, real Claude Code 2.1.330 (haiku) and
-//!     codex-cli (low effort), build mode, each run in its own temporary
+//!     the branch binary at ee46250, real Claude Code 2.1.331 (haiku) and
+//!     codex-cli 0.171.0 (low effort), build mode, each run in its own temporary
 //!     directory: 12 sequential runs, all `Confirmed`; 24 runs in two rounds
 //!     of 6 concurrent runs per provider, all `Confirmed`; two rounds of one
 //!     Claude Code run that ran `(sleep 25 &)` beside three ordinary
