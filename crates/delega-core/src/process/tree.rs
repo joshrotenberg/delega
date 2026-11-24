@@ -116,7 +116,7 @@ pub(crate) async fn list_processes_from(
     programs: &[PathBuf],
 ) -> Result<Vec<ProcessRow>, InspectError> {
     let mut spawned = None;
-    let mut last_error = None;
+    let mut failures = Vec::new();
     for program in programs {
         let mut command = tokio::process::Command::new(program);
         command
@@ -130,17 +130,11 @@ pub(crate) async fn list_processes_from(
                 spawned = Some(child);
                 break;
             }
-            Err(error) => last_error = Some((program.clone(), error)),
+            Err(error) => failures.push((program.clone(), error)),
         }
     }
     let Some(child) = spawned else {
-        let detail = last_error.map_or_else(
-            || "no ps program configured".to_string(),
-            |(program, error)| format!("{}: {error}", program.display()),
-        );
-        return Err(InspectError::Unavailable(format!(
-            "ps could not be started ({detail})"
-        )));
+        return Err(not_started(&failures));
     };
     read_listing(child, PS_MAX_BYTES)
         .await
@@ -193,6 +187,31 @@ async fn read_listing(
     result
 }
 
+/// The error for a listing program that could not be started. Every path
+/// tried is named with its own error, in the order tried, so a refusal on one
+/// path is not hidden behind "not found" on the next. A message longer than
+/// [`MAX_ERROR_CHARS`] is cut to that length, ending in "...".
+pub(crate) fn not_started(failures: &[(PathBuf, std::io::Error)]) -> InspectError {
+    let detail = if failures.is_empty() {
+        "no ps program configured".to_string()
+    } else {
+        failures
+            .iter()
+            .map(|(program, error)| format!("{}: {error}", program.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let message = format!("ps could not be started ({detail})");
+    if message.chars().count() <= MAX_ERROR_CHARS {
+        return InspectError::Unavailable(message);
+    }
+    const CUT: &str = "...";
+    InspectError::Unavailable(format!(
+        "{}{CUT}",
+        clip(&message, MAX_ERROR_CHARS - CUT.len())
+    ))
+}
+
 /// Run one listing command, bounded as [`list_processes_from`] is.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) async fn run_listing(
@@ -204,8 +223,10 @@ pub(crate) async fn run_listing(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let child = super::spawn::spawn(&mut command)
-        .map_err(|e| InspectError::Unavailable(format!("ps could not be started ({e})")))?;
+    let child = super::spawn::spawn(&mut command).map_err(|error| {
+        let program = PathBuf::from(command.as_std().get_program());
+        not_started(&[(program, error)])
+    })?;
     read_listing(child, max).await
 }
 

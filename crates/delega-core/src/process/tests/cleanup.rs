@@ -530,6 +530,81 @@ async fn a_missing_ps_program_finishes_fast_and_still_stops_the_group() {
     assert_stopped_in_time("same-group grandchild", &[gc], started).await;
 }
 
+/// A file in `dir` that exists but may not be executed (mode 0644).
+fn unexecutable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write refused ps");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+}
+
+fn os_error(errno: rustix::io::Errno) -> String {
+    std::io::Error::from_raw_os_error(errno.raw_os_error()).to_string()
+}
+
+async fn unavailable_message(programs: &[std::path::PathBuf]) -> String {
+    let error = crate::process::tree::list_processes_from(programs)
+        .await
+        .expect_err("no program can start");
+    match error {
+        InspectError::Unavailable(message) => message,
+        other => panic!("a program that cannot start is unavailable inspection: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_ps_is_reported_as_refused_not_as_missing() {
+    let s = Scratch::new();
+    // A listing program that exists but may not be executed, tried before a
+    // missing one, as a sandbox that refuses `/bin/ps` presents it. Both live
+    // in this test's private directory, and the second is never created.
+    let refused = s.path("refused-ps");
+    unexecutable(&refused);
+    let missing = s.path("never-created-ps");
+    let message = unavailable_message(&[refused.clone(), missing.clone()]).await;
+    let refused_text = format!(
+        "{}: {}",
+        refused.display(),
+        os_error(rustix::io::Errno::ACCESS)
+    );
+    let missing_text = format!(
+        "{}: {}",
+        missing.display(),
+        os_error(rustix::io::Errno::NOENT)
+    );
+    assert_eq!(
+        message,
+        format!("ps could not be started ({refused_text}, {missing_text})")
+    );
+}
+
+#[test]
+fn an_overlong_ps_start_error_is_cut_to_the_limit_with_the_first_attempt_first() {
+    use crate::process::limits::MAX_ERROR_CHARS;
+    // Two attempts whose message is far longer than the limit. The first path
+    // holds multi-byte characters, so a cut by bytes would split one.
+    let first = format!("/{}/ps", "\u{e9}".repeat(600));
+    let failures = [
+        (
+            std::path::PathBuf::from(&first),
+            std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()),
+        ),
+        (
+            std::path::PathBuf::from(format!("/{}/ps", "x".repeat(600))),
+            std::io::Error::from_raw_os_error(rustix::io::Errno::NOENT.raw_os_error()),
+        ),
+    ];
+    let InspectError::Unavailable(message) = crate::process::tree::not_started(&failures) else {
+        panic!("not started is unavailable inspection");
+    };
+    assert_eq!(message.chars().count(), MAX_ERROR_CHARS, "{message}");
+    assert!(message.ends_with("..."), "{message}");
+    let start = format!(
+        "ps could not be started ({first}: {}, /",
+        os_error(rustix::io::Errno::ACCESS)
+    );
+    assert!(message.starts_with(&start), "{message}");
+}
+
 /// A `ps` stand-in that prints `output` and exits 0, at a path in `s`.
 fn fake_ps(s: &Scratch, output: &str) -> Lister {
     use std::os::unix::fs::PermissionsExt;
