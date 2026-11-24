@@ -318,7 +318,8 @@ impl KeeperLink {
 /// (the owner's reader and the keeper both record it, before the answer is
 /// delivered or sent):
 /// a refused hold (a process that was never signalled), a failed read of
-/// `/proc`, or a freeze that did not complete. A census that is incomplete
+/// `/proc`, or a freeze that did not complete, or whose details do not say
+/// it completed (a freeze task that failed). A census that is incomplete
 /// because the tree keeps changing reports a nonzero count and never claimed
 /// an empty tree, so it is not one. An answer without details (no walk) is
 /// not one.
@@ -331,7 +332,7 @@ pub(crate) fn reply_unproven(verb: &str, detail: &str) -> bool {
     let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
     nonzero("refused")
         || nonzero("read_failures")
-        || (verb == "freeze" && field("complete") == Some("false"))
+        || (verb == "freeze" && !detail.is_empty() && field("complete") != Some("true"))
 }
 
 /// Wait up to `bound` for the keeper, the owner's own child, to exit; kill it
@@ -820,5 +821,13 @@ mod tests {
             "passes=1 complete=true refused=0 read_failures=0"
         ));
         assert!(!reply_unproven("census", ""));
+        // A freeze without walk details (no walk, elsewhere than Linux)
+        // claims nothing; one whose details do not say it completed does.
+        assert!(!reply_unproven("freeze", ""));
+        assert!(reply_unproven("freeze", "the freeze panicked"));
+        assert!(reply_unproven(
+            "freeze",
+            "passes=0 complete=false refused=0 read_failures=0 task=failed"
+        ));
     }
 }

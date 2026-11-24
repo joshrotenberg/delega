@@ -626,12 +626,22 @@ async fn freeze_report(pid: i32) -> (usize, String) {
             (walked.effective_live(), walked.detail())
         })
         .await
-        .unwrap_or((usize::MAX, "the freeze panicked".into()))
+        .unwrap_or_else(|_| freeze_task_failed())
     }
     #[cfg(not(target_os = "linux"))]
     {
         census_report(pid)
     }
+}
+
+/// The answer to a freeze whose task failed (it panicked): an incomplete
+/// freeze, which is never zero and which [`reply_unproven`] counts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn freeze_task_failed() -> (usize, String) {
+    (
+        usize::MAX,
+        "passes=0 complete=false refused=0 read_failures=0 task=failed".into(),
+    )
 }
 
 /// Reap every exited child but the program (Linux, where orphans of the tree
@@ -805,6 +815,20 @@ mod tests {
                 unproven: false,
             }
         );
+    }
+
+    /// A freeze whose task failed answers an incomplete freeze: never zero,
+    /// and noted as unproven on both ends, so a later clean answer cannot
+    /// lead to Confirmed.
+    #[test]
+    fn a_failed_freeze_task_is_an_unproven_answer_and_never_zero() {
+        let (live, detail) = freeze_task_failed();
+        assert_ne!(live, 0);
+        assert!(reply_unproven("freeze", &detail), "{detail}");
+        let mut sticky = Sticky::default();
+        sticky.note("freeze", &detail);
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert!(sticky.unproven);
     }
 
     /// An unproven answer is noted before it is sent and stays noted through
