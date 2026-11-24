@@ -743,8 +743,8 @@ See `crates/delega-core/src/provider/env.rs`.
 - Claude Code and Codex build workers ran delega's own checks. In both
   sandboxes, running `/bin/ps` failed with `Operation not permitted`.
 - `cargo fmt`, `cargo clippy` and the builds passed. Tests that list processes
-  with `ps` failed: 104 of 195 in delega-core's process suite, most CLI tests,
-  and the doctor tests.
+  with `ps` failed: 104 of 195 in delega-core's process suite, most CLI tests
+  and most doctor tests.
 - Spawning processes, signalling the worker's own child processes, and writing
   in the working directory and the temporary directory worked.
 - A build worker on macOS could not run a project's tests that inspect
