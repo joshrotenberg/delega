@@ -4,13 +4,15 @@
 //! the fixed texts exported from [`crate::process`] or is built here from
 //! fixed parts and the values it carries.
 //!
-//! [`is_documented`] checks a reason's shape against these definitions, so a
-//! change of wording here cannot make a caller that uses it reject a reason,
-//! and text that is not one of these shapes is rejected. What it checks:
+//! [`is_documented`] checks a reason's shape against these definitions, so it
+//! follows a change of wording here as long as the new text stays within the
+//! limits below (the separators in one reason, the length of a listing
+//! error), and text that is not one of these shapes is rejected. What it
+//! checks:
 //!
 //! - A whole reason is either one run-loss reason (a provider run or a
 //!   supervised run that ended without its result) alone, or one to
-//!   [`MAX_MERGED_REPORTS`] process-report reasons joined by `"; "`, in any
+//!   three (`MAX_MERGED_REPORTS`) process-report reasons joined by `"; "`, in any
 //!   order. A process-report reason is a fixed text, the count left at the
 //!   reap, the inspection-unavailable reason, the stop not confirmed in time,
 //!   or the owner that ended without a report.
@@ -118,11 +120,17 @@ pub fn is_documented(reason: &str) -> bool {
     if STANDALONE_RECOGNISERS.iter().any(|r| r(reason)) {
         return true;
     }
-    let seps: Vec<usize> = reason.match_indices("; ").map(|(at, _)| at).collect();
     // Each reason holds at most MAX_SEPARATORS_IN_A_REASON separators and
     // there are at most MAX_MERGED_REPORTS reasons; more separators than that
-    // cannot be a documented reason.
-    if seps.len() > MAX_MERGED_REPORTS * (MAX_SEPARATORS_IN_A_REASON + 1) - 1 {
+    // cannot be a documented reason, so collecting stops at the first one
+    // over the limit.
+    let most = MAX_MERGED_REPORTS * (MAX_SEPARATORS_IN_A_REASON + 1) - 1;
+    let seps: Vec<usize> = reason
+        .match_indices("; ")
+        .map(|(at, _)| at)
+        .take(most + 1)
+        .collect();
+    if seps.len() > most {
         return false;
     }
     // `fewest[k]`: the fewest whole process reasons that end just before the

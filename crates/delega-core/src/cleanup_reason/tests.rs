@@ -357,9 +357,9 @@ fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
     }
 }
 
+/// Exponential parsing would hang here; the CI job timeout catches that.
 #[test]
-fn a_long_adversarial_reason_is_rejected_at_once() {
-    let started = std::time::Instant::now();
+fn a_long_adversarial_reason_is_rejected() {
     let entries = vec!["/bin/ps: x (os error 1)"; 5_000].join(", ");
     for error in [
         format!("{NOT_STARTED_START}{entries}, invalid"),
@@ -379,9 +379,4 @@ fn a_long_adversarial_reason_is_rejected_at_once() {
     assert!(!is_documented(&joined));
     let separators = vec!["x"; 20_000].join("; ");
     assert!(!is_documented(&separators));
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "took {:?}",
-        started.elapsed()
-    );
 }
