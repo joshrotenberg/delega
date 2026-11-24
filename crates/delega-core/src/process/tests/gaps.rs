@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use super::fixtures::{
     AWAIT, Heard, Lifeline, OWN_GROUP, OWN_SESSION, Reaper, Record, Scratch, assert_gone,
-    await_record, is_running, is_running_async, list_off_the_clock, own_group_recorded,
+    await_held, await_record, is_running, is_running_async, list_off_the_clock, own_group_recorded,
     own_session_recorded, read_record, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
@@ -964,46 +964,95 @@ fn delayed_lister(
     })
 }
 
+/// The exit budget is the real one (3.1 s). Every listing after the first takes
+/// a fixed 400 ms on the run's clock, well inside the budget, so the exit
+/// listing must be waited for and the descendant that left the session
+/// followed; with the budget the old tests used (150 ms) this run is
+/// `Unconfirmed`. The run's clock is paused from before the spawn and held
+/// (`await_held`) until the leader has ended and the exit listing has begun, so
+/// the start of the run and the leader's end cost the clock nothing. The 400 ms
+/// then pass on the paused clock, and the real `ps` after them is taken off it
+/// (`list_off_the_clock`), so however slow `ps` is under load, the listing
+/// takes exactly 400 ms of the budget. The test resumes the real clock once
+/// the listing has answered.
 #[tokio::test]
 async fn a_slow_listing_at_exit_is_waited_for_and_the_descendant_is_followed() {
     require_perl!();
-    // The exit budget is the real one (3.1 s). Every listing after the first
-    // takes a fixed 400 ms and then the real `ps`, well inside the budget, so the
-    // exit listing must be waited for and the descendant that left the session
-    // followed. With the budget the old tests used (150 ms) this run is
-    // `Unconfirmed`. The only thing load can change is the real `ps`: when the
-    // longest listing was itself near the budget the premise is gone and the run
-    // is repeated, and only when the verdict is exactly the late listing's
-    // (`is_late_listing_only`). A listing under 2 s with any verdict but
-    // `Confirmed`, or a slow listing with any other `Unconfirmed` (a failed stop,
-    // a pid left over), fails.
-    for attempt in 1..=5 {
-        let s = Scratch::new();
-        let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
-        spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
-        let slowest = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        spec = spec.with_lister(delayed_lister(
-            s.path("scanned"),
-            Duration::from_millis(400),
-            slowest.clone(),
-        ));
-        let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
-        assert_no_false_confirmation(pids[0], &report.cleanup);
-        let slowest = slowest.load(std::sync::atomic::Ordering::SeqCst);
-        if report.cleanup == Cleanup::Confirmed {
-            assert_gone("descendant", &pids).await;
-            return;
-        }
-        assert!(
-            slowest > 2000 && crate::process::is_late_listing_only(&report.cleanup),
-            "the slowest listing took {slowest} ms; a run that is not Confirmed must have a \
-             listing over 2000 ms and the late listing's verdict alone: {report:#?}"
-        );
-        eprintln!("attempt {attempt}: a listing took {slowest} ms under load; repeating");
-    }
-    panic!(
-        "five runs in a row had a listing of more than 2 s; the machine is too loaded to test this"
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::time::Instant;
+
+    const DELAY: Duration = Duration::from_millis(400);
+    let s = Scratch::new();
+    let mut spec = leader_with_a_live_middle_process(&s, "exit 0");
+    spec.timings.exit_listing = crate::process::limits::EXIT_LISTING_BUDGET;
+    let calls = Arc::new(AtomicU32::new(0));
+    let spans: Arc<Mutex<Vec<(u32, Instant, Instant)>>> = Arc::default();
+    let (answered, mut answers) = tokio::sync::watch::channel(0u32);
+    let answered = Arc::new(answered);
+    let (lister_calls, recorder, marker) = (calls.clone(), spans.clone(), s.path("scanned"));
+    spec = spec.with_lister(Arc::new(move || {
+        let call = lister_calls.fetch_add(1, Ordering::SeqCst);
+        let (recorder, answered, marker) = (recorder.clone(), answered.clone(), marker.clone());
+        Box::pin(async move {
+            let began = Instant::now();
+            if call > 0 {
+                tokio::time::sleep(DELAY).await;
+            }
+            let rows = list_off_the_clock().await;
+            let _ = std::fs::write(&marker, "scanned");
+            recorder
+                .lock()
+                .expect("lock spans")
+                .push((call, began, Instant::now()));
+            answered.send_modify(|n| *n += 1);
+            rows
+        })
+    }));
+    tokio::time::pause();
+    let handle = crate::process::ProcessHandle::start(spec);
+    let (gc, counted) = (s.path("gc"), calls.clone());
+    // The leader ends once the descendant has published `gc`; the exit
+    // listing is the first call after the one at spawn.
+    let descendant = await_held(
+        "the descendant's record and the exit listing beginning",
+        move || {
+            Ok(match read_record(&gc) {
+                Record::Pid(pid) if counted.load(Ordering::SeqCst) >= 2 => Some(pid),
+                _ => None,
+            })
+        },
+    )
+    .await;
+    let mut reaper = Reaper::default();
+    reaper.register(descendant, &s);
+    // Only the listing's 400 ms are left to pass on the clock; nothing real
+    // is awaited until it has answered.
+    answers
+        .wait_for(|n| *n >= 2)
+        .await
+        .expect("the lister is alive");
+    tokio::time::resume();
+    let report = tokio::time::timeout(Duration::from_secs(120), handle.wait())
+        .await
+        .expect("the run did not end after its exit listing");
+    let exit_listing = spans
+        .lock()
+        .expect("lock spans")
+        .iter()
+        .find(|(call, ..)| *call == 1)
+        .map(|(_, began, ended)| *ended - *began)
+        .expect("the exit listing was recorded");
+    // Tokio's timer wheel rounds the delay's deadline up to its next
+    // millisecond tick.
+    assert!(
+        DELAY <= exit_listing && exit_listing <= DELAY + Duration::from_millis(1),
+        "the exit listing took {exit_listing:?} of the run's clock, not its delay of {DELAY:?}"
     );
+    assert_no_false_confirmation(descendant, &report.cleanup);
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
+    assert_gone("descendant", &[descendant]).await;
 }
 
 /// The exit budget of the concurrent runs below, far under the real one.
