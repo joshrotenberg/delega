@@ -37,12 +37,22 @@ pub struct SpawnGuard {
 /// runtime), deadlocks that run. A spawn that blocks in the kernel holds up
 /// every other spawn for as long, and a run's time limit cannot interrupt it.
 pub fn spawn_guard() -> SpawnGuard {
-    SpawnGuard {
-        // A panic while the lock was held leaves nothing to repair: the lock
-        // guards no data, only the moment of the spawn.
-        _held: SPAWN.lock().unwrap_or_else(PoisonError::into_inner),
-    }
+    #[cfg(test)]
+    WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // A panic while the lock was held leaves nothing to repair: the lock
+    // guards no data, only the moment of the spawn.
+    let held = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
+    #[cfg(test)]
+    WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    SpawnGuard { _held: held }
 }
+
+/// Test seam: how many threads are in [`spawn_guard`] waiting to take the lock
+/// (counted up before `lock()`, down once it is taken). The spawn-lock test
+/// reads it to prove its siblings are blocked on the lock while it holds a
+/// pipe without close-on-exec. Not compiled outside tests.
+#[cfg(test)]
+pub(super) static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Start `command` while holding the spawn lock. Every spawn of the process
 /// layer goes through here; clippy's `disallowed_methods` (the workspace
