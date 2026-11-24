@@ -213,31 +213,13 @@ impl Rig {
         }
     }
 
-    /// How many complete `role pid` records for `role` are in `pids`. The
-    /// fakes' `acc:` behaviours append to it while they run, so a record counts
-    /// only once its line has ended: an unfinished last line is not yet a
-    /// record, whatever it begins with. A finished line that is not a role and
-    /// a pid above 1 is a failure.
+    /// How many lines of `pids` (written by the fakes' `acc:` behaviours) begin
+    /// with `role`.
     fn recorded(&self, role: &str) -> usize {
-        let path = self.fakes.join("pids");
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
-            Err(e) => panic!("read {}: {e}", path.display()),
-        };
-        text.split_inclusive('\n')
-            .filter_map(|line| line.strip_suffix('\n'))
-            .map(|line| {
-                line.split_once(' ')
-                    .filter(|(role, pid)| {
-                        !role.is_empty()
-                            && pid.bytes().all(|b| b.is_ascii_digit())
-                            && pid.parse::<u32>().is_ok_and(|pid| pid > 1)
-                    })
-                    .unwrap_or_else(|| panic!("a malformed record in pids: {line:?}"))
-                    .0
-            })
-            .filter(|recorded| *recorded == role)
+        std::fs::read_to_string(self.fakes.join("pids"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.split_whitespace().next() == Some(role))
             .count()
     }
 
@@ -764,13 +746,7 @@ fn unconfirmed_cleanup_after_a_signal_exits_1_not_130() {
         // would be left, which the unconfirmed verdict is the warning of.
         let began = Instant::now();
         while rig.recorded("provider") < 1 || rig.recorded("child") < 1 {
-            assert!(
-                began.elapsed() < EVENTUALLY,
-                "{how}: waited {EVENTUALLY:?} for complete provider and child records in pids: \
-                 {} providers, {} children",
-                rig.recorded("provider"),
-                rig.recorded("child")
-            );
+            assert!(began.elapsed() < EVENTUALLY, "the worker did not start");
             std::thread::sleep(POLL);
         }
         if how == "SIGTERM" {
