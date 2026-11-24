@@ -584,6 +584,8 @@ fn take_queued(
     run_seam(&AFTER_QUEUED_CHECK);
     if sys::pidfd_exited(&hold.fd) {
         drop(candidate);
+        #[cfg(test)]
+        RECHECK_FALLBACKS.with(|n| n.set(n.get() + 1));
         return Held::take(pid, root);
     }
     Ok(candidate)
@@ -599,6 +601,10 @@ thread_local! {
     /// field was checked and before the parent's pidfd is asked again, as a
     /// parent that exits between the two would.
     static AFTER_QUEUED_CHECK: Seam = const { std::cell::RefCell::new(None) };
+    /// Test probe: how many times [`take_queued`] dropped a candidate because
+    /// the second look found its parent exited, and took the child again as
+    /// the keeper's own, on this thread.
+    static RECHECK_FALLBACKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -916,7 +922,7 @@ mod tests {
                 // A subreaper, as the keeper is: the child of a parent that
                 // exits is reparented to this process.
                 sys::become_subreaper().expect("become a child subreaper");
-                let (taken, child) = queued_child_whose_parent_exits_mid_take(me);
+                let (taken, child, fallbacks) = queued_child_whose_parent_exits_mid_take(me);
                 let held_as_own_child = taken.as_ref().is_ok_and(|held| {
                     held.pid == child
                         && held_stat(child)
@@ -930,7 +936,9 @@ mod tests {
                     .is_some_and(|stat| matches!(stat.state, 'T' | 't'));
                 drop(taken);
                 kill_by_pidfd(child);
-                format!("held_as_own_child={held_as_own_child} stopped={stopped}")
+                format!(
+                    "held_as_own_child={held_as_own_child} fallbacks={fallbacks} stopped={stopped}"
+                )
             }
             _ => "unknown mode".to_string(),
         };
@@ -1260,8 +1268,9 @@ mod tests {
     /// its own, hold the parent, and take its child through [`take_queued`]
     /// with the parent killed and exited in the seam between the check of
     /// the candidate's parent field and the second look at the parent's
-    /// pidfd. Returns what was taken and the child's pid.
-    fn queued_child_whose_parent_exits_mid_take(me: i32) -> (Result<Held, NotHeld>, i32) {
+    /// pidfd. Returns what was taken, the child's pid, and how many times
+    /// the second look dropped the candidate and took the child again.
+    fn queued_child_whose_parent_exits_mid_take(me: i32) -> (Result<Held, NotHeld>, i32, u32) {
         use crate::test_spawn::Guarded;
         let mut parent = std::process::Command::new("sh")
             .args(["-c", "sleep 30 & wait"])
@@ -1301,10 +1310,18 @@ mod tests {
                 while !sys::pidfd_exited(&parent_fd) && Instant::now() < until {
                     std::thread::sleep(Duration::from_millis(5));
                 }
+                // The window is exercised only if the parent has exited
+                // before the second look; fail otherwise.
+                assert!(
+                    sys::pidfd_exited(&parent_fd),
+                    "the stand-in parent did not exit in the seam"
+                );
                 seam_ran.set(true);
             }));
         });
+        let fallbacks_before = RECHECK_FALLBACKS.with(std::cell::Cell::get);
         let taken = take_queued(child, parent_pid, Some(&hold), me);
+        let fallbacks = RECHECK_FALLBACKS.with(std::cell::Cell::get) - fallbacks_before;
         AFTER_QUEUED_CHECK.with(|seam| seam.borrow_mut().take());
         assert!(
             ran.get(),
@@ -1314,7 +1331,7 @@ mod tests {
             let _ = parent.kill();
             let _ = parent.wait();
         }
-        (taken, child)
+        (taken, child, fallbacks)
     }
 
     /// The parent exits after its child's parent field was checked: the
@@ -1323,7 +1340,7 @@ mod tests {
     #[test]
     fn a_queued_child_whose_parent_exits_after_the_check_is_refused_unless_now_the_keepers() {
         let me = i32::try_from(std::process::id()).expect("a pid");
-        let (taken, child) = queued_child_whose_parent_exits_mid_take(me);
+        let (taken, child, fallbacks) = queued_child_whose_parent_exits_mid_take(me);
         let stopped = held_stat(child)
             .ok()
             .flatten()
@@ -1332,17 +1349,21 @@ mod tests {
         drop(taken);
         kill_by_pidfd(child);
         assert!(refused, "a child of an exited parent was held");
+        assert_eq!(fallbacks, 1, "the second look did not drop the candidate");
         assert!(!stopped, "the refused child was signalled");
     }
 
     /// The same window under a subreaper, as in the keeper: the candidate is
     /// dropped and the child is held again, verified as the keeper's own
-    /// direct child.
+    /// direct child. The fallback count shows the second take happened: by
+    /// the time the helper reads `/proc` the child is reparented either way,
+    /// so the candidate returned without the second look would also pass
+    /// the parent check.
     #[test]
     fn a_queued_child_whose_parent_exits_after_the_check_is_held_only_as_the_keepers_child() {
         assert_eq!(
             in_a_helper("queued-parent-exits"),
-            "held_as_own_child=true stopped=false"
+            "held_as_own_child=true fallbacks=1 stopped=false"
         );
     }
 
