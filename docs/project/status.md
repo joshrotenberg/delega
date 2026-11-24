@@ -33,14 +33,12 @@ stands. This page lists the limits a user meets.
 - **Asking permission live** works for Claude Code runs over MCP or the Rust
   supervisor (`permissions.on_request: ask`). Codex runs and `delega run` refuse
   it before start ([#164](https://github.com/joshrotenberg/delega/issues/164)).
-- **Cleanup.** Met on Linux; partly met on macOS. Every provider process the
-  CLI and MCP start is held by a keeper, a small `delega` process that stops the
-  provider's whole tree when delega is gone, even after a `SIGKILL`. On Linux
-  the keeper also adopts every orphaned descendant. On macOS it cannot, and a
-  confirmed verdict covers the provider's process group, its session, tracked
-  descendants and processes that show the run marker; the result says so in
-  `provider_notes`, and what it can miss is in "What a macOS verdict covers"
-  in
+- **Cleanup.** Met on Linux; partly met on macOS. The CLI and MCP start
+  provider processes under a keeper, a small `delega` process that stops the
+  processes it finds when delega is gone, even after a `SIGKILL`. On Linux
+  the keeper also adopts orphaned descendants. On macOS it cannot, and a
+  descendant that cleanup does not reach can be missed; the result says so in
+  `provider_notes`, and the scope is in "What a macOS verdict covers" in
   [`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs).
   On every platform, a run is reported unconfirmed when a process still held the output
   after the kill, a `SIGKILL` of the keeper alone makes the result unconfirmed,

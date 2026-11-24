@@ -38,10 +38,9 @@ descendant can outlive a confirmed run, in
 and the [acceptance harness](../acceptance.md) tests them
 ([matrix](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md#the-matrix),
 [expectations](https://github.com/joshrotenberg/delega/blob/main/acceptance/README.md#expectations)).
-On macOS the keeper cannot adopt orphans, so a confirmed verdict covers the
-provider's process group, its session, tracked descendants and processes that
-show the run marker. A kept run on macOS says so in `provider_notes`. What it
-can miss is in "What a macOS verdict covers" in
+On macOS the keeper cannot adopt orphans, and a descendant that cleanup does
+not reach can be missed. A kept run on macOS says so in `provider_notes`. The
+scope is in "What a macOS verdict covers" in
 [`process/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/process/mod.rs).
 Under the supervisor, `interrupt`, `close` and `shutdown` wait for a run to
 settle within a bound ([Stopping](../supervisor.md#stopping)).

@@ -8,11 +8,12 @@
 //! run's value and its processes stay findable by the outer run. A process is
 //! marked for a run when one element of the list equals the run's value.
 //!
-//! The value is read from the environment a process was started with: on
-//! Linux from `/proc/<pid>/environ`, elsewhere from `ps -E`. Both show the
-//! environment as it was at `exec`, so `unsetenv` does not hide a process; a
-//! process started with an environment that leaves the variable out does not
-//! carry it.
+//! The value is read on Linux from `/proc/<pid>/environ` and elsewhere from
+//! `ps -E`. Both read the memory where `exec` placed the process's environment,
+//! not the process's current environment: `unsetenv` does not hide a process,
+//! but a process that overwrites that memory in place can remove the marker,
+//! and a process started with an environment that leaves the variable out does
+//! not carry it.
 //!
 //! The worker can read the value. It grants nothing: knowing it only lets a
 //! process make itself a target of that run's cleanup.

@@ -184,8 +184,9 @@
 //!   owner's own environment, if any, then a new one), so a descendant that left
 //!   the child's session and whose parent is gone can still be found. Cleanup
 //!   sweeps read it from `/proc/<pid>/environ` on Linux and from one `ps -U
-//!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both show
-//!   the environment as it was at `exec`. A marked process that is in the
+//!   <uid> -E` listing elsewhere, taken beside the ordinary listing. Both read
+//!   the memory where `exec` placed the process's environment (see module
+//!   `marker`). A marked process that is in the
 //!   child's session when it is read (it started after the ordinary listing)
 //!   is a member and is signalled as one. A process found only by the marker is
 //!   never signalled by number alone: it is stopped with SIGSTOP when first
@@ -296,27 +297,16 @@
 //!
 //! # What a macOS verdict covers
 //!
-//! On macOS the keeper is not a subreaper, so it cannot adopt orphans. A kept
-//! run's `Confirmed` there means the final sweeps found no live process in the
-//! child's process group, none in its session, no descendant an earlier
-//! listing tracked, and none whose environment, as `ps -E` shows it, carries
-//! the run marker; and that no process held the output pipes past the drain
-//! bound.
-//!
-//! It can miss two kinds of process, and the run then ends `Confirmed` while
-//! the process runs:
-//!
-//! - A descendant that left the session after its parent exited, before any
-//!   listing saw the two together, whose run marker `ps -E` does not show (it
-//!   was started with an environment that leaves the marker out, or macOS hides
-//!   its environment, as measured for Apple's programs under System Integrity
-//!   Protection), and that does not hold the output pipes.
-//! - A fast fork relay whose generations exit before a listing reads them, and
-//!   that does not hold the output pipes.
-//!
-//! The evidence and measurements are under "What remains possible". A kept
-//! run on macOS carries [`MACOS_KEEPER_NOTE`](crate::provider::MACOS_KEEPER_NOTE)
-//! in its `provider_notes`.
+//! This describes cleanup after a kept run started a child; a run that started
+//! none has nothing to sweep. On macOS the keeper is not a subreaper, so it
+//! cannot adopt orphans. Cleanup finds descendants through the child's process
+//! group, its session, earlier listings, the run marker and held output pipes.
+//! A descendant that none of these reach (for example one that left the
+//! session and does not show the marker, or a fast fork relay) can be missed,
+//! and the run can then end `Confirmed` while it runs. The evidence and
+//! measurements are under "What remains possible". A kept run on macOS carries
+//! [`MACOS_KEEPER_NOTE`](crate::provider::MACOS_KEEPER_NOTE) in its
+//! `provider_notes`.
 //!
 //! # What remains possible
 //!
@@ -375,10 +365,10 @@
 //!   `an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux` and
 //!   `a_fork_relay_is_stopped_in_a_kept_run` in `tests/gaps.rs` run in the Linux
 //!   CI job; they have not run on a developer machine.
-//! - On macOS there is no subreaper, and the run marker is the only tie. A
-//!   descendant that left the session, whose parent is gone, and that does not
-//!   show the marker is not found. That covers a process started with an
-//!   environment that leaves the marker out, and, measured on macOS 27.2 with
+//! - On macOS there is no subreaper. A descendant that left the session, whose
+//!   parent is gone, and that does not show the marker is not found. Among
+//!   these are a process started with an environment that leaves the marker
+//!   out, and, measured on macOS 27.2 with
 //!   System Integrity Protection enabled, every Apple program: `ps -E` showed no
 //!   environment for `/bin/sleep`, `/bin/sh` or `/usr/bin/perl`, and showed it
 //!   for a Homebrew binary and for this crate's test binary. Whether this applies
