@@ -755,20 +755,23 @@ See `crates/delega-core/src/provider/env.rs`.
   processes with `ps`. When delega supervises a build worker, its own process
   inspection runs outside the worker's sandbox and was not affected.
 
-### 2026-11-24, Claude Code 2.1.331 on macOS (#215)
+### 2026-11-24, Claude Code on macOS (#215)
 
-- A `full` worker had one Bash command denied while its other commands,
+- A `full` worker (Claude Code version not recorded) had one Bash command
+  denied while its other commands,
   including `cargo test`, ran. The command started `cd $(mktemp -d); bad=0;`
   and looped 100 times over a body that started and stopped background
   processes. delega listed it in `permissions.denied` with the reason that
   Claude Code was running in don't ask mode.
-- A probe of three `delega run --provider claude --full` runs asked for 21
-  commands one per Bash call. Each ran without a denial: `cd` outside the
+- A later probe with Claude Code 2.1.331, three
+  `delega run --provider claude --full --ephemeral` runs, asked for 21
+  commands one per Bash call. None was denied: `cd` outside the
   working directory, command substitution, `for` and `until` loops, a
   background `&` with `$!` and `wait`, `kill -0`, `kill -STOP` and
   `kill -KILL`, `/bin/sh -c`, `case`, `ps -o stat= -p`, redirection to
-  `/dev/null`, and the denied command's loop body run once.
-- The denial did not reproduce, and no single construct explains it.
+  `/dev/null`, and the denied command's loop body run once, without its
+  `cd $(mktemp -d)` prefix and its 100-round loop.
+- What triggered the denial is not known.
 
 ### Claude Code 2.1.330, date unrecorded
 
