@@ -230,8 +230,11 @@ pub struct KeeperDiagnostics {
     pub freeze_incomplete: bool,
     /// The latest answers of the keeper to the owner's census and freeze
     /// requests (Linux), oldest first, bounded: the live count and how the
-    /// walk went (`passes`, `complete`, `refused`); last, its answer to the
-    /// reap (`reaped: live=<n> proven=<true|false>`).
+    /// walk went (`passes`, `complete`, `refused`), with `late` before the
+    /// count for an answer that came after its request timed out or was
+    /// cancelled; last, its answer to the reap (`reaped: live=<n>
+    /// proven=<true|false>`, then ` unproven=true` when the keeper recorded
+    /// an unproven answer during the run).
     pub tree_reports: Vec<String>,
 }
 

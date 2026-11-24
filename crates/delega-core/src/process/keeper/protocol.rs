@@ -186,10 +186,13 @@ pub(crate) enum FromKeeper {
     /// The program is reaped; how many processes of the tree were still alive
     /// after the last freeze (Linux; 0 elsewhere), and whether the final
     /// census before the reap proved the tree empty (Linux with a subreaper
-    /// only; see `Walked::proves_empty`).
+    /// only; see `Walked::proves_empty`), and whether any answer of the run
+    /// was unproven in a way no later answer repairs (`unproven`, recorded
+    /// by the keeper before it sent that answer).
     Reaped {
         live: usize,
         proven: bool,
+        unproven: bool,
     },
     /// The keeper is about to reap the program on its own (a signal, its
     /// ceiling, or a new parent): the owner must send no more signals that
@@ -217,9 +220,13 @@ impl FromKeeper {
             }
             FromKeeper::Reaped {
                 live,
-                proven: false,
-            } => format!("reaped {live}"),
-            FromKeeper::Reaped { live, proven: true } => format!("reaped {live} proven"),
+                proven,
+                unproven,
+            } => format!(
+                "reaped {live}{}{}",
+                if *proven { " proven" } else { "" },
+                if *unproven { " unproven" } else { "" }
+            ),
             FromKeeper::Releasing => "releasing".into(),
             FromKeeper::Warn(text) => format!("warn {}", one_line(text)),
         }
@@ -253,19 +260,20 @@ impl FromKeeper {
                 detail: words.collect::<Vec<_>>().join(" "),
             },
             "reaped" => {
-                let live = match words.next() {
-                    None | Some("") => 0,
-                    Some(n) => n.parse().ok()?,
+                // The count is required: a line without it claims nothing.
+                let live = words.next()?.parse().ok()?;
+                let (proven, unproven) = match words.collect::<Vec<_>>().as_slice() {
+                    [] => (false, false),
+                    ["proven"] => (true, false),
+                    ["unproven"] => (false, true),
+                    ["proven", "unproven"] => (true, true),
+                    _ => return None,
                 };
-                let proven = match words.next() {
-                    None => false,
-                    Some("proven") => true,
-                    Some(_) => return None,
-                };
-                if words.next().is_some() {
-                    return None;
+                FromKeeper::Reaped {
+                    live,
+                    proven,
+                    unproven,
                 }
-                FromKeeper::Reaped { live, proven }
             }
             "releasing" => FromKeeper::Releasing,
             "warn" => FromKeeper::Warn(rest.to_string()),
@@ -400,14 +408,22 @@ mod tests {
             FromKeeper::Reaped {
                 live: 0,
                 proven: false,
+                unproven: false,
             },
             FromKeeper::Reaped {
                 live: 0,
                 proven: true,
+                unproven: false,
+            },
+            FromKeeper::Reaped {
+                live: 0,
+                proven: true,
+                unproven: true,
             },
             FromKeeper::Reaped {
                 live: 3,
                 proven: false,
+                unproven: true,
             },
             FromKeeper::Releasing,
             FromKeeper::Warn("x y".into()),
@@ -426,6 +442,13 @@ mod tests {
         // Only the exact word claims a proof.
         assert_eq!(FromKeeper::parse("reaped 0 provenx"), None);
         assert_eq!(FromKeeper::parse("reaped 0 proven extra"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 unproven proven"), None);
+        assert_eq!(FromKeeper::parse("reaped 0 unprovenx"), None);
+        // A missing or non-numeric count is not zero.
+        assert_eq!(FromKeeper::parse("reaped  proven"), None);
+        assert_eq!(FromKeeper::parse("reaped proven"), None);
+        assert_eq!(FromKeeper::parse("reaped"), None);
+        assert_eq!(FromKeeper::parse("reaped "), None);
     }
 
     #[test]

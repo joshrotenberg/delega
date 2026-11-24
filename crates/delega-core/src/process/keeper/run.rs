@@ -11,6 +11,7 @@ use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::link::reply_unproven;
 use super::protocol::{FromKeeper, Hello, Lines, ToKeeper};
 use crate::process::limits::{KEEPER_RELEASE_WAIT, KEEPER_TICK};
 use crate::process::sys::{self, Signal};
@@ -227,6 +228,7 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
 
     let ceiling = Instant::now() + hello.ceiling;
     let mut exited = false;
+    let mut sticky = Sticky::default();
     let mut tick = tokio::time::interval(KEEPER_TICK);
     loop {
         tokio::select! {
@@ -247,15 +249,24 @@ async fn keep(hello: Hello, fds: Vec<OwnedFd>) -> i32 {
                     }
                 }
                 Some(Event::Command(ToKeeper::Census(id))) => {
-                    let (live, detail) = census_report(pid);
+                    #[cfg(all(test, target_os = "linux"))]
+                    let answer = match late_refusal().await {
+                        Some(answer) => answer,
+                        None => census_report(pid),
+                    };
+                    #[cfg(not(all(test, target_os = "linux")))]
+                    let answer = census_report(pid);
+                    let (live, detail) = answer;
+                    sticky.note("census", &detail);
                     say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Freeze(id))) => {
                     let (live, detail) = freeze_report(pid).await;
+                    sticky.note("freeze", &detail);
                     say(&FromKeeper::Tree { id, live, detail });
                 }
                 Some(Event::Command(ToKeeper::Reap)) => {
-                    say(&reap_reply(finish(pid, exited, subreaper).await));
+                    say(&reap_reply(finish(pid, exited, subreaper, &mut sticky).await));
                     drop(child);
                     return 0;
                 }
@@ -355,6 +366,40 @@ async fn wait_exit(pid: i32, limit: Duration) -> bool {
     }
 }
 
+/// Whether any census or freeze answer of this keeper was unproven in a way
+/// no later answer repairs ([`reply_unproven`]). Recorded before the answer
+/// is sent, so an answer the owner never receives, or receives after its
+/// request timed out, still counts; carried to the owner in `reaped`.
+#[derive(Debug, Default)]
+struct Sticky {
+    unproven: bool,
+}
+
+impl Sticky {
+    fn note(&mut self, verb: &str, detail: &str) {
+        if reply_unproven(verb, detail) {
+            self.unproven = true;
+        }
+    }
+}
+
+/// With [`super::LATE_REFUSAL_ENV`] set, the keeper's first census is
+/// answered with a refused hold, without a walk, once the owner's request has
+/// timed out (a test seam).
+#[cfg(all(test, target_os = "linux"))]
+async fn late_refusal() -> Option<(usize, String)> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static USED: AtomicBool = AtomicBool::new(false);
+    if std::env::var_os(super::LATE_REFUSAL_ENV).is_none() || USED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    tokio::time::sleep(crate::process::limits::KEEPER_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+    Some((
+        1,
+        "passes=1 complete=false refused=1 read_failures=0".into(),
+    ))
+}
+
 /// What the keeper says when it has reaped the program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Finished {
@@ -363,6 +408,9 @@ struct Finished {
     /// Whether the final census proved the tree empty (Linux, with a
     /// subreaper).
     proven: bool,
+    /// Whether any answer of the run, or the census or freeze at the reap,
+    /// was unproven in a way no later answer repairs.
+    unproven: bool,
 }
 
 /// The owner asked for the reap: everything is settled on its side. Anything
@@ -372,17 +420,29 @@ struct Finished {
 /// (Linux), then the program is reaped, and the orphans with it. Returns what
 /// the last freeze left alive and whether the final census proved the tree
 /// empty, or why the program could not be killed or reaped; then `reaped` is
-/// not sent.
-async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, String> {
+/// not sent. The census and freeze before the reap are noted in `sticky`
+/// like the answers of the run.
+async fn finish(
+    pid: i32,
+    exited: bool,
+    subreaper: bool,
+    sticky: &mut Sticky,
+) -> Result<Finished, String> {
     // Test seam: injected only now, at the reap, so no answer to the owner
     // can report the failures; only the proof can show them.
     #[cfg(all(test, target_os = "linux"))]
     super::walk::inject_read_failures_from_env();
     #[cfg(target_os = "linux")]
-    let live = if census(pid) > 0 {
-        freeze(pid).await
-    } else {
-        0
+    let live = {
+        let (counted, detail) = census_report(pid);
+        sticky.note("census", &detail);
+        if counted > 0 {
+            let (live, detail) = freeze_report(pid).await;
+            sticky.note("freeze", &detail);
+            live
+        } else {
+            0
+        }
     };
     #[cfg(not(target_os = "linux"))]
     let live = 0;
@@ -419,7 +479,12 @@ async fn finish(pid: i32, exited: bool, subreaper: bool) -> Result<Finished, Str
         let _ = subreaper;
         false
     };
-    reaped.map(|()| Finished { live, proven })
+    let unproven = sticky.unproven;
+    reaped.map(|()| Finished {
+        live,
+        proven,
+        unproven,
+    })
 }
 
 /// Reap `pid` with `reap` until it succeeds or `bound` passes.
@@ -446,7 +511,15 @@ fn consume_reap(
 /// The answer to `reap`: `reaped` only when the program was reaped.
 fn reap_reply(finished: Result<Finished, String>) -> FromKeeper {
     match finished {
-        Ok(Finished { live, proven }) => FromKeeper::Reaped { live, proven },
+        Ok(Finished {
+            live,
+            proven,
+            unproven,
+        }) => FromKeeper::Reaped {
+            live,
+            proven,
+            unproven,
+        },
         Err(why) => FromKeeper::Warn(why),
     }
 }
@@ -553,12 +626,22 @@ async fn freeze_report(pid: i32) -> (usize, String) {
             (walked.effective_live(), walked.detail())
         })
         .await
-        .unwrap_or((usize::MAX, "the freeze panicked".into()))
+        .unwrap_or_else(|_| freeze_task_failed())
     }
     #[cfg(not(target_os = "linux"))]
     {
         census_report(pid)
     }
+}
+
+/// The answer to a freeze whose task failed (it panicked): an incomplete
+/// freeze, which is never zero and which [`reply_unproven`] counts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn freeze_task_failed() -> (usize, String) {
+    (
+        usize::MAX,
+        "passes=0 complete=false refused=0 read_failures=0 task=failed".into(),
+    )
 }
 
 /// Reap every exited child but the program (Linux, where orphans of the tree
@@ -703,6 +786,7 @@ mod tests {
         let reply = reap_reply(result.map(|()| Finished {
             live: 0,
             proven: true,
+            unproven: false,
         }));
         assert!(matches!(reply, FromKeeper::Warn(_)), "{reply:?}");
     }
@@ -722,11 +806,55 @@ mod tests {
         assert_eq!(
             reap_reply(Ok(Finished {
                 live: 2,
-                proven: false
+                proven: false,
+                unproven: false,
             })),
             FromKeeper::Reaped {
                 live: 2,
-                proven: false
+                proven: false,
+                unproven: false,
+            }
+        );
+    }
+
+    /// A freeze whose task failed answers an incomplete freeze: never zero,
+    /// and noted as unproven on both ends, so a later clean answer cannot
+    /// lead to Confirmed.
+    #[test]
+    fn a_failed_freeze_task_is_an_unproven_answer_and_never_zero() {
+        let (live, detail) = freeze_task_failed();
+        assert_ne!(live, 0);
+        assert!(reply_unproven("freeze", &detail), "{detail}");
+        let mut sticky = Sticky::default();
+        sticky.note("freeze", &detail);
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert!(sticky.unproven);
+    }
+
+    /// An unproven answer is noted before it is sent and stays noted through
+    /// later clean answers, so the reap carries it to the owner even when the
+    /// owner never received that answer.
+    #[test]
+    fn a_keeper_answer_that_refused_a_hold_is_carried_by_the_reap_after_clean_answers() {
+        let mut sticky = Sticky::default();
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert!(!sticky.unproven);
+        sticky.note(
+            "freeze",
+            "passes=2 complete=false refused=1 read_failures=0",
+        );
+        sticky.note("freeze", "passes=1 complete=true refused=0 read_failures=0");
+        sticky.note("census", "passes=2 complete=true refused=0 read_failures=0");
+        assert_eq!(
+            reap_reply(Ok(Finished {
+                live: 0,
+                proven: true,
+                unproven: sticky.unproven,
+            })),
+            FromKeeper::Reaped {
+                live: 0,
+                proven: true,
+                unproven: true,
             }
         );
     }

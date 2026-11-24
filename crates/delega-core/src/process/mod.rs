@@ -135,8 +135,13 @@
 //!   tree. Once any answer of a run was unproven in a way a later one cannot
 //!   repair (a refused hold, a failed read, a freeze that did not complete),
 //!   the verdict stays `Unconfirmed` ([`KEEPER_UNPROVEN_REASON`]); no later
-//!   proof supersedes it. A census that is incomplete only because the tree
-//!   keeps changing never claimed zero and does not count. A process listed in a children file whose stat
+//!   proof supersedes it. The keeper records such an answer before it sends
+//!   it (the census and freeze it runs at the reap included) and says so in
+//!   its `reaped` line; the owner's socket reader records it as it reads the
+//!   answer, before handing it to the request, so an answer that arrives
+//!   after its request timed out or was cancelled still counts. A census
+//!   that is incomplete only because the tree keeps changing never claimed
+//!   zero and does not count. A process listed in a children file whose stat
 //!   reads as missing is gone only if its pidfd says so (`hidepid` can hide a
 //!   live one). A queued child is taken under its parent only while the
 //!   parent's pidfd shows it alive, and otherwise only as the keeper's own
@@ -145,7 +150,12 @@
 //!   reason but the process being gone (ENOENT, ESRCH) makes the pass
 //!   incomplete, never counts as absence (the stat of a held process
 //!   included), and so does any error from a directory listing of `/proc`;
-//!   a children read is kept only if the parent's pidfd shows it had not
+//!   an error while listing the task directory of a pid already listed (a
+//!   process reaped mid-listing ends it with ENOENT) counts as that process
+//!   gone only on strict proof of exit (opening its pidfd fails with ESRCH,
+//!   or a poll shows the pidfd readable, which needs every thread to have
+//!   exited; a zombie leader can have live threads), and otherwise as a
+//!   failed read; a children read is kept only if the parent's pidfd shows it had not
 //!   exited by the end of the read; a refused hold anywhere in a freeze leaves
 //!   it unproven whatever later passes find; and the freeze releases its
 //!   pidfds before the final census. Each answer carries its passes and
@@ -252,7 +262,11 @@
 //! refusals of group and session members and tracked processes, which while
 //! alive are in the keeper's tree, and nothing else: a refusal meant for a
 //! process found only by the run marker and anything the keeper reported stay
-//! sticky. macOS has no subreaper, and its keeper never reports a proof.
+//! sticky. The proof is also required: a Linux kept run whose keeper is a
+//! subreaper, acknowledged the reap and left nothing alive, but did not
+//! prove the tree empty, is `Unconfirmed` ([`FINAL_CENSUS_UNPROVEN_REASON`])
+//! even when nothing was refused. macOS has no subreaper, and its keeper
+//! never reports a proof; its verdict does not wait for one.
 //!
 //! It also requires that the listing taken before the first signal completed
 //! (see "How a child is owned"). That listing is the only one that can see a
@@ -587,9 +601,9 @@ pub use handle::{Interrupter, ProcessHandle, run};
 pub use keeper::{KeeperCommand, keeper_main};
 pub use marker::MARKER_ENV;
 pub use owner::{
-    FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON, KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON,
-    NO_REAP_ACK_REASON, NO_SUBREAPER_REASON, PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON,
-    UNVERIFIED_SIGNAL_REASON, is_late_listing_only,
+    FINAL_CENSUS_UNPROVEN_REASON, FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON,
+    KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON, NO_REAP_ACK_REASON, NO_SUBREAPER_REASON,
+    PIPES_HELD_REASON, TREE_LEFT_AT_REAP_REASON, UNVERIFIED_SIGNAL_REASON, is_late_listing_only,
 };
 pub use report::{
     Diagnostics, Ending, KeeperDiagnostics, LeaderExit, ProcessReport, ProcessTiming, SignalRecord,

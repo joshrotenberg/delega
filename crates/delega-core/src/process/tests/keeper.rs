@@ -717,3 +717,83 @@ async fn an_owner_refusal_stands_when_the_final_census_proves_nothing() {
     );
     assert_refusal_stands(&report);
 }
+
+/// The verdict's reason, or a panic naming the verdict.
+fn unconfirmed_reason(report: &crate::process::ProcessReport) -> &str {
+    match &report.cleanup {
+        Cleanup::Unconfirmed { reason, .. } => reason,
+        other => panic!("expected an Unconfirmed verdict, got {other:?}: {report:#?}"),
+    }
+}
+
+/// A refused hold the keeper reports in answer to a census the owner had
+/// already given up on (the request timed out) still decides the verdict:
+/// the owner's reader records it as it reads the answer, and the keeper,
+/// which recorded it before it answered, carries it in its answer to the
+/// reap. The program exits at once and every later answer is clean, so a
+/// run that lost the late answer would end Confirmed. Linux: only a
+/// subreaper keeper is asked for its census.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_keeper_refusal_answered_after_its_request_timed_out_makes_the_verdict_unconfirmed() {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "exit 0", LONG);
+    spec.keeper = Some(test_keeper().env(crate::process::keeper::LATE_REFUSAL_ENV, "1"));
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    let keeper = report.diagnostics.keeper.as_ref().expect("a kept run");
+    assert!(keeper.subreaper, "{report:#?}");
+    assert!(
+        keeper.tree_reports.iter().any(|r| r == "census: no answer"),
+        "the census did not time out: {report:#?}"
+    );
+    assert!(
+        keeper
+            .tree_reports
+            .iter()
+            .any(|r| r.starts_with("census: late live=1 ") && r.contains("refused=1")),
+        "the late refusal was not read: {report:#?}"
+    );
+    assert_eq!(
+        reap_report(&report),
+        "reaped: live=0 proven=true unproven=true",
+        "{report:#?}"
+    );
+    assert_eq!(
+        unconfirmed_reason(&report),
+        crate::process::KEEPER_UNPROVEN_REASON,
+        "{report:#?}"
+    );
+}
+
+/// A kept run that starts nothing but the program, with a keeper whose first
+/// read of `/proc` after the owner says `reap` fails (a test seam, Linux).
+/// Nothing is alive and the owner refused nothing, but the final census
+/// proves nothing, so on Linux the verdict is Unconfirmed for that reason
+/// alone. macOS has no subreaper and no proof, and keeps its rules.
+#[tokio::test]
+async fn a_reap_of_nothing_alive_without_the_final_proof_is_unconfirmed_on_linux() {
+    let s = Scratch::new();
+    let mut spec = sh(&s, "exit 0", LONG);
+    spec.keeper = Some(test_keeper().env(crate::process::keeper::INJECT_READ_FAILURES_ENV, "1"));
+    let report = ProcessHandle::start(spec).wait().await;
+    assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
+    assert_eq!(
+        report.diagnostics.inspection.unverified_signals, 0,
+        "{report:#?}"
+    );
+    assert_eq!(
+        reap_report(&report),
+        "reaped: live=0 proven=false",
+        "{report:#?}"
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            unconfirmed_reason(&report),
+            crate::process::FINAL_CENSUS_UNPROVEN_REASON,
+            "{report:#?}"
+        );
+    } else {
+        assert_confirmed(&report);
+    }
+}

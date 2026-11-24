@@ -78,7 +78,10 @@ struct State {
     lost: AtomicBool,
     closed: AtomicBool,
     subreaper: AtomicBool,
-    pending: Mutex<HashMap<u64, oneshot::Sender<(usize, String)>>>,
+    /// Census and freeze requests sent and not yet answered. An entry stays
+    /// after its request timed out, so the answer, when it comes, is still
+    /// judged by its verb.
+    pending: Mutex<HashMap<u64, Pending>>,
     /// The latest answers to census and freeze requests, for the diagnostics.
     tree_log: Mutex<Vec<String>>,
     warnings: Mutex<Vec<String>>,
@@ -90,6 +93,59 @@ struct State {
     unproven: AtomicBool,
 }
 
+/// A census or freeze request waiting for its answer.
+struct Pending {
+    verb: &'static str,
+    /// The awaiting request; `None` once it timed out.
+    tx: Option<oneshot::Sender<(usize, String)>>,
+}
+
+impl State {
+    fn log(&self, entry: String) {
+        let mut log = lock(&self.tree_log);
+        if log.len() >= TREE_LOG_ENTRIES {
+            log.remove(0);
+        }
+        log.push(entry);
+    }
+
+    /// An answer to a census or freeze request, as the socket reader reads
+    /// it. A proof failure no later answer repairs is recorded here, before
+    /// the answer goes to any waiter, so it counts also when the request was
+    /// cancelled or timed out and the waiter is gone.
+    fn tree_answer(&self, id: u64, live: usize, detail: String) {
+        let pending = lock(&self.pending).remove(&id);
+        // An answer to no known request is judged by the strictest verb.
+        let verb = pending.as_ref().map_or("freeze", |p| p.verb);
+        if reply_unproven(verb, &detail) {
+            self.unproven.store(true, Ordering::SeqCst);
+        }
+        let late = match pending.and_then(|p| p.tx) {
+            Some(tx) => tx.send((live, detail.clone())).is_err(),
+            None => true,
+        };
+        if late {
+            self.log(
+                format!("{verb}: late live={live} {detail}")
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+    }
+
+    /// The keeper's answer to `reap`. What the keeper recorded as unproven
+    /// during the run is recorded here before the answer goes to the reap.
+    fn reaped(&self, reaped: Reaped) {
+        if reaped.unproven {
+            self.unproven.store(true, Ordering::SeqCst);
+        }
+        self.reaped.store(true, Ordering::SeqCst);
+        if let Some(tx) = lock(&self.reaped_tx).take() {
+            let _ = tx.send(reaped);
+        }
+    }
+}
+
 /// What the keeper said when it reaped the program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reaped {
@@ -98,6 +154,10 @@ pub(crate) struct Reaped {
     /// Whether the final census before the reap proved the tree empty
     /// (Linux, with a subreaper).
     pub proven: bool,
+    /// Whether any answer the keeper gave during the run, or worked out at
+    /// the reap, was unproven in a way no later answer repairs (see
+    /// [`reply_unproven`]), recorded by the keeper before it sent it.
+    pub unproven: bool,
 }
 
 /// What the owner's shared state holds of the keeper: the socket, and what the
@@ -151,20 +211,18 @@ impl LinkHandle {
         (&self.stream).write_all(line.as_bytes()).is_ok()
     }
 
-    async fn request(&self, make: fn(u64) -> ToKeeper, verb: &str) -> Option<usize> {
+    async fn request(&self, make: fn(u64) -> ToKeeper, verb: &'static str) -> Option<usize> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        lock(&self.state.pending).insert(id, tx);
+        lock(&self.state.pending).insert(id, Pending { verb, tx: Some(tx) });
         if self.state.closed.load(Ordering::SeqCst) || !self.send(make(id)) {
             lock(&self.state.pending).remove(&id);
             self.log(format!("{verb}: not sent"));
             return None;
         }
         match tokio::time::timeout(KEEPER_REPLY_TIMEOUT, rx).await {
+            // The reader recorded any proof failure before it delivered this.
             Ok(Ok((live, detail))) => {
-                if reply_unproven(verb, &detail) {
-                    self.state.unproven.store(true, Ordering::SeqCst);
-                }
                 self.log(
                     format!("{verb}: live={live} {detail}")
                         .trim_end()
@@ -173,7 +231,10 @@ impl LinkHandle {
                 Some(live)
             }
             _ => {
-                lock(&self.state.pending).remove(&id);
+                // The entry stays for the reader to judge a late answer.
+                if let Some(pending) = lock(&self.state.pending).get_mut(&id) {
+                    pending.tx = None;
+                }
                 self.log(format!("{verb}: no answer"));
                 None
             }
@@ -181,11 +242,7 @@ impl LinkHandle {
     }
 
     fn log(&self, entry: String) {
-        let mut log = lock(&self.state.tree_log);
-        if log.len() >= TREE_LOG_ENTRIES {
-            log.remove(0);
-        }
-        log.push(entry);
+        self.state.log(entry);
     }
 
     /// The latest answers to census and freeze requests, oldest first.
@@ -234,8 +291,13 @@ impl KeeperLink {
             _ => None,
         };
         if let Some(reaped) = confirmed {
+            let unproven = if reaped.unproven {
+                " unproven=true"
+            } else {
+                ""
+            };
             self.handle.log(format!(
-                "reaped: live={} proven={}",
+                "reaped: live={} proven={}{unproven}",
                 reaped.live, reaped.proven
             ));
         }
@@ -252,9 +314,12 @@ impl KeeperLink {
     }
 }
 
-/// Whether a census or freeze answer leaves a hole no later answer repairs:
+/// Whether a census or freeze answer leaves a hole no later answer repairs
+/// (the owner's reader and the keeper both record it, before the answer is
+/// delivered or sent):
 /// a refused hold (a process that was never signalled), a failed read of
-/// `/proc`, or a freeze that did not complete. A census that is incomplete
+/// `/proc`, or a freeze that did not complete, or whose details do not say
+/// it completed (a freeze task that failed). A census that is incomplete
 /// because the tree keeps changing reports a nonzero count and never claimed
 /// an empty tree, so it is not one. An answer without details (no walk) is
 /// not one.
@@ -267,7 +332,7 @@ pub(crate) fn reply_unproven(verb: &str, detail: &str) -> bool {
     let nonzero = |name: &str| field(name).is_some_and(|v| v != "0");
     nonzero("refused")
         || nonzero("read_failures")
-        || (verb == "freeze" && field("complete") == Some("false"))
+        || (verb == "freeze" && !detail.is_empty() && field("complete") != Some("true"))
 }
 
 /// Wait up to `bound` for the keeper, the owner's own child, to exit; kill it
@@ -572,17 +637,16 @@ fn follow(
                         signal: Some(signal),
                     },
                 ),
-                FromKeeper::Tree { id, live, detail } => {
-                    if let Some(tx) = lock(&state.pending).remove(&id) {
-                        let _ = tx.send((live, detail));
-                    }
-                }
-                FromKeeper::Reaped { live, proven } => {
-                    state.reaped.store(true, Ordering::SeqCst);
-                    if let Some(tx) = lock(&state.reaped_tx).take() {
-                        let _ = tx.send(Reaped { live, proven });
-                    }
-                }
+                FromKeeper::Tree { id, live, detail } => state.tree_answer(id, live, detail),
+                FromKeeper::Reaped {
+                    live,
+                    proven,
+                    unproven,
+                } => state.reaped(Reaped {
+                    live,
+                    proven,
+                    unproven,
+                }),
                 FromKeeper::Releasing => {
                     // From here the keeper reaps the program on its own. No
                     // group or member signal is in flight once the pin is
@@ -657,6 +721,82 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst));
     }
 
+    /// A link whose keeper end is returned and never answers by itself; the
+    /// test plays the socket reader with [`State::tree_answer`].
+    fn silent_link() -> (LinkHandle, UnixStream) {
+        let (owner, keeper) = UnixStream::pair().expect("a socket pair");
+        let handle = LinkHandle {
+            keeper_pid: 0,
+            provider_pid: 0,
+            stream: owner,
+            state: Arc::new(State::default()),
+            next_id: AtomicU64::new(1),
+            shut: AtomicBool::new(false),
+        };
+        (handle, keeper)
+    }
+
+    const REFUSED: &str = "passes=2 complete=false refused=1 read_failures=0";
+
+    /// The keeper's refusal arrives after the owner's freeze request timed
+    /// out: the reader still records it, and the run stays unproven.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_answered_after_its_request_timed_out_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        assert_eq!(handle.freeze().await, None);
+        assert!(!handle.unproven());
+        handle.state.tree_answer(1, 1, REFUSED.into());
+        assert!(handle.unproven());
+        assert_eq!(
+            handle.tree_log(),
+            vec![
+                "freeze: no answer".to_string(),
+                format!("freeze: late live=1 {REFUSED}")
+            ]
+        );
+    }
+
+    /// The same for a request whose future was dropped before the answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_answered_after_its_request_was_cancelled_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), handle.census())
+                .await
+                .is_err()
+        );
+        handle.state.tree_answer(1, 1, REFUSED.into());
+        assert!(handle.unproven());
+    }
+
+    /// A late answer is judged by the verb of its request: a census of a
+    /// tree that keeps changing claimed nothing, and a freeze that did not
+    /// complete did.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_is_judged_by_the_verb_of_its_request() {
+        let changing = "passes=64 complete=false refused=0 read_failures=0";
+        let (handle, _keeper) = silent_link();
+        assert_eq!(handle.census().await, None);
+        handle.state.tree_answer(1, 1, changing.into());
+        assert!(!handle.unproven());
+        assert_eq!(handle.freeze().await, None);
+        handle.state.tree_answer(2, 1, changing.into());
+        assert!(handle.unproven());
+    }
+
+    /// What the keeper carried in `reaped` makes the run unproven before the
+    /// reap receives the answer.
+    #[test]
+    fn a_reap_answer_that_carries_an_unproven_answer_leaves_the_run_unproven() {
+        let (handle, _keeper) = silent_link();
+        handle.state.reaped(Reaped {
+            live: 0,
+            proven: true,
+            unproven: true,
+        });
+        assert!(handle.unproven());
+    }
+
     #[test]
     fn which_answers_are_unproven() {
         assert!(reply_unproven(
@@ -681,5 +821,13 @@ mod tests {
             "passes=1 complete=true refused=0 read_failures=0"
         ));
         assert!(!reply_unproven("census", ""));
+        // A freeze without walk details (no walk, elsewhere than Linux)
+        // claims nothing; one whose details do not say it completed does.
+        assert!(!reply_unproven("freeze", ""));
+        assert!(reply_unproven("freeze", "the freeze panicked"));
+        assert!(reply_unproven(
+            "freeze",
+            "passes=0 complete=false refused=0 read_failures=0 task=failed"
+        ));
     }
 }
