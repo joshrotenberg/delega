@@ -334,7 +334,22 @@
 //!
 //! A process listing that is empty, that does not contain this process, or
 //! that has a line that cannot be parsed is a failed inspection, never "nothing
-//! found", so it cannot confirm cleanup.
+//! found", so it cannot confirm cleanup. On Linux one shape of unparsable row
+//! lets the listing be taken again instead: `<pid> 0 4294967295 X<flags>
+//! <start time>`, which `ps` can print for a task that is exiting, or that an
+//! exec from another thread of its process has just replaced (ppid 0, and pgid
+//! -1 printed as unsigned). When every unparsable line of a listing has
+//! exactly that shape, the same listing is taken again, at most
+//! `EXITING_ROW_RETRIES` (2) more times and only within one `PS_TIMEOUT` of
+//! the first one's start, and the first fresh listing in which every row
+//! parses is used; otherwise the listing fails with the error that quotes the
+//! line. The retry verifies only that a fresh, complete listing parses. The
+//! row is never skipped, and it does not prove its pid is gone: an exec from
+//! a non-leader thread hands the leader's pid and start time to the thread
+//! that called it, so the pid can still name a live process. Retries are
+//! counted in `inspection.exiting_row_retries`. A listing is also not an
+//! instant: `ps` reads `/proc` one pid after another, so a process that takes
+//! a pid the read has already passed is not in that listing.
 //!
 //! The environment variable `DELEGA_TEST_NO_PROCESS_LISTING` is a test-only
 //! seam for `acceptance/`: when it is set, whatever its value, no program is
