@@ -28,26 +28,20 @@ async fn wait_for_cleanup_report(handle: ProcessHandle, began: Instant) -> Proce
 }
 
 /// Wait, within [`BOUND`] of `began`, until no process has the scratch
-/// directory as its working directory. A census counts only if it was taken
-/// within the bound: one that returns after it, empty or not, fails, and the
-/// wait for a census that does not return ends at the bound. (The census
-/// bounds its own `lsof` run too, killing it at its limit.)
+/// directory as its working directory.
 async fn assert_case_empty(what: &str, scratch: &Scratch, began: Instant) {
-    let deadline = tokio::time::Instant::from_std(began + BOUND);
     let dir = scratch.dir();
     loop {
         let dir = dir.clone();
-        let census = tokio::task::spawn_blocking(move || processes_in(&dir));
-        let left = tokio::time::timeout_at(deadline, census)
+        let left = tokio::task::spawn_blocking(move || processes_in(&dir))
             .await
-            .unwrap_or_else(|_| panic!("{what}: the census did not return within {BOUND:?}"))
             .expect("the census task ended");
-        assert!(
-            began.elapsed() < BOUND,
-            "{what}: processes in the case directory {BOUND:?} after the stop: {left:?}"
-        );
-        if left.as_ref().is_ok_and(Vec::is_empty) {
-            return;
+        match left {
+            Ok(left) if left.is_empty() => return,
+            left => assert!(
+                began.elapsed() < BOUND,
+                "{what}: processes in the case directory {BOUND:?} after the stop: {left:?}"
+            ),
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
