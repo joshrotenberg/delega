@@ -294,6 +294,30 @@
 //! reported as not confirmed. It cannot substitute a program, so it can only
 //! make the verdict weaker.
 //!
+//! # What a macOS verdict covers
+//!
+//! On macOS the keeper is not a subreaper, so it cannot adopt orphans. A kept
+//! run's `Confirmed` there means the final sweeps found no live process in the
+//! child's process group, none in its session, no descendant an earlier
+//! listing tracked, and none whose environment, as `ps -E` shows it, carries
+//! the run marker; and that no process held the output pipes past the drain
+//! bound.
+//!
+//! It can miss two kinds of process, and the run then ends `Confirmed` while
+//! the process runs:
+//!
+//! - A descendant that left the session after its parent exited, before any
+//!   listing saw the two together, whose run marker `ps -E` does not show (it
+//!   was started with an environment that leaves the marker out, or macOS hides
+//!   its environment, as measured for Apple's programs under System Integrity
+//!   Protection), and that does not hold the output pipes.
+//! - A fast fork relay whose generations exit before a listing reads them, and
+//!   that does not hold the output pipes.
+//!
+//! The evidence and measurements are under "What remains possible". A kept
+//! run on macOS carries [`MACOS_KEEPER_NOTE`](crate::provider::MACOS_KEEPER_NOTE)
+//! in its `provider_notes`.
+//!
 //! # What remains possible
 //!
 //! Without a keeper, two gaps remain, and both end with `Confirmed` while a
@@ -339,8 +363,9 @@
 //! no in-process code can do").
 //!
 //! A kept run closes these on Linux. On macOS it closes the SIGKILL of the
-//! owner, and the two gaps remain in part; tracking forks on macOS is
-//! delega issue 167. In detail:
+//! owner, and the two gaps remain in part, as "What a macOS verdict covers"
+//! states; tracking forks on macOS is shelved (delega issues 167 and 189). In
+//! detail:
 //!
 //! - On Linux the keeper is the reaper of every orphan, so the `setsid`
 //!   descendant and every generation of the relay are the keeper's descendants
@@ -394,9 +419,8 @@
 //!   - a keeper that is lost, or that exits without the owner's `released`,
 //!     leaves the child unreaped to the reaper above it, and the verdict is
 //!     `Unconfirmed`;
-//!   - on macOS, a detached orphan whose environment the system hides from
-//!     `ps -E` (Apple's programs under SIP), and a fast fork relay, can be
-//!     missed;
+//!   - on macOS, the two kinds of process "What a macOS verdict covers" names
+//!     can be missed;
 //!   - a process the kernel prevents inspecting or signalling (`hidepid`,
 //!     another user's, no pidfd) leaves the verdict `Unconfirmed`, and the
 //!     keeper's own cleanup keeps going until its deadline and then exits.
