@@ -366,12 +366,12 @@ fn run_case(name: &str) {
 
 #[test]
 fn a_guarded_sibling_never_holds_a_pipe_from_another_spawns_cloexec_window() {
-    run_case("guarded_case");
+    run_case("a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner");
 }
 
 #[test]
 #[ignore = "run by its outer test in a process of its own"]
-fn guarded_case() {
+fn a_spawn_through_the_lock_waits_while_a_pipe_lacks_close_on_exec_inner() {
     if !in_fixture_process() {
         return;
     }
@@ -393,13 +393,13 @@ fn guarded_case() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_unguarded_sibling_started_in_the_cloexec_window_is_seen_holding_the_pipe() {
-    run_case("unguarded_case");
+    run_case("an_unguarded_spawn_in_the_window_inherits_the_pipe_inner");
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "run by its outer test in a process of its own"]
-fn unguarded_case() {
+fn an_unguarded_spawn_in_the_window_inherits_the_pipe_inner() {
     if !in_fixture_process() {
         return;
     }
