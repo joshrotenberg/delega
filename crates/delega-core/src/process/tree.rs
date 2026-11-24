@@ -189,22 +189,110 @@ async fn read_listing(
 
 /// The error for a listing program that could not be started. Every path
 /// tried is named with its own error, in the order tried, so a refusal on one
-/// path is not hidden behind "not found" on the next. The detail is clipped
-/// to [`MAX_ERROR_CHARS`].
-fn not_started(failures: &[(PathBuf, std::io::Error)]) -> InspectError {
+/// path is not hidden behind "not found" on the next. The whole message stays
+/// within [`MAX_ERROR_CHARS`], see [`bounded_failures`].
+pub(crate) fn not_started(failures: &[(PathBuf, std::io::Error)]) -> InspectError {
+    const OPEN: &str = "ps could not be started (";
+    const CLOSE: &str = ")";
     let detail = if failures.is_empty() {
         "no ps program configured".to_string()
     } else {
-        failures
+        let entries: Vec<(String, String)> = failures
             .iter()
-            .map(|(program, error)| format!("{}: {error}", program.display()))
-            .collect::<Vec<_>>()
-            .join(", ")
+            .map(|(program, error)| (program.display().to_string(), error.to_string()))
+            .collect();
+        let budget = MAX_ERROR_CHARS - OPEN.chars().count() - CLOSE.chars().count();
+        bounded_failures(&entries, budget)
     };
-    InspectError::Unavailable(format!(
-        "ps could not be started ({})",
-        clip(&detail, MAX_ERROR_CHARS)
-    ))
+    InspectError::Unavailable(format!("{OPEN}{detail}{CLOSE}"))
+}
+
+/// What a shortened path or a cut text is marked with.
+const OMITTED: &str = "...";
+
+/// The fewest characters a shortened path keeps, mark included, so that it
+/// still names the file. Pairs are left out before paths get shorter.
+const MIN_SHORTENED_PATH: usize = 40;
+
+/// Join `(path, error)` pairs as `path: error, path: error` within `budget`
+/// characters. Error descriptions are kept whole: paths are shortened first
+/// (to their last characters, after [`OMITTED`]), then trailing pairs are
+/// left out and counted as `... and N more path(s)`. Only when a single
+/// error cannot fit on its own is the text cut, and the cut is marked.
+fn bounded_failures(entries: &[(String, String)], budget: usize) -> String {
+    let len = |text: &str| text.chars().count();
+    for kept in (1..=entries.len()).rev() {
+        let shown = &entries[..kept];
+        let note = match entries.len() - kept {
+            0 => String::new(),
+            1 => format!(", {OMITTED} and 1 more path"),
+            n => format!(", {OMITTED} and {n} more paths"),
+        };
+        let fixed: usize = shown
+            .iter()
+            .map(|(_, error)| len(": ") + len(error))
+            .sum::<usize>()
+            + len(", ") * (kept - 1)
+            + len(&note);
+        let Some(for_paths) = budget.checked_sub(fixed) else {
+            continue;
+        };
+        let Some(cap) = path_cap(shown.iter().map(|(path, _)| len(path)), for_paths) else {
+            continue;
+        };
+        let joined = shown
+            .iter()
+            .map(|(path, error)| format!("{}: {error}", shorten(path, cap)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{joined}{note}");
+    }
+    // Not even the first error fits whole. Cut it, and say so.
+    let (path, error) = &entries[0];
+    let mut text = format!("{path}: {error}");
+    let more = entries.len() - 1;
+    if more > 0 {
+        text.push_str(&format!(
+            " and {more} more path{}",
+            if more == 1 { "" } else { "s" }
+        ));
+    }
+    let keep = budget.saturating_sub(len(OMITTED));
+    format!("{}{OMITTED}", clip(&text, keep))
+}
+
+/// The longest any path may be so that all of `lengths` fit in `room`
+/// characters, with paths shorter than that kept whole. `None` when even a
+/// [`MIN_SHORTENED_PATH`] characters of every long path do not fit. `usize::MAX` means no path
+/// needs shortening.
+fn path_cap(lengths: impl Iterator<Item = usize>, room: usize) -> Option<usize> {
+    let mut sorted: Vec<usize> = lengths.collect();
+    if sorted.iter().sum::<usize>() <= room {
+        return Some(usize::MAX);
+    }
+    sorted.sort_unstable();
+    let mut room = room;
+    let mut count = sorted.len();
+    for length in sorted {
+        let share = room / count;
+        if length > share {
+            return (share >= MIN_SHORTENED_PATH).then_some(share);
+        }
+        room -= length;
+        count -= 1;
+    }
+    Some(usize::MAX)
+}
+
+/// `path` as is when it is at most `cap` characters, otherwise its last
+/// characters after [`OMITTED`], `cap` characters in all.
+fn shorten(path: &str, cap: usize) -> String {
+    let chars = path.chars().count();
+    if chars <= cap {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(chars - (cap - OMITTED.len())).collect();
+    format!("{OMITTED}{tail}")
 }
 
 /// Run one listing command, bounded as [`list_processes_from`] is.
