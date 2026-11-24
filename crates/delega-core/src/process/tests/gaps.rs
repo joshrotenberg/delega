@@ -71,9 +71,14 @@ async fn listing_waits_for(path: &std::path::Path) {
 /// - The first listing reads the table and writes `scanned`; the scripts start
 ///   the descendant only after it ([`WAIT_FOR_SCAN`]).
 /// - With `witness`, the second listing, the first of `CAPTURE_RAMP`, waits
-///   until `gc` is published, then reads the table and writes `seen`. The
-///   leader waits for `seen` before it ends, so this listing sees the
-///   descendant while the leader is its parent.
+///   until `gc` is published and then reads the table. The test lets the
+///   leader end only once the owner tracks the descendant, so this listing
+///   sees the descendant while the leader is its parent, and the owner has
+///   recorded what it saw before the leader goes. (On Linux the owner reads
+///   the descendant's start time from `/proc` after the listing returns, and
+///   accepts it only while the descendant's parent is still the leader; a
+///   leader that ended as soon as the listing returned would leave a
+///   descendant the owner may not signal.)
 /// - Every other listing waits until `gc` is published, then reads the table
 ///   until the leader is no longer a live process in it, and answers with that
 ///   reading. None of them can see the descendant with the leader as its
@@ -84,16 +89,10 @@ async fn listing_waits_for(path: &std::path::Path) {
 /// shows no group leader but the leader (see the test that uses it).
 fn ordered_listings(s: &Scratch, witness: bool, hide_group_leaders: bool) -> Lister {
     let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let (scanned, seen, gc, leader) = (
-        s.path("scanned"),
-        s.path("seen"),
-        s.path("gc"),
-        s.path("leader"),
-    );
+    let (scanned, gc, leader) = (s.path("scanned"), s.path("gc"), s.path("leader"));
     Arc::new(move || {
         let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (scanned, seen, gc, leader) =
-            (scanned.clone(), seen.clone(), gc.clone(), leader.clone());
+        let (scanned, gc, leader) = (scanned.clone(), gc.clone(), leader.clone());
         Box::pin(async move {
             let hide = |rows: Vec<crate::process::tree::ProcessRow>| match read_record(&leader) {
                 Record::Pid(leader) if hide_group_leaders => rows
@@ -109,9 +108,7 @@ fn ordered_listings(s: &Scratch, witness: bool, hide_group_leaders: bool) -> Lis
             }
             listing_waits_for(&gc).await;
             if call == 1 && witness {
-                let rows = list_processes().await;
-                let _ = std::fs::write(&seen, "seen");
-                return rows.map(hide);
+                return list_processes().await.map(hide);
             }
             let began = std::time::Instant::now();
             loop {
@@ -244,11 +241,11 @@ async fn each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing
 /// The periodic interval is the default here, so the listings are the one at
 /// spawn, the early ramp (`CAPTURE_RAMP`) and then the 500 ms interval. The
 /// descendant calls `setsid` straight after the first listing. The first ramp
-/// listing is held until it has, and the leader crashes as soon as that
-/// listing has read the table; every later listing is held until the leader
-/// is gone ([`ordered_listings`]). So that ramp listing, and no other, sees
-/// the descendant while the leader is its parent, and what it saw must be
-/// enough to stop the descendant after the crash. That the ramp listing comes
+/// listing is held until it has; the test waits until the owner tracks the
+/// descendant and then lets the leader crash (`go`); every later listing is
+/// held until the leader is gone ([`ordered_listings`]). So that ramp
+/// listing, and no other, sees the descendant while the leader is its parent,
+/// and what it saw must be enough to stop the descendant after the crash. That the ramp listing comes
 /// before the first periodic one is a matter of the schedule, which
 /// `each_ramp_listing_starts_once_due_and_before_the_first_periodic_listing`
 /// pins.
@@ -260,13 +257,18 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
     let script = format!(
         "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} kill -KILL $$; sleep 5",
         own_session_recorded("gc"),
-        await_record("seen")
+        await_record("go")
     );
     let spec = sh(&s, &script, LONG).with_lister(ordered_listings(&s, true, false));
-    let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
-    assert_no_false_confirmation(pids[0], &report.cleanup);
+    let handle = crate::process::ProcessHandle::start(spec);
+    let mut reaper = Reaper::default();
+    let gc = reaper.watch(&s, "gc").await;
+    super::fixtures::wait_tracked(&handle, gc).await;
+    std::fs::write(s.path("go"), "go").expect("write the go file");
+    let report = handle.wait().await;
+    assert_no_false_confirmation(gc, &report.cleanup);
     assert_eq!(report.cleanup, Cleanup::Confirmed, "{report:#?}");
-    assert_gone("descendant", &pids).await;
+    assert_gone("descendant", &[gc]).await;
 }
 
 /// Gap 1 without a keeper: a `setsid` descendant whose parent, the leader,
