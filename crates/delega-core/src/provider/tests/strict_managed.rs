@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use super::Rig;
-use crate::contract::permissions::Mode;
+use crate::contract::permissions::{Mode, OnRequest};
 use crate::contract::request::{Provider, Request};
 use crate::provider::managed::{Platform, SystemPaths};
 use crate::provider::{ProviderOptions, Refusal, dry_run};
@@ -31,6 +31,8 @@ struct Setup {
     /// `permissions.commands` of every request. When it is not empty the
     /// options carry a hook program, so read and write get the command guard.
     commands: Vec<String>,
+    /// Whether every request sets `on_request: ask`.
+    ask: bool,
 }
 
 impl Setup {
@@ -40,6 +42,7 @@ impl Setup {
             root: tempfile::tempdir().expect("temporary root"),
             platform,
             commands: Vec::new(),
+            ask: false,
         }
     }
 
@@ -76,6 +79,9 @@ impl Setup {
         request.permissions.mode = mode;
         request.permissions.strict = strict;
         request.permissions.commands = self.commands.clone();
+        if self.ask {
+            request.permissions.on_request = OnRequest::Ask;
+        }
         request
     }
 
@@ -534,12 +540,19 @@ fn hook_key_files() -> [(&'static str, String); 3] {
 const ALL_HOOK_KEYS: &str = r#"{"disableAllHooks":true,"allowManagedHooksOnly":true,
     "hooks":{"PreToolUse":[]}}"#;
 
+/// How a part that names hook keys, or a source that may set them, ends.
+const HOOK_ENDING: &str = "Claude Code applies managed settings above the settings delega \
+                           passes, so these hook settings may stop delega's exact-command guard \
+                           from running or change how Claude Code resolves its decision";
+
 fn names_a_hook_key(message: &str) -> bool {
     [
         "disableAllHooks",
         "allowManagedHooksOnly",
         "sets hooks",
         "hook keys",
+        "hook settings",
+        "exact-command guard",
     ]
     .iter()
     .any(|name| message.contains(name))
@@ -552,28 +565,50 @@ fn a_managed_hook_key_refuses_strict_read_and_write_that_rely_on_the_command_gua
             (Platform::Macos, MAC_CLAUDE),
             (Platform::Linux, LINUX_CLAUDE),
         ] {
-            let setup = Setup::guarded(platform);
-            let path = setup.write(&format!("{dir}/managed-settings.json"), &content);
-            for mode in [Mode::Read, Mode::Write] {
-                let refusal = setup.refusal(mode);
-                assert_eq!(
-                    refusal.kind, "permissions_not_enforceable",
-                    "{key} {mode:?}"
-                );
-                let entry = format!(
-                    "the managed source {} sets {key}, and Claude Code applies managed settings \
-                     above the settings delega passes",
-                    text(&path)
-                );
-                assert!(
-                    refusal.message.contains(&entry),
-                    "{key} {mode:?}: {}",
-                    refusal.message
-                );
-                assert!(!refusal.message.contains(SECRET), "{}", refusal.message);
+            for ask in [false, true] {
+                let mut setup = Setup::guarded(platform);
+                setup.ask = ask;
+                let path = setup.write(&format!("{dir}/managed-settings.json"), &content);
+                for mode in [Mode::Read, Mode::Write] {
+                    let refusal = setup.refusal(mode);
+                    assert_eq!(
+                        refusal.kind, "permissions_not_enforceable",
+                        "{key} {mode:?} ask={ask}"
+                    );
+                    let entry = format!(
+                        "the managed source {} sets {key}, and {HOOK_ENDING}",
+                        text(&path)
+                    );
+                    assert!(
+                        refusal.message.contains(&entry),
+                        "{key} {mode:?} ask={ask}: {}",
+                        refusal.message
+                    );
+                    assert!(!refusal.message.contains(SECRET), "{}", refusal.message);
+                }
             }
         }
     }
+}
+
+#[test]
+fn the_hook_ending_is_left_out_of_a_permissions_allow_finding_with_the_guard() {
+    let setup = Setup::guarded(Platform::Linux);
+    let path = setup.write(
+        &format!("{LINUX_CLAUDE}/managed-settings.json"),
+        r#"{"permissions":{"allow":["Bash"]}}"#,
+    );
+    let refusal = setup.refusal(Mode::Read);
+    assert!(
+        refusal.message.contains(&format!(
+            "the managed source {} sets permissions.allow, and Claude Code applies managed \
+             settings above the settings delega passes",
+            text(&path)
+        )),
+        "{}",
+        refusal.message
+    );
+    assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
 }
 
 #[test]
@@ -628,7 +663,7 @@ fn managed_hook_keys_are_named_beside_permissions_allow_with_the_guard() {
     assert!(
         refusal.message.contains(&format!(
             "the managed source {} sets allowManagedHooksOnly, disableAllHooks, hooks, \
-             permissions.allow,",
+             permissions.allow, and {HOOK_ENDING}",
             text(&path)
         )),
         "{}",
@@ -698,16 +733,33 @@ fn managed_hook_keys_do_not_affect_full_with_or_without_permissions_commands() {
 
 #[test]
 fn strict_builds_refusal_does_not_name_managed_hook_keys() {
-    let setup = Setup::new(Platform::Linux);
+    let setup = Setup::guarded(Platform::Linux);
     setup.write(
         &format!("{LINUX_CLAUDE}/managed-settings.json"),
         ALL_HOOK_KEYS,
     );
-    // Strict build is refused for command reads whatever is managed.
+    // Request validation refuses permissions.commands in build before
+    // planning, so the managed sources are not looked at.
     let refusal = setup.refusal(Mode::Build);
+    assert_eq!(refusal.kind, "invalid_request", "{}", refusal.message);
+    assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
+    // With the hook configured and no commands, strict build is refused for
+    // command reads whatever is managed, and no hook key is named.
+    let options = setup.options();
+    assert!(options.hook.is_some());
+    let mut request = setup.request(Mode::Build, true);
+    request.permissions.commands.clear();
+    let refusal = match dry_run(&request, &options) {
+        Ok(_) => panic!("expected strict build to be refused"),
+        Err(refusal) => refusal,
+    };
     assert_eq!(refusal.kind, "permissions_not_enforceable");
     assert!(!names_a_hook_key(&refusal.message), "{}", refusal.message);
-    assert_eq!(setup.notes(Mode::Build), Vec::<String>::new());
+    request.permissions.strict = false;
+    let notes = dry_run(&request, &options)
+        .expect("build without strict runs")
+        .notes;
+    assert!(!notes.iter().any(|n| n.starts_with(NOTE)), "{notes:?}");
 }
 
 #[test]
@@ -727,18 +779,18 @@ fn sources_not_read_say_they_may_set_hook_keys_only_with_the_guard() {
     for entry in [
         format!(
             "the managed source {} could not be read or parsed, so it may set permissions.allow \
-             or hook keys,",
+             or hook keys, and {HOOK_ENDING}",
             text(&settings)
         ),
         format!(
             "the managed source {} is managed preferences, which delega does not open, so it may \
-             set permissions.allow or hook keys,",
+             set permissions.allow or hook keys, and {HOOK_ENDING}",
             text(&preferences)
         ),
         format!(
             "the managed source {} holds a managed preferences file in a user's directory; only \
              the current user's applies and delega does not tell whose it is, so it may set \
-             permissions.allow or hook keys,",
+             permissions.allow or hook keys, and {HOOK_ENDING}",
             text(&users)
         ),
     ] {
@@ -782,7 +834,7 @@ fn unchecked_managed_preferences_say_they_may_set_hook_keys_with_the_guard() {
     assert!(
         refusal.message.contains(&format!(
             "delega could not check the managed preferences directory {}, so managed \
-             preferences may set permissions.allow or hook keys,",
+             preferences may set permissions.allow or hook keys, and {HOOK_ENDING}",
             text(&dir)
         )),
         "{}",

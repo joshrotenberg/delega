@@ -304,13 +304,14 @@ completely and so may widen the run, the plan carries a note naming it, and
   start with `permissions_not_enforceable` instead. Claude Code 2.1.325 or later supports the hook interface. The guard has
   a 5 s timeout and a 2,000,000-byte input limit.
 - Claude Code applies managed settings above `--settings`. A managed
-  `disableAllHooks` set to true is the value in force, so the guard does not
-  run; a managed `allowManagedHooksOnly` runs only the organization's hooks;
-  a managed `hooks` adds hooks that run beside the guard, and Claude Code does
-  not document how their decisions combine with the guard's. When the run has
-  the guard, a managed source that sets any of these keys, or may set them
-  because it was not read completely, is named in a note, and
-  `permissions.strict` refuses the run ([Strict](#strict)).
+  `disableAllHooks: true` can turn off the command guard; a managed
+  `allowManagedHooksOnly: true` can limit hooks to managed ones; a managed
+  `hooks` configuration can add a matching hook beside the guard, and Claude
+  Code does not document how its decision combines with the guard's. When the
+  run has the guard, delega names any of these keys when present, without
+  reading its value, and names a source that may set them because it was not
+  read completely. Each is a note, and `permissions.strict` refuses the run
+  ([Strict](#strict)).
 - `permissions.directories`: each gets `--add-dir` and a `Read(//DIR/**)` rule.
   The `Edit` rule covers a listed directory only if it lies inside the working
   directory. In `build`, listed directories get their `Read` rule without
@@ -405,11 +406,15 @@ can or may widen the run:
   `sandbox`, such as `sandbox.filesystem.denyWrite`, is not checked), which
   can disable or loosen the sandbox delega passes;
 - in `read` and `write` with delega's command guard (`permissions.commands`
-  with a hook configured), one that sets `disableAllHooks`,
-  `allowManagedHooksOnly` or `hooks`, which can stop the guard from running or
-  add a hook whose decision combines with the guard's in ways Claude Code does
-  not document ([Commands and directories](#commands-and-directories)). Runs
-  without the guard rely on no hook, so these keys are not checked for them;
+  with a hook configured), one in which `disableAllHooks`,
+  `allowManagedHooksOnly` or `hooks` is present, whatever its value. Set to
+  true, the first can turn off the guard and the second can limit hooks to
+  managed ones; a `hooks` configuration can add a matching hook beside the
+  guard ([Commands and directories](#commands-and-directories)). Such a part,
+  and the part of a source that may set these keys, ends by saying these hook
+  settings may stop delega's exact-command guard from running or change how
+  Claude Code resolves its decision. Runs without the guard rely on no hook,
+  so these keys are not checked for them;
 - one that exists and was not read completely (`not_inspected`, `unreadable`
   or `partly_read`), such as the managed preferences file or a drop-in
   directory that cannot be listed. It may set any of the keys the run is

@@ -324,8 +324,16 @@ fn a_key_that_does_not_change_what_delega_passes_is_not_listed() {
     );
     // A name that is relevant at the top level is not looked for elsewhere.
     assert_eq!(
-        claude_names(r#"{"permissions":{"env":{},"disableAllHooks":true},"plugins":{"allow":[]}}"#),
+        claude_names(
+            r#"{"permissions":{"env":{},"disableAllHooks":true,"hooks":{}},
+                "plugins":{"allow":[]}}"#
+        ),
         Vec::<String>::new()
+    );
+    // A hooks object under permissions is not the top-level hooks key.
+    assert_eq!(
+        claude_names(r#"{"permissions":{"hooks":{},"deny":[]}}"#),
+        ["permissions.deny"]
     );
 }
 
