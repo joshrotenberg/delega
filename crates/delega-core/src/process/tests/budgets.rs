@@ -183,7 +183,7 @@ async fn a_requested_stop_signals_after_the_real_stop_budget_and_is_unconfirmed(
     // is the late listing's.
     let s = Scratch::new();
     let held = Held::new(true);
-    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG).with_lister(held.lister());
+    let mut spec = sh(&s, "record leader $$; sleep 60", LONG).with_lister(held.lister());
     spec.capture_interval = Some(Duration::from_secs(3600));
     spec.timings = Timings::production();
     let handle = ProcessHandle::start(spec);
@@ -219,7 +219,7 @@ async fn a_natural_exit_with_a_held_listing_signals_after_the_real_exit_budget_a
     let held = Held::new(true);
     let mut spec = sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; exit 0",
+        "record leader $$; sleep 60 & record gc $!; exit 0",
         LONG,
     )
     .with_lister(held.lister());

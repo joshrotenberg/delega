@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::fixtures::{Reaper, Scratch, assert_confirmed, assert_gone, sh};
+use super::fixtures::{Reaper, Record, Scratch, assert_confirmed, assert_gone, read_record, sh};
 use crate::contract::outcome::Outcome;
 use crate::process::{Ending, ProcessHandle, ProcessSpec, run};
 
@@ -17,7 +17,7 @@ async fn a_normal_exit_reports_code_zero_its_output_and_confirmed_cleanup() {
     let s = Scratch::new();
     let spec = sh(
         &s,
-        "echo $$ > leader; printf out; printf err >&2; exit 0",
+        "record leader $$; printf out; printf err >&2; exit 0",
         LONG,
     );
     let report = run(spec).await;
@@ -36,7 +36,7 @@ both!(
     a_nonzero_exit_is_a_failure_that_carries_the_code_kept,
     async {
         let s = Scratch::new();
-        let report = run(sh(&s, "echo $$ > leader; echo boom >&2; exit 7", LONG)).await;
+        let report = run(sh(&s, "record leader $$; echo boom >&2; exit 7", LONG)).await;
         assert_eq!(report.ending, Ending::Exited { code: 7 });
         assert_eq!(report.outcome(), Outcome::Failed);
         let error = report.error_detail().expect("a failure has an error");
@@ -52,7 +52,7 @@ both!(
     a_child_killed_by_a_signal_is_reported_as_signaled_kept,
     async {
         let s = Scratch::new();
-        let report = run(sh(&s, "echo $$ > leader; kill -KILL $$; sleep 5", LONG)).await;
+        let report = run(sh(&s, "record leader $$; kill -KILL $$; sleep 5", LONG)).await;
         assert_eq!(
             report.ending,
             Ending::Signaled {
@@ -73,7 +73,7 @@ both!(
     async {
         let s = Scratch::new();
         let started = Instant::now();
-        let spec = sh(&s, "echo $$ > leader; sleep 60", Duration::from_millis(400));
+        let spec = sh(&s, "record leader $$; sleep 60", Duration::from_millis(400));
         let report = run(spec).await;
         assert_eq!(
             report.ending,
@@ -101,7 +101,7 @@ async fn a_child_that_ignores_terminate_is_killed_after_the_grace_period() {
     // script's start on a loaded machine; the stop path is the same.
     let handle = ProcessHandle::start(sh(
         &s,
-        "trap '' TERM; echo $$ > leader; sleep 60 & echo $! > gc; wait",
+        "trap '' TERM; record leader $$; sleep 60 & record gc $!; wait",
         LONG,
     ));
     let started = Instant::now();
@@ -128,7 +128,7 @@ both!(
     interrupting_through_the_handle_ends_the_run_as_interrupted_kept,
     async {
         let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+        let handle = ProcessHandle::start(sh(&s, "record leader $$; sleep 60", LONG));
         let leader = s.pid("leader").await;
         assert_eq!(handle.pid(), Some(leader as u32));
         handle.interrupt();
@@ -147,7 +147,7 @@ async fn interrupting_from_another_task_stops_the_child_and_its_descendants() {
     let s = Scratch::new();
     let handle = ProcessHandle::start(sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; wait",
+        "record leader $$; sleep 60 & record gc $!; wait",
         LONG,
     ));
     let interrupter = handle.interrupter();
@@ -166,7 +166,7 @@ both!(
     interrupting_from_another_thread_ends_the_run_as_interrupted_kept,
     async {
         let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+        let handle = ProcessHandle::start(sh(&s, "record leader $$; sleep 60", LONG));
         let interrupter = handle.interrupter();
         let leader = s.pid("leader").await;
         std::thread::spawn(move || interrupter.interrupt())
@@ -184,7 +184,7 @@ both!(
     interrupting_before_the_child_has_run_still_ends_clean_kept,
     async {
         let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+        let handle = ProcessHandle::start(sh(&s, "record leader $$; sleep 60", LONG));
         handle.interrupt();
         let report = handle.wait().await;
         assert!(
@@ -192,8 +192,19 @@ both!(
             "{report:#?}"
         );
         assert_confirmed(&report);
-        if let Ok(text) = std::fs::read_to_string(s.path("leader")) {
-            let leader: i32 = text.trim().parse().expect("pid");
+        // The interrupt can end the shell before its record is complete,
+        // even after the redirection created the file. The report's pid is
+        // the leader either way, so the leader is checked whether or not it
+        // recorded itself; a record that is complete must name the same pid.
+        let recorded = match read_record(&s.path("leader")) {
+            Record::Pid(pid) => Some(pid),
+            Record::Absent | Record::Incomplete(_) => None,
+        };
+        if let Some(recorded) = recorded {
+            assert_eq!(report.pid, Some(recorded as u32), "{report:#?}");
+        }
+        if let Some(leader) = report.pid {
+            let leader = i32::try_from(leader).expect("a pid");
             assert_gone("leader", &[leader]).await;
         }
     }
@@ -204,7 +215,7 @@ async fn dropping_the_handle_stops_the_child_and_its_descendants() {
     let s = Scratch::new();
     let handle = ProcessHandle::start(sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; wait",
+        "record leader $$; sleep 60 & record gc $!; wait",
         LONG,
     ));
     let mut reaper = Reaper::default();
@@ -223,7 +234,7 @@ both!(
     cancelling_the_run_future_stops_the_child_kept,
     async {
         let s = Scratch::new();
-        let spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+        let spec = sh(&s, "record leader $$; sleep 60", LONG);
         let mut future = Box::pin(run(spec));
         // Wait for the child to exist, however slow the machine, then cancel.
         let mut reaper = Reaper::default();
@@ -247,7 +258,7 @@ fn shutting_down_the_runtime_kills_the_group_of_a_running_child() {
     let (handle, leader, gc) = runtime.block_on(async {
         let handle = ProcessHandle::start(sh(
             &s,
-            "echo $$ > leader; sleep 60 & echo $! > gc; wait",
+            "record leader $$; sleep 60 & record gc $!; wait",
             LONG,
         ));
         let leader = reaper.watch(&s, "leader").await;

@@ -74,7 +74,7 @@ fn assert_no_false_confirmation(descendant: i32, cleanup: &Cleanup) {
 async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
-    let script = format!("{WAIT_FOR_SCAN} echo $$ > leader; {OWN_GROUP} & echo $! > gc; exit 0");
+    let script = format!("{WAIT_FOR_SCAN} record leader $$; {OWN_GROUP} & record gc $!; exit 0");
     let mut spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     spec.capture_interval = Some(Duration::from_secs(3600));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
@@ -89,7 +89,7 @@ async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cle
     // The crash lands 0.2 s after the descendant starts. No periodic scan runs
     // after the first, however slow the machine is.
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_GROUP} & echo $! > gc; \
+        "{WAIT_FOR_SCAN} record leader $$; {OWN_GROUP} & record gc $!; \
          sleep 0.2; kill -KILL $$; sleep 5"
     );
     let mut spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
@@ -181,7 +181,7 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+        "{WAIT_FOR_SCAN} record leader $$; {OWN_SESSION} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} \
          sleep 0.2; kill -KILL $$; sleep 5"
     );
     let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
@@ -203,7 +203,7 @@ async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0",
+        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} exit 0",
         own_session_sleeper()
     );
     let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
@@ -218,7 +218,7 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} \
+        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} \
          sleep 0.15; kill -KILL $$; sleep 5",
         own_session_sleeper()
     );
@@ -241,7 +241,7 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
     let detach =
         "perl -e 'use POSIX; POSIX::setsid(); %ENV = (); exec { q(/bin/sleep) } q(sleep), q(60)'";
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; {AFTER_RAMP} {detach} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} exit 0"
+        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {detach} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} exit 0"
     );
     // The owner's listings never show it: once the leader is known they hide
     // every group leader but the leader, which the orphan is from its
@@ -278,7 +278,7 @@ async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux
 /// starts a descendant that calls `setsid` and then writes its own pid to `gc`.
 /// The descendant's parent is the middle process, not the leader.
 const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid(); \
-    open F, q(>), q(gc.tmp); print F $$; close F; rename q(gc.tmp), q(gc); \
+    open F, q(>), q(gc.tmp); print F qq($$\\n); close F; rename q(gc.tmp), q(gc); \
     exec q(sleep), q(60)' &\nwait\n";
 
 /// The script of a leader that starts the middle process after the first scan
@@ -288,7 +288,7 @@ const MIDDLE: &str = "perl -e 'use POSIX; POSIX::setsid(); \
 fn leader_with_a_live_middle_process(s: &Scratch, ending: &str) -> crate::process::ProcessSpec {
     std::fs::write(s.path("middle.sh"), MIDDLE).expect("write the middle script");
     let script = format!(
-        "{WAIT_FOR_SCAN} echo $$ > leader; sh middle.sh & \
+        "{WAIT_FOR_SCAN} record leader $$; sh middle.sh & \
          while [ ! -e gc ]; do sleep 0.02; done; {ending}"
     );
     let mut spec = sh(s, &script, LONG).with_lister(marking_lister(s.path("scanned")));

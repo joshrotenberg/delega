@@ -21,14 +21,97 @@ pub(super) const AWAIT: Duration = Duration::from_secs(90);
 /// Poll `ready` every 10 ms until it holds, for at most [`AWAIT`]. `what` names
 /// the event for the failure message.
 pub(super) async fn await_event(what: &str, mut ready: impl FnMut() -> bool) {
+    await_value(what, || if ready() { Ok(()) } else { Err(String::new()) }).await;
+}
+
+/// Poll `read` every 10 ms until it returns a value, for at most [`AWAIT`].
+/// On timeout the message names the event (`what`) and the last thing `read`
+/// saw instead (its error text, when not empty).
+pub(super) async fn await_value<T>(what: &str, mut read: impl FnMut() -> Result<T, String>) -> T {
     let began = Instant::now();
-    while !ready() {
-        assert!(
-            began.elapsed() < AWAIT,
-            "waited {AWAIT:?} and never saw: {what}"
-        );
+    loop {
+        let seen = match read() {
+            Ok(value) => return value,
+            Err(seen) => seen,
+        };
+        if began.elapsed() >= AWAIT {
+            if seen.is_empty() {
+                panic!("waited {AWAIT:?} and never saw: {what}");
+            }
+            panic!("waited {AWAIT:?} and never saw: {what} (last seen: {seen})");
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Shell: defines `record NAME VALUE`, which writes `VALUE` and a newline to
+/// `NAME` with the `printf` builtin: one small write, and no process of its
+/// own in the run's tree. A reader can still find the file empty (created by
+/// the redirection, not yet written) or, in principle, partly written;
+/// [`read_record`] calls that incomplete and the waits keep waiting. [`sh`]
+/// puts it before every script; a script that starts another shell writes
+/// its record with `echo` the same way.
+pub(super) const RECORD: &str = "record() { printf '%s\\n' \"$2\" > \"$1\"; }; ";
+
+/// Publish `pid` as a complete record at `path`: write a temporary file
+/// beside it and rename it into place. It runs in the test process, so it
+/// adds no process to any run.
+pub(super) fn publish_pid(path: &Path, pid: u32) {
+    let name = path.file_name().expect("a record has a file name");
+    let mut temporary = name.to_os_string();
+    temporary.push(".tmp");
+    let temporary = path.with_file_name(temporary);
+    std::fs::write(&temporary, format!("{pid}\n")).expect("write the temporary record");
+    std::fs::rename(&temporary, path).expect("publish the record");
+}
+
+/// What a pid record file holds when read.
+#[derive(Debug, PartialEq)]
+pub(super) enum Record {
+    /// Not published (yet).
+    Absent,
+    /// Present but not one pid and a newline, or unreadable: never accepted
+    /// as a pid. The text says what was found.
+    Incomplete(String),
+    /// One complete record: a pid of a process a test started (above 1).
+    Pid(i32),
+}
+
+/// Read a pid record: complete only as decimal digits of a pid above 1
+/// followed by exactly one newline. A digit prefix of a write that was split,
+/// or a file a redirection created before anything was written to it, is
+/// [`Record::Incomplete`].
+pub(super) fn read_record(path: &Path) -> Record {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Record::Absent,
+        Err(e) => return Record::Incomplete(format!("unreadable: {e}")),
+    };
+    text.strip_suffix('\n')
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+        .map_or_else(|| Record::Incomplete(format!("{text:?}")), Record::Pid)
+}
+
+#[test]
+fn only_one_pid_and_a_newline_is_a_complete_record() {
+    let scratch = Scratch::new();
+    let path = scratch.path("pid");
+    assert_eq!(read_record(&path), Record::Absent);
+    for partial in ["", "12", "12\n3", "12\n\n", " 12\n", "1\n", "x\n"] {
+        std::fs::write(&path, partial).expect("write a partial record");
+        assert!(
+            matches!(read_record(&path), Record::Incomplete(_)),
+            "{partial:?} was accepted"
+        );
+    }
+    publish_pid(&path, 4242);
+    assert_eq!(read_record(&path), Record::Pid(4242));
+    assert!(
+        !scratch.path("pid.tmp").exists(),
+        "the temporary record was renamed"
+    );
 }
 
 /// A private directory per test for pid files and markers.
@@ -51,16 +134,19 @@ impl Scratch {
         self.dir.path().to_path_buf()
     }
 
-    /// Wait until a script has written a pid to the named file.
+    /// Wait until a script has published a complete pid record under `name`
+    /// (see [`RECORD`]).
     pub(super) async fn pid(&self, name: &str) -> i32 {
         let path = self.path(name);
-        let mut pid = None;
-        await_event(&format!("the script writing a pid to {name}"), || {
-            pid = read_pid_file(&path);
-            pid.is_some()
-        })
-        .await;
-        pid.expect("the pid file was just read")
+        await_value(
+            &format!("the script publishing a complete pid record in {name}"),
+            || match read_record(&path) {
+                Record::Pid(pid) => Ok(pid),
+                Record::Absent => Err("no file".to_owned()),
+                Record::Incomplete(text) => Err(text),
+            },
+        )
+        .await
     }
 
     /// Wait until a file exists and is not empty.
@@ -72,17 +158,41 @@ impl Scratch {
         .await;
     }
 
-    /// The pid in a file that must already exist.
+    /// The pid in a record that must already be published.
     pub(super) fn pid_now(&self, name: &str) -> i32 {
-        std::fs::read_to_string(self.path(name))
-            .expect("pid file exists")
-            .trim()
-            .parse()
-            .expect("pid file holds a pid")
+        match read_record(&self.path(name)) {
+            Record::Pid(pid) => pid,
+            other => panic!("{name} holds no complete pid record: {other:?}"),
+        }
+    }
+    /// The records in the directory `name`, one file per pid: the complete
+    /// ones' pids, and what each incomplete one held (a record still being
+    /// written, or one whose writer was stopped before it wrote).
+    pub(super) fn published_pids_in(&self, name: &str) -> (Vec<i32>, Vec<String>) {
+        let entries = match std::fs::read_dir(self.path(name)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
+            Err(e) => panic!("read the record directory {name}: {e}"),
+        };
+        let (mut pids, mut incomplete) = (Vec::new(), Vec::new());
+        for entry in entries {
+            let path = entry.expect("read a record directory entry").path();
+            match read_record(&path) {
+                Record::Pid(pid) => pids.push(pid),
+                Record::Absent => {}
+                Record::Incomplete(text) => incomplete.push(format!("{}: {text}", path.display())),
+            }
+        }
+        pids.sort_unstable();
+        (pids, incomplete)
     }
 }
 
-fn read_pid_file(path: &Path) -> Option<i32> {
+/// The pid in the relay's heartbeat file. The heartbeat is rewritten in place
+/// by every generation and is not a published record, so this read accepts
+/// whatever parses; the caller checks the identity before it signals.
+#[cfg(not(target_os = "linux"))]
+fn read_heartbeat_pid(path: &Path) -> Option<i32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
@@ -253,13 +363,13 @@ tokio::task_local! {
 }
 
 /// A shell script as a child, in the scratch directory, and only `PATH`
-/// inherited. The grace, the drain bound and the cleanup deadline are long
+/// inherited. The script can publish pid records with `record` ([`RECORD`]). The grace, the drain bound and the cleanup deadline are long
 /// compared with anything a loaded machine adds, so a run does not end by one
 /// of them unless the test makes it (a test about a child that ignores TERM
 /// pays the grace once, one second).
 pub(super) fn sh(scratch: &Scratch, script: &str, limit: Duration) -> ProcessSpec {
     let mut spec = ProcessSpec::new("/bin/sh", limit)
-        .args(["-c", script])
+        .args(["-c".to_owned(), format!("{RECORD}{script}")])
         .cwd(scratch.dir())
         .env(EnvPolicy::inherit_only(["PATH"]));
     spec.stop_grace = Duration::from_secs(1);
@@ -634,7 +744,7 @@ pub(super) async fn end_relay_leftovers(dir: &std::path::Path) {
             if !fresh {
                 return;
             }
-            if let Some(pid) = read_pid_file(&beat)
+            if let Some(pid) = read_heartbeat_pid(&beat)
                 && let Some(process) = ProcessIdentity::from_pid_file(pid, dir)
                 && process_names_path(pid, dir.as_os_str().as_encoded_bytes())
             {
@@ -674,8 +784,8 @@ fn a_pid_file_only_registers_a_process_in_its_test_directory() {
     let foreign = Scratch::new();
     let path = scratch.path("pid");
     let mut original = waiting_child(&scratch);
-    std::fs::write(&path, format!("{}\n", original.id())).expect("write the original PID");
-    let pid = read_pid_file(&path).expect("read the original PID");
+    publish_pid(&path, original.id());
+    let pid = scratch.pid_now("pid");
     assert!(
         ProcessIdentity::from_pid_file(pid, &scratch.dir()).is_some(),
         "a process in the test directory must register"
@@ -684,8 +794,8 @@ fn a_pid_file_only_registers_a_process_in_its_test_directory() {
 
     let mut replacement = waiting_child(&foreign);
     // Stand in for numeric PID reuse without requiring the kernel to reuse it.
-    std::fs::write(&path, format!("{}\n", replacement.id())).expect("simulate PID reuse");
-    let pid = read_pid_file(&path).expect("read the replacement PID");
+    publish_pid(&path, replacement.id());
+    let pid = scratch.pid_now("pid");
     let registered = ProcessIdentity::from_pid_file(pid, &scratch.dir());
     assert!(replacement.wait().expect("reap the replacement").success());
     assert!(

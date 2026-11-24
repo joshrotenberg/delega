@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::fixtures::{Scratch, assert_confirmed};
+use super::fixtures::{RECORD, Record, Scratch, assert_confirmed, read_record};
 use crate::process::sys::leader_has_exited;
 use crate::process::tree::{Lister, list_processes};
 use crate::process::{Ending, ProcessSpec, run};
@@ -23,9 +23,10 @@ async fn a_fast_child_is_identified_when_the_first_snapshot_follows_its_exit() {
         Box::pin(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
             loop {
-                let pid = std::fs::read_to_string(&pid_file)
-                    .ok()
-                    .and_then(|pid| pid.parse::<i32>().ok());
+                let pid = match read_record(&pid_file) {
+                    Record::Pid(pid) => Some(pid),
+                    Record::Absent | Record::Incomplete(_) => None,
+                };
                 if pid.is_some_and(leader_has_exited) {
                     confirmed.store(true, Ordering::SeqCst);
                     return list_processes().await;
@@ -40,7 +41,10 @@ async fn a_fast_child_is_identified_when_the_first_snapshot_follows_its_exit() {
         })
     });
     let spec = ProcessSpec::new("/bin/sh", Duration::from_secs(60))
-        .args(["-c", "printf '%s' $$ > leader; printf '[]'; exit 0"])
+        .args([
+            "-c".to_owned(),
+            format!("{RECORD}record leader $$; printf '[]'; exit 0"),
+        ])
         .cwd(s.dir())
         .env(crate::process::EnvPolicy::empty())
         .with_lister(lister);

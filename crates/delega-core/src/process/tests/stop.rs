@@ -25,7 +25,7 @@ async fn a_leader_that_stops_itself_is_still_running_and_ends_as_timed_out() {
     // exited is stopped by the limit and reported as timed out.
     let spec = sh(
         &s,
-        "echo $$ > leader; kill -STOP $$; sleep 1",
+        "record leader $$; kill -STOP $$; sleep 1",
         Duration::from_secs(2),
     );
     // A run that waited for the stopped child to exit would never return.
@@ -51,7 +51,7 @@ async fn a_stopped_descendant_receives_terminate_when_the_group_does() {
     // the checklist in the module docs is what checks it.
     let mut spec = sh(
         &s,
-        "echo $$ > leader; sleep 60 & echo $! > gc; kill -STOP $!; echo stopped > stopped; wait",
+        "record leader $$; sleep 60 & record gc $!; kill -STOP $!; echo stopped > stopped; wait",
         LONG,
     );
     // The grace is a minute, so a stop that reached the descendant only with
@@ -84,7 +84,7 @@ both!(
     the_child_leads_a_new_session_and_has_no_controlling_terminal_kept,
     async {
         let s = Scratch::new();
-        let handle = ProcessHandle::start(sh(&s, "echo $$ > leader; sleep 60", LONG));
+        let handle = ProcessHandle::start(sh(&s, "record leader $$; sleep 60", LONG));
         let mut reaper = Reaper::default();
         let leader = reaper.watch(&s, "leader").await;
         assert_eq!(
@@ -112,7 +112,7 @@ both!(
         let s = Scratch::new();
         let held = Held::new(false);
         // Exits 0 shortly after SIGUSR1, a signal the test sends itself.
-        let script = "trap 'exit 0' USR1; echo $$ > leader; echo ready > ready; \
+        let script = "trap 'exit 0' USR1; record leader $$; echo ready > ready; \
                   while :; do sleep 0.02; done";
         let spec = sh(&s, script, LONG).with_lister(held.lister());
         let handle = ProcessHandle::start(spec);
@@ -145,7 +145,7 @@ both!(
     a_panic_in_the_owner_loop_stops_the_child_and_still_reports_kept,
     async {
         let s = Scratch::new();
-        let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+        let mut spec = sh(&s, "record leader $$; sleep 60", LONG);
         spec.panic_in_loop = true;
         let report = run(spec).await;
         assert!(
@@ -186,7 +186,7 @@ fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session
         .enable_all()
         .build()
         .expect("build runtime");
-    let script = format!("echo $$ > leader; {OWN_SESSION} & echo $! > gc; wait");
+    let script = format!("record leader $$; {OWN_SESSION} & record gc $!; wait");
     let mut reaper = Reaper::default();
     let (handle, gc) = runtime.block_on(async {
         let handle = ProcessHandle::start(sh(&s, &script, LONG));

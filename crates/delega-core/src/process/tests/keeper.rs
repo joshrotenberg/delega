@@ -170,7 +170,7 @@ async fn a_kept_run_reports_a_crash_by_its_signal() {
 #[tokio::test]
 async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
     let s = Scratch::new();
-    let script = format!("{OWN_GROUP} & echo $! > gc; echo $$ > leader; sleep 60");
+    let script = format!("{OWN_GROUP} & record gc $!; record leader $$; sleep 60");
     let spec = kept(sh(&s, &script, Duration::from_millis(800)));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc", "leader"]).await;
     assert!(
@@ -186,7 +186,7 @@ async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{OWN_SESSION} >/dev/null 2>&1 & echo $! > gc; {WAIT_ESCAPED} echo ready > ready; sleep 60"
+        "{OWN_SESSION} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} echo ready > ready; sleep 60"
     );
     let spec = kept(sh(&s, &script, LONG));
     let handle = ProcessHandle::start(spec);
@@ -254,7 +254,7 @@ async fn a_process_with_another_runs_marker_is_never_signalled() {
         .wait()
         .await;
     assert_confirmed(&report);
-    let mut spec = kept(sh(&s, "echo $$ > leader; sleep 60", LONG));
+    let mut spec = kept(sh(&s, "record leader $$; sleep 60", LONG));
     spec.stop_grace = Duration::from_millis(100);
     let handle = ProcessHandle::start(spec);
     let _ = s.pid("leader").await;
@@ -290,16 +290,17 @@ fn owner_entry() {
     let script = if std::env::var_os(OWNER_RELAY_ENV).is_some() {
         // The program is the fork relay of gaps.rs, run long enough that only
         // a stop explains its end.
-        format!("echo $$ > leader; {}", super::gaps::long_relay(&dir))
+        format!("record leader $$; {}", super::gaps::long_relay(&dir))
     } else {
         format!(
-            "echo $$ > leader; {OWN_GROUP} & echo $! > group; \
-             {} >/dev/null 2>&1 & echo $! > session; \
+            "record leader $$; {OWN_GROUP} & record group $!; \
+             {} >/dev/null 2>&1 & record session $!; \
              sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
              sleep 60",
             own_session_sleeper()
         )
     };
+    let script = format!("{}{script}", super::fixtures::RECORD);
     let mut spec = ProcessSpec::new("/bin/sh", LONG)
         .args(["-c", &script])
         .cwd(&dir)
@@ -369,7 +370,7 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
 #[tokio::test]
 async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
     let s = Scratch::new();
-    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+    let mut spec = sh(&s, "record leader $$; sleep 60", LONG);
     spec.keeper = Some(named_keeper(&s.dir()));
     let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
@@ -460,7 +461,7 @@ async fn a_keeper_that_ends_before_answering_leaves_cleanup_unconfirmed() {
 #[tokio::test]
 async fn a_keeper_stopped_by_a_signal_releases_the_program_before_reaping_it() {
     let s = Scratch::new();
-    let mut spec = sh(&s, "echo $$ > leader; sleep 60", LONG);
+    let mut spec = sh(&s, "record leader $$; sleep 60", LONG);
     spec.keeper = Some(named_keeper(&s.dir()));
     let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
@@ -562,7 +563,7 @@ async fn sigkill_of_the_owner_stops_a_fork_relay_every_time_on_linux() {
 const WAITS_FOR_A_REFUSAL: &str = "perl -e 'use POSIX; POSIX::setpgid(0, 0) or die; \
      open F, q(>), q(gc-ready); print F $$; close F; \
      until (-e q(refused)) { select(undef, undef, undef, 0.02) }' \
-     </dev/null >/dev/null 2>&1 & echo $! > gc; \
+     </dev/null >/dev/null 2>&1 & record gc $!; \
      until [ -s gc-ready ]; do sleep 0.01; done;";
 
 /// The spec with every signal to a single process refused, and the refusal
@@ -627,7 +628,7 @@ fn assert_refusal_stands(report: &crate::process::ProcessReport) {
 async fn a_signal_refused_for_lack_of_verification_makes_the_verdict_unconfirmed() {
     require_perl!();
     let s = Scratch::new();
-    let script = format!("{WAITS_FOR_A_REFUSAL} echo $$ > leader; sleep 60");
+    let script = format!("{WAITS_FOR_A_REFUSAL} record leader $$; sleep 60");
     let mut spec = refusing(&s, sh(&s, &script, LONG));
     spec.keeper = None;
     let handle = ProcessHandle::start(spec);
