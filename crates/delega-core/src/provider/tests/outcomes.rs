@@ -1109,6 +1109,28 @@ async fn codex_503_at_capacity_is_provider_capacity() {
     assert_eq!(error.kind, "provider_capacity");
 }
 
+#[tokio::test]
+async fn codex_content_policy_refusal_is_provider_content_policy_with_its_message() {
+    let error = failure_of(Provider::Codex, "content-policy").await;
+    assert_eq!(error.kind, "provider_content_policy");
+    assert_eq!(error.provider_exit_code, Some(1));
+    assert!(
+        error.message.starts_with(
+            "This content was flagged for possible cybersecurity risk. \
+             If this seems wrong, try rephrasing your request."
+        ),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn codex_message_quoting_the_content_policy_phrase_stays_provider_error() {
+    let error = failure_of(Provider::Codex, "content-policy-quoted").await;
+    assert_eq!(error.kind, "provider_error");
+    assert_eq!(error.provider_exit_code, Some(1));
+}
+
 async fn unrelated_failure_keeps_its_kind(provider: Provider) {
     for (mode, kind) in [
         ("provider-error", "provider_error"),

@@ -69,6 +69,13 @@
 #                    500-character clip point
 #   capacity         a turn.failed with "unexpected status 503 Service
 #                    Unavailable: the server is at capacity" (not recorded)
+#   content-policy   codex-cli 0.171.0 on 2026-11-24 refusing an assignment
+#                    under its content policy: an error event and a turn.failed
+#                    with "This content was flagged for possible cybersecurity
+#                    risk. ...", the text as recorded in issue #219, where part
+#                    of it was elided as "..."
+#   content-policy-quoted  the same events with a message that only quotes the
+#                    content-policy phrase after other text
 #
 # Modes about the standard error excerpt:
 #   Standard error past the 64 KiB capture limit whose capture starts inside
@@ -327,6 +334,20 @@ case "$mode" in
   usage-limit-info-only)
     init
     emit '{"type":"turn.failed","codex_error_info":"usage_limit_exceeded","error":{"message":"The turn could not continue"}}'
+    exit 1
+    ;;
+  content-policy)
+    init
+    msg="This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. If you're doing authorized security work that requires more cyber permissive safeguards, apply for ... access via https://platform.openai.com/settings/organization/status-and-access before retrying."
+    emit "{\"type\":\"error\",\"message\":\"$msg\"}"
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"$msg\"}}"
+    exit 1
+    ;;
+  content-policy-quoted)
+    init
+    msg="Stream disconnected while reading the reply to: This content was flagged for possible review"
+    emit "{\"type\":\"error\",\"message\":\"$msg\"}"
+    emit "{\"type\":\"turn.failed\",\"error\":{\"message\":\"$msg\"}}"
     exit 1
     ;;
   context-window)
