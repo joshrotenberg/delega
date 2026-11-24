@@ -526,6 +526,65 @@ fn a_repeated_install_updates_files_and_repeats_the_commands() {
     );
 }
 
+#[cfg(debug_assertions)]
+fn interrupt_before_plugin_work(rig: &Rig, args: &[&str]) -> Output {
+    let gate = rig.home.join("before-plugin-work");
+    let mut child = rig
+        .command(args)
+        .env("DELEGA_TEST_HOLD_BEFORE_PLUGIN_WORK", &gate)
+        .captured()
+        .guarded_spawn()
+        .expect("start delega plugin");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !gate.exists() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("plugin did not reach the signal test gate");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    support::signal(child.id(), "INT");
+    fs::remove_file(gate).expect("release plugin command");
+    support::wait_bounded_for(child, Duration::from_secs(30))
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_signal_before_the_first_plugin_host_command_prevents_it_from_starting() {
+    let rig = Rig::new();
+    let out = interrupt_before_plugin_work(&rig, &["plugin", "install", "--output", "json"]);
+
+    rig.no_calls();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("interrupted install report");
+    let first = &doc["hosts"][0]["commands"][0];
+    assert_eq!(first["status"], "failed", "{doc}");
+    assert!(
+        first["output"]
+            .as_str()
+            .unwrap()
+            .ends_with(" was interrupted"),
+        "{doc}"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_signal_during_dry_run_or_uninstall_without_hosts_exits_130() {
+    for args in [
+        &["plugin", "install", "--dry-run"][..],
+        &["plugin", "uninstall"][..],
+    ] {
+        let rig = Rig::new();
+        let out = interrupt_before_plugin_work(&rig, args);
+
+        rig.no_calls();
+        assert_eq!(out.status.code(), Some(130), "{out:?}");
+        assert!(text(&out.stderr).contains("delega plugin: signal received; exiting"));
+    }
+}
+
 #[test]
 fn a_signal_interrupts_plugin_install_and_stops_the_host_descendant() {
     for signal in ["INT", "TERM", "HUP", "QUIT"] {
