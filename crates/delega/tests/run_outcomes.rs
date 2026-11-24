@@ -545,9 +545,11 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         let rig = Rig::new();
         let (stderr_reader, stderr_writer) = guarded_pipe().expect("a pipe");
         fill(&stderr_writer);
+        let stop_requested = rig.path("stop-requested");
         let mut child = Reaped(Some(
             rig.command()
                 .args(rig.run_args(provider, "large", &["--output", "json"]))
+                .env("DELEGA_TEST_ACK_RESULT_STOP_REQUESTED", &stop_requested)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::from(stderr_writer))
                 .guarded_spawn()
@@ -558,9 +560,14 @@ fn a_signal_while_standard_output_is_stalled_exits_130_only_if_the_result_was_no
         // writing it, and blocks once the pipe is full.
         wait_readable(&stdout, Duration::from_secs(120));
         signal(child.id(), "TERM");
-        // Long enough for delega to have taken the signal; the reader then
-        // drains while delega is still alive, held by its full standard error.
-        std::thread::sleep(Duration::from_millis(450));
+        // delega has taken the signal and asked the write to stop; the reader
+        // then drains while delega is still alive, held by its full standard
+        // error.
+        wait_for_ack(
+            &stop_requested,
+            &mut child,
+            "the signal asked the result write to stop",
+        );
         let reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
             let _ = std::io::Read::read_to_end(&mut { stdout }, &mut bytes);
