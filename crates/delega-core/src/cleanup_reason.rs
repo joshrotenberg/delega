@@ -29,9 +29,10 @@
 //! - Diagnostic text is bounded free text: not empty, on one line, without
 //!   `;`, and the listing error that holds it is at most [`MAX_ERROR_CHARS`]
 //!   characters. A quoted listing line is diagnostic text of at most
-//!   `UNPARSED_LINE_MAX_CHARS` characters in the escaped form
-//!   `escape_listing_line` writes (`\\`, `\"`, and `\u{<hex>}` for `;`,
-//!   control characters and whitespace other than the space).
+//!   `UNPARSED_LINE_MAX_CHARS` characters between `"` and `"` (then `...`
+//!   when clipped), with no control character or whitespace other than the
+//!   space, no `"` that is not escaped with `\`, and no lone `\` at the
+//!   end. What an escape stands for is not checked.
 //!
 //! What it does not check: whether a reason could have been produced in a
 //! given run (which combinations a run can merge, which exit codes `ps` can
@@ -421,49 +422,31 @@ fn is_unparsed_tail(text: &str) -> bool {
     })
 }
 
-/// Whether `body` is a line escaped by [`escape_listing_line`]: diagnostic
-/// text (see [`is_diagnostic`]) of at most [`UNPARSED_LINE_MAX_CHARS`]
-/// characters, with no unescaped `"` or character [`needs_code`] selects, and
-/// every `\` starting one of the escapes in their canonical form.
+/// Whether `body` is bounded quoted text: diagnostic text (see
+/// [`is_diagnostic`]) of at most [`UNPARSED_LINE_MAX_CHARS`] characters with
+/// no character [`needs_code`] selects and no unescaped `"`. A `\\` takes the
+/// next character, whatever it is apart from those, so a lone `\\` at the end
+/// (which would escape the closing quote) is refused. What an escape stands
+/// for is not checked.
 fn is_escaped_line(body: &str) -> bool {
     if !is_diagnostic(body) || body.chars().count() > UNPARSED_LINE_MAX_CHARS {
         return false;
     }
-    let mut rest = body;
-    while let Some(c) = rest.chars().next() {
-        if c != '\\' {
-            if c == '"' || needs_code(c) {
-                return false;
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        let c = if c == '\\' {
+            match chars.next() {
+                Some(escaped) => escaped,
+                None => return false,
             }
-            rest = &rest[c.len_utf8()..];
-            continue;
-        }
-        let escape = if let Some(after) = rest.strip_prefix("\\u{") {
-            let Some(close) = after.find('}') else {
-                return false;
-            };
-            let Some(code) = u32::from_str_radix(&after[..close], 16)
-                .ok()
-                .and_then(char::from_u32)
-            else {
-                return false;
-            };
-            code
+        } else if c == '"' {
+            return false;
         } else {
-            match rest[1..].chars().next() {
-                Some(e @ ('\\' | '"')) => e,
-                _ => return false,
-            }
+            c
         };
-        // A character that is written as itself has no escape.
-        let canonical = escape_char(escape);
-        if canonical.chars().count() == 1 {
+        if needs_code(c) {
             return false;
         }
-        let Some(after) = rest.strip_prefix(canonical.as_str()) else {
-            return false;
-        };
-        rest = after;
     }
     true
 }

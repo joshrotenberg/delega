@@ -322,6 +322,8 @@ fn listing_errors_with_bounded_diagnostic_text_are_recognised() {
             "x".repeat(UNPARSED_LINE_MAX_CHARS - 6)
         ),
         format!("{UNPARSED_START}1{UNPARSED_END}, the first: \"x\"..."),
+        // What an escape stands for is not checked.
+        format!("{UNPARSED_START}1{UNPARSED_END}, the first: \"a\\nb\\u{{3B}}\\\\\""),
     ] {
         assert!(is_listing_error(&error), "{error:?}");
         let stopping = format!("{STOPPING_START}1.0 s: {INSPECTION_FAILED}{error}");
@@ -394,17 +396,10 @@ fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
         quoted("a\u{2028}b"),
         quoted("a\"b"),
         quoted("a\\"),
-        quoted("a\\nb"),
-        quoted("a\\tb"),
-        quoted("a\\u{3B}b"),
-        quoted("a\\u{03b}b"),
-        quoted("a\\u{+3b}b"),
-        quoted("a\\u{61}b"),
-        quoted("a\\u{20}b"),
-        quoted("a\\u{}b"),
-        quoted("a\\u{d800}b"),
-        quoted("a\\u{3b"),
-        quoted("a\\u3b"),
+        // An escape cannot carry a forbidden character.
+        quoted("a\\;b"),
+        quoted("a\\\nb"),
+        quoted("a\\\u{1b}b"),
         quoted(&"x".repeat(UNPARSED_LINE_MAX_CHARS + 1)),
         format!("{}...", quoted(&"x".repeat(UNPARSED_LINE_MAX_CHARS + 1))),
         quoted(&format!(
