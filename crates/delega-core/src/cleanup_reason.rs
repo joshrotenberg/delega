@@ -140,7 +140,8 @@ const INSPECTION_UNAVAILABLE_END: &str =
 const DESCENDANTS_LISTED: &str =
     " Descendants seen at the latest scan are listed because they cannot be checked.";
 
-/// The reason when process listing did not work: `error` is why, `checked`
+/// The reason when process listing did not work: `error` is why (an OS error
+/// or what `ps` said, recognised as any text that is not empty), `checked`
 /// what the group probe found, and `listed` whether descendants seen earlier
 /// are listed in the verdict.
 pub(crate) fn inspection_unavailable(error: &str, checked: GroupCheck, listed: bool) -> String {
@@ -187,7 +188,9 @@ const STOPPING_START: &str = "stopping was not confirmed within ";
 const INSPECTION_FAILED: &str = "process inspection failed: ";
 
 /// The reason when cleanup did not confirm the stop within `waited`: the last
-/// view's finding, or the error of the listing that failed.
+/// view's finding, or the error of the listing that failed. That error is the
+/// listing's own text (an OS error or what `ps` said), so it is recognised as
+/// any text that is not empty, and it ends the reason.
 pub(crate) fn stopping_unconfirmed(waited: Duration, detail: Result<StopDetail, &str>) -> String {
     let waited = format!("{:.1} s", waited.as_secs_f64());
     match detail {
@@ -279,3 +282,6 @@ fn is_run_lost(reason: &str) -> bool {
         .strip_suffix(RUN_LOST_END)
         .is_some_and(|cause| RunLost::ALL.iter().any(|c| c.text() == cause))
 }
+
+#[cfg(test)]
+mod tests;
