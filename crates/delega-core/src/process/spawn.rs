@@ -64,3 +64,15 @@ pub(super) fn spawn(
     let _held = spawn_guard();
     command.spawn()
 }
+
+/// Start `command` as [`spawn`] does, but only if `admit` says so when asked
+/// while the spawn lock is held, immediately before the spawn. `None` means
+/// nothing was started.
+#[allow(clippy::disallowed_methods)]
+pub(super) fn spawn_if(
+    command: &mut tokio::process::Command,
+    admit: impl FnOnce() -> bool,
+) -> Option<std::io::Result<tokio::process::Child>> {
+    let _held = spawn_guard();
+    admit().then(|| command.spawn())
+}

@@ -43,8 +43,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// The committed schema of the document, embedded at build time.
 pub const DOCTOR_SCHEMA: &str = include_str!("../schemas/doctor.schema.json");
 
-/// Problem kind: process inspection cannot be run, so every cleanup would be
-/// reported as not confirmed.
+/// Problem kind: the one sample process listing doctor takes failed, so a
+/// cleanup whose listings fail the same way is reported as not confirmed.
 pub const PROCESS_INSPECTION_UNAVAILABLE: &str = "process_inspection_unavailable";
 
 /// Whether the process listing that confirms cleanup works.
@@ -350,8 +350,8 @@ pub(crate) async fn diagnose_on(
             provider: None,
             kind: PROCESS_INSPECTION_UNAVAILABLE.to_string(),
             message: format!(
-                "process inspection failed ({detail}), so every cleanup would be reported as not \
-                 confirmed"
+                "a sample process listing failed ({detail}); a cleanup whose listings fail the \
+                 same way is reported as not confirmed"
             ),
             blocks: Blocks::Cleanup,
         });

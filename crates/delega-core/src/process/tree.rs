@@ -34,7 +34,9 @@ use tokio::time::Instant;
 
 use crate::cleanup_reason::{self, ListingFailure};
 
-use super::limits::{MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT};
+use super::limits::{
+    EXITING_ROW_RETRIES, MAX_ERROR_CHARS, PS_MAX_BYTES, PS_READ_CHUNK, PS_TIMEOUT,
+};
 use super::marker::MarkedRow;
 use super::sys::{self, Signal};
 
@@ -48,6 +50,11 @@ pub(crate) enum InspectError {
     Unavailable(String),
     /// Any other failure, as text.
     Failed(String),
+    /// A listing whose only unparsable lines are rows for an exiting process
+    /// ([`retry_trigger`]), as text. [`ProcessTree`] takes the listing again
+    /// and, if no fresh listing parses fully, reports this as `Failed` with the
+    /// same text.
+    ExitingRow(String),
 }
 
 impl fmt::Display for InspectError {
@@ -55,7 +62,9 @@ impl fmt::Display for InspectError {
         match self {
             InspectError::TimedOut => f.write_str(ListingFailure::TimedOut.text()),
             InspectError::Unavailable(message) => f.write_str(message),
-            InspectError::Failed(message) => f.write_str(message),
+            InspectError::Failed(message) | InspectError::ExitingRow(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -99,6 +108,90 @@ fn parse_row(line: &str) -> Option<ProcessRow> {
     })
 }
 
+/// Whether `line` has exactly the shape Linux `ps` was seen to print for a
+/// task that is exiting, or that an exec from another thread of its process
+/// has just replaced (#217): `<pid> 0 4294967295 <X or X+> <weekday> <month>
+/// <day> <hh:mm:ss> <year>`, with a positive pid, ppid 0, pgid -1 printed as
+/// unsigned, state exactly `X` or `X+`, and a complete start time in the C
+/// locale. Every field is anchored; no other shape matches, so a start time
+/// printed in another locale leaves such a listing failed without a retry.
+/// Such a row proves nothing about its pid (an exec from a non-leader thread
+/// hands the leader's pid and start time to the thread that called it), so it
+/// is never skipped; it only lets the listing be taken again.
+fn exiting_row_signature(line: &str) -> bool {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    fn number(text: &str, digits: std::ops::RangeInclusive<usize>, max: u32) -> Option<u32> {
+        let n = (digits.contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| text.parse::<u32>().ok())
+            .flatten()?;
+        (n <= max).then_some(n)
+    }
+    if !line.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        return false;
+    }
+    let fields: Vec<&str> = line.split(' ').filter(|f| !f.is_empty()).collect();
+    let [pid, ppid, pgid, state, weekday, month, day, time, year] = fields[..] else {
+        return false;
+    };
+    let clock: Vec<&str> = time.split(':').collect();
+    number(pid, 1..=10, i32::MAX as u32).is_some_and(|pid| pid > 0)
+        && ppid == "0"
+        && pgid == "4294967295"
+        && (state == "X" || state == "X+")
+        && WEEKDAYS.contains(&weekday)
+        && MONTHS.contains(&month)
+        && number(day, 1..=2, 31).is_some_and(|day| day > 0)
+        && matches!(
+            clock[..],
+            [h, m, s] if number(h, 2..=2, 23).is_some()
+                && number(m, 2..=2, 59).is_some()
+                && number(s, 2..=2, 60).is_some()
+        )
+        && number(year, 4..=4, 9999).is_some()
+}
+
+/// Whether an unparsable `line` lets the listing be taken again: Linux only,
+/// and only [`exiting_row_signature`].
+fn retry_trigger(line: &str) -> bool {
+    cfg!(target_os = "linux") && exiting_row_signature(line)
+}
+
+/// The bound on the listing of an exiting-row retry, carried into the
+/// listing's own task (see [`ProcessTree::rows`]).
+#[derive(Clone)]
+pub(crate) struct RetryGate {
+    /// The inspection's start plus `ps_timeout`.
+    deadline: Instant,
+    /// Where a launched retry is counted.
+    observations: SharedObservations,
+}
+
+tokio::task_local! {
+    /// Set only in the task that takes an exiting-row retry's listing.
+    static RETRY_GATE: RetryGate;
+}
+
+/// At the launch boundary of a listing (with the spawn lock held, immediately
+/// before the spawn): whether it may start. Only a retry's listing is
+/// bounded, and only by its deadline; every other listing may start.
+pub(crate) fn launch_admitted() -> bool {
+    RETRY_GATE
+        .try_with(|gate| Instant::now() < gate.deadline)
+        .unwrap_or(true)
+}
+
+/// Count a retry's listing as started once its program is launched. Does
+/// nothing for any other listing.
+pub(crate) fn note_launched() {
+    let _ = RETRY_GATE.try_with(|gate| {
+        let mut obs = gate.observations.lock().unwrap_or_else(|e| e.into_inner());
+        obs.stats.exiting_row_retries += 1;
+    });
+}
+
 /// Where `ps` is looked for, in order.
 const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
 
@@ -128,12 +221,16 @@ pub(crate) async fn list_processes_from(
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        match super::spawn::spawn(&mut command) {
-            Ok(child) => {
+        match super::spawn::spawn_if(&mut command, launch_admitted) {
+            // An exiting-row retry whose task reached this point after its
+            // deadline starts nothing; its result is discarded anyway.
+            None => return Err(InspectError::TimedOut),
+            Some(Ok(child)) => {
+                note_launched();
                 spawned = Some(child);
                 break;
             }
-            Err(error) => failures.push((program.clone(), error)),
+            Some(Err(error)) => failures.push((program.clone(), error)),
         }
     }
     let Some(child) = spawned else {
@@ -237,8 +334,9 @@ pub(crate) async fn list_processes() -> Result<Vec<ProcessRow>, InspectError> {
 }
 
 /// Run one process listing the way cleanup does and say whether it gave a usable
-/// table. This is the check `delega doctor` makes: when it fails, every cleanup
-/// would be reported as not confirmed. The error is text and names no process.
+/// table. This is the check `delega doctor` makes. It is one sample and never
+/// retried: a failure says that one listing failed, which cleanup would
+/// report as not confirmed if its listings failed the same way. The error is text and names no process.
 /// It honours the same test-only variable as cleanup.
 pub async fn check_inspection() -> Result<(), String> {
     list_processes_from(&system_programs())
@@ -264,7 +362,12 @@ fn system_programs() -> Vec<PathBuf> {
 /// Parse a process listing and refuse one that cannot be right. A valid
 /// listing is never empty, holds this process (`own_pid`), and has no line
 /// that does not parse. Anything else is a failed inspection, never "nothing
-/// found": a listing that shows no descendants must not confirm cleanup.
+/// found": a listing that shows no descendants must not confirm cleanup. When
+/// the listing has rows, holds this process, and every unparsable line is a
+/// [`retry_trigger`], the error is [`InspectError::ExitingRow`] instead of
+/// `Failed`, with the same text, so the caller can take the listing again.
+/// Any other listing with an unparsable line fails with the quoted line, even
+/// when this process is missing too.
 ///
 /// The error for unparsed lines quotes the first of them, escaped and
 /// bounded by `cleanup_reason::unparsed_lines`. That is safe only because
@@ -278,27 +381,32 @@ pub(crate) fn validate_listing(
     let mut rows = Vec::new();
     let mut unparsed = 0usize;
     let mut first_unparsed = None;
+    let mut only_exiting = true;
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
         match parse_row(line) {
             Some(row) => rows.push(row),
             None => {
                 unparsed += 1;
                 first_unparsed.get_or_insert(line);
+                only_exiting &= retry_trigger(line);
             }
         }
     }
     if rows.is_empty() {
         return Err(InspectError::Failed(ListingFailure::NoRows.text().into()));
     }
-    if let Some(first) = first_unparsed {
-        return Err(InspectError::Failed(cleanup_reason::unparsed_lines(
-            unparsed, first,
-        )));
-    }
-    if !rows
+    let has_own = rows
         .iter()
-        .any(|row| u32::try_from(row.pid).is_ok_and(|pid| pid == own_pid))
-    {
+        .any(|row| u32::try_from(row.pid).is_ok_and(|pid| pid == own_pid));
+    if let Some(first) = first_unparsed {
+        let message = cleanup_reason::unparsed_lines(unparsed, first);
+        return Err(if only_exiting && has_own {
+            InspectError::ExitingRow(message)
+        } else {
+            InspectError::Failed(message)
+        });
+    }
+    if !has_own {
         return Err(InspectError::Failed(
             ListingFailure::OwnMissing.text().into(),
         ));
@@ -360,6 +468,13 @@ pub struct InspectionStats {
     /// Signals not sent because the process could not be verified (Linux: no
     /// pidfd, or no recorded start time). Any makes the verdict `Unconfirmed`.
     pub unverified_signals: u64,
+    /// Exiting-row retries started: listings taken again because the only
+    /// unparsable lines of a listing were rows for an exiting process (Linux
+    /// only). A retry counts once its listing program is launched, including
+    /// one whose result is later discarded at the deadline; one whose task
+    /// reaches the launch after the deadline launches nothing and does not
+    /// count. They count within one inspection, not in `attempts`.
+    pub exiting_row_retries: u64,
 }
 
 /// The shared receipts: the public numbers plus the instant of the latest
@@ -717,28 +832,46 @@ impl ProcessTree {
     }
 
     /// Bounded inspection; a failed snapshot never proves that a process exited.
+    ///
+    /// A listing whose only unparsable lines are rows for an exiting process
+    /// ([`InspectError::ExitingRow`]) is taken again, at most
+    /// [`EXITING_ROW_RETRIES`] times, against one absolute deadline: this
+    /// inspection's start plus `ps_timeout`. A retry is asked for only before
+    /// the deadline, and the deadline goes with it into the listing's own
+    /// task ([`RetryGate`]), where the listing program is launched only if
+    /// the deadline has not passed when the spawn lock is held, immediately
+    /// before the spawn. Its result is used only if it arrives before the
+    /// deadline; one that arrives later is discarded (its listing reaps
+    /// itself under its own deadline), so retries never extend the time one
+    /// inspection may take. A fresh listing is used whatever it returns: a
+    /// table that passes validation, or its own error. When the retry is
+    /// discarded or not started, the listing fails as before, with
+    /// `ExitingRow` reported as `Failed` and the same quoted text.
     async fn rows(&self) -> Result<Vec<ProcessRow>, InspectError> {
         let started = Instant::now();
         {
             let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
             obs.stats.attempts += 1;
         }
-        // The production inspector owns its timeout and async reap. Run it as
-        // its own task so cancelling this future never cancels it, and so a
-        // panicking inspector, or a panicking factory, is caught here and
-        // reported as a failure.
-        let lister = self.lister.clone();
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lister())) {
-            Ok(future) => match tokio::spawn(future).await {
-                Ok(rows) => rows,
-                Err(_) => Err(InspectError::Failed(
-                    ListingFailure::InspectorPanicked.text().into(),
-                )),
-            },
-            Err(_) => Err(InspectError::Failed(
-                ListingFailure::FactoryPanicked.text().into(),
-            )),
-        };
+        let deadline = started + ps_timeout();
+        let mut result = self.list_once(None).await;
+        for _ in 0..EXITING_ROW_RETRIES {
+            if !matches!(result, Err(InspectError::ExitingRow(_))) || Instant::now() >= deadline {
+                break;
+            }
+            let gate = RetryGate {
+                deadline,
+                observations: self.observations.clone(),
+            };
+            match tokio::time::timeout_at(deadline, self.list_once(Some(gate))).await {
+                Ok(next) if Instant::now() < deadline => result = next,
+                _ => break,
+            }
+        }
+        let result = result.map_err(|error| match error {
+            InspectError::ExitingRow(message) => InspectError::Failed(message),
+            other => other,
+        });
         let mut obs = self.observations.lock().unwrap_or_else(|e| e.into_inner());
         let finished = Instant::now();
         let duration = finished.saturating_duration_since(started).as_millis() as u64;
@@ -758,6 +891,33 @@ impl ProcessTree {
             }
         }
         result
+    }
+
+    /// One listing from the lister, with `gate` set in its task for a retry.
+    async fn list_once(&self, gate: Option<RetryGate>) -> Result<Vec<ProcessRow>, InspectError> {
+        // The production inspector owns its timeout and async reap. Run it as
+        // its own task so cancelling this future never cancels it, and so a
+        // panicking inspector, or a panicking factory, is caught here and
+        // reported as a failure.
+        let lister = self.lister.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lister())) {
+            Ok(future) => match tokio::spawn(async move {
+                match gate {
+                    Some(gate) => RETRY_GATE.scope(gate, future).await,
+                    None => future.await,
+                }
+            })
+            .await
+            {
+                Ok(rows) => rows,
+                Err(_) => Err(InspectError::Failed(
+                    ListingFailure::InspectorPanicked.text().into(),
+                )),
+            },
+            Err(_) => Err(InspectError::Failed(
+                ListingFailure::FactoryPanicked.text().into(),
+            )),
+        }
     }
 
     /// The session of every live row outside the child's group.
@@ -1614,6 +1774,341 @@ mod tests {
             crate::cleanup_reason::is_listing_error(&message),
             "{message}"
         );
+    }
+
+    /// The row seen on Linux CI (#217).
+    const OBSERVED: &str = "  17328       0 4294967295 X+ Tue Nov 24 10:44:54 2026";
+
+    /// Unparsable rows that are not the exiting-row shape.
+    const NOT_EXITING: [&str; 19] = [
+        "17328 0 X+ Tue Nov 24 10:44:54 2026",
+        "17328 0 S Xday Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X+ Tue Nov 24",
+        "17328 0 4294967295 X+ Tue Nov 24 10:44:54 2026 extra",
+        "17328 0 4294967295 S+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 R+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 Z+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 XT Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X< Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 Xs+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X++ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 +X Tue Nov 24 10:44:54 2026",
+        "0 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "+17328 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "4294967295 0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "17328 1 4294967295 X+ Tue Nov 24 10:44:54 2026",
+        "17328 0 4294967295 X+ Tue Nov 24 10:44 2026",
+        "17328 0 4294967295 X+ Tue Nov 24 10:44:54 26",
+        "17328\t0 4294967295 X+ Tue Nov 24 10:44:54 2026",
+    ];
+
+    fn quoting(line: &str) -> String {
+        cleanup_reason::unparsed_lines(1, line)
+    }
+
+    /// The launch boundary of [`list_processes_from`], for an injected lister
+    /// that starts no program: refused after a retry's deadline, and counted
+    /// for a retry once admitted.
+    fn launch() -> Result<(), InspectError> {
+        if !launch_admitted() {
+            return Err(InspectError::TimedOut);
+        }
+        note_launched();
+        Ok(())
+    }
+
+    /// A lister that validates `texts` in order, as the system lister would,
+    /// and counts its calls.
+    fn listings(texts: Vec<String>) -> (Lister, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let texts = Arc::new(Mutex::new(VecDeque::from(texts)));
+        let counted = calls.clone();
+        let lister: Lister = Arc::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = texts.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(async move {
+                launch()?;
+                validate_listing(&text, std::process::id())
+            })
+        });
+        (lister, calls)
+    }
+
+    fn own_row() -> String {
+        row(std::process::id())
+    }
+
+    fn retries(tree: &ProcessTree) -> u64 {
+        tree.observations.lock().unwrap().stats.exiting_row_retries
+    }
+
+    #[test]
+    fn only_the_exact_exiting_row_shape_matches() {
+        for line in [
+            OBSERVED,
+            "17328 0 4294967295 X Mon Jan 1 00:00:00 2026",
+            "1 0 4294967295 X+ Sat Dec 31 23:59:60 9999",
+        ] {
+            assert!(exiting_row_signature(line), "{line:?} did not match");
+        }
+        // A pgid of -1 parses as a row, so it is here and not in NOT_EXITING.
+        for line in NOT_EXITING
+            .into_iter()
+            .chain(["17328 0 -1 X+ Tue Nov 24 10:44:54 2026"])
+        {
+            assert!(!exiting_row_signature(line), "{line:?} matched");
+        }
+    }
+
+    #[test]
+    fn only_linux_takes_a_listing_with_an_exiting_row_again() {
+        assert_eq!(retry_trigger(OBSERVED), cfg!(target_os = "linux"));
+        match validate_listing(&format!("{}{OBSERVED}\n", own_row()), std::process::id()) {
+            Err(InspectError::ExitingRow(message)) if cfg!(target_os = "linux") => {
+                assert_eq!(message, quoting(OBSERVED))
+            }
+            Err(InspectError::Failed(message)) if !cfg!(target_os = "linux") => {
+                assert_eq!(message, quoting(OBSERVED))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_exiting_row_beside_another_bad_line_fails_without_a_retry() {
+        let text = format!("{}{OBSERVED}\nnot a row\n", own_row());
+        match validate_listing(&text, std::process::id()) {
+            Err(InspectError::Failed(message)) => assert_eq!(
+                message,
+                format!(
+                    "the process listing had 2 lines that could not be parsed, \
+                     the first: \"{OBSERVED}\""
+                )
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exiting_row_then_a_clean_listing_counts_after_one_retry_on_linux() {
+        let (lister, calls) = listings(vec![
+            format!("{}{OBSERVED}\n", own_row()),
+            format!("{}{}", row(1), own_row()),
+        ]);
+        let tree = ProcessTree::new(123, lister, true);
+        let result = tree.rows().await;
+        let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        if cfg!(target_os = "linux") {
+            assert_eq!(result.map(|rows| rows.len()), Ok(2));
+            assert_eq!((retries(&tree), calls), (1, 2));
+        } else {
+            assert_eq!(result, Err(InspectError::Failed(quoting(OBSERVED))));
+            assert_eq!((retries(&tree), calls), (0, 1));
+        }
+        assert_eq!(tree.observations.lock().unwrap().stats.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn an_exiting_row_past_the_retry_limit_fails_quoting_the_line() {
+        let text = format!("{}{OBSERVED}\n", own_row());
+        let (lister, calls) = listings(vec![text; 3]);
+        let tree = ProcessTree::new(123, lister, true);
+        let result = tree.rows().await;
+        let message = quoting(OBSERVED);
+        assert_eq!(
+            message,
+            "the process listing had 1 lines that could not be parsed, the first: \
+             \"  17328       0 4294967295 X+ Tue Nov 24 10:44:54 2026\""
+        );
+        assert!(cleanup_reason::is_listing_error(&message), "{message}");
+        assert_eq!(result, Err(InspectError::Failed(message)));
+        let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let limit = u64::from(EXITING_ROW_RETRIES);
+        if cfg!(target_os = "linux") {
+            assert_eq!((retries(&tree), calls as u64), (limit, limit + 1));
+        } else {
+            assert_eq!((retries(&tree), calls), (0, 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exiting_row_in_a_listing_without_our_process_fails_without_a_retry() {
+        let text = format!("{}{OBSERVED}\n", row(1));
+        assert_eq!(
+            validate_listing(&text, std::process::id()),
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        let (lister, calls) = listings(vec![text, format!("{}{}", row(1), own_row())]);
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert_eq!(retries(&tree), 0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_row_that_is_not_the_exiting_shape_fails_without_a_retry() {
+        for line in NOT_EXITING {
+            let (lister, calls) = listings(vec![
+                format!("{}{line}\n", own_row()),
+                format!("{}{}", row(1), own_row()),
+            ]);
+            let tree = ProcessTree::new(123, lister, true);
+            assert_eq!(
+                tree.rows().await,
+                Err(InspectError::Failed(quoting(line))),
+                "{line:?}"
+            );
+            assert_eq!(retries(&tree), 0, "{line:?}");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{line:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_never_runs_past_one_listing_deadline() {
+        let exiting = format!("{}{OBSERVED}\n", own_row());
+        // The first listing takes the whole deadline: no retry starts.
+        let slow = exiting.clone();
+        let lister: Lister = Arc::new(move || {
+            let slow = slow.clone();
+            Box::pin(async move {
+                launch()?;
+                tokio::time::sleep(ps_timeout()).await;
+                validate_listing(&slow, std::process::id())
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert_eq!(retries(&tree), 0);
+        // A retry that hangs is given up at the deadline.
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let lister: Lister = Arc::new(move || {
+            let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let text = exiting.clone();
+            Box::pin(async move {
+                launch()?;
+                if !first {
+                    std::future::pending::<()>().await;
+                }
+                validate_listing(&text, std::process::id())
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        let started = Instant::now();
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert!(started.elapsed() <= ps_timeout());
+        let expected = u64::from(cfg!(target_os = "linux"));
+        assert_eq!(retries(&tree), expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_retry_that_completes_after_the_deadline_is_discarded() {
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let lister: Lister = Arc::new(move || {
+            let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if first {
+                    return validate_listing(
+                        &format!("{}{OBSERVED}\n", own_row()),
+                        std::process::id(),
+                    );
+                }
+                // The retry launches before the deadline; the clock then
+                // passes the deadline, and it returns a clean listing at once.
+                launch()?;
+                tokio::time::advance(ps_timeout() + std::time::Duration::from_millis(1)).await;
+                validate_listing(&format!("{}{}", row(1), own_row()), std::process::id())
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert_eq!(retries(&tree), u64::from(cfg!(target_os = "linux")));
+    }
+
+    #[tokio::test]
+    async fn a_retry_listing_that_reaches_its_launch_after_the_deadline_starts_nothing() {
+        // `echo` stands in for `ps`: launched, it prints no table, so the
+        // listing fails as unparsable; refused, it fails as timed out.
+        let echo = vec![PathBuf::from("/bin/echo")];
+        let observations: SharedObservations = Default::default();
+        let count = |o: &SharedObservations| o.lock().unwrap().stats.exiting_row_retries;
+        let late = RetryGate {
+            deadline: Instant::now(),
+            observations: observations.clone(),
+        };
+        assert_eq!(
+            RETRY_GATE.scope(late, list_processes_from(&echo)).await,
+            Err(InspectError::TimedOut)
+        );
+        assert_eq!(count(&observations), 0, "a refused retry was counted");
+        let early = RetryGate {
+            deadline: Instant::now() + std::time::Duration::from_secs(60),
+            observations: observations.clone(),
+        };
+        let launched = RETRY_GATE.scope(early, list_processes_from(&echo)).await;
+        assert!(
+            matches!(launched, Err(InspectError::Failed(_))),
+            "{launched:?}"
+        );
+        assert_eq!(count(&observations), 1, "a launched retry was not counted");
+        // A listing that is not a retry is neither bounded nor counted.
+        let plain = list_processes_from(&echo).await;
+        assert!(matches!(plain, Err(InspectError::Failed(_))), "{plain:?}");
+        assert_eq!(count(&observations), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_whose_task_runs_after_the_deadline_launches_nothing_and_is_not_counted() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let lister: Lister = Arc::new(move || {
+            let first = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let sender = sender.clone();
+            Box::pin(async move {
+                if first {
+                    return validate_listing(
+                        &format!("{}{OBSERVED}\n", own_row()),
+                        std::process::id(),
+                    );
+                }
+                // The retry's task gets to its launch only after the deadline.
+                tokio::time::sleep(ps_timeout() + std::time::Duration::from_millis(1)).await;
+                let result = list_processes_from(&[PathBuf::from("/bin/echo")]).await;
+                if let Some(sender) = sender.lock().unwrap().take() {
+                    let _ = sender.send(result.clone());
+                }
+                result
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(receiver.await, Ok(Err(InspectError::TimedOut)));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        } else {
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        assert_eq!(retries(&tree), 0);
     }
 
     #[test]
