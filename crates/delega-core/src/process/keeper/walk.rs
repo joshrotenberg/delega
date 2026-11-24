@@ -90,6 +90,9 @@ thread_local! {
     /// Test seam: make the stat read of a held process with this pid fail on
     /// this thread (not as missing).
     static FAILED_HELD_STAT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// Test seam: make the listing of this pid's task directory end with
+    /// ENOENT on this thread, as when the process is reaped mid-listing.
+    static FAILED_TASK_LISTING: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 fn forced_failure() -> bool {
@@ -157,7 +160,8 @@ fn stat(pid: i32) -> Option<(char, i32)> {
 /// reported any error, whatever its kind: on Linux an error ends the stream,
 /// so what came before it is not the whole directory. Only a read of an
 /// entry already listed (a pid's stat, a task's children) can show that
-/// entry gone.
+/// entry gone; the task directory of a listed pid has its own rule (see
+/// [`task_listing_failed`]).
 fn listed<T>(entries: impl Iterator<Item = std::io::Result<T>>) -> Result<Vec<T>, ReadFailed> {
     entries
         .collect::<std::io::Result<Vec<T>>>()
@@ -176,8 +180,18 @@ pub(super) fn children(pid: i32) -> Result<Vec<i32>, ReadFailed> {
             Err(error) if is_gone(&error) => return Ok(Vec::new()),
             Err(_) => return Err(read_failed()),
         };
+        let tasks = tasks.collect::<std::io::Result<Vec<_>>>();
+        #[cfg(test)]
+        let tasks = if FAILED_TASK_LISTING.with(std::cell::Cell::get) == pid {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        } else {
+            tasks
+        };
+        let Ok(tasks) = tasks else {
+            return task_listing_failed(pid);
+        };
         let mut out = Vec::new();
-        for task in listed(tasks)? {
+        for task in tasks {
             match std::fs::read_to_string(task.path().join("children")) {
                 Ok(text) => out.extend(parse_pids(&text)),
                 Err(error) if is_gone(&error) => {}
@@ -193,6 +207,22 @@ pub(super) fn children(pid: i32) -> Result<Vec<i32>, ReadFailed> {
         .filter(|(_, parent)| *parent == pid)
         .map(|(child, _)| child)
         .collect())
+}
+
+/// The listing of `pid`'s task directory ended with an error. Unlike a
+/// listing of `/proc` itself, which can hide processes when cut short, this
+/// is the directory of one process already listed, and a process reaped
+/// mid-listing ends it with ENOENT. The process counts as gone, with no
+/// children, only if its stat now shows it gone (and its pidfd agrees, as
+/// `hidepid` can hide a live process) or a zombie (whose children were
+/// reparented when it exited); otherwise the read failed.
+fn task_listing_failed(pid: i32) -> Result<Vec<i32>, ReadFailed> {
+    match stat_read(pid)? {
+        None if gone_by_pidfd(pid) => Ok(Vec::new()),
+        None => Err(read_failed()),
+        Some((state, _)) if state == 'Z' || state == 'X' => Ok(Vec::new()),
+        Some(_) => Err(read_failed()),
+    }
 }
 
 /// Every descendant of `root` in one pass, by parent links (no signals).
@@ -960,6 +990,55 @@ mod tests {
         assert_eq!(running, Some((true, Some(false))));
         // Exited, but its stat could not be read: still not gone.
         assert_eq!(exited, Some(Some(false)));
+    }
+
+    /// An error while listing the task directory of a pid already listed is
+    /// absence when the process has gone (reaped, or a zombie) and a failed
+    /// read while it lives.
+    #[test]
+    fn a_task_listing_error_is_absence_only_for_a_process_that_has_gone() {
+        use crate::test_spawn::Guarded;
+        if !children_file() {
+            eprintln!("skipped: this kernel has no task children files");
+            return;
+        }
+        let spawn = || {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .guarded_spawn()
+                .expect("start a child")
+        };
+        let read_with_listing_error = |pid: i32| {
+            FAILED_TASK_LISTING.with(|failed| failed.set(pid));
+            let read = children(pid);
+            FAILED_TASK_LISTING.with(|failed| failed.set(0));
+            read
+        };
+        let mut live = spawn();
+        let live_pid = i32::try_from(live.id()).expect("a pid");
+        let live_read = read_with_listing_error(live_pid);
+        let _ = live.kill();
+        let _ = live.wait();
+
+        let mut zombie = spawn();
+        let zombie_pid = i32::try_from(zombie.id()).expect("a pid");
+        let _ = zombie.kill();
+        let until = Instant::now() + Duration::from_secs(10);
+        while stat(zombie_pid).is_some_and(|(state, _)| state != 'Z') && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let zombie_read = read_with_listing_error(zombie_pid);
+        let _ = zombie.wait();
+        // Reaped now: its stat is gone, unless the pid was reused already.
+        let reaped_read = stat(zombie_pid)
+            .is_none()
+            .then(|| read_with_listing_error(zombie_pid));
+
+        assert_eq!(live_read, Err(ReadFailed), "a live process read as gone");
+        assert_eq!(zombie_read, Ok(Vec::new()));
+        if let Some(read) = reaped_read {
+            assert_eq!(read, Ok(Vec::new()));
+        }
     }
 
     /// An error from a directory listing's iterator is a failed read, also

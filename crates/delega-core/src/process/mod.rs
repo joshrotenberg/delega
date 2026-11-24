@@ -150,7 +150,10 @@
 //!   reason but the process being gone (ENOENT, ESRCH) makes the pass
 //!   incomplete, never counts as absence (the stat of a held process
 //!   included), and so does any error from a directory listing of `/proc`;
-//!   a children read is kept only if the parent's pidfd shows it had not
+//!   an error while listing the task directory of a pid already listed (a
+//!   process reaped mid-listing ends it with ENOENT) counts as that process
+//!   gone only when its stat then reads as gone (and its pidfd agrees) or a
+//!   zombie, and otherwise as a failed read; a children read is kept only if the parent's pidfd shows it had not
 //!   exited by the end of the read; a refused hold anywhere in a freeze leaves
 //!   it unproven whatever later passes find; and the freeze releases its
 //!   pidfds before the final census. Each answer carries its passes and
