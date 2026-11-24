@@ -35,6 +35,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use delega_core::canonical::sorted;
 use delega_core::contract::SCHEMA_VERSION;
+use delega_core::process::Ending;
 use serde_json::json;
 
 use super::report::{CommandRecord, HostRecord};
@@ -132,7 +133,7 @@ impl Report {
     }
 }
 
-pub fn run(args: Args) -> ExitCode {
+pub async fn run(args: Args, runner: &mut exec::Runner) -> ExitCode {
     let configured = match super::configured_dir(args.install_dir) {
         Ok(dir) => dir,
         Err(error) => {
@@ -147,15 +148,21 @@ pub fn run(args: Args) -> ExitCode {
         }
     }
     let report = match fsops::canonical_dir(&configured) {
-        Ok(dir) => uninstall(&Request {
-            dir,
-            named,
-            programs: Host::ALL
-                .into_iter()
-                .map(|host| (host, super::find_host(host)))
-                .collect(),
-            dry_run: args.dry_run,
-        }),
+        Ok(dir) => {
+            uninstall(
+                &Request {
+                    dir,
+                    named,
+                    programs: Host::ALL
+                        .into_iter()
+                        .map(|host| (host, super::find_host(host)))
+                        .collect(),
+                    dry_run: args.dry_run,
+                },
+                runner,
+            )
+            .await
+        }
         // Still a document, so a caller that asked for JSON always gets one.
         Err(error) => Report {
             dry_run: args.dry_run,
@@ -191,7 +198,7 @@ fn program(request: &Request, host: Host) -> &Result<PathBuf, String> {
 }
 
 /// Uninstall, or with `dry_run` report what would be done.
-pub(super) fn uninstall(request: &Request) -> Report {
+pub(super) async fn uninstall(request: &Request, runner: &mut exec::Runner) -> Report {
     let dir: &Path = &request.dir;
     let mut report = Report {
         dry_run: request.dry_run,
@@ -262,7 +269,7 @@ pub(super) fn uninstall(request: &Request) -> Report {
             row.note = Some("registrations are read before removal (not run in a dry run)".into());
             host.uninstall_commands()
         } else {
-            match registration::removal_commands(host, path, dir) {
+            match registration::removal_commands(host, path, dir, runner).await {
                 Ok(commands) => commands,
                 Err(error) => {
                     row.status = "refused";
@@ -289,21 +296,27 @@ pub(super) fn uninstall(request: &Request) -> Report {
             } else if broke {
                 row.commands.push(CommandRecord::new(args, "not_run", ""));
             } else {
-                match exec::run(&path, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES) {
-                    Ok(ran) if ran.success => {
+                match runner
+                    .run(&path, &args, exec::CHANGE_LIMIT, exec::CHANGE_BYTES)
+                    .await
+                {
+                    Ok(ran) if matches!(ran.ending, Ending::Exited { code: 0 }) => {
                         row.commands
-                            .push(CommandRecord::new(args, "ran", &ran.shown()));
+                            .push(CommandRecord::new(args, "ran", &exec::shown(&ran)));
                     }
                     // A host that never had it exits nonzero; that is not a
                     // reason to keep the files.
-                    Ok(ran) if host.already_absent(&ran.shown()) => {
-                        row.commands
-                            .push(CommandRecord::new(args, "already_absent", &ran.shown()));
+                    Ok(ran) if host.already_absent(&exec::shown(&ran)) => {
+                        row.commands.push(CommandRecord::new(
+                            args,
+                            "already_absent",
+                            &exec::shown(&ran),
+                        ));
                     }
                     Ok(ran) => {
                         broke = true;
                         row.commands
-                            .push(CommandRecord::new(args, "failed", &ran.shown()));
+                            .push(CommandRecord::new(args, "failed", &exec::shown(&ran)));
                     }
                     Err(error) => {
                         broke = true;

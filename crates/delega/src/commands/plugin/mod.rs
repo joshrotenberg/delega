@@ -31,9 +31,60 @@ pub enum Command {
 
 impl Command {
     pub(super) fn run(self) -> ExitCode {
-        match self {
-            Self::Install(args) => install::run(args),
-            Self::Uninstall(args) => uninstall::run(args),
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                super::output::report(&format!(
+                    "delega plugin: cannot start the async runtime: {err}"
+                ));
+                return ExitCode::FAILURE;
+            }
+        };
+        runtime.block_on(async {
+            let mut runner = match exec::Runner::install() {
+                Ok(runner) => runner,
+                Err(err) => {
+                    super::output::report(&format!(
+                        "delega plugin: cannot install signal handlers: {err}"
+                    ));
+                    return ExitCode::FAILURE;
+                }
+            };
+            #[cfg(debug_assertions)]
+            hold_before_work();
+            let code = match self {
+                Self::Install(args) => install::run(args, &mut runner).await,
+                Self::Uninstall(args) => uninstall::run(args, &mut runner).await,
+            };
+            if code == ExitCode::SUCCESS && runner.check_interrupt().await {
+                super::output::report("delega plugin: signal received; exiting");
+                ExitCode::from(super::run::signals::exit_status_when_cut_short(0))
+            } else {
+                code
+            }
+        })
+    }
+}
+
+/// Let a test deliver a signal while the runtime is in synchronous work,
+/// after registering handlers. Deleting the new file releases the command.
+#[cfg(debug_assertions)]
+fn hold_before_work() {
+    use std::time::{Duration, Instant};
+
+    if let Some(path) = std::env::var_os("DELEGA_TEST_HOLD_BEFORE_PLUGIN_WORK")
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .is_ok()
+    {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Path::new(&path).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }

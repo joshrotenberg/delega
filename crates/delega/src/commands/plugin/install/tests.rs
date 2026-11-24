@@ -42,15 +42,16 @@ fn the_plugin_version_follows_the_executable_bytes() {
     assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
 }
 
-#[test]
-fn an_install_with_different_executable_bytes_has_a_different_version_everywhere() {
+#[tokio::test]
+async fn an_install_with_different_executable_bytes_has_a_different_version_everywhere() {
     let tmp = tempfile::tempdir().expect("temporary directory");
     let root = fs::canonicalize(tmp.path()).expect("resolve");
     let executable = root.join("delega-under-test");
     fs::write(&executable, b"first build").expect("write executable");
     let request = request(&root, &executable);
 
-    let first = install(&request);
+    let mut runner = exec::Runner::without_signal_handlers();
+    let first = install(&request, &mut runner).await;
     assert_eq!(first.error, None);
     let first_version = first.plugin_version.clone().expect("version");
     let claude = request.dir.join("plugin/delega/.claude-plugin/plugin.json");
@@ -65,14 +66,14 @@ fn an_install_with_different_executable_bytes_has_a_different_version_everywhere
     );
 
     // The same bytes again: the same version, and the commands repeat.
-    let again = install(&request);
+    let again = install(&request, &mut runner).await;
     assert_eq!(
         again.plugin_version.as_deref(),
         Some(first_version.as_str())
     );
 
     fs::write(&executable, b"second build").expect("rewrite executable");
-    let second = install(&request);
+    let second = install(&request, &mut runner).await;
     assert_eq!(second.error, None);
     let second_version = second.plugin_version.clone().expect("version");
     assert_ne!(first_version, second_version);

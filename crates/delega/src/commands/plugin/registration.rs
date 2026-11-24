@@ -9,30 +9,38 @@
 
 use std::path::Path;
 
+use delega_core::process::Ending;
 use serde_json::Value;
 
 use super::exec::{self, LISTING_BYTES, LISTING_LIMIT};
 use super::{Host, MARKETPLACE, PLUGIN_DIR, PLUGIN_ID};
 
-fn inspect(program: &Path, args: &[&str]) -> Result<Value, String> {
+async fn inspect(
+    program: &Path,
+    args: &[&str],
+    runner: &mut exec::Runner,
+) -> Result<Value, String> {
     let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-    let ran = exec::run(program, &args, LISTING_LIMIT, LISTING_BYTES).map_err(|error| {
-        format!("cannot verify registration: {error}; no removal was attempted")
-    })?;
+    let ran = runner
+        .run(program, &args, LISTING_LIMIT, LISTING_BYTES)
+        .await
+        .map_err(|error| {
+            format!("cannot verify registration: {error}; no removal was attempted")
+        })?;
     // A failed listing may print plugin configuration values. Its output is
     // not echoed as a diagnostic.
-    if !ran.success {
+    if !matches!(ran.ending, Ending::Exited { code: 0 }) {
         return Err(
             "cannot verify registration: the host listing failed; no removal was attempted".into(),
         );
     }
-    if !ran.stderr.trim().is_empty() {
+    if !ran.stderr.text().trim().is_empty() {
         return Err(
             "cannot verify registration: the host listing reported diagnostics; no removal was attempted"
                 .into(),
         );
     }
-    let value: Value = serde_json::from_str(&ran.stdout).map_err(|_| {
+    let value: Value = serde_json::from_str(&ran.stdout.text()).map_err(|_| {
         "cannot verify registration: unsupported host JSON response; no removal was attempted"
             .to_string()
     })?;
@@ -80,12 +88,18 @@ fn selected<'a>(rows: &'a Value, field: &str, name: &str) -> Result<Option<&'a V
 /// The host commands that remove this plugin's registration, in order, or an
 /// error saying why nothing may be removed. An empty list means the host has
 /// no registration left to remove.
-pub fn removal_commands(
+pub async fn removal_commands(
     host: Host,
     program: &Path,
     dir: &Path,
+    runner: &mut exec::Runner,
 ) -> Result<Vec<Vec<String>>, String> {
-    let marketplaces = inspect(program, &["plugin", "marketplace", "list", "--json"])?;
+    let marketplaces = inspect(
+        program,
+        &["plugin", "marketplace", "list", "--json"],
+        runner,
+    )
+    .await?;
     let entries = match host {
         Host::Claude => &marketplaces,
         Host::Codex => &marketplaces["marketplaces"],
@@ -107,7 +121,7 @@ pub fn removal_commands(
             ));
         }
     }
-    let plugins = inspect(program, &["plugin", "list", "--json"])?;
+    let plugins = inspect(program, &["plugin", "list", "--json"], runner).await?;
     let (entries, field) = match host {
         Host::Claude => (&plugins, "id"),
         Host::Codex => (&plugins["installed"], "pluginId"),

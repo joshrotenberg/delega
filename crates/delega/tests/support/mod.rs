@@ -364,7 +364,7 @@ fn group_members(group: i32) -> Vec<i32> {
 }
 
 /// Whether a process is alive. A zombie counts as gone.
-fn is_running(pid: i32) -> bool {
+pub fn is_running(pid: i32) -> bool {
     let out = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .captured()
