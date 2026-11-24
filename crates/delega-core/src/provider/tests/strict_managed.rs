@@ -373,46 +373,82 @@ fn deny_listing(dir: &std::path::Path, mode: u32) -> Option<Mode0755> {
 }
 
 #[test]
-fn a_preferences_directory_that_cannot_be_listed_refuses_strict() {
+fn a_preferences_directory_that_cannot_be_listed_refuses_strict_as_unchecked() {
     let setup = Setup::new(Platform::Macos);
     let dir = setup.root.path().join(PREFERENCES);
     std::fs::create_dir_all(&dir).expect("create directory");
-    // Search is allowed, so the current user's file could still be opened by
-    // its path; listing is not.
+    // Search is allowed and listing is not: macOS can still serve the current
+    // user's preferences, and delega cannot see whether there are any.
     let Some(_restore) = deny_listing(&dir, 0o311) else {
         return;
     };
     let refusal = setup.refusal(Mode::Read);
+    assert_eq!(refusal.kind, "permissions_not_enforceable");
     assert!(
         refusal.message.contains(&format!(
-            "the managed source {} could not be listed completely, so it may hold the current \
-             user's managed preferences file",
+            "delega could not check the managed preferences directory {}, so managed \
+             preferences may set permissions.allow,",
             text(&dir)
         )),
+        "{}",
+        refusal.message
+    );
+    assert_eq!(setup.notes(Mode::Write).len(), 1);
+}
+
+#[test]
+fn a_users_preferences_directory_that_denies_search_refuses_strict_without_naming_the_user() {
+    let setup = Setup::new(Platform::Macos);
+    let dir = setup.root.path().join(PREFERENCES);
+    let user = dir.join("sentinel-user-4419");
+    std::fs::create_dir_all(&user).expect("create directory");
+    let Some(_restore) = deny_listing(&user, 0o000) else {
+        return;
+    };
+    let refusal = setup.refusal(Mode::Read);
+    assert_eq!(refusal.kind, "permissions_not_enforceable");
+    assert!(
+        refusal.message.contains(&format!(
+            "delega could not check a user's directory in {}, so managed preferences may set \
+             permissions.allow,",
+            text(&dir)
+        )),
+        "{}",
+        refusal.message
+    );
+    assert!(
+        !refusal.message.contains("sentinel-user-4419"),
         "{}",
         refusal.message
     );
 }
 
 #[test]
-fn a_managed_directory_that_denies_search_refuses_strict() {
-    let setup = Setup::new(Platform::Linux);
-    let dir = setup.root.path().join(LINUX_CLAUDE);
+fn a_settings_directory_that_denies_search_adds_nothing_because_claude_code_runs_as_the_same_user()
+{
+    let setup = Setup::new(Platform::Macos);
+    let dir = setup.root.path().join(MAC_CLAUDE);
     std::fs::create_dir_all(&dir).expect("create directory");
-    // Nothing under it can be looked at, so nothing proves it holds no
-    // managed settings file.
     let Some(_restore) = deny_listing(&dir, 0o000) else {
         return;
     };
-    let refusal = setup.refusal(Mode::Read);
-    assert!(
-        refusal.message.contains(&format!(
-            "the managed source {} could not be read or parsed, so it may set",
-            text(&dir.join("managed-settings.json"))
-        )),
-        "{}",
-        refusal.message
-    );
+    for mode in [Mode::Read, Mode::Write] {
+        setup.runs_strict(mode);
+        assert_eq!(setup.notes(mode), Vec::<String>::new());
+    }
+    assert_eq!(setup.notes(Mode::Build), Vec::<String>::new());
+}
+
+#[test]
+fn a_regular_file_in_place_of_a_managed_directory_adds_nothing() {
+    let setup = Setup::new(Platform::Macos);
+    setup.write(PREFERENCES, SECRET);
+    setup.write(MAC_CLAUDE, SECRET);
+    for mode in [Mode::Read, Mode::Write] {
+        setup.runs_strict(mode);
+        assert_eq!(setup.notes(mode), Vec::<String>::new());
+    }
+    assert_eq!(setup.notes(Mode::Build), Vec::<String>::new());
 }
 
 #[test]

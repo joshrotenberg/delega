@@ -397,19 +397,32 @@ can or may widen the run:
   `sandbox`, such as `sandbox.filesystem.denyWrite`, is not checked), which
   can disable or loosen the sandbox delega passes;
 - one that exists and was not read completely (`not_inspected`, `unreadable`
-  or `partly_read`), such as the managed preferences file or a directory that
-  cannot be listed. It may set either kind of key, so it may widen the run.
-  `managed-mcp.json` holds no settings keys and is not counted.
+  or `partly_read`), such as the managed preferences file or a drop-in
+  directory that cannot be listed. It may set either kind of key, so it may
+  widen the run. `managed-mcp.json` holds no settings keys and is not counted.
 
 The users' managed preferences under `/Library/Managed Preferences` are one
 source, named by that directory only, never by a user. Only the current
 user's file applies, and delega does not tell which user a file belongs to,
 so the check can refuse conservatively on another user's file.
 
+A managed settings file or drop-in that delega cannot look up at all, for
+example under a directory that denies search, counts as absent. Claude Code
+runs as the same user as delega and reads these files by path, so a file
+delega cannot look up is one Claude Code cannot read either. Managed
+preferences differ: macOS serves them to the process through the preferences
+system, so delega's file lookup is only a proxy for them. On macOS the run
+check therefore adds one more case: when looking up
+`/Library/Managed Preferences/com.anthropic.claudecode.plist`, listing
+`/Library/Managed Preferences`, or looking up that file in a user's directory
+there fails for a reason other than absence, the run gets a part saying delega
+could not check that location, so managed preferences may widen the run. It
+names the system file or the directory, never a user's directory. Doctor does
+not report this case.
+
 Each source is one part of the `permissions_not_enforceable` message, with
 its path and key names, or why it was not read. Values are never reported.
-Without
-`permissions.strict` the run goes ahead and each source is a provider note
+Without `permissions.strict` the run goes ahead and each source is a provider note
 starting `managed settings can widen this run:`. `full` asks for no scope and no
 sandbox, so it is not checked. A managed `hooks` key and settings Claude Code
 fetches from a server are not checked.
@@ -883,7 +896,7 @@ or that was not read completely and so may widen the run ([Strict](#strict)).
 | Read state or limit | What doctor reports |
 | --- | --- |
 | `read` | A parsed source. Empty Claude settings and drop-ins count as empty objects. |
-| `unreadable` | An unreadable, non-regular or invalid source, or a file over 4 MiB. A location that cannot be looked at for a reason other than absence, such as a directory that denies search, or a preferences directory that cannot be listed, is reported this way, not left out. Claude settings require an object root. |
+| `unreadable` | An unreadable, non-regular or invalid source, or a file over 4 MiB. Claude settings require an object root. |
 | `not_inspected` | Managed preferences are present. Doctor does not inspect their contents. |
 | `partly_read` | Some drop-ins were unreadable or a scan limit was reached. A changing file may also be reported this way without keys. |
 | 64 drop-in files, 4,096 directory entries, 4 MiB aggregate | Reaching a drop-in scan limit reports `limit_reached`. |

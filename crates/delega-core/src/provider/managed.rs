@@ -196,30 +196,20 @@ impl SystemPaths {
 
     /// What is at `path`, a fixed location: nothing, something that may be
     /// opened, or something that may not (a link out of an injected root, or
-    /// one that points nowhere, or a path that cannot be looked at for a reason
-    /// other than absence, such as a directory that denies search). Under an
-    /// injected root the directory holding the path must itself be inside, or
-    /// the answer is nothing.
+    /// one that points nowhere). Under an injected root the directory holding
+    /// the path must itself be inside, or the answer is nothing.
     fn presence(&self, path: &Path) -> Presence {
         if self.injected() && !path.parent().is_some_and(|dir| self.inside(dir)) {
             return Presence::Absent;
         }
-        match std::fs::symlink_metadata(path) {
-            Err(error) if is_absence(&error) => Presence::Absent,
-            Err(_) => Presence::Unusable,
-            Ok(_) if self.inside(path) => Presence::Usable,
-            Ok(_) => Presence::Unusable,
+        if std::fs::symlink_metadata(path).is_err() {
+            Presence::Absent
+        } else if self.inside(path) {
+            Presence::Usable
+        } else {
+            Presence::Unusable
         }
     }
-}
-
-/// Whether an error says that nothing is at a path. Any other error, such as
-/// a denied permission, leaves open that something is there.
-fn is_absence(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,7 +572,9 @@ pub(super) fn check_claude_mcp(system: &SystemPaths) -> Result<(), Refusal> {
 /// preferences that is conservative, since only the current user's file
 /// applies and which one that is goes unchecked. The managed MCP file holds
 /// no settings keys and is left out. `full` grants the built-in tools without
-/// a scope and asks for no sandbox, so nothing managed can widen it.
+/// a scope and asks for no sandbox, so nothing managed can widen it. Managed
+/// preferences locations delega could not check are added by
+/// [`unchecked_preferences`], which says why settings files are not.
 ///
 /// Only fixed paths and key names from [`CLAUDE_KEYS`] are used, never a value.
 pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String> {
@@ -654,6 +646,85 @@ pub(super) fn claude_widening(system: &SystemPaths, mode: RunMode) -> Vec<String
                  settings delega passes",
                 source.path
             ))
+        })
+        .chain(unchecked_preferences(system, &Limits::default(), could))
+        .collect()
+}
+
+/// Whether an error says that nothing is at a path. Any other error, such as
+/// a denied permission, leaves open that something is there.
+fn is_absence(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// For the run check only: the managed preferences locations on macOS that
+/// delega could not check, one phrase per fixed path.
+///
+/// Settings files and drop-ins are not checked this way, and [`scan`] counts a
+/// path it cannot look up as absent. Claude Code runs as the same user as
+/// delega and reads those files by path, so a file delega cannot look up is
+/// one Claude Code cannot read either. Managed preferences differ: macOS
+/// serves them to the process through the preferences system, so delega's
+/// file lookup is only a proxy for them. When looking up the system file,
+/// listing the directory, or looking up the file in a user's directory fails
+/// for a reason other than absence, managed preferences may widen the run.
+///
+/// The phrase names the system file or the directory, never a user's
+/// directory. It follows the same rules for an injected root and the same
+/// listing bound as the scan.
+fn unchecked_preferences(system: &SystemPaths, limits: &Limits, could: &str) -> Vec<String> {
+    const FILE: &str = "com.anthropic.claudecode.plist";
+    if system.platform != Platform::Macos {
+        return Vec::new();
+    }
+    let dir = system.join("/Library/Managed Preferences");
+    // Under an injected root nothing outside it is looked at.
+    if !system.inside(&dir) {
+        return Vec::new();
+    }
+    let unchecked = |error: std::io::Error| !is_absence(&error);
+    let mut what = Vec::new();
+    let whole = dir.join(FILE);
+    if std::fs::symlink_metadata(&whole)
+        .err()
+        .is_some_and(unchecked)
+    {
+        what.push(format!("the managed preferences file {}", whole.display()));
+    }
+    match std::fs::read_dir(&dir) {
+        Err(error) => {
+            if unchecked(error) {
+                what.push(format!(
+                    "the managed preferences directory {}",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(entries) => {
+            let user_unchecked = entries
+                .take(limits.directory_entries)
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|user| system.inside(user) && user.is_dir())
+                .any(|user| {
+                    std::fs::symlink_metadata(user.join(FILE))
+                        .err()
+                        .is_some_and(unchecked)
+                });
+            if user_unchecked {
+                what.push(format!("a user's directory in {}", dir.display()));
+            }
+        }
+    }
+    what.into_iter()
+        .map(|what| {
+            format!(
+                "delega could not check {what}, so managed preferences may set {could}, and \
+                 Claude Code applies managed settings above the settings delega passes"
+            )
         })
         .collect()
 }
@@ -1195,24 +1266,8 @@ fn preferences(
     if !system.inside(&dir) {
         return;
     }
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if is_absence(&error) => return,
-        // The directory is there and cannot be listed. The provider opens the
-        // current user's file by its known path, which needs no listing, so
-        // the users' files are one source that could not be read.
-        Err(_) => {
-            found.push(ManagedSource {
-                path: dir.display().to_string(),
-                kind: ManagedSourceKind::UserManagedPreferences,
-                state: ManagedSourceState::Unreadable,
-                files: None,
-                note: Some(USER_PREFERENCES_NOTE.to_string()),
-                keys: Vec::new(),
-                other_keys: 0,
-            });
-            return;
-        }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
     };
     let mut counts = ManagedFileCounts {
         found: 0,

@@ -90,7 +90,9 @@ settings source sets `permissions.allow`, sets a recognized `sandbox` key
 (`build` only), or exists and was not read completely and so may widen the
 run, such as the managed preferences file. A user's managed preferences file
 refuses even when it is another user's, since delega does not tell whose it
-is. The part names the source path and the key names; values are never
+is. On macOS a managed preferences location delega could not check (a lookup
+or listing that fails for a reason other than absence) also refuses. The part
+names the source path and the key names; values are never
 reported ([Strict](providers.md#strict)). The
 refusal message reads `permissions.strict is set and <provider> cannot enforce
 these permissions as stated: <part>; <part>`. A dry run gives the same refusal.
