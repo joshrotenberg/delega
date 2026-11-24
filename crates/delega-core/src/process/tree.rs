@@ -189,59 +189,27 @@ async fn read_listing(
 
 /// The error for a listing program that could not be started. Every path
 /// tried is named with its own error, in the order tried, so a refusal on one
-/// path is not hidden behind "not found" on the next. The whole message stays
-/// within [`MAX_ERROR_CHARS`], see [`bounded_failures`].
+/// path is not hidden behind "not found" on the next. A message longer than
+/// [`MAX_ERROR_CHARS`] is cut to that length, ending in "...".
 pub(crate) fn not_started(failures: &[(PathBuf, std::io::Error)]) -> InspectError {
-    const OPEN: &str = "ps could not be started (";
-    const CLOSE: &str = ")";
     let detail = if failures.is_empty() {
         "no ps program configured".to_string()
     } else {
-        let entries: Vec<String> = failures
+        failures
             .iter()
             .map(|(program, error)| format!("{}: {error}", program.display()))
-            .collect();
-        let budget = MAX_ERROR_CHARS - OPEN.chars().count() - CLOSE.chars().count();
-        bounded_failures(&entries, budget)
+            .collect::<Vec<_>>()
+            .join(", ")
     };
-    InspectError::Unavailable(format!("{OPEN}{detail}{CLOSE}"))
-}
-
-/// Join whole `path: error` entries with ", " in the order given, adding
-/// entries while they and the note for the rest fit in `budget` characters.
-/// When entries are left out the text ends with `, ... and N more path(s)`.
-/// Only when the first entry alone does not fit is it cut, at a character
-/// boundary, and marked with "...".
-fn bounded_failures(entries: &[String], budget: usize) -> String {
-    let chars = |text: &str| text.chars().count();
-    let note = |left_out: usize| match left_out {
-        0 => String::new(),
-        1 => ", ... and 1 more path".to_string(),
-        n => format!(", ... and {n} more paths"),
-    };
-    let mut text = String::new();
-    let mut used = 0;
-    let mut kept = 0;
-    for entry in entries {
-        let separator = if kept == 0 { 0 } else { 2 };
-        let after = used + separator + chars(entry);
-        if after + chars(&note(entries.len() - kept - 1)) > budget {
-            break;
-        }
-        if kept > 0 {
-            text.push_str(", ");
-        }
-        text.push_str(entry);
-        used = after;
-        kept += 1;
+    let message = format!("ps could not be started ({detail})");
+    if message.chars().count() <= MAX_ERROR_CHARS {
+        return InspectError::Unavailable(message);
     }
-    if kept == 0 {
-        let tail = format!("...{}", note(entries.len() - 1));
-        let room = budget.saturating_sub(chars(&tail));
-        return format!("{}{tail}", clip(&entries[0], room));
-    }
-    text.push_str(&note(entries.len() - kept));
-    text
+    const CUT: &str = "...";
+    InspectError::Unavailable(format!(
+        "{}{CUT}",
+        clip(&message, MAX_ERROR_CHARS - CUT.len())
+    ))
 }
 
 /// Run one listing command, bounded as [`list_processes_from`] is.

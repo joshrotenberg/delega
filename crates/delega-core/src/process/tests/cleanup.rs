@@ -577,68 +577,32 @@ async fn a_refused_ps_is_reported_as_refused_not_as_missing() {
     );
 }
 
-#[tokio::test]
-async fn an_overlong_first_ps_entry_is_cut_and_the_rest_counted_within_the_limit() {
-    use crate::process::limits::MAX_ERROR_CHARS;
-    let s = Scratch::new();
-    // Nest directories until the refused path is about 990 characters, under
-    // the 1024 bytes exec accepts on macOS, so the error is still a refusal
-    // and its entry alone is longer than the message may be.
-    let mut dir = s.path("");
-    let target = 990;
-    while dir.as_os_str().len() + 200 < target - 20 {
-        dir.push("d".repeat(199));
-    }
-    let pad = target - dir.as_os_str().len() - 1;
-    dir.push("p".repeat(pad.clamp(1, 200)));
-    std::fs::create_dir_all(dir.parent().expect("parent")).expect("create nested dirs");
-    let refused = dir;
-    unexecutable(&refused);
-    assert!(refused.as_os_str().len() > 950, "{}", refused.display());
-    let missing = s.path("never-created-ps");
-    let message = unavailable_message(&[refused.clone(), missing]).await;
-    assert_eq!(message.chars().count(), MAX_ERROR_CHARS, "{message}");
-    let start = format!("ps could not be started ({}", s.path("").display());
-    assert!(message.starts_with(&start), "{message}");
-    assert!(message.ends_with("..., ... and 1 more path)"), "{message}");
-}
-
 #[test]
-fn ps_entries_that_cannot_all_fit_are_kept_whole_and_counted() {
+fn an_overlong_ps_start_error_is_cut_to_the_limit_with_the_first_attempt_first() {
     use crate::process::limits::MAX_ERROR_CHARS;
-    // Fifty attempts with long paths: only whole entries are shown, in the
-    // order tried, and the message says how many were left out.
-    let entry_path = |n: usize| format!("/{}/ps{n}", "x".repeat(300));
-    let failures: Vec<_> = (0..50)
-        .map(|n| {
-            (
-                std::path::PathBuf::from(entry_path(n)),
-                std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()),
-            )
-        })
-        .collect();
+    // Two attempts whose message is far longer than the limit. The first path
+    // holds multi-byte characters, so a cut by bytes would split one.
+    let first = format!("/{}/ps", "\u{e9}".repeat(600));
+    let failures = [
+        (
+            std::path::PathBuf::from(&first),
+            std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()),
+        ),
+        (
+            std::path::PathBuf::from(format!("/{}/ps", "x".repeat(600))),
+            std::io::Error::from_raw_os_error(rustix::io::Errno::NOENT.raw_os_error()),
+        ),
+    ];
     let InspectError::Unavailable(message) = crate::process::tree::not_started(&failures) else {
         panic!("not started is unavailable inspection");
     };
-    assert!(
-        message.chars().count() <= MAX_ERROR_CHARS,
-        "{} chars: {message}",
-        message.chars().count()
+    assert_eq!(message.chars().count(), MAX_ERROR_CHARS, "{message}");
+    assert!(message.ends_with("..."), "{message}");
+    let start = format!(
+        "ps could not be started ({first}: {}, /",
+        os_error(rustix::io::Errno::ACCESS)
     );
-    let refusal = os_error(rustix::io::Errno::ACCESS);
-    let shown: Vec<String> = (0..50)
-        .map(|n| format!("{}: {refusal}", entry_path(n)))
-        .take_while(|entry| message.contains(entry.as_str()))
-        .collect();
-    assert!(!shown.is_empty(), "the first entry fits whole: {message}");
-    assert_eq!(
-        message,
-        format!(
-            "ps could not be started ({}, ... and {} more paths)",
-            shown.join(", "),
-            50 - shown.len()
-        )
-    );
+    assert!(message.starts_with(&start), "{message}");
 }
 
 /// A `ps` stand-in that prints `output` and exits 0, at a path in `s`.
