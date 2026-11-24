@@ -487,6 +487,14 @@ pub(crate) struct ProcessTree {
     /// Test seam: created whenever a refused signal is recorded.
     #[cfg(test)]
     pub(crate) refusal_file: Option<std::path::PathBuf>,
+    /// Test seam: run once in a snapshot after its check of the shared pin
+    /// and before adoption, as a release in between would.
+    #[cfg(test)]
+    after_pin_check: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Test seam: run once while the child's identity is learned, after the
+    /// pin was checked under its lock and before the start time is read.
+    #[cfg(test)]
+    before_root_read: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 /// What one cleanup sweep found alive. Zombies are not alive: they have run to
@@ -565,6 +573,10 @@ impl ProcessTree {
             refuse_signals: false,
             #[cfg(test)]
             refusal_file: None,
+            #[cfg(test)]
+            after_pin_check: None,
+            #[cfg(test)]
+            before_root_read: None,
         }
     }
 
@@ -756,15 +768,10 @@ impl ProcessTree {
             })
         });
         let root = rows.iter().find(|row| row.pid == self.pid);
-        if self.root_started.is_none() {
-            self.root_started = root.map(|r| r.started.clone());
-            // The child is pinned now (unreaped), so its pid is its own.
-            if self.root_started.is_some() && self.pinned {
-                self.root_ticks = sys::start_ticks(self.pid);
-                if let Some(ticks) = self.root_ticks {
-                    self.ticks.insert(self.pid, ticks);
-                }
-            }
+        if self.root_started.is_none()
+            && let Some(root) = root
+        {
+            self.learn_root(root);
         }
         let mut owned: HashSet<i32> = HashSet::new();
         if let Some(root) = root
@@ -809,6 +816,33 @@ impl ProcessTree {
         }
     }
 
+    /// Learn the child's identity from its row: the start the listing shows
+    /// and, on Linux, its start time in ticks from `/proc`. Only while the
+    /// child is pinned, and the pin's lock is held across the check, the read
+    /// and storing the result: the keeper reaps the child only after the
+    /// owner answered `released`, which takes this lock, so the pid cannot
+    /// name a replacement between the check and the read. With the pin
+    /// released nothing is learned (a replacement's start time would
+    /// otherwise become the child's identity at [`Self::unpin`]). The guard
+    /// ends here, so [`Self::track`] can take the lock afterwards.
+    fn learn_root(&mut self, root: &ProcessRow) {
+        let pin = self.pin.clone();
+        let held = pin.as_deref().map(GroupPin::lock);
+        if !self.pinned || held.as_ref().is_some_and(|pinned| !**pinned) {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(seam) = self.before_root_read.take() {
+            seam();
+        }
+        self.root_started = Some(root.started.clone());
+        self.root_ticks = sys::start_ticks(self.pid);
+        if let Some(ticks) = self.root_ticks {
+            self.ticks.insert(self.pid, ticks);
+        }
+        drop(held);
+    }
+
     async fn snapshot(&mut self, with_marker: bool) -> Result<Snapshot, InspectError> {
         let token = self.marker.clone().filter(|_| with_marker);
         // Without `/proc` the marker reading is a listing of its own that does
@@ -827,6 +861,10 @@ impl ProcessTree {
         // The keeper may have let go of the child while the listing ran.
         if self.pin.as_ref().is_some_and(|pin| !pin.pinned()) {
             self.unpin();
+        }
+        #[cfg(test)]
+        if let Some(seam) = self.after_pin_check.take() {
+            seam();
         }
         let sessions = self.read_sessions(&rows);
         self.adopt(&rows, &sessions);
