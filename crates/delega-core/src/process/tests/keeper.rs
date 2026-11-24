@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, ProcessIdentity, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed,
-    assert_gone, is_running, run_guarded, sh,
+    OWN_GROUP, ProcessIdentity, Reaper, Scratch, assert_confirmed, assert_gone, is_running,
+    own_group_recorded, own_session_recorded, perl_record_self, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -76,13 +76,15 @@ fn sleeper_entry() {
 }
 
 /// A shell command that starts a process in a session of its own, like
-/// `OWN_SESSION`, running this test binary as a 60 s sleeper instead of
-/// `sleep`, so the run marker in its environment is visible on macOS too.
-pub(super) fn own_session_sleeper() -> String {
+/// `own_session_recorded`, running this test binary as a 60 s sleeper instead
+/// of `sleep`, so the run marker in its environment is visible on macOS too.
+/// It publishes its own pid at `record` once `setsid` has succeeded.
+pub(super) fn own_session_sleeper(record: &str) -> String {
     let exe = std::env::current_exe().expect("the test binary's path");
     format!(
-        "perl -e 'use POSIX; POSIX::setsid(); $ENV{{{SLEEP_ENV}}} = 60; \
+        "perl -e 'use POSIX; defined(POSIX::setsid()) or die; {} $ENV{{{SLEEP_ENV}}} = 60; \
          exec q({}), q(--exact), q(process::tests::keeper::sleeper_entry), q(--test-threads=1), q(-q)'",
+        perl_record_self(record),
         exe.display()
     )
 }
@@ -185,14 +187,13 @@ async fn a_kept_run_that_times_out_is_stopped_with_its_group() {
 async fn an_interrupted_kept_run_stops_a_setsid_descendant() {
     require_perl!();
     let s = Scratch::new();
-    let script = format!(
-        "{OWN_SESSION} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} echo ready > ready; sleep 60"
-    );
+    // The descendant publishes `gc` once it has left the session, so the
+    // interrupt comes after that.
+    let script = format!("{} >/dev/null 2>&1 & sleep 60", own_session_recorded("gc"));
     let spec = kept(sh(&s, &script, LONG));
     let handle = ProcessHandle::start(spec);
     let mut reaper = Reaper::default();
     let gc = reaper.watch(&s, "gc").await;
-    s.exists("ready").await;
     handle.interrupt();
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
@@ -290,12 +291,15 @@ fn owner_entry() {
         // a stop explains its end.
         format!("record leader $$; {}", super::gaps::long_relay(&dir))
     } else {
+        // The group and session descendants publish their own records once
+        // they have left the group and the session.
         format!(
-            "record leader $$; {OWN_GROUP} & record group $!; \
-             {} >/dev/null 2>&1 & record session $!; \
+            "record leader $$; {} & \
+             {} >/dev/null 2>&1 & \
              sh -c 'trap \"\" TERM; echo $$ > stubborn; while :; do sleep 1; done' & \
              sleep 60",
-            own_session_sleeper()
+            own_group_recorded("group"),
+            own_session_sleeper("session")
         )
     };
     let script = format!("{}{script}", super::fixtures::RECORD);
@@ -356,7 +360,6 @@ async fn sigkill_of_the_owner_leaves_nothing_running() {
         pids.push(reaper.watch(&s, file).await);
     }
     pids.push(keeper);
-    super::fixtures::wait_own_group(pids[2]).await;
     let _ = crate::process::sys::signal_process(owner_pid, Signal::KILL);
     let _ = owner.wait();
     assert_gone("the program, its descendants and the keeper", &pids).await;

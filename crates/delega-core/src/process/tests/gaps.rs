@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_gone, is_running,
-    is_running_async, run_guarded, sh,
+    OWN_GROUP, OWN_SESSION, Reaper, Scratch, assert_gone, await_record, is_running,
+    is_running_async, own_group_recorded, own_session_recorded, run_guarded, sh,
 };
 use crate::contract::result::Cleanup;
 use crate::process::Ending;
@@ -86,11 +86,12 @@ async fn an_own_group_grandchild_whose_parent_exits_at_once_is_cleaned_up() {
 async fn an_own_group_descendant_started_between_two_scans_before_a_crash_is_cleaned_up() {
     require_perl!();
     let s = Scratch::new();
-    // The crash lands 0.2 s after the descendant starts. No periodic scan runs
-    // after the first, however slow the machine is.
+    // The crash comes once the descendant has said it left the group. No
+    // periodic scan runs after the first, however slow the machine is.
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {OWN_GROUP} & record gc $!; \
-         sleep 0.2; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} record leader $$; {} & {} kill -KILL $$; sleep 5",
+        own_group_recorded("gc"),
+        await_record("gc")
     );
     let mut spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     spec.capture_interval = Some(Duration::from_secs(3600));
@@ -181,8 +182,10 @@ async fn a_setsid_descendant_started_just_after_spawn_is_cleaned_up_when_the_lea
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {OWN_SESSION} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} \
-         sleep 0.2; kill -KILL $$; sleep 5"
+        "{WAIT_FOR_SCAN} record leader $$; {} >/dev/null 2>&1 & {} \
+         sleep 0.2; kill -KILL $$; sleep 5",
+        own_session_recorded("gc"),
+        await_record("gc")
     );
     let spec = sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned")));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
@@ -203,8 +206,9 @@ async fn a_setsid_grandchild_whose_parent_exits_at_once_is_stopped_in_a_kept_run
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} exit 0",
-        own_session_sleeper()
+        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & {} exit 0",
+        own_session_sleeper("gc"),
+        await_record("gc")
     );
     let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
@@ -218,9 +222,10 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped
     require_perl!();
     let s = Scratch::new();
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} \
+        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {} >/dev/null 2>&1 & {} \
          sleep 0.15; kill -KILL $$; sleep 5",
-        own_session_sleeper()
+        own_session_sleeper("gc"),
+        await_record("gc")
     );
     let spec = kept(sh(&s, &script, LONG).with_lister(marking_lister(s.path("scanned"))));
     let (report, pids, _reaper) = run_guarded(&s, spec, &["gc"]).await;
@@ -238,10 +243,14 @@ async fn a_setsid_descendant_started_between_two_scans_before_a_crash_is_stopped
 async fn an_orphan_that_clears_its_environment_is_stopped_by_the_keeper_on_linux() {
     require_perl!();
     let s = Scratch::new();
-    let detach =
-        "perl -e 'use POSIX; POSIX::setsid(); %ENV = (); exec { q(/bin/sleep) } q(sleep), q(60)'";
+    let detach = format!(
+        "perl -e 'use POSIX; defined(POSIX::setsid()) or die; {} %ENV = (); \
+         exec {{ q(/bin/sleep) }} q(sleep), q(60)'",
+        super::fixtures::perl_record_self("gc")
+    );
     let script = format!(
-        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {detach} >/dev/null 2>&1 & record gc $!; {WAIT_ESCAPED} exit 0"
+        "{WAIT_FOR_SCAN} record leader $$; {AFTER_RAMP} {detach} >/dev/null 2>&1 & {} exit 0",
+        await_record("gc")
     );
     // The owner's listings never show it: once the leader is known they hide
     // every group leader but the leader, which the orphan is from its

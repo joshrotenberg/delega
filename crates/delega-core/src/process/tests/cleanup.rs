@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::fixtures::{
-    OWN_GROUP, OWN_SESSION, Reaper, Scratch, WAIT_ESCAPED, assert_confirmed, assert_gone,
-    await_event, is_running, run_guarded, sh, wait_own_group, wait_tracked,
+    OWN_GROUP, Reaper, Scratch, assert_confirmed, assert_gone, await_event, await_record,
+    is_running, own_group_recorded, own_session_recorded, run_guarded, sh, wait_tracked,
 };
 use crate::contract::result::Cleanup;
 use crate::process::sys::Signal;
@@ -116,8 +116,13 @@ both!(
         require_perl!();
         let s = Scratch::new();
         // Its own group, the child's session: the group signal cannot reach it, the
-        // session sweep can, whether or not a scan ever saw it.
-        let script = format!("record leader $$; {OWN_GROUP} & record gc $!; {WAIT_ESCAPED} exit 0");
+        // session sweep can, whether or not a scan ever saw it. The leader exits
+        // once the descendant has said it left the group.
+        let script = format!(
+            "record leader $$; {} & {} exit 0",
+            own_group_recorded("gc"),
+            await_record("gc")
+        );
         let started = Instant::now();
         let (report, pids, _reaper) = run_guarded(&s, sh(&s, &script, LONG), &["gc"]).await;
         assert_eq!(report.ending, Ending::Exited { code: 0 }, "{report:#?}");
@@ -135,13 +140,14 @@ both!(
         // A session of its own is beyond the sweep. Only a scan that saw it while
         // its parent lived can track it. The leader stays until the test has seen
         // the scan track the descendant, however long that takes, then exits.
+        // The descendant publishes `gc` only once it has left the session.
         let script = format!(
-            "record leader $$; {OWN_SESSION} & record gc $!; while [ ! -e go ]; do sleep 0.02; done; exit 0"
+            "record leader $$; {} & while [ ! -e go ]; do sleep 0.02; done; exit 0",
+            own_session_recorded("gc")
         );
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         let mut reaper = Reaper::default();
         let gc = reaper.watch(&s, "gc").await;
-        wait_own_group(gc).await;
         wait_tracked(&handle, gc).await;
         let stopped = Instant::now();
         std::fs::write(s.path("go"), "go").expect("write the go file");
@@ -162,7 +168,8 @@ both!(
         // The descendant is in its own session, inherits the pipes and is tracked.
         // It must get TERM when the group does, not when cleanup starts: with a
         // long grace and drain it would otherwise hold the report for a minute.
-        let script = format!("record leader $$; {OWN_SESSION} & record gc $!; wait");
+        // It publishes `gc` only once it has left the session.
+        let script = format!("record leader $$; {} & wait", own_session_recorded("gc"));
         let mut spec = sh(&s, &script, LONG);
         spec.stop_grace = Duration::from_secs(60);
         spec.drain_bound = Duration::from_secs(60);
@@ -170,7 +177,6 @@ both!(
         let handle = ProcessHandle::start(spec);
         let mut reaper = Reaper::default();
         let gc = reaper.watch(&s, "gc").await;
-        wait_own_group(gc).await;
         // Let the periodic scan see the descendant.
         wait_tracked(&handle, gc).await;
         let stopped = Instant::now();
@@ -190,9 +196,11 @@ both!(
         let s = Scratch::new();
         // The descendant starts after the first scan and the interrupt comes before
         // the next periodic one, so only the scan a stop makes first can see it.
+        // It publishes `gc` only once it has left the session, so the sweep
+        // cannot catch it in the session.
         let script = format!(
-            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; \
-         {OWN_SESSION} & record gc $!; wait"
+            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; {} & wait",
+            own_session_recorded("gc")
         );
         let mut spec =
             sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
@@ -201,8 +209,6 @@ both!(
         let handle = ProcessHandle::start(spec);
         let mut reaper = Reaper::default();
         let gc = reaper.watch(&s, "gc").await;
-        // Without this the sweep could catch it before it has left the session.
-        wait_own_group(gc).await;
         let stopped = Instant::now();
         handle.interrupt();
         let report = wait_for_cleanup_report(handle, stopped).await;
@@ -404,9 +410,12 @@ both!(
         // pipe makes it Unconfirmed. Never Confirmed with the orphan alive.
         // It starts after the first scan, and the leader exits before the next, so
         // no scan can have seen it with its parent alive.
+        // It publishes `gc` once it has left the session, and the leader exits
+        // then.
         let script = format!(
-            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; \
-         {OWN_SESSION} & record gc $!; {WAIT_ESCAPED} exit 0"
+            "while [ ! -e scanned ]; do sleep 0.02; done; record leader $$; {} & {} exit 0",
+            own_session_recorded("gc"),
+            await_record("gc")
         );
         let mut spec =
             sh(&s, &script, LONG).with_lister(super::gaps::marking_lister(s.path("scanned")));
@@ -695,8 +704,12 @@ both!(
         require_perl!();
         let s = Scratch::new();
         // Wait until the descendant has left the group, so the group signal cannot
-        // be what reaches it.
-        let script = format!("record leader $$; {OWN_GROUP} & record gc $!; {WAIT_ESCAPED} exit 0");
+        // be what reaches it: it says so in `gc`.
+        let script = format!(
+            "record leader $$; {} & {} exit 0",
+            own_group_recorded("gc"),
+            await_record("gc")
+        );
         let mut spec = sh(&s, &script, LONG);
         spec.track_descendants = false;
         let started = Instant::now();

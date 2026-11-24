@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::fixtures::{
-    Held, OWN_SESSION, Reaper, Scratch, assert_confirmed, assert_gone, await_event, sh,
+    Held, Reaper, Scratch, assert_confirmed, assert_gone, await_event, own_session_recorded, sh,
 };
 use crate::process::sys::{self, Signal};
 use crate::process::tree::Lister;
@@ -195,7 +195,9 @@ fn dropping_the_runtime_kills_a_tracked_descendant_outside_the_group_and_session
         .enable_all()
         .build()
         .expect("build runtime");
-    let script = format!("record leader $$; {OWN_SESSION} & record gc $!; wait");
+    // It publishes `gc` only once it has left the session, so a scan that
+    // tracks it tracks a process outside the group and session.
+    let script = format!("record leader $$; {} & wait", own_session_recorded("gc"));
     let mut reaper = Reaper::default();
     let (handle, gc) = runtime.block_on(async {
         let handle = ProcessHandle::start(sh(&s, &script, LONG));

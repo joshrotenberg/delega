@@ -438,6 +438,44 @@ pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sle
 /// `sleep 60` in a session of its own, beyond what the session sweep reaches.
 pub(super) const OWN_SESSION: &str = "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(60)'";
 
+/// Perl statements that publish the running process's own pid as a complete
+/// record at `name` in the current directory: a temporary file beside it,
+/// renamed into place, as [`publish_pid`] does.
+pub(super) fn perl_record_self(name: &str) -> String {
+    format!(
+        "open F, q(>), q({name}.tmp) or die; print F qq($$\\n); close F or die; \
+         rename q({name}.tmp), q({name}) or die;"
+    )
+}
+
+/// [`OWN_GROUP`] that publishes its own pid at `name` once `setpgid` has
+/// succeeded, and only then: the record is its acknowledgement that it has
+/// left the group. Wait for it in the script with [`await_record`].
+pub(super) fn own_group_recorded(name: &str) -> String {
+    format!(
+        "perl -e 'use POSIX; setpgid(0,0) or die; {} exec q(sleep), q(60)'",
+        perl_record_self(name)
+    )
+}
+
+/// [`OWN_SESSION`] that publishes its own pid at `name` once `setsid` has
+/// succeeded, and only then: the record is its acknowledgement that it has
+/// left the session.
+pub(super) fn own_session_recorded(name: &str) -> String {
+    format!(
+        "perl -e 'use POSIX; defined(POSIX::setsid()) or die; {} exec q(sleep), q(60)'",
+        perl_record_self(name)
+    )
+}
+
+/// Shell: wait until the record `name` exists. The records the descendants
+/// publish themselves are renamed into place, so a file that exists is
+/// complete. The 10 ms is how often the shell looks, not a guess at when the
+/// record comes.
+pub(super) fn await_record(name: &str) -> String {
+    format!("until [ -e {name} ]; do sleep 0.01; done;")
+}
+
 /// The state letters `ps` shows for a process, empty when it is gone.
 pub(super) fn process_state(pid: i32) -> String {
     std::process::Command::new("/bin/ps")
@@ -506,13 +544,9 @@ pub(super) async fn run_guarded(
     (handle.wait().await, pids, reaper)
 }
 
-/// Shell: after starting a background command with `&`, wait until it has
-/// become the leader of its own group (so it has run `setsid` or `setpgid`).
-pub(super) const WAIT_ESCAPED: &str =
-    "until [ \"$(ps -o pgid= -p $! | tr -d ' ')\" = \"$!\" ]; do sleep 0.02; done;";
-
 /// Wait until a process leads its own group, for tests that must not race the
-/// descendant's own `setsid`.
+/// descendant's own `setsid`. A descendant that can acknowledge the move
+/// itself ([`own_session_recorded`]) needs no such wait.
 pub(super) async fn wait_own_group(pid: i32) {
     let began = Instant::now();
     loop {
