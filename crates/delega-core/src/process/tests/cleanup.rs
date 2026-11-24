@@ -22,10 +22,13 @@ const LONG: Duration = Duration::from_secs(60);
 /// and listing delays.
 const BOUND: Duration = Duration::from_secs(30);
 
+/// The report, or a failure once [`BOUND`] has passed since `began`: a
+/// cleanup that does not end (a descendant holding the report, say) fails
+/// the test within its bound, not at the run's cleanup deadline.
 async fn wait_for_cleanup_report(handle: ProcessHandle, began: Instant) -> ProcessReport {
     tokio::time::timeout_at(tokio::time::Instant::from_std(began + BOUND), handle.wait())
         .await
-        .expect("the report was held by the detached descendant for 30 s")
+        .unwrap_or_else(|_| panic!("no report within {BOUND:?} of the stop"))
 }
 
 async fn assert_stopped_in_time(what: &str, pids: &[i32], began: Instant) {
@@ -283,7 +286,7 @@ both!(
             .await;
         let stopped = Instant::now();
         handle.interrupt();
-        let report = handle.wait().await;
+        let report = wait_for_cleanup_report(handle, stopped).await;
         assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
         let (kids, _) = s.published_pids_in("kids");
         assert!(kids.len() >= 3, "only {} children were started", kids.len());
