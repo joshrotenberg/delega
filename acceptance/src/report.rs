@@ -297,7 +297,7 @@ fn results_md(rows: &[Measured], meta: Option<&serde_json::Value>, repeats: &[Me
     out.push_str("## Summary\n\n");
     out.push_str(
         "- **Expected outcome and exit**: the outcome and the exit status the expectations table gives.\n\
-         - **Cleanup verdict as expected**: `cleanup.confirmed` matches the fixture's reference value. The reference outcome, exit and cleanup verdict are recorded for comparison.\n\
+         - **Cleanup verdict as expected**: exact match with the fixture's reference value. A documented residual or an allowed late listing can pass with a different verdict.\n\
          - **One stated outcome**: standard output held exactly one JSON document that parses and validates\n\
            as a `RunResult`, and `delega` exited without the harness having to kill it. Rows where the harness\n\
            closed standard output or killed `delega` have no document to read and are not counted.\n\

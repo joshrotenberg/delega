@@ -439,13 +439,17 @@ fallback.
 
 ## What gates the matrix
 
-- A readable run must exit and produce exactly one valid `RunResult`.
-- Outside the documented residuals for the current platform, a `Confirmed`
-  result fails if the harness observes a survivor at exit or after settling.
+- Every row must have the expected exit status. A readable run must produce
+  exactly one valid `RunResult` with the expected outcome.
 - An `Unconfirmed` result must give a reason documented by the process layer.
-  Examples include a late or unavailable listing, an incomplete freeze, a
-  keeper that could not prove its tree empty, and output pipes still held
-  open. Probe and provider reasons can appear together.
+  Probe and provider reasons can appear together.
+- Outside the documented residuals, rows expecting `Confirmed` must have no
+  survivors at exit or after settling. They may report `Unconfirmed` for a
+  late listing alone, with no reported PIDs or process groups. The harness
+  evaluates that result from the original attempt.
+- Rows with process listing disabled must report `Unconfirmed`. The Linux
+  keeper must still leave no survivors. On macOS only the detached roles
+  listed for those rows may survive.
 - When the fixture kills `delega` or closes its output, the harness checks the
   expected termination. A SIGKILL produces no result. Where cleanup is
   guaranteed without a result, the harness checks for survivors after settling.
@@ -453,8 +457,7 @@ fallback.
   `delega` to stop the tree.
 - The harness must leave no processes from the run after its sweep.
 
-The matrix keeps reference outcomes, exit statuses and cleanup verdicts for
-comparison in the report. Its gap rows exercise macOS orphans, a detached
+The matrix's gap rows exercise macOS orphans, a detached
 `bare` child and the fork relay, plus SIGKILL of both `delega` and its keeper
 on every platform. The orphan and detached-child gaps are listed on macOS
 where `ps -E` hides system program environments. The harness probes that
@@ -464,8 +467,8 @@ The `GAPS` table in `src/matrix.rs` determines which rows are documented
 residuals on the current platform. `RESULTS.md` lists every such row with its
 cleanup verdict and observed survivors. A gap is shown when all its listed
 roles survive after settling. Survivor observations on these rows are
-informational. The valid-result, documented-reason, and termination checks
-still apply wherever the fixture can exercise them.
+informational. The valid-result, expected-outcome, documented-reason, and
+exit checks still apply wherever the fixture can exercise them.
 
 Each ledger entry is an empty file named `pids/role.pid`. Creating the file
 publishes its complete role and PID in one step.
