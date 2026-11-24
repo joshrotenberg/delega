@@ -95,6 +95,11 @@ Give each its own working directory.
 Prefer short waits and the cursor to one long wait. A timeout costs nothing: the
 workers keep running, and you can do other work or call `wait` again.
 
+A host can limit how long a tool call stays in the foreground. Claude Code moves
+a call still running after 120 seconds into the background and reports its
+result later as a notification, so there keep `timeout_secs` under 120 or
+expect that.
+
 Do not leave many waits open at once: one `wait` can name every run and worker
 you care about. A `wait` that would block when the limit on open waits is
 reached returns at once with `limit_reached: "max_waits_in_flight"`,
