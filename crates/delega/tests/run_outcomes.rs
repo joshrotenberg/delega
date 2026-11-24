@@ -184,14 +184,16 @@ fn a_timed_out_run_in_text_mode_says_so_on_stderr() {
 fn interrupted(provider: &str, names: &[&str]) -> (std::process::Output, Rig) {
     let rig = Rig::new();
     let handled = rig.path("signal");
-    let mut child = rig
-        .command()
-        .args(rig.run_args(provider, "hang", &["--output", "json"]))
-        .env("DELEGA_TEST_ACK_RUN_SIGNAL", &handled)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .guarded_spawn()
-        .expect("spawn delega");
+    // Killed and reaped if a wait below fails.
+    let mut child = Reaped(Some(
+        rig.command()
+            .args(rig.run_args(provider, "hang", &["--output", "json"]))
+            .env("DELEGA_TEST_ACK_RUN_SIGNAL", &handled)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .guarded_spawn()
+            .expect("spawn delega"),
+    ));
     rig.wait_started();
     for (count, name) in names.iter().enumerate() {
         signal(child.id(), name);
@@ -203,7 +205,7 @@ fn interrupted(provider: &str, names: &[&str]) -> (std::process::Output, Rig) {
             &format!("it handled signal {} ({name})", count + 1),
         );
     }
-    (wait_bounded(child), rig)
+    (wait_bounded(child.take()), rig)
 }
 
 #[test]

@@ -460,23 +460,34 @@ pub fn wait_exit_only(child: &mut Child, limit: Duration) -> std::process::ExitS
 /// (`DELEGA_TEST_ACK_*`, debug builds only) once it has reached `what`. Fails
 /// the test past [`WAIT_LIMIT`], or at once if `child` exits first, so a
 /// `delega` that never reaches the state is a failure and not a long wait.
+/// Before failing it kills and reaps `child`, so nothing is left running and
+/// nothing later waits on it.
 pub fn wait_for_ack(path: &Path, child: &mut Child, what: &str) {
     let began = Instant::now();
-    while !path.exists() {
-        if let Some(status) = child.try_wait().expect("poll child") {
-            // It may have acknowledged just before it exited.
-            assert!(
-                path.exists(),
-                "delega exited ({status}) before it acknowledged that {what}"
-            );
+    let failure = loop {
+        if path.exists() {
             return;
         }
-        assert!(
-            began.elapsed() < WAIT_LIMIT,
-            "delega did not acknowledge within {WAIT_LIMIT:?} that {what}"
-        );
-        std::thread::sleep(POLL);
-    }
+        match child.try_wait() {
+            // The acknowledgement is written on a thread of its own, so it
+            // can land just after delega exits; look once more.
+            Ok(Some(status)) => {
+                std::thread::sleep(POLL);
+                if path.exists() {
+                    return;
+                }
+                break format!("delega exited ({status}) before it acknowledged that {what}");
+            }
+            Ok(None) if began.elapsed() >= WAIT_LIMIT => {
+                break format!("delega did not acknowledge within {WAIT_LIMIT:?} that {what}");
+            }
+            Ok(None) => std::thread::sleep(POLL),
+            Err(err) => break format!("cannot poll delega while waiting until {what}: {err}"),
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("{failure}");
 }
 
 /// Send a signal by name (`INT`, `TERM`) to a process.
