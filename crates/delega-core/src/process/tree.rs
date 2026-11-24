@@ -1869,6 +1869,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_exiting_row_in_a_listing_without_our_process_fails_without_a_retry() {
+        let text = format!("{}{OBSERVED}\n", row(1));
+        assert_eq!(
+            validate_listing(&text, std::process::id()),
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        let (lister, calls) = listings(vec![text, format!("{}{}", row(1), own_row())]);
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert_eq!(retries(&tree), 0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn a_row_that_is_not_the_exiting_shape_fails_without_a_retry() {
         for line in NOT_EXITING {
             let (lister, calls) = listings(vec![
@@ -1929,6 +1946,32 @@ mod tests {
         assert!(started.elapsed() <= ps_timeout());
         let expected = u64::from(cfg!(target_os = "linux"));
         assert_eq!(retries(&tree), expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_retry_that_completes_after_the_deadline_is_discarded() {
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let lister: Lister = Arc::new(move || {
+            let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if first {
+                    return validate_listing(
+                        &format!("{}{OBSERVED}\n", own_row()),
+                        std::process::id(),
+                    );
+                }
+                // The clock passes the deadline inside the retry, which then
+                // returns a clean listing at once.
+                tokio::time::advance(ps_timeout() + std::time::Duration::from_millis(1)).await;
+                validate_listing(&format!("{}{}", row(1), own_row()), std::process::id())
+            })
+        });
+        let tree = ProcessTree::new(123, lister, true);
+        assert_eq!(
+            tree.rows().await,
+            Err(InspectError::Failed(quoting(OBSERVED)))
+        );
+        assert_eq!(retries(&tree), u64::from(cfg!(target_os = "linux")));
     }
 
     #[test]
