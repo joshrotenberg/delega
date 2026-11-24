@@ -4,10 +4,16 @@
 
 /// Skip a test visibly when `perl` is missing. The tests that start a
 /// descendant in its own process group or session need it, because `sh` cannot
-/// do that portably (`set -m` is ignored by dash without a terminal).
+/// do that portably (`set -m` is ignored by dash without a terminal). Under CI
+/// (`CI` set, as GitHub Actions sets it) a missing perl fails the test
+/// instead, so it is never reported as passed.
 macro_rules! require_perl {
     () => {
         if !super::fixtures::perl_available() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "perl is not installed, and CI requires it for this test"
+            );
             eprintln!(
                 "SKIPPED: perl is not installed; this test starts a descendant in its own \
                  process group or session with it"
