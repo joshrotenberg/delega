@@ -30,7 +30,7 @@ An argument a tool does not have is rejected.
 | `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. `stale_server` is present only when the executable this server started from was replaced or removed since. |
 | `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: `settled: true` and, when there is one, its `result`, with the outcome `interrupted` when the stop ended it. A finished run's result comes back unchanged. |
 | `respond` | `interaction`, `decision`, optional `note` | Commits an allow or deny for one pending permission interaction. |
-| `close` | `worker` | After its running run has stopped: the worker is `closed`, its queued runs are discarded, its slot is free, and `settled: true`, with the stopped run's `result` when a run was running. |
+| `close` | `worker` | After its running run has stopped: the worker is `closed`, its queued runs are discarded, its slot is free, and `settled: true`, with the stopped run's `result` when there is one. |
 
 `start` and `follow_up` return at once. Only `wait`, `interrupt` and `close`
 wait, and each is bounded: `wait` by its `timeout_secs` (30 seconds by default,
