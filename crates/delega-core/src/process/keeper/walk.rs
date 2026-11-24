@@ -213,15 +213,16 @@ pub(super) fn children(pid: i32) -> Result<Vec<i32>, ReadFailed> {
 /// listing of `/proc` itself, which can hide processes when cut short, this
 /// is the directory of one process already listed, and a process reaped
 /// mid-listing ends it with ENOENT. The process counts as gone, with no
-/// children, only if its stat now shows it gone (and its pidfd agrees, as
-/// `hidepid` can hide a live process) or a zombie (whose children were
-/// reparented when it exited); otherwise the read failed.
+/// children, only on strict proof of exit ([`sys::pid_gone`]): opening its
+/// pidfd fails with ESRCH, or a poll of the pidfd succeeds with it readable,
+/// which happens only once every thread has exited. Neither its stat (a
+/// zombie leader can have live worker threads, which own children) nor a
+/// poll that fails counts; otherwise the read failed.
 fn task_listing_failed(pid: i32) -> Result<Vec<i32>, ReadFailed> {
-    match stat_read(pid)? {
-        None if gone_by_pidfd(pid) => Ok(Vec::new()),
-        None => Err(read_failed()),
-        Some((state, _)) if state == 'Z' || state == 'X' => Ok(Vec::new()),
-        Some(_) => Err(read_failed()),
+    if sys::pid_gone(pid) {
+        Ok(Vec::new())
+    } else {
+        Err(read_failed())
     }
 }
 
@@ -992,53 +993,138 @@ mod tests {
         assert_eq!(exited, Some(Some(false)));
     }
 
-    /// An error while listing the task directory of a pid already listed is
-    /// absence when the process has gone (reaped, or a zombie) and a failed
-    /// read while it lives.
-    #[test]
-    fn a_task_listing_error_is_absence_only_for_a_process_that_has_gone() {
+    fn sleeper() -> std::process::Child {
         use crate::test_spawn::Guarded;
+        std::process::Command::new("sleep")
+            .arg("30")
+            .guarded_spawn()
+            .expect("start a child")
+    }
+
+    /// Wait up to 10 s for the stat of `pid` to show state `Z`.
+    fn wait_zombie(pid: i32) -> bool {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            if stat(pid).is_some_and(|(state, _)| state == 'Z') {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A failed task listing reads as no children only on strict proof of
+    /// exit: a reaped pid (ESRCH) or a process whose every thread exited.
+    /// A live process stays a failed read.
+    #[test]
+    fn a_failed_task_listing_is_absence_only_on_strict_proof_of_exit() {
+        let mut live = sleeper();
+        let live_pid = i32::try_from(live.id()).expect("a pid");
+        let live_read = task_listing_failed(live_pid);
+        let _ = live.kill();
+        let _ = live.wait();
+
+        let mut zombie = sleeper();
+        let zombie_pid = i32::try_from(zombie.id()).expect("a pid");
+        let _ = zombie.kill();
+        let became_zombie = wait_zombie(zombie_pid);
+        let zombie_read = task_listing_failed(zombie_pid);
+        let _ = zombie.wait();
+
+        assert_eq!(live_read, Err(ReadFailed), "a live process read as gone");
+        assert!(became_zombie, "the killed child never showed as a zombie");
+        assert_eq!(zombie_read, Ok(Vec::new()));
+        // Above any pid_max: opening its pidfd fails with ESRCH.
+        assert_eq!(task_listing_failed(i32::MAX - 1), Ok(Vec::new()));
+    }
+
+    /// A process whose leader thread exited while a worker thread lives
+    /// shows its leader as a zombie, and its workers can still own children,
+    /// so a failed task listing of it stays a failed read. The leader ends
+    /// with the raw `exit` system call, which ends that thread alone.
+    #[test]
+    fn a_failed_task_listing_of_a_zombie_leader_with_a_live_worker_is_a_failed_read() {
+        use crate::test_spawn::Guarded;
+        let sys_exit = if cfg!(target_arch = "x86_64") {
+            60
+        } else if cfg!(target_arch = "aarch64") {
+            93
+        } else {
+            eprintln!("skipped: no exit system call number for this architecture");
+            return;
+        };
+        let threads = std::process::Command::new("perl")
+            .args(["-Mthreads", "-e", "1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .guarded_status();
+        if !threads.is_ok_and(|status| status.success()) {
+            eprintln!("skipped: perl with threads is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let ready = dir.path().join("worker-ready");
+        let script = format!(
+            "use threads; my $r = shift; \
+             threads->create(sub {{ open my $f, q(>), $r; print $f 1; close $f; sleep 60 }}); \
+             until (-s $r) {{ select(undef, undef, undef, 0.01) }} syscall({sys_exit}, 0);"
+        );
+        let mut child = std::process::Command::new("perl")
+            .args(["-e", &script])
+            .arg(&ready)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .guarded_spawn()
+            .expect("start perl");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        let leader_exited = wait_zombie(pid);
+        let worker_alive = std::fs::read_dir(format!("/proc/{pid}/task"))
+            .map(|tasks| tasks.count() > 1)
+            .unwrap_or(false);
+        let read = task_listing_failed(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(leader_exited, "the leader thread did not exit");
+        assert!(worker_alive, "the worker thread is not alive");
+        assert_eq!(
+            read,
+            Err(ReadFailed),
+            "a process with a live thread read as gone"
+        );
+    }
+
+    /// The listing fault reaches the fallback through `children`: a live
+    /// process stays a failed read, a zombie reads as no children.
+    #[test]
+    fn a_task_listing_error_in_children_goes_through_the_strict_fallback() {
         if !children_file() {
             eprintln!("skipped: this kernel has no task children files");
             return;
         }
-        let spawn = || {
-            std::process::Command::new("sleep")
-                .arg("30")
-                .guarded_spawn()
-                .expect("start a child")
-        };
         let read_with_listing_error = |pid: i32| {
             FAILED_TASK_LISTING.with(|failed| failed.set(pid));
             let read = children(pid);
             FAILED_TASK_LISTING.with(|failed| failed.set(0));
             read
         };
-        let mut live = spawn();
+        let mut live = sleeper();
         let live_pid = i32::try_from(live.id()).expect("a pid");
         let live_read = read_with_listing_error(live_pid);
         let _ = live.kill();
         let _ = live.wait();
-
-        let mut zombie = spawn();
+        let mut zombie = sleeper();
         let zombie_pid = i32::try_from(zombie.id()).expect("a pid");
         let _ = zombie.kill();
-        let until = Instant::now() + Duration::from_secs(10);
-        while stat(zombie_pid).is_some_and(|(state, _)| state != 'Z') && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let became_zombie = wait_zombie(zombie_pid);
         let zombie_read = read_with_listing_error(zombie_pid);
         let _ = zombie.wait();
-        // Reaped now: its stat is gone, unless the pid was reused already.
-        let reaped_read = stat(zombie_pid)
-            .is_none()
-            .then(|| read_with_listing_error(zombie_pid));
-
         assert_eq!(live_read, Err(ReadFailed), "a live process read as gone");
+        assert!(became_zombie, "the killed child never showed as a zombie");
         assert_eq!(zombie_read, Ok(Vec::new()));
-        if let Some(read) = reaped_read {
-            assert_eq!(read, Ok(Vec::new()));
-        }
     }
 
     /// An error from a directory listing's iterator is a failed read, also
