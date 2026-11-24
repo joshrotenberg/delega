@@ -179,16 +179,29 @@ fn a_timed_out_run_in_text_mode_says_so_on_stderr() {
     rig.assert_nothing_left();
 }
 
-/// Start `hang`, send `names` in turn once it is running, and return the result
-/// after it exits.
+/// Start `hang`, send `names` in turn once it is running, each once delega has
+/// handled the one before, and return the result after it exits.
 fn interrupted(provider: &str, names: &[&str]) -> (std::process::Output, Rig) {
     let rig = Rig::new();
-    let child = rig.spawn_run(provider, "hang", &["--output", "json"]);
+    let handled = rig.path("signal");
+    let mut child = rig
+        .command()
+        .args(rig.run_args(provider, "hang", &["--output", "json"]))
+        .env("DELEGA_TEST_ACK_RUN_SIGNAL", &handled)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .guarded_spawn()
+        .expect("spawn delega");
     rig.wait_started();
-    for name in names {
+    for (count, name) in names.iter().enumerate() {
         signal(child.id(), name);
-        // Far enough apart that each one is a signal of its own.
-        std::thread::sleep(Duration::from_millis(100));
+        // Each one handled before the next is sent, so each is a signal of
+        // its own, taken while the run is still being waited for.
+        wait_for_ack(
+            &rig.path(&format!("signal-{}", count + 1)),
+            &mut child,
+            &format!("it handled signal {} ({name})", count + 1),
+        );
     }
     (wait_bounded(child), rig)
 }
