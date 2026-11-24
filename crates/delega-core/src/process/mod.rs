@@ -344,19 +344,21 @@
 //! time printed in another locale leaves the listing failed without a retry.
 //! It is taken again at most once (`EXITING_ROW_RETRIES`), against one
 //! absolute deadline, the inspection's start plus `PS_TIMEOUT`: the retry
-//! starts only before it, and its result is used only if it arrives before
-//! it. The retry verifies only that a fresh, complete listing passes the same
+//! is asked for only before it, its `ps` is launched only if the deadline has
+//! not passed when the spawn lock is held, immediately before the spawn, and
+//! its result is used only if it arrives before it. The retry verifies only that a fresh, complete listing passes the same
 //! validation. The row is never skipped, and it does not prove its pid is
 //! gone: an exec from a non-leader thread hands the leader's pid and start
 //! time to the thread that called it, so the pid can still name a live
 //! process. When the retry is not started, is discarded at the deadline, or
 //! shows the same signature again, cleanup keeps the error that quotes the
-//! row; a retry that fails differently supplies its own error. Retries
-//! started, including discarded ones, are counted in
+//! row; a retry that fails differently supplies its own error. Retries whose
+//! `ps` was launched, including ones discarded at the deadline, are counted in
 //! `inspection.exiting_row_retries`. A retried listing before the first
 //! signal is taken later, so that signal can come up to one listing's time
-//! later, within the existing stop budget; a leader that exits in that
-//! interval is reported by its natural exit. Ownership and the checks before
+//! later, within the existing stop budget; in a run that is not a dialogue, a
+//! leader that exits in that interval is reported by its natural exit (a
+//! dialogue run can set its ending before that wait, and keeps it). Ownership and the checks before
 //! a signal are unchanged. `delega doctor` takes one sample listing and does
 //! not retry it, so its failure describes that sample. A listing is also not
 //! an instant: `ps` reads `/proc` one pid after another, so a process that
