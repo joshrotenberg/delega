@@ -7,7 +7,7 @@ use super::{Rig, finished, result_of};
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::request::Provider;
 use delega_core::supervisor::{
-    Error, Limits, RunState, Supervisor, Target, WaitLimit, WaitTargets, WorkerState,
+    Error, Limits, RunState, Supervisor, Target, WaitLimit, WaitResponse, WaitTargets, WorkerState,
 };
 
 fn runs(ids: &[&str]) -> WaitTargets {
@@ -22,6 +22,48 @@ fn workers(ids: &[&str]) -> WaitTargets {
         runs: Vec::new(),
         workers: ids.iter().map(ToString::to_string).collect(),
     }
+}
+
+/// Drive a one-second wait after the actor has parked it. The fake provider
+/// stays gated, and the clock runs normally again before it is released.
+async fn expire_wait(
+    supervisor: &Supervisor,
+    targets: WaitTargets,
+    timeout: Option<u64>,
+    cursor: Option<u64>,
+) -> WaitResponse {
+    let mut observer = supervisor.observe_waits();
+    let wait = supervisor.wait(targets, timeout, cursor);
+    tokio::pin!(wait);
+    tokio::select! {
+        biased;
+        response = &mut wait => panic!("wait answered before registration: {response:?}"),
+        () = std::future::ready(()) => {}
+    }
+    let registration = observer.registered().await;
+    tokio::time::pause();
+    // Poll once to arm the timer. Both of these selects always have a ready
+    // branch, so Tokio cannot auto-advance ahead of the explicit clock steps.
+    tokio::select! {
+        biased;
+        response = &mut wait => panic!("wait answered when armed: {response:?}"),
+        () = std::future::ready(()) => {}
+    }
+    tokio::time::advance(Duration::from_millis(900)).await;
+    tokio::select! {
+        biased;
+        response = &mut wait => panic!("wait answered before the deadline: {response:?}"),
+        () = std::future::ready(()) => {}
+    }
+    assert_waits_in_flight(supervisor, 1).await;
+    tokio::time::advance(Duration::from_millis(101)).await;
+    let response = tokio::time::timeout(Duration::from_millis(10), wait)
+        .await
+        .expect("wait did not expire at one second")
+        .expect("wait");
+    tokio::time::resume();
+    registration.removed().await;
+    response
 }
 
 #[tokio::test]
@@ -75,16 +117,7 @@ async fn a_wait_that_times_out_is_a_response_with_current_states_not_an_error() 
         .expect("start");
     gate.started().await;
 
-    let begun = Instant::now();
-    let response = supervisor
-        .wait(runs(&[&started.run]), Some(1), None)
-        .await
-        .expect("a timeout is not an error");
-    assert!(
-        begun.elapsed() >= Duration::from_millis(900),
-        "{:?}",
-        begun.elapsed()
-    );
+    let response = expire_wait(&supervisor, runs(&[&started.run]), Some(1), None).await;
     assert!(response.timed_out);
     assert_eq!(response.timeout_secs, 1);
     assert_eq!(response.runs[0].state, RunState::Running);
@@ -115,18 +148,9 @@ async fn the_wait_ceiling_caps_the_timeout_asked_for() {
         .await
         .expect("start");
     gate.started().await;
-    let begun = Instant::now();
-    let response = supervisor
-        .wait(runs(&[&started.run]), Some(3600), None)
-        .await
-        .expect("wait");
+    let response = expire_wait(&supervisor, runs(&[&started.run]), Some(3600), None).await;
     assert!(response.timed_out);
     assert_eq!(response.timeout_secs, 1);
-    assert!(
-        begun.elapsed() < Duration::from_secs(30),
-        "{:?}",
-        begun.elapsed()
-    );
     gate.open();
     result_of(&supervisor, &started.run).await;
     supervisor.shutdown().await;
@@ -148,10 +172,7 @@ async fn a_wait_with_no_timeout_uses_the_configured_default_and_the_ceiling_stil
         .await
         .expect("start");
     gate.started().await;
-    let response = supervisor
-        .wait(runs(&[&started.run]), None, None)
-        .await
-        .expect("wait");
+    let response = expire_wait(&supervisor, runs(&[&started.run]), None, None).await;
     assert!(response.timed_out);
     assert_eq!(response.timeout_secs, 1);
     let listed = supervisor.list().await.expect("list");
@@ -170,10 +191,8 @@ async fn a_wait_with_no_timeout_uses_the_configured_default_and_the_ceiling_stil
         .await
         .expect("start");
     gate2.started().await;
-    let response = second
-        .wait(runs(&[&started2.run]), None, None)
-        .await
-        .expect("wait");
+    let response = expire_wait(&second, runs(&[&started2.run]), None, None).await;
+    assert!(response.timed_out);
     assert_eq!(response.timeout_secs, 1);
     gate.open();
     gate2.open();
@@ -209,10 +228,7 @@ async fn a_cursor_returns_at_once_for_a_finish_after_it_and_not_for_one_before_i
     let cursor = first.cursor;
 
     // `a` finished before the cursor and `b` has not finished: nothing is new.
-    let quiet = supervisor
-        .wait(runs(&[&a.run, &b.run]), Some(1), Some(cursor))
-        .await
-        .expect("wait");
+    let quiet = expire_wait(&supervisor, runs(&[&a.run, &b.run]), Some(1), Some(cursor)).await;
     assert!(quiet.timed_out, "{quiet:#?}");
     assert!(
         quiet.runs.iter().all(|r| r.changed == Some(false)),
@@ -606,12 +622,8 @@ async fn a_wait_that_times_out_frees_its_slot() {
         .expect("start");
     gate.started().await;
 
+    let timed_out = expire_wait(&supervisor, runs(&[&started.run]), Some(1), None).await;
     let mut waits = supervisor.observe_waits();
-    let timed_out = supervisor
-        .wait(runs(&[&started.run]), Some(1), None)
-        .await
-        .expect("wait");
-    waits.registered().await.removed().await;
     assert!(timed_out.timed_out);
     assert_eq!(timed_out.limit_reached, None);
     assert_eq!(timed_out.timeout_secs, 1);
