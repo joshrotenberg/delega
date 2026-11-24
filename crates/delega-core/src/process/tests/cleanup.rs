@@ -817,6 +817,7 @@ async fn the_repeating_group_kill_stops_a_child_when_inspection_hangs_and_early_
     );
     assert_gone("leader and sleep", &pids).await;
     assert!(matches!(report.cleanup, Cleanup::Unconfirmed { .. }));
+    super::fixtures::assert_documented(&report.cleanup);
 }
 
 #[tokio::test]

@@ -381,6 +381,7 @@ async fn a_keeper_killed_during_the_run_makes_the_verdict_unconfirmed() {
     let keeper = keeper_identity(keeper, &s.dir()).expect("identify the keeper");
     assert!(keeper.signal(Signal::KILL), "signal the keeper");
     let report = handle.wait().await;
+    super::fixtures::assert_documented(&report.cleanup);
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => {
             assert!(reason.contains("keeper"), "{reason}");
@@ -744,6 +745,7 @@ async fn an_owner_refusal_stands_when_the_final_census_proves_nothing() {
 
 /// The verdict's reason, or a panic naming the verdict.
 fn unconfirmed_reason(report: &crate::process::ProcessReport) -> &str {
+    super::fixtures::assert_documented(&report.cleanup);
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => reason,
         other => panic!("expected an Unconfirmed verdict, got {other:?}: {report:#?}"),

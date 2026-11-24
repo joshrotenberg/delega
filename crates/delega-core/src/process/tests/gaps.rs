@@ -131,6 +131,7 @@ fn ordered_listings(s: &Scratch, witness: bool, hide_group_leaders: bool) -> Lis
 /// The wanted behaviour: when a descendant is left running, the result must not
 /// claim cleanup is confirmed.
 fn assert_no_false_confirmation(descendant: i32, cleanup: &Cleanup) {
+    super::fixtures::assert_documented(cleanup);
     let alive = is_running(descendant);
     assert!(
         !(alive && *cleanup == Cleanup::Confirmed),
@@ -848,6 +849,7 @@ async fn measure_the_relay_freeze() {
     let mut took = Vec::new();
     for _ in 0..50 {
         let (alive, cleanup, stop) = relay_run().await;
+        super::fixtures::assert_documented(&cleanup);
         took.push(stop);
         if !alive {
             stopped += 1;

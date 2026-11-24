@@ -421,6 +421,20 @@ pub(super) fn assert_confirmed(report: &ProcessReport) {
     );
 }
 
+/// Assert that the reason of an `Unconfirmed` verdict from the process layer
+/// is one delega-core documents (`cleanup_reason::is_documented`), so a reason
+/// built outside `cleanup_reason` and the fixed texts fails the test that
+/// observes it. Not for runs whose injected lister returns a text production
+/// never builds.
+pub(super) fn assert_documented(cleanup: &crate::contract::result::Cleanup) {
+    if let crate::contract::result::Cleanup::Unconfirmed { reason, .. } = cleanup {
+        assert!(
+            crate::cleanup_reason::is_documented(reason),
+            "an Unconfirmed reason delega-core does not document: {reason}"
+        );
+    }
+}
+
 /// A background-able command: `sleep 60` in a process group of its own, in the
 /// session of whoever starts it.
 pub(super) const OWN_GROUP: &str = "perl -e 'use POSIX; setpgid(0,0); exec q(sleep), q(60)'";

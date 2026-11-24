@@ -109,6 +109,7 @@ async fn stop_while_the_listing_is_held(how: How) -> Option<ProcessReport> {
 }
 
 fn assert_missed_listing(report: &ProcessReport) {
+    super::fixtures::assert_documented(&report.cleanup);
     match &report.cleanup {
         Cleanup::Unconfirmed { reason, .. } => assert!(
             reason.contains("before the first signal did not complete"),
@@ -315,6 +316,7 @@ async fn a_stop_whose_listing_never_completes_still_ends_at_the_grace_with_kill(
         matches!(report.cleanup, Cleanup::Unconfirmed { .. }),
         "{report:#?}"
     );
+    super::fixtures::assert_documented(&report.cleanup);
     super::fixtures::assert_gone("leader", &[leader]).await;
 }
 
