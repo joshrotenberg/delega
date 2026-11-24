@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{
     Guarded, PROVIDERS, Rig, assert_stop_cleanup, guarded_pipe, result_of, signal, text,
-    wait_bounded, wait_exit_only, wait_for_ack,
+    wait_bounded, wait_bounded_for, wait_exit_only, wait_for_ack,
 };
 
 #[test]
@@ -156,15 +156,28 @@ fn a_denial_in_a_completed_run_is_listed_on_stderr_and_exits_zero() {
     }
 }
 
+fn run_to_timeout(rig: &Rig, provider: &str, args: &[&str]) -> std::process::Output {
+    // Keep the real CLI deadline to exercise the parsed --timeout all the
+    // way through worker shutdown and the command's exit status. The five
+    // seconds also cover preparation, including the separate version probe.
+    let mut child = rig.spawn_run(provider, "hang", args);
+    wait_for_ack(
+        &rig.record.join("started"),
+        &mut child,
+        "the fake provider reached its hang loop",
+    );
+    wait_bounded_for(child, Duration::from_secs(30))
+}
+
 #[test]
 fn a_run_past_its_time_limit_exits_124_and_leaves_nothing_running() {
     for provider in PROVIDERS {
         let rig = Rig::new();
-        let out = rig.run(provider, "hang", &["--timeout", "1s", "--output", "json"]);
+        let out = run_to_timeout(&rig, provider, &["--timeout", "5s", "--output", "json"]);
         assert_eq!(out.status.code(), Some(124), "{provider}");
         let result = result_of(&out);
         assert_eq!(result.outcome, Outcome::TimedOut);
-        assert_eq!(result.timing.timeout_secs, 1);
+        assert_eq!(result.timing.timeout_secs, 5);
         assert_stop_cleanup(&result, "stop");
         rig.assert_nothing_left();
     }
@@ -173,7 +186,7 @@ fn a_run_past_its_time_limit_exits_124_and_leaves_nothing_running() {
 #[test]
 fn a_timed_out_run_in_text_mode_says_so_on_stderr() {
     let rig = Rig::new();
-    let out = rig.run("claude", "hang", &["--timeout", "1"]);
+    let out = run_to_timeout(&rig, "claude", &["--timeout", "5"]);
     assert_eq!(out.status.code(), Some(124));
     assert!(text(&out.stderr).contains("timed_out: timed_out:"));
     rig.assert_nothing_left();
@@ -661,10 +674,14 @@ fn text_mode_prints_an_answer_only_for_a_completed_run() {
         for (prompt, extra, code) in [
             ("provider-error", &[][..], 1),
             ("denied-refused", &[][..], 2),
-            ("hang", &["--timeout", "1"][..], 124),
+            ("hang", &["--timeout", "5"][..], 124),
         ] {
             let rig = Rig::new();
-            let out = rig.run(provider, prompt, extra);
+            let out = if prompt == "hang" {
+                run_to_timeout(&rig, provider, extra)
+            } else {
+                rig.run(provider, prompt, extra)
+            };
             assert_eq!(out.status.code(), Some(code), "{provider} {prompt}");
             assert_eq!(
                 text(&out.stdout),

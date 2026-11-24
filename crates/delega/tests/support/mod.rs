@@ -397,13 +397,23 @@ pub fn wait_bounded(child: Child) -> Output {
 
 /// [`wait_bounded`] with a limit of the caller's choosing.
 pub fn wait_bounded_for(mut child: Child, limit: Duration) -> Output {
+    let began = Instant::now();
+    wait_bounded_with_clock(&mut child, limit, || began.elapsed())
+}
+
+/// Wait with an injected elapsed clock so the watchdog can be tested separately
+/// from the time it takes to start a real subprocess.
+pub fn wait_bounded_with_clock(
+    child: &mut Child,
+    limit: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+) -> Output {
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
-    let began = Instant::now();
     let status = loop {
         match child.try_wait().expect("poll child") {
             Some(status) => break status,
-            None if began.elapsed() > limit => {
+            None if elapsed() >= limit => {
                 let _ = child.kill();
                 let _ = child.wait();
                 panic!("the child did not exit within {limit:?}");

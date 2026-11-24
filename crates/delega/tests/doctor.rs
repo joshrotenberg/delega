@@ -525,13 +525,25 @@ fn doctor_cannot_run_without_a_usable_current_directory_and_exits_two() {
 
 #[test]
 fn a_version_probe_that_does_not_answer_is_reported_as_timed_out() {
-    // The program sleeps far longer than the probe's limit, so the verdict does
-    // not depend on how fast the machine is; the test takes about the limit.
+    // Keep the real probe deadline to cover doctor executing and timing out
+    // a fake provider in a separate process.
     let rig = Rig::new();
-    let silent = script(&rig, "silent-codex", "exec sleep 120");
+    let ready = rig.path("probe-started");
+    let silent = script(
+        &rig,
+        "silent-codex",
+        r#"[ "$1" = --version ] || exit 2
+: > "${0%/*}/probe-started" || exit 2
+exec /bin/sleep 20"#,
+    );
     let out = doctor_with(&rig, &["--output", "json"], |c| {
+        // A previous inspection retry must not satisfy readiness.
+        if ready.exists() {
+            std::fs::remove_file(&ready).expect("clear previous probe marker");
+        }
         c.env("DELEGA_CODEX_BIN", &silent);
     });
+    assert!(ready.exists(), "the version probe never reported readiness");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     let report = json_of(&out);
     assert_eq!(
