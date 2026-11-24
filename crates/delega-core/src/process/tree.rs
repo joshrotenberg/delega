@@ -99,6 +99,22 @@ fn parse_row(line: &str) -> Option<ProcessRow> {
     })
 }
 
+/// Whether `line` is a row for a process that has exited: its state column
+/// begins with `X` (procps's dead state) and its pid is a positive integer.
+/// Such a row is skipped, and its other columns are not read: `ps` can print
+/// one for a process exiting while it reads it, with columns such as a pgid
+/// of -1 printed as unsigned. An exited process is not live, so skipping it
+/// cannot hide a live descendant; a process that later reuses the pid appears
+/// in a later listing in its own right. Any other row must parse fully.
+fn is_dead_row(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let pid_ok = parts
+        .next()
+        .and_then(|pid| pid.parse::<i32>().ok())
+        .is_some_and(|pid| pid > 0);
+    pid_ok && parts.nth(2).is_some_and(|state| state.starts_with('X'))
+}
+
 /// Where `ps` is looked for, in order.
 const PS_PROGRAMS: [&str; 2] = ["/bin/ps", "/usr/bin/ps"];
 
@@ -263,7 +279,8 @@ fn system_programs() -> Vec<PathBuf> {
 
 /// Parse a process listing and refuse one that cannot be right. A valid
 /// listing is never empty, holds this process (`own_pid`), and has no line
-/// that does not parse. Anything else is a failed inspection, never "nothing
+/// that does not parse. A row for an exited process ([`is_dead_row`]) is
+/// skipped before parsing and counts toward none of these. Anything else is a failed inspection, never "nothing
 /// found": a listing that shows no descendants must not confirm cleanup.
 ///
 /// The error for unparsed lines quotes the first of them, escaped and
@@ -279,6 +296,9 @@ pub(crate) fn validate_listing(
     let mut unparsed = 0usize;
     let mut first_unparsed = None;
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        if is_dead_row(line) {
+            continue;
+        }
         match parse_row(line) {
             Some(row) => rows.push(row),
             None => {
