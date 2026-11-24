@@ -12,9 +12,9 @@ use super::keeper::{SLEEP_ENV, kept};
 use crate::process::{MARKER_ENV, ProcessHandle};
 use crate::test_spawn::Guarded;
 
-/// The variable that carries the probe value in the sibling's environment.
-/// Nothing in delega reads it.
-const PROBE_ENV: &str = "DELEGA_TEST_ENV_LEAK_PROBE";
+// The variable that carries the probe value in the sibling's environment.
+// Only the test-only record of marker readings looks for its name.
+use crate::process::marker::examined::PROBE_ENV;
 
 /// A value no other process holds: a fixed prefix and 16 random bytes in hex.
 fn probe_value() -> String {
@@ -134,8 +134,9 @@ async fn await_environment(pid: u32, value: &str) {
 /// reports and the inspection's last error), nor the warnings, may contain
 /// that value. The test checks that the sibling was alive across the run, that
 /// cleanup took at least one marker reading and that a reading of this run's
-/// token examined the sibling (a test-only record of the pids the production
-/// reader looked at), and that the value is readable
+/// token examined the sibling and saw its environment (a test-only record of
+/// the pids the production reader looked at, and on macOS whether the row held
+/// the probe variable's name), and that the value is readable
 /// where cleanup reads (`ps -Eww` on macOS, `/proc` on Linux), so a pass means
 /// delega dropped the value rather than never saw it.
 #[tokio::test]
@@ -182,8 +183,8 @@ async fn environment_text_read_by_cleanup_never_reaches_the_report_or_its_diagno
         "cleanup took no marker reading, so it never read the sibling's environment"
     );
     assert!(
-        crate::process::marker::examined::contains(&token, pid as i32),
-        "no marker reading of this run examined the sibling, so the test proves nothing"
+        crate::process::marker::examined::saw_environment(&token, pid as i32),
+        "no marker reading of this run saw the sibling's environment, so the test proves nothing"
     );
     let keeper = report
         .diagnostics

@@ -139,7 +139,7 @@ pub(crate) async fn marked(
                 let block = std::fs::read(format!("/proc/{pid}/environ"));
                 #[cfg(test)]
                 if block.is_ok() {
-                    examined::note(&token, &[pid]);
+                    examined::note(&token, &[(pid, true)]);
                 }
                 let marked = block.is_ok_and(|block| environ_has(&block, &token));
                 let after = super::sys::start_ticks(pid);
@@ -207,12 +207,12 @@ pub(crate) fn parse_marked(
                 "the marker listing had a line that could not be parsed".into(),
             ));
         };
-        #[cfg(test)]
-        parsed_pids.push(pid);
         if u32::try_from(pid).is_ok_and(|p| p == own_pid) {
             seen_own = true;
         }
         let rest: Vec<&str> = words.collect();
+        #[cfg(test)]
+        parsed_pids.push((pid, rest.iter().any(|w| w.contains(examined::PROBE_ENV))));
         if state.starts_with('Z') || pid <= 1 {
             continue;
         }
@@ -241,20 +241,28 @@ pub(crate) fn parse_marked(
 }
 
 /// Test-only record of which processes a marker reading examined, per run
-/// token: on Linux each pid whose `/proc/<pid>/environ` the reader read, on
-/// macOS each pid of a `ps -E` listing that parsed. It holds pids only, never
+/// token, each with whether the reading saw its environment: on Linux each pid
+/// whose `/proc/<pid>/environ` the reader read (always seen), on macOS each
+/// pid of a `ps -E` listing that parsed, seen when its command column held
+/// the name [`examined::PROBE_ENV`]. It holds pids and booleans only, never
 /// environment text, and is not compiled outside tests.
 #[cfg(test)]
 pub(crate) mod examined {
     use std::collections::{BTreeSet, HashMap};
     use std::sync::{Mutex, OnceLock};
 
-    fn table() -> &'static Mutex<HashMap<String, BTreeSet<i32>>> {
-        static TABLE: OnceLock<Mutex<HashMap<String, BTreeSet<i32>>>> = OnceLock::new();
+    /// The variable the leak test's sibling carries its probe value under.
+    pub(crate) const PROBE_ENV: &str = "DELEGA_TEST_ENV_LEAK_PROBE";
+
+    /// Per run token, each examined pid with whether its environment was seen.
+    type Table = Mutex<HashMap<String, BTreeSet<(i32, bool)>>>;
+
+    fn table() -> &'static Table {
+        static TABLE: OnceLock<Table> = OnceLock::new();
         TABLE.get_or_init(Default::default)
     }
 
-    pub(crate) fn note(token: &str, pids: &[i32]) {
+    pub(crate) fn note(token: &str, pids: &[(i32, bool)]) {
         let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
         table
             .entry(token.to_owned())
@@ -262,10 +270,13 @@ pub(crate) mod examined {
             .extend(pids.iter().copied());
     }
 
-    /// Whether a marker reading for `token` examined `pid`.
-    pub(crate) fn contains(token: &str, pid: i32) -> bool {
+    /// Whether a marker reading for `token` examined `pid` and saw its
+    /// environment.
+    pub(crate) fn saw_environment(token: &str, pid: i32) -> bool {
         let table = table().lock().unwrap_or_else(|e| e.into_inner());
-        table.get(token).is_some_and(|pids| pids.contains(&pid))
+        table
+            .get(token)
+            .is_some_and(|pids| pids.contains(&(pid, true)))
     }
 }
 
