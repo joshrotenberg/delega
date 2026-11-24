@@ -74,28 +74,29 @@ pub(crate) struct ProcessRow {
 }
 
 /// Parse one process table including state and group membership.
+#[cfg(test)]
 pub(crate) fn parse_rows(stdout: &str) -> Vec<ProcessRow> {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let parent = parts.next()?.parse().ok()?;
-            let group = parts.next()?.parse().ok()?;
-            let state = parts.next()?;
-            let zombie = state.starts_with('Z');
-            let stopped = state.starts_with('T');
-            let started = parts.collect::<Vec<_>>().join(" ");
-            (!started.is_empty()).then_some(ProcessRow {
-                pid,
-                parent,
-                group,
-                zombie,
-                stopped,
-                started,
-            })
-        })
-        .collect()
+    stdout.lines().filter_map(parse_row).collect()
+}
+
+/// Parse one line of a `ps -axo pid=,ppid=,pgid=,stat=,lstart=` listing.
+fn parse_row(line: &str) -> Option<ProcessRow> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let parent = parts.next()?.parse().ok()?;
+    let group = parts.next()?.parse().ok()?;
+    let state = parts.next()?;
+    let zombie = state.starts_with('Z');
+    let stopped = state.starts_with('T');
+    let started = parts.collect::<Vec<_>>().join(" ");
+    (!started.is_empty()).then_some(ProcessRow {
+        pid,
+        parent,
+        group,
+        zombie,
+        stopped,
+        started,
+    })
 }
 
 /// Where `ps` is looked for, in order.
@@ -264,18 +265,34 @@ fn system_programs() -> Vec<PathBuf> {
 /// listing is never empty, holds this process (`own_pid`), and has no line
 /// that does not parse. Anything else is a failed inspection, never "nothing
 /// found": a listing that shows no descendants must not confirm cleanup.
+///
+/// The error for unparsed lines quotes the first of them, escaped and
+/// bounded by `cleanup_reason::unparsed_lines`. That is safe only because
+/// this listing (`ps -axo pid=,ppid=,pgid=,stat=,lstart=`) carries no command
+/// or environment text; the marker listing (`ps -Eww`) is parsed by
+/// `marker::parse_marked`, which never quotes a line, and never reaches here.
 pub(crate) fn validate_listing(
     stdout: &str,
     own_pid: u32,
 ) -> Result<Vec<ProcessRow>, InspectError> {
-    let lines = stdout.lines().filter(|l| !l.trim().is_empty()).count();
-    let rows = parse_rows(stdout);
+    let mut rows = Vec::new();
+    let mut unparsed = 0usize;
+    let mut first_unparsed = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        match parse_row(line) {
+            Some(row) => rows.push(row),
+            None => {
+                unparsed += 1;
+                first_unparsed.get_or_insert(line);
+            }
+        }
+    }
     if rows.is_empty() {
         return Err(InspectError::Failed(ListingFailure::NoRows.text().into()));
     }
-    if rows.len() < lines {
+    if let Some(first) = first_unparsed {
         return Err(InspectError::Failed(cleanup_reason::unparsed_lines(
-            lines - rows.len(),
+            unparsed, first,
         )));
     }
     if !rows
@@ -1516,6 +1533,87 @@ mod tests {
             Err(InspectError::Failed(message)) => assert!(message.contains("could not be parsed")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn an_unparsed_line_in_the_middle_is_counted_and_quoted_and_still_fails() {
+        let text = format!("{}12 1 12 S\n{}not a row\n{}", row(1), row(10), row(2));
+        match validate_listing(&text, 10) {
+            Err(InspectError::Failed(message)) => assert_eq!(
+                message,
+                "the process listing had 2 lines that could not be parsed, \
+                 the first: \"12 1 12 S\""
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_quoted_listing_line_keeps_no_control_character_or_separator() {
+        // `lines` drops a `\r` before the newline, so this one is inside.
+        let text = format!("{}1 2\t3;\u{1b}[0m \r\"\\\n", row(10));
+        match validate_listing(&text, 10) {
+            Err(InspectError::Failed(message)) => {
+                assert_eq!(
+                    message,
+                    "the process listing had 1 lines that could not be parsed, \
+                     the first: \"1 2\\u{9}3\\u{3b}\\u{1b}[0m \\u{d}\\\"\\\\\""
+                );
+                assert!(!message.contains(';'), "{message}");
+                assert!(!message.chars().any(char::is_control), "{message}");
+                assert!(
+                    crate::cleanup_reason::is_listing_error(&message),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_long_listing_line_is_clipped_at_the_bound_without_splitting_an_escape() {
+        use crate::cleanup_reason::UNPARSED_LINE_MAX_CHARS;
+        let quoted = |message: &str| {
+            let start = message.find(": \"").expect("quote") + 3;
+            let end = message.rfind('"').expect("closing quote");
+            (
+                message[start..end].to_string(),
+                message[end + 1..].to_string(),
+            )
+        };
+        // Exactly the bound: kept whole.
+        let exact = "x".repeat(UNPARSED_LINE_MAX_CHARS);
+        let Err(InspectError::Failed(message)) =
+            validate_listing(&format!("{}{exact}\n", row(10)), 10)
+        else {
+            panic!("a line at the bound did not fail");
+        };
+        assert_eq!(quoted(&message), (exact.clone(), String::new()));
+        // One over: clipped to the bound and marked.
+        let Err(InspectError::Failed(message)) =
+            validate_listing(&format!("{}{exact}y\n", row(10)), 10)
+        else {
+            panic!("a line over the bound did not fail");
+        };
+        assert_eq!(quoted(&message), (exact, "...".to_string()));
+        assert!(
+            crate::cleanup_reason::is_listing_error(&message),
+            "{message}"
+        );
+        // An escape that would cross the bound is left out whole.
+        let line = format!("{};", "x".repeat(UNPARSED_LINE_MAX_CHARS - 3));
+        let Err(InspectError::Failed(message)) =
+            validate_listing(&format!("{}{line}\n", row(10)), 10)
+        else {
+            panic!("a line with an escape at the bound did not fail");
+        };
+        let (body, cut) = quoted(&message);
+        assert_eq!(body, "x".repeat(UNPARSED_LINE_MAX_CHARS - 3));
+        assert_eq!(cut, "...");
+        assert!(
+            crate::cleanup_reason::is_listing_error(&message),
+            "{message}"
+        );
     }
 
     #[test]

@@ -22,8 +22,17 @@ fn every_listing_error() -> Vec<String> {
     all.push(ps_exit(Some(1)));
     all.push(ps_exit(Some(-1)));
     all.push(ps_exit(None));
-    all.push(unparsed_lines(1));
-    all.push(unparsed_lines(42));
+    all.push(unparsed_lines(1, "12 1 12 S"));
+    all.push(unparsed_lines(
+        42,
+        "1 2\t3;\u{1b}[0m \r\"\\ \u{2028} \u{e9}",
+    ));
+    // Clipped, and clipped where an escape would cross the bound.
+    all.push(unparsed_lines(3, &"x".repeat(5 * UNPARSED_LINE_MAX_CHARS)));
+    all.push(unparsed_lines(
+        2,
+        &format!("{};;", "x".repeat(UNPARSED_LINE_MAX_CHARS - 3)),
+    ));
     all.push(not_started(&[]).to_string());
     let enoent = || io::Error::from_raw_os_error(2);
     let eacces = || io::Error::from_raw_os_error(13);
@@ -296,6 +305,25 @@ fn listing_errors_with_bounded_diagnostic_text_are_recognised() {
         format!("ps failed (exit Some({}))", i32::MIN),
         format!("{NOT_STARTED_START}/opt/ps: not found, /bin/ps: denied)"),
         format!("{NOT_STARTED_START}anything{NOT_STARTED_CUT}"),
+        // A quoted line with every escape, and at the bound, whole or cut.
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"a\\\\b\\\"c\\u{{3b}}\\u{{9}}\\u{{2028}}\""
+        ),
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"{}\"",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS)
+        ),
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"{}\"...",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS)
+        ),
+        format!(
+            "{UNPARSED_START}1{UNPARSED_END}, the first: \"{}\\u{{3b}}\"",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS - 6)
+        ),
+        format!("{UNPARSED_START}1{UNPARSED_END}, the first: \"x\"..."),
+        // What an escape stands for is not checked.
+        format!("{UNPARSED_START}1{UNPARSED_END}, the first: \"a\\nb\\u{{3B}}\\\\\""),
     ] {
         assert!(is_listing_error(&error), "{error:?}");
         let stopping = format!("{STOPPING_START}1.0 s: {INSPECTION_FAILED}{error}");
@@ -307,6 +335,8 @@ fn listing_errors_with_bounded_diagnostic_text_are_recognised() {
 
 #[test]
 fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
+    let unparsed = |tail: &str| format!("{UNPARSED_START}1{UNPARSED_END}{tail}");
+    let quoted = |body: &str| unparsed(&format!(", the first: \"{body}\""));
     let over = |prefix: &str| {
         let mut s = prefix.to_string();
         while s.chars().count() <= MAX_ERROR_CHARS {
@@ -345,6 +375,37 @@ fn a_listing_error_outside_the_documented_shapes_is_not_recognised() {
         "ps failed (exit Some(1)); unknown reason".to_string(),
         "the process listing had 0 lines that could not be parsed".to_string(),
         "the process listing had many lines that could not be parsed".to_string(),
+        // The count without the quoted line, and quoted lines outside the
+        // escaped form or the bound.
+        "the process listing had 1 lines that could not be parsed".to_string(),
+        unparsed("abc"),
+        unparsed(" \"abc"),
+        unparsed(" \"abc\"\""),
+        unparsed(" \"abc\".."),
+        unparsed(" \"abc\"...."),
+        unparsed(" \"abc\"... "),
+        unparsed(" \"abc\" and more"),
+        unparsed(", the first: abc"),
+        "the process listing had 0 lines that could not be parsed, the first: \"x\"".to_string(),
+        quoted(""),
+        quoted("a;b"),
+        quoted("a\nb"),
+        quoted("a\rb"),
+        quoted("a\tb"),
+        quoted("a\u{1b}b"),
+        quoted("a\u{2028}b"),
+        quoted("a\"b"),
+        quoted("a\\"),
+        // An escape cannot carry a forbidden character.
+        quoted("a\\;b"),
+        quoted("a\\\nb"),
+        quoted("a\\\u{1b}b"),
+        quoted(&"x".repeat(UNPARSED_LINE_MAX_CHARS + 1)),
+        format!("{}...", quoted(&"x".repeat(UNPARSED_LINE_MAX_CHARS + 1))),
+        quoted(&format!(
+            "{}\\u{{3b}}",
+            "x".repeat(UNPARSED_LINE_MAX_CHARS - 5)
+        )),
     ];
     for error in errors {
         assert!(!is_listing_error(&error), "{error:?}");

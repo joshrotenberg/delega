@@ -21,13 +21,18 @@
 //!   without padding; a wait is `{:.1} s` and at most `Duration::MAX`.
 //! - A listing error (inside `process inspection was unavailable (...)` and
 //!   after `process inspection failed: `) is one of the fixed listing texts,
-//!   the count of unparsed lines, `ps failed (exit Some(<i32>))` or
+//!   the count of unparsed lines with the first of them quoted and escaped,
+//!   `ps failed (exit Some(<i32>))` or
 //!   `ps failed (exit None)`, or a fixed prefix (`ps: `, or
 //!   `ps could not be started (` closed by `)` or cut with `...`) followed by
 //!   diagnostic text.
 //! - Diagnostic text is bounded free text: not empty, on one line, without
 //!   `;`, and the listing error that holds it is at most [`MAX_ERROR_CHARS`]
-//!   characters.
+//!   characters. A quoted listing line is diagnostic text of at most
+//!   `UNPARSED_LINE_MAX_CHARS` characters between `"` and `"` (then `...`
+//!   when clipped), with no control character or whitespace other than the
+//!   space, no `"` that is not escaped with `\`, and no lone `\` at the
+//!   end. What an escape stands for is not checked.
 //!
 //! What it does not check: whether a reason could have been produced in a
 //! given run (which combinations a run can merge, which exit codes `ps` can
@@ -338,26 +343,131 @@ pub(crate) fn ps_exit(code: Option<i32>) -> String {
     format!("{PS_EXIT_START}{code:?})")
 }
 
-/// The listing had `count` lines that did not parse.
-pub(crate) fn unparsed_lines(count: usize) -> String {
-    format!("{UNPARSED_START}{count}{UNPARSED_END}")
+/// Starts the quoted first unparsed line in that error.
+const UNPARSED_FIRST_START: &str = ", the first: \"";
+/// Closes the quoted line.
+const UNPARSED_FIRST_END: &str = "\"";
+/// Follows the closing quote when the line was clipped.
+const UNPARSED_FIRST_CUT: &str = "...";
+/// The most characters of the escaped first unparsed line an error carries.
+pub(crate) const UNPARSED_LINE_MAX_CHARS: usize = 200;
+
+/// The system listing (`ps -axo pid=,ppid=,pgid=,stat=,lstart=`, five columns
+/// with no command or environment text) had `count` lines that did not parse,
+/// the first of them `first`. The line is escaped ([`escape_listing_line`]),
+/// at most [`UNPARSED_LINE_MAX_CHARS`] characters of it are kept, and a
+/// clipped line is followed by `...` after its closing quote. Never call this
+/// with a line of a listing that carries command or environment text (the
+/// marker listing).
+pub(crate) fn unparsed_lines(count: usize, first: &str) -> String {
+    let (line, cut) = escape_listing_line(first, UNPARSED_LINE_MAX_CHARS);
+    format!(
+        "{UNPARSED_START}{count}{UNPARSED_END}{UNPARSED_FIRST_START}{line}{UNPARSED_FIRST_END}{}",
+        if cut { UNPARSED_FIRST_CUT } else { "" }
+    )
+}
+
+/// Whether a character of a quoted listing line is written as `\u{<hex>}`:
+/// `;` (it separates joined reasons), every control character and every
+/// whitespace character other than the space (so the line stays one line).
+fn needs_code(c: char) -> bool {
+    c == ';' || c.is_control() || (c.is_whitespace() && c != ' ')
+}
+
+/// The escaped form of one character of a quoted listing line.
+fn escape_char(c: char) -> String {
+    match c {
+        '\\' => "\\\\".to_string(),
+        '"' => "\\\"".to_string(),
+        c if needs_code(c) => format!("\\u{{{:x}}}", u32::from(c)),
+        c => c.to_string(),
+    }
+}
+
+/// `line` escaped for quoting in a listing error: `\` becomes `\\`, `"`
+/// becomes `\"`, and every character [`needs_code`] selects becomes
+/// `\u{<lowercase hex>}`; everything else is kept. Whole escapes are kept
+/// while the result has at most `max` characters; the flag says whether
+/// anything was left out.
+fn escape_listing_line(line: &str, max: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut kept = 0;
+    for c in line.chars() {
+        let escaped = escape_char(c);
+        let n = escaped.chars().count();
+        if kept + n > max {
+            return (out, true);
+        }
+        out.push_str(&escaped);
+        kept += n;
+    }
+    (out, false)
+}
+
+/// Whether `text` is what follows the count of unparsed lines: the quoted
+/// first line, possibly clipped.
+fn is_unparsed_tail(text: &str) -> bool {
+    let Some(quoted) = text.strip_prefix(UNPARSED_FIRST_START) else {
+        return false;
+    };
+    [
+        UNPARSED_FIRST_END.to_string() + UNPARSED_FIRST_CUT,
+        UNPARSED_FIRST_END.to_string(),
+    ]
+    .iter()
+    .any(|end| {
+        quoted
+            .strip_suffix(end.as_str())
+            .is_some_and(is_escaped_line)
+    })
+}
+
+/// Whether `body` is bounded quoted text: diagnostic text (see
+/// [`is_diagnostic`]) of at most [`UNPARSED_LINE_MAX_CHARS`] characters with
+/// no character [`needs_code`] selects and no unescaped `"`. A `\\` takes the
+/// next character, whatever it is apart from those, so a lone `\\` at the end
+/// (which would escape the closing quote) is refused. What an escape stands
+/// for is not checked.
+fn is_escaped_line(body: &str) -> bool {
+    if !is_diagnostic(body) || body.chars().count() > UNPARSED_LINE_MAX_CHARS {
+        return false;
+    }
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        let c = if c == '\\' {
+            match chars.next() {
+                Some(escaped) => escaped,
+                None => return false,
+            }
+        } else if c == '"' {
+            return false;
+        } else {
+            c
+        };
+        if needs_code(c) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether `error` has the shape of a process listing error (`InspectError`):
-/// a fixed text, the count of unparsed lines, an exit status, or a fixed
+/// a fixed text, the count of unparsed lines with the first quoted (see
+/// [`is_escaped_line`]), an exit status, or a fixed
 /// prefix followed by diagnostic text (see [`is_diagnostic`]). At most
 /// [`MAX_ERROR_CHARS`] characters.
-fn is_listing_error(error: &str) -> bool {
+pub(crate) fn is_listing_error(error: &str) -> bool {
     if error.chars().count() > MAX_ERROR_CHARS {
         return false;
     }
     ListingFailure::ALL.iter().any(|f| f.text() == error)
         || error
             .strip_prefix(UNPARSED_START)
-            .and_then(|rest| rest.strip_suffix(UNPARSED_END))
-            .is_some_and(|n| {
+            .and_then(|rest| rest.split_once(UNPARSED_END))
+            .is_some_and(|(n, tail)| {
                 n.parse::<usize>()
                     .is_ok_and(|v| v > 0 && v.to_string() == n)
+                    && is_unparsed_tail(tail)
             })
         || error
             .strip_prefix(PS_EXIT_START)
