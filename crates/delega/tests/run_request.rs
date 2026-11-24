@@ -8,8 +8,13 @@ use delega_core::contract::permissions::Mode;
 use delega_core::contract::request::Provider;
 use serde_json::Value;
 use std::io::Write;
-use std::process::Stdio;
-use support::{Guarded, PROVIDERS, Rig, result_of, text, wait_bounded, wait_bounded_for};
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use support::{
+    Guarded, PROVIDERS, Rig, result_of, text, wait_bounded, wait_bounded_for,
+    wait_bounded_with_clock, wait_for_ack,
+};
 
 fn profile(rig: &Rig, body: &str) -> String {
     rig.file("profile.json", body)
@@ -1039,15 +1044,41 @@ fn wait_bounded_reads_the_pipes_while_it_waits() {
 }
 
 #[test]
-#[should_panic(expected = "did not exit within")]
 fn wait_bounded_kills_a_child_that_does_not_exit_and_fails_the_test() {
-    let child = std::process::Command::new("/bin/sleep")
-        .arg("30")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let rig = Rig::new();
+    let ready = rig.path("ready");
+    let mut command = Command::new("/bin/sh");
+    rig.configure(&mut command);
+    let mut child = command
+        .args(["-c", r#": > "$1"; exec /bin/sleep 10"#, "watchdog-fixture"])
+        .arg(&ready)
         .guarded_spawn()
-        .expect("spawn sleep");
-    let _ = wait_bounded_for(child, std::time::Duration::from_millis(200));
+        .expect("spawn watchdog fixture");
+    wait_for_ack(&ready, &mut child, "the watchdog fixture is ready");
+
+    let limit = Duration::from_millis(200);
+    let mut reads = 0;
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_bounded_with_clock(&mut child, limit, || {
+            reads += 1;
+            if reads == 1 { Duration::ZERO } else { limit }
+        })
+    }))
+    .expect_err("the watchdog must fail the test at expiry");
+    assert_eq!(reads, 2);
+    assert_eq!(
+        failure.downcast_ref::<String>().map(String::as_str),
+        Some("the child did not exit within 200ms")
+    );
+    // Inspect the status cached by the real kill and reap in the watchdog.
+    assert_eq!(
+        child
+            .try_wait()
+            .expect("poll fixture")
+            .expect("reaped")
+            .signal(),
+        Some(rustix::process::Signal::KILL.as_raw())
+    );
 }
 
 const CANARY: &str = "canary-value-must-not-appear-5521";

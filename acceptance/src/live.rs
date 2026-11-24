@@ -131,6 +131,14 @@ pub fn install_stop_handler() -> Result<(), String> {
 /// group if it has not exited within `bound`. `None` when it could not be
 /// started or did not finish in time.
 pub fn bounded_output(command: &mut Command, bound: Duration) -> Option<(ExitStatus, Vec<u8>)> {
+    bounded_output_with_clock(command, bound, |started| started.elapsed())
+}
+
+fn bounded_output_with_clock(
+    command: &mut Command,
+    bound: Duration,
+    mut elapsed: impl FnMut(Instant) -> Duration,
+) -> Option<(ExitStatus, Vec<u8>)> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -151,7 +159,7 @@ pub fn bounded_output(command: &mut Command, bound: Duration) -> Option<(ExitSta
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < bound => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if elapsed(started) < bound => std::thread::sleep(Duration::from_millis(20)),
             _ => break None,
         }
     };
@@ -2480,13 +2488,54 @@ mod tests {
 
     #[test]
     fn a_helper_that_does_not_finish_is_killed_at_its_bound() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let ready = scratch.path().join("ready");
+        let mut command = Command::new("/bin/sh");
+        command
+            .env_clear()
+            .env("HOME", scratch.path())
+            .args([
+                "-c",
+                r#"printf '%s\n' "$$" > "$1.tmp" &&
+                   /bin/mv "$1.tmp" "$1" &&
+                   exec /bin/sleep 10"#,
+                "helper-fixture",
+            ])
+            .arg(&ready);
+        let bound = Duration::from_millis(300);
+        let mut pid = None;
+        let mut reads = 0;
         let began = Instant::now();
         assert!(
-            bounded_output(
-                Command::new("/bin/sleep").arg("30"),
-                Duration::from_millis(300)
-            )
+            bounded_output_with_clock(&mut command, bound, |_| {
+                reads += 1;
+                if reads == 1 {
+                    // Wait for the real helper to report its PID before moving
+                    // the deadline clock. On failure let the helper reap it.
+                    while began.elapsed() < Duration::from_secs(3) {
+                        if let Ok(record) = std::fs::read_to_string(&ready) {
+                            pid = record
+                                .trim()
+                                .parse()
+                                .ok()
+                                .and_then(rustix::process::Pid::from_raw);
+                            return Duration::ZERO;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                bound
+            })
             .is_none()
+        );
+        assert_eq!(reads, 2);
+        let pid = pid.expect("helper reported its PID before expiry");
+        assert!(
+            matches!(
+                rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
+                Err(rustix::io::Errno::CHILD)
+            ),
+            "the helper must already have been reaped"
         );
         assert!(began.elapsed() < Duration::from_secs(5));
         let (status, out) =
