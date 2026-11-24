@@ -559,15 +559,52 @@ impl Held {
 /// that parent only while the parent's pidfd shows it alive: once it has
 /// exited its pid may name a foreign process, so the child counts only if it
 /// is now the keeper's own child (reparented); anything else is refused.
+///
+/// The parent's pidfd is asked again after the candidate's parent field was
+/// checked against the parent's pid, before the hold is returned. Alive then,
+/// the parent was alive across that check, so the pid it was compared with
+/// was the parent's own. Exited by then, the check may have matched a process
+/// that reused the parent's pid: the candidate is dropped unsignalled, and the
+/// child is held only as the keeper's own direct child (the keeper never
+/// exits, so its pid cannot be reused), or refused.
 fn take_queued(
     pid: i32,
     parent: i32,
     parent_hold: Option<&Held>,
     root: i32,
 ) -> Result<Held, NotHeld> {
-    match parent_hold {
-        Some(hold) if sys::pidfd_exited(&hold.fd) => Held::take(pid, root),
-        _ => Held::take(pid, parent),
+    let Some(hold) = parent_hold else {
+        return Held::take(pid, parent);
+    };
+    if sys::pidfd_exited(&hold.fd) {
+        return Held::take(pid, root);
+    }
+    let candidate = Held::take(pid, parent)?;
+    #[cfg(test)]
+    run_seam(&AFTER_QUEUED_CHECK);
+    if sys::pidfd_exited(&hold.fd) {
+        drop(candidate);
+        return Held::take(pid, root);
+    }
+    Ok(candidate)
+}
+
+/// A test seam: a closure run once, on this thread, at a point of a walk.
+#[cfg(test)]
+type Seam = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: run in [`take_queued`] after the candidate child's parent
+    /// field was checked and before the parent's pidfd is asked again, as a
+    /// parent that exits between the two would.
+    static AFTER_QUEUED_CHECK: Seam = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_seam(seam: &'static std::thread::LocalKey<Seam>) {
+    if let Some(run) = seam.with(|s| s.borrow_mut().take()) {
+        run();
     }
 }
 
