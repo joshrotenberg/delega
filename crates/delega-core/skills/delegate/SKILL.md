@@ -28,15 +28,18 @@ An argument a tool does not have is rejected.
 | `wait` | `runs` or `workers` (lists), `timeout_secs`, `after` (a cursor) | When a named run finishes, needs a permission decision, or reaches the wait timeout: their states, `timed_out` and a `cursor`. A timeout is not an error. `released_by_shutdown: true` means the server was shutting down and released the wait, so a named run can still be `running`; `timed_out: false` alone does not mean something finished. `limit_reached: "max_waits_in_flight"` means too many waits were already open and this one returned at once without waiting. |
 | `read` | `run` or `worker`, `detail`, `after` (a cursor), `text_offset` | The `result` if finished; otherwise `state`, partial text and recent activity. |
 | `list` | none | Workers on this connection with state, queue length and session id, and the limits in force and in use. `stale_server` is present only when the executable this server started from was replaced or removed since. |
-| `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: the `result`, with the outcome `interrupted`. |
+| `interrupt` | `run` or `worker` | After the run has stopped and cleanup was attempted: `settled: true` and the `result`, with the outcome `interrupted`. A finished run's result comes back unchanged. |
 | `respond` | `interaction`, `decision`, optional `note` | Commits an allow or deny for one pending permission interaction. |
-| `close` | `worker` | After its running run has stopped: the worker is `closed`, its queued runs are discarded and its slot is free. |
+| `close` | `worker` | After its running run has stopped: the worker is `closed`, its queued runs are discarded, its slot is free, and `settled: true` with the stopped run's `result`. |
 
 `start` and `follow_up` return at once. Only `wait`, `interrupt` and `close`
 wait, and each is bounded: `wait` by its `timeout_secs` (30 seconds by default,
 and at most 300), `interrupt` and `close` by 30 seconds. At most 64 waits can
 be open at once (`list` reports `max_waits_in_flight` and `waits_in_flight`). If those 30 seconds
-pass first, `settled` is false: `read` the run later.
+pass first, `settled` is false and no `result` comes back: the run is still
+being stopped, so `read` it later. `settled` can also be false with no
+`result` when the run stopped but its result was already gone: at most 256
+results are kept, and a `read` of the run then reports it unknown.
 
 ## Start a worker
 
@@ -156,7 +159,7 @@ between two pages, and the offsets would then belong to different answers.
   `can_follow_up` for each worker. A worker started with `session.ephemeral`, or
   whose runs reported no session, cannot continue.
 - `interrupt` stops a run you no longer need. The result comes back with the
-  outcome `interrupted`.
+  outcome `interrupted`, unless `settled` is false.
 - `read` the result before you `close` the worker. Results already produced
   stay readable only for a bounded time after `close`: at most 256 results and
   one hour.

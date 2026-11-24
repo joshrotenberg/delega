@@ -100,7 +100,7 @@ lower values from the `[mcp]` section of the
 | `retention` | 1 hour | How long a finished result stays readable. |
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | `wait_default` | 30 s | `wait` with no `timeout_secs`. `list` reports it as `default_wait_secs`. |
-| `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Waiting and cursors](#waiting-and-cursors)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
+| `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Answers at the limit](#wait-at-its-limit)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
 | preflight bound | 10 s | A bound on `start`'s dry run. A start that runs past it can be refused, kind `preflight_timeout`. |
 | outstanding request checks | 16 | Checks running at once. A `start` beyond it waits for a slot within the preflight bound. Not in `list`. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer. |
@@ -185,16 +185,12 @@ carries its value as `cursor`.
   `cursor`. Pass the cursor back as `after_cursor` to wait for
   the next change. How waits are answered:
   [`supervisor/core/waits.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/core/waits.rs).
-- A timeout is a response with `timed_out: true` and the current states.
 - Ids that name nothing are listed in `unknown`; the rest are still waited for.
-  If all are unknown the call returns at once. No ids at all is
-  `InvalidArguments`.
-- A wait whose applied timeout is 0 is a poll: it returns the current states at
-  once and never carries `limit_reached`.
-- When `max_waits_in_flight` waits are already blocked, a wait that would block
-  returns at once with the current states, `timed_out: true`, `timeout_secs: 0`
-  and `limit_reached: "max_waits_in_flight"`. Its cursor is good for the next
-  call. A wait with something to report is answered regardless.
+  If all are unknown the call returns at once. No ids at all, or more than 256,
+  is `InvalidArguments`.
+- A timeout is a response, not an error. Every answer `wait` gives, at its
+  timeout, at shutdown, as a poll and at `max_waits_in_flight`, is in
+  [Answers at the limit](#wait-at-its-limit).
 
 ## Reading
 
@@ -241,11 +237,11 @@ How activity is kept and counted: [`supervisor/activity.rs`](https://github.com/
 
 | Call | What happens |
 | --- | --- |
-| `interrupt` of a running run | Asks the provider to stop and waits up to `interrupt_bound`. `settled: true` with the result if it settled in time and the result is still kept; otherwise `settled: false` and no result. Runs queued behind it go on. |
+| `interrupt` of a running run | Asks the provider to stop and waits up to `interrupt_bound`. What it returns: [Answers at the limit](#interrupt-at-its-limit). Runs queued behind it go on. |
 | `interrupt` of a queued run | Removes it. Its result is `interrupted`: no `started_at`, zero duration, confirmed cleanup. |
 | `interrupt` of a finished run | Returns its result unchanged. |
 | `interrupt` of a worker | Acts on its current run. |
-| `close` | Marks the worker closed, ends each queued run `interrupted` with `discarded by close`, stops the running run as `interrupt` does (it can return `settled: false`), and frees the live-worker slot at once; the running slot frees when the run ends. Finished results stay readable. Closing again reports `already_closed`, the current state and nothing discarded. |
+| `close` | Marks the worker closed, ends each queued run `interrupted` with `discarded by close`, stops the running run as `interrupt` does ([Answers at the limit](#close-at-its-limit)), and frees the live-worker slot at once; the running slot frees when the run ends. Finished results stay readable. Closing again reports `already_closed`, the current state and nothing discarded. |
 | `shutdown` | Closes every live worker the same way with `discarded by shutdown`, refuses new work with `Error::ShutDown`, and waits up to `shutdown_bound`. The report's `unsettled` lists runs still running; `failed` reports a failure of the supervisor's task. It releases waits registered when it begins. Reads and `list` keep working. |
 | Drop of the last clone | Signals every provider to stop and returns without waiting. The processes end shortly after. |
 
@@ -261,6 +257,94 @@ own task stops every provider; calls that need that task return
 
 How drop works: the `Drop` impl in
 [`supervisor/mod.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/mod.rs).
+
+## Answers at the limit
+
+`wait`, `interrupt` and `close` each wait in the caller's task, for at most a
+limit: the applied timeout of `wait`, and `interrupt_bound` (30 s) of
+`interrupt` and `close`. The limit is counted as in
+[How the bounds count time](#how-the-bounds-count-time). This section lists
+every answer each call gives, including when its limit passes, when shutdown
+comes first and when retention has dropped a result. None of them is an error.
+The errors are those of [Operations](#operations); a call whose supervisor task
+ended while it waited returns `Stopped` or `Failed`.
+
+The MCP tools return the same responses as JSON. `released_by_shutdown` is
+left out when false, and `limit_reached`, `state`, `stopped_run` and `result`
+when absent.
+
+### Wait at its limit
+
+The applied timeout is `timeout_secs`, or `wait_default` (30 s) without one,
+capped at `wait_ceiling` (300 s). The response's `timeout_secs` is the applied
+timeout, or 0 where the table says so.
+
+Something named is ready when:
+
+- a named run is finished or has a pending interaction;
+- a named worker's current run, the one it had when the wait began, is finished
+  or has a pending interaction, or the worker had no unfinished run then;
+- with `after_cursor`, a named run, or a run of a named worker, finished after
+  the cursor or had its interactions change after it;
+- a named run or worker has aged out ([Retention](#retention)) while the wait
+  blocks. It is listed in `unknown`.
+
+| When | `timed_out` | `released_by_shutdown` | `timeout_secs` |
+| --- | --- | --- | --- |
+| Something named is ready when the call arrives, or every id is unknown. Answers at once. | `false` | absent | applied |
+| Something named becomes ready before the time passes. | `false` | absent | applied |
+| The time passes and nothing named is ready. | `true` | absent | applied |
+| The time passes, and something named becomes ready before the answer is built. | `false` | absent | applied |
+| The time passes, and another call is handled before the answer is built, with nothing named ready. | `true` | absent | applied |
+| Shutdown begins while the wait blocks. | `false` | `true` | applied |
+| The time passes, and shutdown begins before the answer is built. | `false` | `true` | applied |
+| Shutdown begins and makes something named ready in the same step, such as a named queued run it discards. | `false` | absent | applied |
+| A wait with `after_cursor` arrives after shutdown began and nothing named is ready. Answers at once. | `false` | `true` | applied |
+| A wait without `after_cursor` arrives after shutdown began. It is not released at once: it blocks until a named run stops or the time passes. | as above | as above | applied |
+| The applied timeout is 0. Answers at once and blocks nothing. | `true`, or `false` if something named is ready | absent | 0 |
+| `max_waits_in_flight` waits already block and nothing named is ready. Answers at once with `limit_reached: "max_waits_in_flight"`. | `true` | absent | 0 |
+
+- Every answer carries the current states of everything named and a `cursor`.
+  The cursor is good for the next call, also from a poll or a `limit_reached`
+  answer.
+- With `after_cursor`, each named run and worker carries `changed`. After a
+  timeout each `changed` is `false`.
+- `timed_out: false` does not mean something finished. Shutdown releases waits
+  when it begins, before their runs have stopped, so a wait with
+  `released_by_shutdown: true` can name runs still `running`. A wait without
+  `after_cursor` follows them until they stop.
+
+### Interrupt at its limit
+
+| Target | Answers | `settled` | `state` | `result` |
+| --- | --- | --- | --- | --- |
+| A worker with no run kept | at once, with no `run` | `true` | absent | absent |
+| A finished run | at once | `true` | `finished` | its result, unchanged |
+| A queued run | at once, with `was_queued: true` | `true` | `finished` | `interrupted`, never started |
+| A running run that settles within `interrupt_bound` | when it settles | `true` | `finished` | its result, `interrupted` when the stop ended it |
+| A running run that has not settled when `interrupt_bound` passes | at the limit | `false` | `running` | absent |
+| A running run that settled in time, whose result retention dropped before the call looked it up | when it settles | `false` | `running` | absent |
+
+A run that did not settle in time is still being stopped and ends
+`interrupted`; read it later. A run whose result retention dropped is unknown
+to `read`.
+
+### Close at its limit
+
+| Worker | Answers | `settled` | `stopped_run` | `result` |
+| --- | --- | --- | --- | --- |
+| No running run: idle, or only queued runs | at once | `true` | absent | absent |
+| A running run that settles within `interrupt_bound` | when it settles | `true` | the run | its result, `interrupted` when the stop ended it |
+| A running run that has not settled when `interrupt_bound` passes | at the limit | `false` | the run | absent |
+| A running run that settled in time, whose result retention dropped before the call looked it up | when it settles | `false` | the run | absent |
+
+`discarded` lists the queued runs this call discarded. Closing a closed worker
+answers with `already_closed: true` and nothing discarded; if its run is still
+stopping, the call waits for it again by the same rows.
+
+Shutdown while `interrupt` or `close` waits does not change the answer: the run
+was already asked to stop, and the call answers by the rows above. Neither call
+is refused after shutdown.
 
 ## Retention
 
