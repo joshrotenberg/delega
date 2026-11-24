@@ -39,15 +39,6 @@ async fn assert_stopped_in_time(what: &str, pids: &[i32], began: Instant) {
         .unwrap_or_else(|_| panic!("{what}: still running {BOUND:?} after the stop"));
 }
 
-fn recorded_pids(scratch: &Scratch, file: &str) -> Vec<i32> {
-    std::fs::read_to_string(scratch.path(file))
-        .unwrap_or_default()
-        .split_inclusive('\n')
-        .filter_map(|line| line.strip_suffix('\n')?.parse().ok())
-        .filter(|pid| *pid > 1)
-        .collect()
-}
-
 /// Release the children even if waiting for a PID or the report panics.
 struct ChildLifetime<'a>(&'a Scratch);
 
@@ -263,20 +254,22 @@ both!(
          for (1..400) {{ my $p = fork(); \
          if (!defined $p) {{ next }} \
          if (!$p) {{ setpgid(0,0); {WAIT_WHILE_GUARDED}; exit 0 }} \
-         open F, q(>>), q(kids); print F qq($p\n); close F; \
+         open F, q(>), qq(kids/$p.tmp); print F qq($p\n); close F; \
+         rename qq(kids/$p.tmp), qq(kids/$p); \
          select(undef, undef, undef, 0.05); }}'"
         );
+        std::fs::create_dir(s.path("kids")).expect("create the record directory");
         let _reaper = ChildLifetime::new(&s);
         let handle = ProcessHandle::start(sh(&s, &script, LONG));
         await_event("three children being started", || {
-            recorded_pids(&s, "kids").len() >= 3
+            s.published_pids_in("kids").len() >= 3
         })
         .await;
         let stopped = Instant::now();
         handle.interrupt();
         let report = handle.wait().await;
         assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-        let kids = recorded_pids(&s, "kids");
+        let kids = s.published_pids_in("kids");
         assert!(kids.len() >= 3, "only {} children were started", kids.len());
         assert_confirmed(&report);
         assert_stopped_in_time("children forked until the stop", &kids, stopped).await;
@@ -338,21 +331,25 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     // children do not hold the output pipes.
     let child = detached_own_group();
     let script = format!(
-        "trap \"{child} & echo \\$! >> gcs\" TERM; record leader $$; \
+        "trap \"{child} & record gcs/\\$! \\$!\" TERM; record leader $$; \
          while [ ! -e quit ]; do sleep 0.05; done"
     );
     let mut spec = sh(&s, &script, LONG);
     spec.stop_grace = Duration::from_secs(60);
+    std::fs::create_dir(s.path("gcs")).expect("create the record directory");
     let _reaper = ChildLifetime::new(&s);
     let handle = ProcessHandle::start(spec);
     let leader = s.pid("leader").await;
     let mut reaper = Reaper::default();
     let child = reaper.register(leader, &s).expect("identify the leader in the test scratch directory");
     handle.interrupt();
-    s.exists("gcs").await;
+    await_event("a first child started by the stop's TERM", || {
+        !s.published_pids_in("gcs").is_empty()
+    })
+    .await;
     let mut sent_at = Instant::now();
     await_event("a second child started by a second TERM", || {
-        if recorded_pids(&s, "gcs").len() >= 2 {
+        if s.published_pids_in("gcs").len() >= 2 {
             return true;
         }
         if sent_at.elapsed() >= Duration::from_millis(300) {
@@ -366,7 +363,7 @@ both!(a_leader_that_survives_its_terminate_handler_and_starts_a_child_on_each_te
     std::fs::write(s.path("quit"), "quit").expect("write the quit file");
     let report = handle.wait().await;
     assert_eq!(report.ending, Ending::Interrupted, "{report:#?}");
-    let children = recorded_pids(&s, "gcs");
+    let children = s.published_pids_in("gcs");
     assert!(
         children.len() >= 2,
         "{} children were started",

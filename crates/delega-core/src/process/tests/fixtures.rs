@@ -176,6 +176,33 @@ impl Scratch {
             Record::Incomplete(text) => panic!("{name} holds an incomplete pid record: {text}"),
         }
     }
+
+    /// The pids published as separate records in the directory `name`, one
+    /// file per pid. Temporary files not yet renamed are not records and are
+    /// skipped; a record file that is not complete is a failure.
+    pub(super) fn published_pids_in(&self, name: &str) -> Vec<i32> {
+        let entries = match std::fs::read_dir(self.path(name)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => panic!("read the record directory {name}: {e}"),
+        };
+        let mut pids = Vec::new();
+        for entry in entries {
+            let path = entry.expect("read a record directory entry").path();
+            if path.extension().is_some_and(|ext| ext == "tmp") {
+                continue;
+            }
+            match read_record(&path) {
+                Record::Pid(pid) => pids.push(pid),
+                Record::Absent => {}
+                Record::Incomplete(text) => {
+                    panic!("{} holds an incomplete pid record: {text}", path.display())
+                }
+            }
+        }
+        pids.sort_unstable();
+        pids
+    }
 }
 
 /// The pid in the relay's heartbeat file. The heartbeat is rewritten in place
