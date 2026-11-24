@@ -145,8 +145,15 @@
 //!   reads as missing is gone only if its pidfd says so (`hidepid` can hide a
 //!   live one). A queued child is taken under its parent only while the
 //!   parent's pidfd shows it alive, and otherwise only as the keeper's own
-//!   child. The owner reads a start time while holding the pin's lock, so
-//!   the child cannot be reaped mid-read. A read of `/proc` that fails for any
+//!   child; the parent's pidfd is asked again after the child's parent field
+//!   was compared with the parent's pid, and a parent that exited by then
+//!   drops the candidate unsignalled (the comparison may have matched a
+//!   process that reused the parent's pid), so the child is held only as the
+//!   keeper's own direct child or refused. The owner reads a start time while
+//!   holding the pin's lock, so the child cannot be reaped mid-read; the
+//!   child's own identity is learned under that lock too, with the check of
+//!   the pin, the read and storing it in one hold, and is not learned at all
+//!   once the pin is released. A read of `/proc` that fails for any
 //!   reason but the process being gone (ENOENT, ESRCH) makes the pass
 //!   incomplete, never counts as absence (the stat of a held process
 //!   included), and so does any error from a directory listing of `/proc`;
