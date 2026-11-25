@@ -46,11 +46,18 @@ pub const INTERRUPT_BOUND: Duration = Duration::from_secs(30);
 /// this long of awake time after the machine wakes.
 pub(super) const WALL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// The longest `start` spends checking the request's paths, executable and
-/// schema before it is admitted.
+/// schema before it is admitted, and the longest a dispatched run's plan
+/// (its paths resolved, its executable found and its settings files read) may
+/// take to build, counted from dispatch. A run whose plan is not built by then
+/// is refused `preflight_timeout`. Starting the keeper and the provider's
+/// probes and process comes after the plan and is not covered by this bound.
 pub const PREFLIGHT_BOUND: Duration = Duration::from_secs(10);
-/// Most request checks that may be outstanding at once. Each `start` checks its
-/// paths on an OS thread of its own, and a check on a filesystem that does not
-/// answer keeps its thread until it does, even after `start` gave up waiting. A
+/// Most request checks and run preparations that may be outstanding at once,
+/// together. Each `start` checks its paths, and each dispatched run is
+/// prepared, on an OS thread of its own, and one on a filesystem that does not
+/// answer keeps its thread until it does, even after the caller gave up
+/// waiting. A dispatched run that finds every slot taken waits for one the
+/// same way a `start` does. A
 /// `start` that finds every slot taken waits for one, without a thread, within
 /// [`PREFLIGHT_BOUND`] counted from when it began; a burst of concurrent starts
 /// is served in turn. One that gets no slot in time is refused

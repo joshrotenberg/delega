@@ -75,4 +75,5 @@ pub use options::ProviderOptions;
 pub use permissions::Mapping;
 pub use progress::{ProgressEvent, ProgressSink};
 pub use refusal::Refusal;
+pub(crate) use run::prepare;
 pub use run::{MACOS_KEEPER_NOTE, NO_KEEPER_NOTE, RunHandle, RunInterrupter, run, start};

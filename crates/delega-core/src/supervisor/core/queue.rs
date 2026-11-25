@@ -12,6 +12,7 @@ use crate::contract::result::RunResult;
 use crate::process::rfc3339_utc;
 use crate::provider::ProgressSink;
 
+use super::super::preflight::Unprepared;
 use super::super::record::Run;
 use super::super::results;
 use super::super::runner;
@@ -149,6 +150,10 @@ impl Core {
         let tx = self.tx.clone();
         let join = tokio::spawn(runner::drive(
             self.launch.clone(),
+            runner::Preparation {
+                preflight: self.preflight.clone(),
+                deadline: self.preflight.deadline(),
+            },
             request,
             options,
             stop,
@@ -203,6 +208,32 @@ impl Core {
             return;
         }
         let result = self.checked(id, result);
+        self.finish_run(id, result);
+    }
+
+    /// A run's task gave up preparing the run: the bound passed, preparing
+    /// failed, or an interrupt, close or shutdown released it. No provider
+    /// process was started, so the run ends as one that never started.
+    pub(super) fn run_unprepared(&mut self, id: &str, how: Unprepared) {
+        let Some(run) = self
+            .runs
+            .get_mut(id)
+            .filter(|r| r.state != RunState::Finished)
+        else {
+            return;
+        };
+        run.started_at = None;
+        run.started = None;
+        let run = &self.runs[id];
+        let wref = self.worker_ref_of(run);
+        let result = match how {
+            Unprepared::Refused((kind, message)) => results::refused(run, wref, &kind, &message),
+            Unprepared::Stopped => results::interrupted_unstarted(
+                run,
+                wref,
+                "interrupted while the run was being prepared, before the provider started",
+            ),
+        };
         self.finish_run(id, result);
     }
 

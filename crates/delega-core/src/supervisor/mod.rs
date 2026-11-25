@@ -208,7 +208,14 @@ impl Supervisor {
         let cursor = Arc::new(AtomicU64::new(0));
         let root = CancellationToken::new();
         let failed = Arc::new(Mutex::new(None));
-        let core = core::Core::new(config.clone(), tx.clone(), launch, cursor, root.clone());
+        let core = core::Core::new(
+            config.clone(),
+            tx.clone(),
+            launch,
+            preflight.clone(),
+            cursor,
+            root.clone(),
+        );
         let task = tokio::spawn(actor::run(core, rx, config.shutdown_bound));
         // If the task panics, `Core`'s drop has already stopped every run;
         // this records that it happened so no call can mistake it for a clean

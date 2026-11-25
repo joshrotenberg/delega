@@ -101,8 +101,8 @@ lower values from the `[mcp]` section of the
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | `wait_default` | 30 s | `wait` with no `timeout_secs`. `list` reports it as `default_wait_secs`. |
 | `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Answers at the limit](#wait-at-its-limit)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
-| preflight bound | 10 s | A bound on `start`'s dry run. A start that runs past it can be refused, kind `preflight_timeout`. |
-| outstanding request checks | 16 | Checks running at once. A `start` beyond it waits for a slot within the preflight bound. Not in `list`. |
+| preflight bound | 10 s | A bound on `start`'s dry run, and on building a run's plan when it is dispatched ([Starting and refusing](#starting-and-refusing)). A start or a dispatched run that runs past it is refused, kind `preflight_timeout`. |
+| outstanding request checks | 16 | Checks and plan builds running at once, together; one that timed out keeps its slot until its thread ends. A `start` or a dispatched run beyond it waits for a slot within the preflight bound. Not in `list`. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer. |
 | compact structured answer | 16 KiB | A compact read leaves out a larger structured answer. |
 | `shutdown_bound` | 30 s | The longest `shutdown` waits for runs to settle. |
@@ -138,11 +138,32 @@ creates no worker**, so the result has no `worker`.
 A `start` still being checked when `shutdown` begins returns `Error::ShutDown`,
 or `Error::Failed` if the supervisor's task failed; neither creates a run.
 
-An admitted run starts at once if a running slot is free. The provider layer
-checks the request again when the run starts; a refusal there ends that run
-`refused` and leaves the worker.
+An admitted run starts at once if a running slot is free. When it starts, the
+provider layer builds its plan again: it resolves the working directory and
+directories, looks up the executable and reads the Claude Code settings files,
+managed settings included. Building the plan runs on a thread of its own, in
+one of the request checks' slots, and must finish by the preflight bound,
+counted from when the run was dispatched. A refusal there ends that run
+`refused` and leaves the worker. A plan not built by the bound ends the run
+`refused`, kind `preflight_timeout`, with the fields of any refusal before
+start; a plan that is ready only at or after the bound is discarded and starts
+nothing. An `interrupt`, `close` or `shutdown` while the plan is being built
+ends the run `interrupted` at once, without starting the provider; a shutdown
+closes the worker and discards its queued runs first. The run's time limit
+starts after the plan is built.
 
-How the checks run: [`supervisor/preflight.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/preflight.rs).
+Only building the plan moved off the runtime. What follows it still runs on
+the runtime: starting the keeper (when a keeper command is set) and the
+provider's version probe, MCP probe and process. Starting a process on a
+filesystem that stops answering can block the runtime's thread there, and on
+the single-threaded runtime of `delega mcp` that holds every other call until
+it returns. A plan build that does not return keeps its thread and its slot
+until the filesystem answers. Slots are shared by admission checks and plan
+builds, 16 in all, so enough hung builds make later starts and dispatched runs
+wait for a slot and end `preflight_timeout`. `delega run` is unchanged: it
+builds the plan on its runtime before it watches for signals.
+
+How the checks and preparations run: [`supervisor/preflight.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/preflight.rs).
 
 ## Follow-ups
 

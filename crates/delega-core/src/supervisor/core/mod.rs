@@ -19,6 +19,7 @@ use crate::contract::result::{Cleanup, RunResult};
 use super::command::Command;
 use super::config::SupervisorConfig;
 use super::ids::Ids;
+use super::preflight::Preflight;
 use super::record::{Run, Worker};
 use super::runner::Launch;
 
@@ -60,6 +61,9 @@ pub(super) struct Core {
     shutdown_waiters: Vec<oneshot::Sender<()>>,
     tx: UnboundedSender<Command>,
     launch: Launch,
+    /// Prepares each dispatched run off the runtime, in the request checks'
+    /// slots and within their bound.
+    preflight: Preflight,
     /// Parent of every run's stop token.
     root: CancellationToken,
     /// Estimated bytes of the finished results kept.
@@ -95,6 +99,7 @@ impl Core {
         mut config: SupervisorConfig,
         tx: UnboundedSender<Command>,
         launch: Launch,
+        preflight: Preflight,
         cursor: Arc<AtomicU64>,
         root: CancellationToken,
     ) -> Self {
@@ -117,6 +122,7 @@ impl Core {
             shutdown_waiters: Vec::new(),
             tx,
             launch,
+            preflight,
             root,
             retained_bytes: 0,
             unconfirmed: VecDeque::new(),
@@ -228,6 +234,7 @@ impl Core {
                 });
             }
             Command::Finished { run, result } => self.run_finished(&run, *result),
+            Command::Unprepared { run, how } => self.run_unprepared(&run, how),
             Command::Crashed { run, reason } => self.run_crashed(&run, reason),
             Command::Quit => {
                 let _ = self.shutdown(false);
