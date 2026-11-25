@@ -30,14 +30,37 @@ pub fn problem(field: &str, message: impl Into<String>) -> Problem {
 }
 
 /// Read a regular file of at most `limit` bytes as UTF-8. A device, a pipe or a
-/// directory is refused before it is opened, so reading cannot block or run
-/// without end, and a file over the limit is refused naming the limit.
+/// directory at the path is refused before it is opened. The path is then
+/// opened without blocking and what was opened is checked again before it is
+/// read, so a pipe put in its place does not wait for a writer. A file over the
+/// limit is refused naming the limit.
 pub fn read_limited(path: &Path, limit: usize) -> Result<String, String> {
     let meta = std::fs::metadata(path).map_err(|err| err.to_string())?;
     if !meta.is_file() {
-        return Err("it is not a regular file".to_string());
+        return Err(NOT_A_REGULAR_FILE.to_string());
     }
-    let file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    read_opened(path, limit)
+}
+
+const NOT_A_REGULAR_FILE: &str = "it is not a regular file";
+
+/// Open `path` without blocking and read it only if what was opened is a
+/// regular file. The check before opening keeps a device at the path from being
+/// opened in the ordinary case; this one covers a path replaced between that
+/// check and the open, such as by a pipe, whose blocking open would wait for a
+/// writer.
+fn read_opened(path: &Path, limit: usize) -> Result<String, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOCTTY;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+        .map_err(|err| err.to_string())?;
+    let meta = file.metadata().map_err(|err| err.to_string())?;
+    if !meta.is_file() {
+        return Err(NOT_A_REGULAR_FILE.to_string());
+    }
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
@@ -261,6 +284,7 @@ mod tests {
     use crate::contract::partial::{PartialPermissions, PartialSession};
     use crate::contract::permissions::Mode;
     use crate::contract::request::{Effort, Provider};
+    use crate::test_spawn::Guarded;
 
     fn config_layer() -> PartialRequest {
         PartialRequest {
@@ -440,5 +464,55 @@ mod tests {
         );
         let tracked = merged(config_layer(), None, Layer::Flag, flags());
         assert_eq!(plain, tracked.request);
+    }
+
+    /// The open itself must not block and the opened file must be checked:
+    /// without that, a path replaced by a pipe after the check before opening
+    /// waits for a writer.
+    #[test]
+    fn a_pipe_in_place_of_the_checked_file_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fifo = dir.path().join("profile.json");
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .guarded_status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed: {made}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_opened(&path, MAX_PROFILE_BYTES));
+        });
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(30));
+        if matches!(answer, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+            // Release an open blocked on the pipe so the thread ends. Opened
+            // without blocking, so this cannot hang if nothing is reading.
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&fifo);
+        }
+        let refusal = answer
+            .expect("read_opened must answer within 30 s with no writer on the pipe")
+            .expect_err("refused");
+        assert_eq!(refusal, NOT_A_REGULAR_FILE);
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_checked_file_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let refusal = read_opened(dir.path(), MAX_PROFILE_BYTES).expect_err("refused");
+        assert_eq!(refusal, NOT_A_REGULAR_FILE);
+    }
+
+    #[test]
+    fn a_regular_file_is_read_through_the_non_blocking_open() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = profile_file(&dir, "{\"schema_version\": 1}");
+        assert_eq!(
+            read_limited(&path, MAX_PROFILE_BYTES).expect("read"),
+            "{\"schema_version\": 1}"
+        );
     }
 }
