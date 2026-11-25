@@ -259,7 +259,9 @@ Behaviour:
   read first, then the profile, then each flag given replaces its field. Lists
   replace, not add. Relative paths (`--request`, `--schema`, `-C`, `--add-dir`,
   and `cwd` and `permissions.directories` in a profile) resolve against the
-  caller's directory. `instructions` has no flag.
+  caller's directory. If the caller's directory cannot be read (it was
+  removed), a relative `cwd` or extra directory is refused `cwd_unusable`,
+  naming the path; an absolute `cwd` still works. `instructions` has no flag.
 - **Claude Code settings.** A Claude worker inherits no hooks, `env`, plugins,
   skills, MCP servers, instructions, `CLAUDE.md` files or auto memory from the
   user's or project's settings. It gets their `permissions.deny` rules, which

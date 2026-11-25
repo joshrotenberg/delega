@@ -150,6 +150,9 @@ fn json_document(value: &impl serde::Serialize) -> String {
 /// Print a refusal found before a run existed, and exit with the refused
 /// status. In JSON mode the refused result is the document.
 pub fn refuse(format: OutputFormat, failure: &Failure, log: &Log) -> ExitCode {
+    if let Some(refusal) = &failure.unusable {
+        return refuse_dry_run(format, &failure.facts, refusal, log);
+    }
     match format {
         OutputFormat::Json => {
             let result = RunResult::refused_invalid(context(&failure.facts), &failure.problems)

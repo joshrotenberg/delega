@@ -102,11 +102,31 @@ impl Rig {
 
     /// Like [`Rig::start_with`], for the `delega` executable at `program`.
     fn start_program(&self, program: &Path, args: &[&str], more_env: &[(&str, &str)]) -> Session {
+        self.start_program_in(None, program, args, more_env)
+    }
+
+    /// Like [`Rig::start`], with the server's working directory set to `dir`.
+    fn start_in(&self, dir: &Path, args: &[&str]) -> Session {
+        let program = Path::new(env!("CARGO_BIN_EXE_delega"));
+        self.start_program_in(Some(dir), program, args, &[])
+    }
+
+    fn start_program_in(
+        &self,
+        dir: Option<&Path>,
+        program: &Path,
+        args: &[&str],
+        more_env: &[(&str, &str)],
+    ) -> Session {
         if !cfg!(debug_assertions) {
             panic!("MCP fixtures require debug system root injection");
         }
         let config = self.root.join("home");
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        if let Some(dir) = dir {
+            command.current_dir(dir);
+        }
+        let mut child = command
             .arg("mcp")
             .args(args)
             .env_clear()
@@ -534,6 +554,47 @@ fn a_start_without_an_absolute_cwd_is_refused_and_starts_nothing() {
         !rig.record.join("argv").exists(),
         "no provider process was started"
     );
+    session.close_stdin();
+    let status = session.exit();
+    assert_stop_status(&session, status, 0);
+    rig.assert_nothing_left();
+}
+
+#[test]
+fn a_start_with_an_absolute_cwd_completes_after_the_servers_own_directory_is_removed() {
+    let rig = Rig::new();
+    let server_dir = rig.root.join("server");
+    std::fs::create_dir(&server_dir).expect("create server directory");
+    let mut session = rig.start_in(&server_dir, &["--env", "FAKE_RECORD_DIR"]);
+    // The server is in that directory once it is spawned; removing it leaves
+    // the server's working directory unreadable, as a host's deleted directory
+    // would, without changing the test process's own.
+    std::fs::remove_dir(&server_dir).expect("remove server directory");
+    session.initialize();
+    let started = session.call(
+        "start",
+        json!({"provider": "codex", "prompt": "success", "cwd": rig.work}),
+    );
+    assert!(started["worker"].is_string(), "{started}");
+    let run = started["run"].clone();
+    let began = Instant::now();
+    let waited = loop {
+        let waited = session.call("wait", json!({"runs": [run], "timeout_secs": 30}));
+        if waited["runs"][0]["outcome"].is_string() {
+            break waited;
+        }
+        assert!(
+            began.elapsed() < EVENTUALLY,
+            "the run did not finish: {waited}"
+        );
+    };
+    assert_eq!(waited["runs"][0]["outcome"], "completed", "{waited}");
+    let result = finished_result(&mut session, &run);
+    assert_eq!(result["outcome"], "completed", "{result}");
+    assert_eq!(result["text"], "fake final answer", "{result}");
+    let worker_cwd = std::fs::read_to_string(rig.record.join("cwd")).expect("worker cwd");
+    assert_eq!(worker_cwd.trim_end(), rig.work.to_string_lossy());
+
     session.close_stdin();
     let status = session.exit();
     assert_stop_status(&session, status, 0);

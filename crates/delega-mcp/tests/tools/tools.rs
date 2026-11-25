@@ -217,7 +217,8 @@ async fn an_empty_extra_directory_is_refused_as_invalid_not_joined_to_cwd() {
     assert_eq!(refused["error"]["kind"], "invalid_request", "{refused}");
     let message = refused["error"]["message"].as_str().expect("message");
     assert!(message.contains("permissions.directories[0]"), "{message}");
-    assert!(rig.argv().is_empty(), "no process was started");
+    // The fake records argv only for a worker run, not for its probes.
+    assert!(rig.argv().is_empty(), "no worker was started");
     rig.finish().await;
 }
 

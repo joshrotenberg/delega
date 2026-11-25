@@ -27,6 +27,7 @@ use delega_core::contract::permissions::Mode;
 use delega_core::contract::request::{Provider, Request};
 use delega_core::contract::validate::Problem;
 use delega_core::profile::{self, ErrorDetail, problem, read_limited};
+use delega_core::provider::Refusal;
 use serde_json::Value;
 
 use super::{Args, Effort, Provider as ProviderArg};
@@ -74,6 +75,9 @@ pub struct Built {
 pub struct Failure {
     pub problems: Vec<Problem>,
     pub facts: Facts,
+    /// A caller-relative path that could not be resolved because the caller's
+    /// directory cannot be read: refused as `cwd_unusable`, not as a problem.
+    pub unusable: Option<Refusal>,
 }
 
 /// What a refusal before any request exists still reports: the provider and the
@@ -100,9 +104,9 @@ pub fn flag_facts(args: &Args) -> Facts {
 pub fn build(args: &Args, config: &Config, file: Option<AppliedConfig>) -> Result<Built, Failure> {
     let mut problems = Vec::new();
     let profile::Merged {
-        request: merged,
+        request: mut merged,
         sources,
-    } = profile::merge_tracked(
+    } = profile::merge_unresolved_tracked(
         config.request_defaults(),
         args.request.as_deref(),
         ErrorDetail::Full,
@@ -126,11 +130,32 @@ pub fn build(args: &Args, config: &Config, file: Option<AppliedConfig>) -> Resul
         origin: Box::new(origin.clone()),
     };
     if !problems.is_empty() {
-        return Err(Failure { problems, facts });
+        return Err(Failure {
+            problems,
+            facts,
+            unusable: None,
+        });
+    }
+    // A relative path that cannot be resolved against the caller's directory
+    // is refused here: left relative, the provider would resolve it against
+    // the worker's directory instead.
+    if let Err(unresolved) = profile::resolve_paths(&mut merged) {
+        return Err(Failure {
+            problems: Vec::new(),
+            facts,
+            unusable: Some(Refusal {
+                kind: "cwd_unusable".to_string(),
+                message: unresolved.to_string(),
+            }),
+        });
     }
     match merged.into_request() {
         Ok(request) => Ok(Built { request, origin }),
-        Err(problems) => Err(Failure { problems, facts }),
+        Err(problems) => Err(Failure {
+            problems,
+            facts,
+            unusable: None,
+        }),
     }
 }
 

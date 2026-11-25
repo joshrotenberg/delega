@@ -74,23 +74,45 @@ fn read_opened(path: &Path, limit: usize) -> Result<String, String> {
 /// Make every relative path in the request relative to the working directory
 /// of this process: `cwd` and `permissions.directories`, whether they came from
 /// a profile or from explicit values. Without this a relative extra directory
-/// would be resolved against the worker's own working directory. A path that
-/// cannot be made absolute, such as an empty one, is left for validation to
-/// report.
-pub fn resolve_paths(request: &mut PartialRequest) {
-    let absolute = |path: &PathBuf| std::path::absolute(path).unwrap_or_else(|_| path.clone());
+/// would be resolved against the worker's own working directory. An empty path
+/// is left for validation to report.
+///
+/// A non-empty relative path that cannot be made absolute, because this
+/// process's working directory cannot be read, is a problem naming the field
+/// and the path. It is never left relative, where the worker's directory would
+/// give it another meaning.
+pub fn resolve_paths(request: &mut PartialRequest) -> Result<(), Problem> {
+    let absolute = |field: String, path: &mut PathBuf| {
+        if path.as_os_str().is_empty() || path.is_absolute() {
+            return Ok(());
+        }
+        match std::path::absolute(&*path) {
+            Ok(resolved) => {
+                *path = resolved;
+                Ok(())
+            }
+            Err(err) => Err(problem(
+                &field,
+                format!(
+                    "{} is relative and the current directory cannot be read: {err}",
+                    path.display()
+                ),
+            )),
+        }
+    };
     if let Some(cwd) = &mut request.cwd {
-        *cwd = absolute(cwd);
+        absolute("cwd".to_string(), cwd)?;
     }
     if let Some(dirs) = request
         .permissions
         .as_mut()
         .and_then(|p| p.directories.as_mut())
     {
-        for dir in dirs {
-            *dir = absolute(dir);
+        for (i, dir) in dirs.iter_mut().enumerate() {
+            absolute(format!("permissions.directories[{i}]"), dir)?;
         }
     }
+    Ok(())
 }
 
 /// How much of a profile's parse error a problem repeats.
@@ -206,6 +228,7 @@ pub fn merge_over(
 /// `config` layer, the profile is `profile`, and `explicit` is `explicit_layer`:
 /// `flag` for the command line, `argument` for an MCP call. The layers are
 /// recorded here, as they are merged, not worked out from the values afterwards.
+/// A relative path that [`resolve_paths`] cannot resolve is added to `problems`.
 pub fn merge_tracked(
     base: PartialRequest,
     path: Option<&Path>,
@@ -216,7 +239,9 @@ pub fn merge_tracked(
 ) -> Merged {
     let mut merged =
         merge_unresolved_tracked(base, path, detail, explicit_layer, problems, explicit);
-    resolve_paths(&mut merged.request);
+    if let Err(unresolved) = resolve_paths(&mut merged.request) {
+        problems.push(unresolved);
+    }
     merged
 }
 
