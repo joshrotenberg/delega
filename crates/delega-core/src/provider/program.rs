@@ -134,19 +134,21 @@ pub(super) fn find_tool(name: &str, path: Option<&std::ffi::OsStr>, cwd: &Path) 
         .find(|candidate| is_executable(candidate))
 }
 
-/// The first line of `--version` output as the provider printed it. The hook
-/// version gate parses this line; what is stored or shown is
-/// [`version_text`].
+/// The first non-blank line of `--version` output, exactly as the provider
+/// printed it, surrounding whitespace included. The hook version gate parses
+/// this line; what is stored or shown is [`version_text`].
 pub(super) fn version_line(stdout: &str) -> Option<String> {
-    let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
     Some(line.to_string())
 }
 
 /// The version line as a result or report holds it: with credentials removed,
-/// then cut to [`VERSION_CHARS`]. Redacting before the cut means the cut cannot
+/// then trimmed, then cut to [`VERSION_CHARS`] with `...` added when cut.
+/// Redaction sees the line with its whitespace as printed, since a configured
+/// value is matched exactly, and it comes before the cut, so the cut cannot
 /// leave part of a credential the redactor no longer recognises.
 pub(super) fn version_text(line: &str, redactor: &Redactor) -> String {
-    clip(&redactor.apply(line), VERSION_CHARS)
+    clip(redactor.apply(line).trim(), VERSION_CHARS)
 }
 
 /// `MAJOR.MINOR.PATCH` at the start of trimmed version output.

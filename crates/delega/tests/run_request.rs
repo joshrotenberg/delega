@@ -6,7 +6,7 @@ mod support;
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::permissions::Mode;
 use delega_core::contract::request::Provider;
-use delega_core::provider::limits::PROGRESS_KIND_CHARS;
+use delega_core::provider::limits::{DENIAL_TOOL_CHARS, PROGRESS_KIND_CHARS};
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
@@ -693,6 +693,34 @@ fn progress_shows_an_event_type_redacted_and_cut() {
         );
         rig.assert_nothing_left();
     }
+}
+
+#[test]
+fn progress_and_the_result_show_a_denial_redacted_and_cut() {
+    let rig = Rig::new();
+    let out = rig.run("claude", "odd-denial", &["--progress", "--output", "json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let expected = format!(
+        "Tool [redacted] {}...: /tmp/denied-path (Denied with [redacted] here.)",
+        "x".repeat(DENIAL_TOOL_CHARS - 16)
+    );
+    let result = result_of(&out);
+    let denied: Vec<&str> = result
+        .permissions
+        .denied
+        .iter()
+        .map(|d| d.request.as_str())
+        .collect();
+    assert_eq!(denied, [expected.as_str()]);
+    let err = text(&out.stderr);
+    assert!(
+        err.lines()
+            .any(|l| l == format!("progress: denied: {expected}")),
+        "{err}"
+    );
+    assert!(!err.contains("sk-ant-"), "{err}");
+    assert!(!text(&out.stdout).contains("sk-ant-"));
+    rig.assert_nothing_left();
 }
 
 #[test]

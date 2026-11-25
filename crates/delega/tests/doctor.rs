@@ -352,6 +352,38 @@ fn a_version_with_escape_sequences_is_shown_without_them_in_text() {
 }
 
 #[test]
+fn doctor_shows_the_version_line_redacted_as_text_and_json() {
+    let rig = Rig::new();
+    // The configured value begins and ends with a space; the line holds it
+    // exactly, then a credential shape.
+    let value = " fake-key-value-1 ";
+    let claude = script(
+        &rig,
+        "keyed-claude",
+        "printf '2.1.400 fake-key-value-1 sk-ant-abcdefghijklmnopqrstuvwx\\n'",
+    );
+    let tweak = |c: &mut Command| {
+        c.env("DELEGA_CLAUDE_BIN", &claude)
+            .env("ANTHROPIC_API_KEY", value);
+    };
+    let out = doctor_with(&rig, &[], tweak);
+    let report = text(&out.stdout);
+    assert!(
+        report.contains("version: 2.1.400[redacted][redacted]\n"),
+        "{report}"
+    );
+    assert!(!report.contains("fake-key-value"), "{report}");
+    assert!(!report.contains("sk-ant-"), "{report}");
+
+    let out = doctor_with(&rig, &["--output", "json"], tweak);
+    let report = json_of(&out);
+    let claude = provider(&report, "claude");
+    assert_eq!(claude["version"], "2.1.400[redacted][redacted]");
+    // The version gate reads the line as printed.
+    assert_eq!(claude["command_hook"]["available"], true);
+}
+
+#[test]
 fn an_unsupported_claude_version_stops_only_exact_command_grants() {
     let rig = Rig::new();
     let old = script(&rig, "old-claude", "echo '2.0.1 (Claude Code)'");

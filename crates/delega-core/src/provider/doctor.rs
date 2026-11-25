@@ -229,8 +229,9 @@ pub struct ProviderCheck {
     /// configuration file), `PATH`, or `option` when a library caller set
     /// `ProviderOptions::executable`.
     pub executable_source: Option<String>,
-    /// The first line of `--version` output with credentials removed and cut
-    /// to 100 characters, or null when there was none.
+    /// The first non-blank line of `--version` output with credentials
+    /// removed, trimmed, and cut to 100 characters with `...` appended when
+    /// cut, or null when there was none.
     pub version: Option<String>,
     /// For Claude Code, whether the command hook interface is available. Null
     /// for Codex, which has no minimum version.

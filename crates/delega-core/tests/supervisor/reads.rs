@@ -4,7 +4,7 @@
 use super::{BOTH, Rig, read_compact, read_full, read_until_text, result_of};
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::request::Provider;
-use delega_core::provider::limits::PROGRESS_KIND_CHARS;
+use delega_core::provider::limits::{DENIAL_TOOL_CHARS, PROGRESS_KIND_CHARS};
 use delega_core::supervisor::limits::{COMPACT_ACTIVITY, COMPACT_PARTIAL_TEXT_CHARS, MAX_ACTIVITY};
 use delega_core::supervisor::{Detail, RunState, Target, WorkerState};
 
@@ -95,6 +95,41 @@ async fn activity_shows_an_event_type_redacted_and_cut() {
         supervisor.shutdown().await;
         rig.assert_nothing_left().await;
     }
+}
+
+#[tokio::test]
+async fn activity_and_the_result_show_a_denial_redacted_and_cut() {
+    let rig = Rig::new();
+    let supervisor = rig.supervisor(Provider::Claude);
+    let started = supervisor
+        .start(rig.request(Provider::Claude, "odd-denial"))
+        .await
+        .expect("start");
+    let result = result_of(&supervisor, &started.run).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    let expected = format!(
+        "Tool [redacted] {}...: /tmp/denied-path (Denied with [redacted] here.)",
+        "x".repeat(DENIAL_TOOL_CHARS - 16)
+    );
+    let denied: Vec<&str> = result
+        .permissions
+        .denied
+        .iter()
+        .map(|d| d.request.as_str())
+        .collect();
+    assert_eq!(denied, [expected.as_str()]);
+    let read = read_full(&supervisor, &started.run).await;
+    let progress = read.progress.expect("progress");
+    assert!(
+        progress
+            .activity
+            .iter()
+            .any(|a| a.kind == "denied" && a.summary == expected),
+        "{:#?}",
+        progress.activity
+    );
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
 }
 
 #[tokio::test]

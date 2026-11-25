@@ -53,7 +53,7 @@ fn claude_result_event_gives_text_usage_cost_session_and_denials() {
     assert_eq!(usage.cost_usd, None);
     assert_eq!(parsed.fresh_usage.unwrap().cost_usd, Some(0.25));
     assert_eq!(parsed.session_usage.unwrap().cost_usd, Some(0.25));
-    let denied: Vec<&str> = parsed.denied.iter().map(|d| d.request.as_str()).collect();
+    let denied = shown(&parsed.denied);
     assert_eq!(denied, ["Bash: rm -rf x", "Read: /etc/passwd", "Grep"]);
 }
 
@@ -199,7 +199,7 @@ fn codex_events_give_thread_final_message_usage_and_declined_commands() {
         (Some(5), Some(2), Some(1), Some(4))
     );
     assert_eq!(usage.cost_usd, None);
-    let denied: Vec<&str> = parsed.denied.iter().map(|d| d.request.as_str()).collect();
+    let denied = shown(&parsed.denied);
     assert_eq!(denied, ["command: rm x"]);
 }
 
@@ -234,7 +234,54 @@ fn denied_requests_are_bounded() {
         Some(&"x".repeat(crate::provider::limits::DENIAL_TARGET_CHARS + 50)),
         None,
     );
-    assert!(parsed.denied[0].request.ends_with("..."));
+    assert!(shown(&parsed.denied)[0].ends_with("..."));
+}
+
+/// The denied requests as a result lists them, with no configured values.
+fn shown(denied: &[crate::provider::stream::Denial]) -> Vec<String> {
+    let redactor = crate::provider::redact::Redactor::default();
+    denied.iter().map(|d| d.shown(&redactor).request).collect()
+}
+
+#[test]
+fn a_denied_tool_name_and_reason_have_credentials_removed_before_they_are_cut() {
+    use crate::provider::limits::{DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, DENIAL_TOOL_CHARS};
+    let configured = "fixture\tprivate  token";
+    let redactor = crate::provider::redact::Redactor::new([configured.to_string()]);
+    let key = "sk-ant-abcdefghijklmnopqrstuvwx";
+    let mut parsed = crate::provider::stream::Parsed::default();
+    // Each secret starts just before its cut, so cutting first would keep
+    // part of it. The configured one holds whitespace the tool name's joining
+    // to one line would change.
+    let tool = "t".repeat(DENIAL_TOOL_CHARS - 5);
+    let target = "c".repeat(DENIAL_TARGET_CHARS - 5);
+    let reason = "r".repeat(DENIAL_REASON_CHARS - 5);
+    parsed.deny(
+        &format!("{tool} {configured}"),
+        Some(&format!("{target}/path/more")),
+        Some(&format!("{reason} {key}")),
+    );
+    let request = parsed.denied[0].shown(&redactor).request;
+    assert!(!request.contains("sk-ant"), "{request}");
+    assert!(!request.contains("private"), "{request}");
+    // The command or path is shown as asked for, cut only.
+    assert_eq!(
+        request,
+        format!("{tool} [red...: {target}/path... ({reason} [red...)")
+    );
+}
+
+#[test]
+fn a_claude_denial_is_classified_by_the_tool_name_as_written() {
+    // The tool name is long enough to be cut where it is shown; the stop is
+    // still recognised from the name the provider wrote.
+    let tool = format!("Tool{}", "x".repeat(200));
+    let line = format!(
+        r#"{{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s","errors":["{tool} failed"],"permission_denials":[{{"tool_name":"{tool}","tool_use_id":"t1"}}]}}"#
+    );
+    let parsed = claude::parse(line.as_bytes());
+    assert!(parsed.stopped_by_denial, "{parsed:?}");
+    assert_eq!(parsed.denied[0].tool, tool);
 }
 
 #[test]

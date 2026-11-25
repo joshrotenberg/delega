@@ -179,10 +179,10 @@ fn progress_line(event: &ProgressEvent) -> String {
         ProgressEvent::Started { provider, program } => {
             format!("progress: started {} ({program})", provider_name(*provider))
         }
-        ProgressEvent::Provider { kind, summary } if summary.is_empty() => {
+        ProgressEvent::Provider { kind, summary, .. } if summary.is_empty() => {
             format!("progress: {kind}")
         }
-        ProgressEvent::Provider { kind, summary } => format!("progress: {kind}: {summary}"),
+        ProgressEvent::Provider { kind, summary, .. } => format!("progress: {kind}: {summary}"),
         ProgressEvent::Denied { request } => format!("progress: denied: {request}"),
         ProgressEvent::Dropped { .. } | ProgressEvent::Message { .. } => String::new(),
         ProgressEvent::Finished { outcome } => {

@@ -250,6 +250,38 @@ both!(
     a_credential_in_the_version_line_is_redacted_in_the_result
 );
 
+async fn a_configured_value_with_outer_whitespace_is_redacted_in_the_version(provider: Provider) {
+    let owned = match provider {
+        Provider::Claude => "ANTHROPIC_API_KEY",
+        Provider::Codex => "OPENAI_API_KEY",
+    };
+    // The value begins and ends with a space, so it is found only in the line
+    // as printed, before any trimming.
+    let value = " fake-key-value-1 ";
+    for (printed, stored) in [
+        (format!("9.9.9{value}"), "9.9.9[redacted]"),
+        (format!("{value}9.9.9"), "[redacted]9.9.9"),
+    ] {
+        let rig = Rig::new();
+        let mut options = rig.options(provider);
+        options.env_set.push((owned.into(), value.into()));
+        options
+            .env_set
+            .push(("FAKE_VERSION".into(), printed.clone()));
+        let result = run_checked(rig.request(provider, "success"), options).await;
+        assert_eq!(
+            result.provenance.provider_version.as_deref(),
+            Some(stored),
+            "{printed:?}"
+        );
+        rig.assert_nothing_left().await;
+    }
+}
+both!(
+    version_line_outer_whitespace_value_is_redacted,
+    a_configured_value_with_outer_whitespace_is_redacted_in_the_version
+);
+
 #[tokio::test]
 async fn a_version_line_is_redacted_before_it_is_cut_so_no_part_of_a_key_is_kept() {
     let rig = Rig::new();

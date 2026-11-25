@@ -27,7 +27,8 @@
 //! arrive unchanged.
 //!
 //! A [`ProgressEvent::Denied`] carries the request exactly as the result lists
-//! it in `permissions.denied`, which includes the denied command or path.
+//! it in `permissions.denied`: the tool name and reason with credentials
+//! removed, the denied command or path as asked for, each part cut.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -64,6 +65,10 @@ pub enum ProgressEvent {
         kind: String,
         /// A short description, possibly empty.
         summary: String,
+        /// Whether the provider's event type was exactly `system`, before
+        /// redaction and cutting. `kind` alone cannot tell: a type such as
+        /// `" system "` is shown as `system` too.
+        system: bool,
     },
     /// The text of one agent message, with credentials removed and cut to
     /// [`PROGRESS_TEXT_CHARS`]. Sent, after the [`Provider`](Self::Provider)
@@ -177,8 +182,12 @@ impl Progress {
                 .unwrap_or_else(PoisonError::into_inner)
                 .feed(chunk);
             for line in lines {
-                for (kind, summary) in describe_line(provider, &line, &redactor) {
-                    progress.emit(ProgressEvent::Provider { kind, summary });
+                for (kind, summary, system) in describe_line(provider, &line, &redactor) {
+                    progress.emit(ProgressEvent::Provider {
+                        kind,
+                        summary,
+                        system,
+                    });
                 }
                 if progress.text {
                     for text in message_texts(provider, &line, &redactor) {
@@ -225,8 +234,13 @@ impl Framer {
 
 /// The events one output line stands for. A line that is not a JSON object
 /// stands for none. Kinds are matched as the provider wrote them and only then
-/// redacted and cut, like summaries.
-fn describe_line(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<(String, String)> {
+/// redacted and cut, like summaries. The third value says whether the type was
+/// exactly `system` as written.
+fn describe_line(
+    provider: Provider,
+    line: &[u8],
+    redactor: &Redactor,
+) -> Vec<(String, String, bool)> {
     let Ok(Value::Object(event)) = serde_json::from_slice::<Value>(line.trim_ascii()) else {
         return Vec::new();
     };
@@ -240,6 +254,7 @@ fn describe_line(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<(S
             (
                 bounded(&kind, redactor, PROGRESS_KIND_CHARS),
                 bounded(&summary, redactor, PROGRESS_SUMMARY_CHARS),
+                kind == "system",
             )
         })
         .collect()
@@ -278,10 +293,13 @@ fn message_texts(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<St
         .collect()
 }
 
-/// One line, with credentials removed, cut to `max` characters.
-fn bounded(text: &str, redactor: &Redactor, max: usize) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    clip(&redactor.apply(&one_line), max)
+/// Provider text with credentials removed, then joined to one line, then cut
+/// to `max` characters. Redaction comes first: a configured value is matched
+/// exactly as passed, so joining its whitespace first could hide it.
+pub(super) fn bounded(text: &str, redactor: &Redactor, max: usize) -> String {
+    let redacted = redactor.apply(text);
+    let one_line = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    clip(&one_line, max)
 }
 
 /// How an agent message is shown: its length, never its text.
@@ -437,7 +455,11 @@ mod tests {
         let out = describe_line(Provider::Claude, event.to_string().as_bytes(), &redactor);
         assert_eq!(
             out,
-            [("assistant".to_string(), "message: 32 chars".to_string())]
+            [(
+                "assistant".to_string(),
+                "message: 32 chars".to_string(),
+                false
+            )]
         );
 
         let event = serde_json::json!({
@@ -449,7 +471,8 @@ mod tests {
             out,
             [(
                 "item.completed".to_string(),
-                "message: 19 chars".to_string()
+                "message: 19 chars".to_string(),
+                false
             )]
         );
     }
@@ -487,6 +510,53 @@ mod tests {
                 format!("{}...", "k".repeat(PROGRESS_KIND_CHARS)),
                 "{provider:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_configured_value_with_inner_whitespace_is_redacted_in_kind_and_summary() {
+        let value = "fixture\tprivate  token";
+        let redactor = Redactor::new([value.to_string()]);
+        let event = serde_json::json!({
+            "type": format!("t {value} t"),
+            "subtype": format!("s {value} s"),
+            "message": format!("m {value} m")
+        });
+        for provider in [Provider::Claude, Provider::Codex] {
+            let out = describe_line(provider, event.to_string().as_bytes(), &redactor);
+            assert_eq!(out[0].0, "t [redacted] t", "{provider:?}");
+            assert!(!out[0].0.contains("private"), "{out:?}");
+        }
+        for kind in ["error", "system"] {
+            let mut event = event.clone();
+            event["type"] = serde_json::json!(kind);
+            let out = describe_line(Provider::Claude, event.to_string().as_bytes(), &redactor);
+            assert!(out[0].1.contains("[redacted]"), "{out:?}");
+            assert!(!out[0].1.contains("private"), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn a_configured_value_across_the_kind_cut_leaves_no_part_of_itself() {
+        let value = "fixture-private-token";
+        let redactor = Redactor::new([value.to_string()]);
+        // The value starts at character 35 and would run past the 40-character
+        // cut; the mask that replaces it is cut instead.
+        let kind = format!("{}{value}", "k".repeat(35));
+        let event = serde_json::json!({"type": kind});
+        let out = describe_line(Provider::Codex, event.to_string().as_bytes(), &redactor);
+        assert_eq!(out[0].0, format!("{}[reda...", "k".repeat(35)));
+        assert!(!out[0].0.contains("fixture"), "{out:?}");
+    }
+
+    #[test]
+    fn only_a_type_that_is_exactly_system_is_marked_as_system() {
+        let redactor = Redactor::default();
+        for (kind, system) in [("system", true), (" system ", false), ("system\n", false)] {
+            let event = serde_json::json!({"type": kind, "subtype": "thinking_tokens"});
+            let out = describe_line(Provider::Claude, event.to_string().as_bytes(), &redactor);
+            assert_eq!(out[0].0, "system", "{kind:?}");
+            assert_eq!(out[0].2, system, "{kind:?}");
         }
     }
 
@@ -539,7 +609,8 @@ mod tests {
             out,
             [(
                 "item.completed".to_string(),
-                "command_execution completed".to_string()
+                "command_execution completed".to_string(),
+                false
             )]
         );
     }

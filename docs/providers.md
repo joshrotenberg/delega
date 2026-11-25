@@ -51,10 +51,11 @@ requiring the command guard can report `unsupported_provider_version`.
    (each must exist). Look up the executable. For Claude Code, read the user's
    deny rules and check for exclusive managed MCP. Any refusal at this stage
    leaves the provider unstarted.
-2. Run `<executable> --version` (5 s). The first line, redacted (see
-   [Text from the provider](#text-from-the-provider)) and then cut to 100
-   characters, is `provenance.provider_version`; doctor reports the same text.
-   The version gate reads the line as printed. For Claude Code with
+2. Run `<executable> --version` (5 s). The first non-blank line, redacted
+   (see [Text from the provider](#text-from-the-provider)), trimmed and cut to
+   100 characters with `...` appended when cut, is
+   `provenance.provider_version`; doctor reports the same text. The version
+   gate reads the line as printed. For Claude Code with
    `permissions.commands` granted, a version below 2.1.325 or an unreadable one is `refused` with kind
    `unsupported_provider_version`, or `failed` with that kind when the probe's
    processes could not be confirmed stopped.
@@ -174,20 +175,24 @@ See [Claude Code stream](#stream) and [Codex stream](#stream-1).
 
 ### Text from the provider
 
-Provider errors, progress kinds and text, and the `--version` line replace
-common credential shapes and passed values of provider or
-[secret-looking variables](#environment-policy) with `[redacted]`. Values
-shorter than 6 characters are excluded from value matching. Recognised shapes include API keys, forge and Slack tokens, AWS
-access key IDs, JWTs, Bearer tokens and private key blocks. Answer text and
-denied commands or paths are shown as provided, subject to capture limits.
+Provider errors, progress kinds and text, the tool name and reason of a denied
+request, and the `--version` line replace common credential shapes and passed
+values of provider or [secret-looking variables](#environment-policy) with
+`[redacted]`. Redaction sees the text as the provider wrote it and comes before
+any joining of whitespace or cut. Values shorter than 6 characters are excluded
+from value matching. Recognised shapes include API keys, forge and Slack
+tokens, AWS access key IDs, JWTs, Bearer tokens and private key blocks. Answer
+text and denied commands or paths are shown as provided, subject to capture
+limits.
 
 | Limit | What you see |
 | --- | --- |
 | 64 KiB | Standard error captured from the end. |
 | 8 KiB, then 300 characters | Redacted standard error excerpt from the end, joined to one line. A character cut adds `... `. If capture was cut and no excerpt remains, the error says so. |
 | 500 characters | Redacted provider error message from the start. |
-| 100 characters | Redacted first line of `--version` output, from the start. |
-| 40 characters | Redacted provider event type in a progress kind, from the start. A cut adds `...`. |
+| 100 characters | Redacted first non-blank line of `--version` output, trimmed, from the start. A cut adds `...`. |
+| 40 characters | Redacted provider event type in a progress kind, joined to one line, from the start. A cut adds `...`. |
+| 100, 500 and 300 characters | Redacted tool name (joined to one line), unredacted command or path, and redacted reason of a denied request, each from the start. A cut adds `...`. |
 
 Credential matching is heuristic. A credential cut by the capture limit with
 more than 8 KiB remaining in capture, or a private key with overlapping

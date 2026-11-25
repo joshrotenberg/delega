@@ -14,7 +14,7 @@ use crate::contract::result::Usage;
 
 use super::hook::{GRANTS_ENV, HookCommand};
 use super::launch::{Built, Elide, Inputs};
-use super::limits::{DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, SETTINGS_ARGUMENT_LIMIT};
+use super::limits::{HOOK_TIMEOUT_SECS, MAX_REASONS, SETTINGS_ARGUMENT_LIMIT};
 use super::refusal::{Refusal, clip};
 use super::stream::{Parsed, Terminal, cost, count, for_each_event, non_empty, str_field};
 
@@ -833,7 +833,8 @@ fn error_reason(content: &Value) -> Option<String> {
     let sentence_end = text.find(". ").map_or(text.len(), |i| i + 1);
     let line_end = text.find('\n').unwrap_or(text.len());
     let reason = text[..sentence_end.min(line_end)].trim();
-    (!reason.is_empty()).then(|| clip(reason, DENIAL_REASON_CHARS))
+    // Not cut here: it is redacted before it is cut (see `Denial::shown`).
+    (!reason.is_empty()).then(|| reason.to_string())
 }
 
 /// Reduce the output stream to a [`Parsed`].
@@ -976,7 +977,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     .denied
                     .iter()
                     .map(|d| {
-                        d.request
+                        d.tool
                             .split([':', ' '])
                             .next()
                             .unwrap_or_default()

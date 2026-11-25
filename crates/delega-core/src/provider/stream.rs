@@ -8,9 +8,45 @@ use serde_json::{Map, Value};
 use crate::contract::result::{DeniedRequest, Usage};
 
 use super::limits::{
-    DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, MAX_DENIED, MAX_LINE_BYTES, MAX_SESSION_IDS,
+    DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, DENIAL_TOOL_CHARS, MAX_DENIED, MAX_LINE_BYTES,
+    MAX_SESSION_IDS,
 };
+use super::progress::bounded;
+use super::redact::Redactor;
 use super::refusal::clip;
+
+/// A denied request as the provider reported it. The raw tool name decides how
+/// the denial is classified; what a result lists is [`Denial::shown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Denial {
+    /// The tool, as the provider named it.
+    pub tool: String,
+    /// The command or path, when there is one, cut to [`DENIAL_TARGET_CHARS`].
+    pub target: Option<String>,
+    /// Why the provider said it was denied, when it did.
+    pub reason: Option<String>,
+}
+
+impl Denial {
+    /// The request as a result, progress and activity show it. The tool name
+    /// and the reason are provider text: each has credentials removed first
+    /// and is then cut, the tool name, joined to one line, to
+    /// [`DENIAL_TOOL_CHARS`] and the reason to [`DENIAL_REASON_CHARS`]. The
+    /// command or path is shown as the provider asked for it, cut only: it is
+    /// what the caller needs to see to decide what to grant.
+    pub fn shown(&self, redactor: &Redactor) -> DeniedRequest {
+        let tool = bounded(&self.tool, redactor, DENIAL_TOOL_CHARS);
+        let mut request = match self.target.as_deref() {
+            Some(t) if !t.is_empty() => format!("{tool}: {t}"),
+            _ => tool,
+        };
+        if let Some(reason) = self.reason.as_deref().filter(|r| !r.is_empty()) {
+            let reason = clip(&redactor.apply(reason), DENIAL_REASON_CHARS);
+            request.push_str(&format!(" ({reason})"));
+        }
+        DeniedRequest { request }
+    }
+}
 
 /// How the provider's last terminal event ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,8 +102,9 @@ pub(super) struct Parsed {
     pub fresh_usage: Option<Usage>,
     /// The provider's totals for the whole session through this run.
     pub session_usage: Option<Usage>,
-    /// Requests answered no.
-    pub denied: Vec<DeniedRequest>,
+    /// Requests answered no, as reported. The texts are bounded only by the
+    /// captured output they came from until [`Denial::shown`] cuts them.
+    pub denied: Vec<Denial>,
     /// How many denials were not recorded because of the bound.
     pub denied_omitted: usize,
     /// How many provider error events (and Claude Code API retries) were
@@ -120,22 +157,17 @@ impl Parsed {
         self.last_error = Some(message.to_string());
     }
 
-    /// Record a denied request, bounded.
+    /// Record a denied request, up to [`MAX_DENIED`] of them.
     pub fn deny(&mut self, tool: &str, target: Option<&str>, reason: Option<&str>) {
         if self.denied.len() >= MAX_DENIED {
             self.denied_omitted += 1;
             return;
         }
-        let mut request = match target {
-            Some(t) if !t.is_empty() => {
-                format!("{tool}: {}", clip(t, DENIAL_TARGET_CHARS))
-            }
-            _ => tool.to_string(),
-        };
-        if let Some(reason) = reason.filter(|r| !r.is_empty()) {
-            request.push_str(&format!(" ({})", clip(reason, DENIAL_REASON_CHARS)));
-        }
-        self.denied.push(DeniedRequest { request });
+        self.denied.push(Denial {
+            tool: tool.to_string(),
+            target: target.map(|t| clip(t, DENIAL_TARGET_CHARS)),
+            reason: reason.map(str::to_string),
+        });
     }
 
     /// Record that another terminal event came after the first.

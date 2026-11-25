@@ -88,8 +88,14 @@ impl Activity {
                 "started".to_string(),
                 format!("{} ({program})", provider_word(provider)),
             ),
-            ProgressEvent::Provider { kind, summary } => {
-                coalescible = kind == "system";
+            ProgressEvent::Provider {
+                kind,
+                summary,
+                system,
+            } => {
+                // Decided on the type as the provider wrote it, not on the
+                // shown kind, which a type such as " system " also becomes.
+                coalescible = system;
                 (kind, summary)
             }
             ProgressEvent::Denied { request } => ("denied".to_string(), request),

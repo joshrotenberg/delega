@@ -49,6 +49,8 @@ pub const MAX_STDERR_BYTES: usize = 64 * 1024;
 pub const STDERR_EXCERPT_CHARS: usize = 300;
 /// Longest error message taken from a provider event, in characters.
 pub const PROVIDER_MESSAGE_CHARS: usize = 500;
+/// Longest tool name shown in a denied request, in characters.
+pub const DENIAL_TOOL_CHARS: usize = 100;
 /// Longest target (command, path) kept in a denied request, in characters.
 pub const DENIAL_TARGET_CHARS: usize = 500;
 /// Most denied requests recorded. Later ones are counted in a note.

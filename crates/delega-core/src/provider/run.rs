@@ -557,12 +557,14 @@ async fn execute_steps(
     };
     if plan.asks.is_some() {
         for denial in &mut parsed.denied {
-            let tool = denial.request.split([':', ' ']).next().unwrap_or_default();
-            denial.request = if super::claude::BUILTINS.contains(&tool) {
+            let tool = denial.tool.split([':', ' ']).next().unwrap_or_default();
+            denial.tool = if super::claude::BUILTINS.contains(&tool) {
                 tool.to_owned()
             } else {
                 "unknown tool".to_owned()
             };
+            denial.target = None;
+            denial.reason = None;
         }
     }
     let cleanup = merge_cleanup(cleanup, report.cleanup.clone());

@@ -83,6 +83,34 @@ both!(
     a_denied_request_is_reported_before_finished
 );
 
+#[tokio::test]
+async fn a_denial_is_redacted_and_cut_in_the_result_and_in_progress() {
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    let events = recording(&mut options);
+    let result = run_checked(rig.request(Provider::Claude, "odd-denial"), options).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    let expected = format!(
+        "Tool [redacted] {}...: /tmp/denied-path (Denied with [redacted] here.)",
+        "x".repeat(crate::provider::limits::DENIAL_TOOL_CHARS - 16)
+    );
+    let denied: Vec<&str> = result
+        .permissions
+        .denied
+        .iter()
+        .map(|d| d.request.as_str())
+        .collect();
+    assert_eq!(denied, [expected.as_str()]);
+    let events = events.lock().expect("lock").clone();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::Denied { request } if *request == expected)),
+        "{events:?}"
+    );
+    rig.assert_nothing_left().await;
+}
+
 async fn a_refused_run_reports_only_finished(provider: Provider) {
     let rig = Rig::new();
     let mut options = rig.options(provider);
