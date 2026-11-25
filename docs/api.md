@@ -68,6 +68,11 @@ arguments, and the library from a struct. A partial request saved as a file is a
 A request that breaks the contract is refused `invalid_request`, with every problem listed; MCP rejects some bad arguments earlier as tool errors ([MCP](#mcp)).
 The bounds are in `crates/delega-core/src/contract/limits.rs`; `delega schema
 request` carries the ranges and list counts but not string lengths.
+A request within these bounds can still make a generated provider argument or
+environment entry longer than 120 KiB, for example many long
+`permissions.commands` with Claude Code; it is refused before start with
+`argument_too_long`, naming the argument and its size
+([Argument size](providers.md#argument-size)).
 
 ### Permissions
 

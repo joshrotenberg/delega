@@ -49,8 +49,10 @@ requiring the command guard can report `unsupported_provider_version`.
 1. Validate the request (`Request::validate`), the `native_args`, and the
    `answer_schema` (it must compile). Resolve `cwd` and `permissions.directories`
    (each must exist). Look up the executable. For Claude Code, read the user's
-   deny rules and check for exclusive managed MCP. Any refusal at this stage
-   leaves the provider unstarted.
+   deny rules and check for exclusive managed MCP. Build the arguments and
+   check each generated argument and environment entry against the
+   per-argument limit ([Argument size](#argument-size)). Any refusal at this
+   stage leaves the provider unstarted.
 2. Run `<executable> --version` (5 s). The output is redacted (see
    [Text from the provider](#text-from-the-provider)), and its first
    non-blank line, trimmed and cut to 100 characters with `...` appended when
@@ -62,7 +64,10 @@ requiring the command guard can report `unsupported_provider_version`.
 3. Codex only: run `<executable> --disable ... mcp list --json` (10 s) and build
    an override that disables every server it lists. A failure, invalid JSON or a
    transport that cannot be disabled is `failed` with kind
-   `provider_preparation_failed`, and the run does not start.
+   `provider_preparation_failed`, and the run does not start. An override over
+   the per-argument limit is `refused` with kind `argument_too_long`, or
+   `failed` with that kind when the probes' processes could not be confirmed
+   stopped, and the run does not start.
 4. Start the provider with the prompt on standard input. The time limit is
    `timeout_secs` minus the time steps 2 and 3 took. If it is used up, the run is
    `timed_out` without starting.
@@ -143,7 +148,7 @@ See `crates/delega-core/src/provider/settle.rs`.
 `permissions_not_enforceable`, `permissions_not_supported`, `provider_not_found`,
 `unsupported_provider_version`, `invalid_env_name`,
 `forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit`,
-`managed_mcp_exclusive` (all refused before start);
+`managed_mcp_exclusive`, `argument_too_long` (all refused before start);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_auth`, `provider_billing`, `provider_capacity`,
 `provider_model_unavailable`, `provider_context_exhausted`, `provider_content_policy`, `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
@@ -225,6 +230,22 @@ applies to the whole argument: for Claude Code the text itself, for Codex
 `developer_instructions=` followed by the text as a TOML string, where quotes,
 backslashes and control characters such as newlines are escaped. The prompt is
 always on standard input, never in arguments.
+
+### Argument size
+
+On Linux a single argument or environment entry (`NAME=value`) of 128 KiB or
+more fails at `exec` with `E2BIG`; macOS has only a total of 1 MiB. Every
+argument and environment entry delega generates for a provider launch is held
+to 120 KiB: Claude Code's `--allowedTools`, `--settings` and the other options,
+the command-grant entry `DELEGA_EXACT_BASH_GRANTS`, and Codex's `-c` settings,
+including the `mcp_servers` override built from MCP discovery. Instructions
+that do not fit move to standard input (above). `--settings` over the limit is
+refused as described under [Deny rules](#deny-rules). Anything else over it is
+refused before the provider starts with `argument_too_long`; the message names
+the argument and its size, never its content. Long
+`permissions.directories` and `permissions.commands` can reach it within their
+count limits, and the Codex override checked after discovery can reach it with
+many or long server names.
 
 ## Claude Code
 
@@ -384,6 +405,7 @@ and entries that are non-strings, empty or contain control characters.
 | 512 rules after expansion and deduplication | More rules are refused with `deny_rules_over_limit`. |
 | 512 characters per rule | Longer rules are refused with `deny_rules_over_limit`. |
 | 120 KiB generated `--settings` JSON | Larger arguments are refused with `deny_rules_over_limit` if deny rules are present, or `unsupported_command` otherwise. |
+| 120 KiB per other generated argument or environment entry | Larger ones are refused with `argument_too_long` ([Argument size](#argument-size)). |
 | 100 rules, 200 characters per rule | Dry-run display limits. `omitted` counts rules beyond the display count. |
 
 Rules are passed as written. For `Read` and `Edit` patterns with exactly

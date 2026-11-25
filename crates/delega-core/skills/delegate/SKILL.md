@@ -181,6 +181,9 @@ A call that cannot go ahead is not always an error.
   reached limit (the result names it), a full queue, a closed worker, a worker
   with no session to continue, and an invalid request or prompt. A refused
   `start` creates no worker.
+- `argument_too_long` means a launch argument built from the request (such as
+  the rules for many long `permissions.commands` or `permissions.directories`)
+  is over the per-argument limit. Grant fewer or shorter entries.
 - A refusal that says a provider is missing, a version is unsupported or a
   settings file is unusable can be diagnosed from a terminal in the same working
   directory with `delega doctor`, which starts no worker. Use `delega doctor
