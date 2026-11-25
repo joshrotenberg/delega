@@ -703,32 +703,46 @@ async fn outstanding_request_checks_are_capped_and_a_start_beyond_the_cap_waits_
     let list = supervisor.list().await.expect("list");
     assert!(list.workers.is_empty(), "a refused start made a worker");
 
-    // Once the held checks end, a later start is admitted. Until their threads
-    // have ended a start may still wait for a slot, or time out on a loaded
-    // machine, and is repeated.
+    // Once the held checks end, a later start is admitted and its run
+    // completes. The short bound covers both the admission check and the run's
+    // preparation when it is dispatched, so on a loaded machine either can
+    // time out; each such attempt is repeated, and the worker of a run
+    // refused at preparation is closed so the retries do not reach the worker
+    // limit. Until the held threads have ended a start may also wait for a
+    // slot.
     released.store(true, Ordering::SeqCst);
-    let mut admitted = None;
+    let mut completed = None;
     for _ in 0..3000 {
         let later = supervisor
             .start(dir.request("echo:later"))
             .await
             .expect("start");
         match later.error.as_ref().map(|e| e.kind.as_str()) {
-            None => {
-                admitted = Some(later);
-                break;
-            }
+            None => {}
             Some("preflight_timeout") => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
             }
             Some(other) => panic!("unexpected refusal {other}: {later:#?}"),
         }
+        let result = finished_result(&supervisor, &later.run).await;
+        match result.error.as_ref().map(|e| e.kind.as_str()) {
+            Some("preflight_timeout") if result.outcome == Outcome::Refused => {
+                let worker = later
+                    .worker
+                    .as_deref()
+                    .expect("an admitted run has a worker");
+                supervisor.close(worker).await.expect("close");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            _ => {
+                completed = Some(result);
+                break;
+            }
+        }
     }
-    let admitted = admitted.expect("a start is admitted once the checks have ended");
-    assert_eq!(
-        finished_result(&supervisor, &admitted.run).await.outcome,
-        Outcome::Completed
-    );
+    let completed = completed.expect("a run is admitted and prepared once the checks have ended");
+    assert_eq!(completed.outcome, Outcome::Completed, "{completed:#?}");
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
@@ -1935,18 +1949,36 @@ async fn a_run_held_in_preparation_does_not_stop_other_runs_results_interrupt_cl
 /// `preflight_timeout`, carrying what any refusal before start carries: no
 /// start time, no duration, a confirmed cleanup. When the preparation returns
 /// later, nothing is started. The bound is short, and the preparation is held
-/// on a message, so it passes the bound however loaded the machine is.
+/// on a message until after the run has finished, so it passes the bound
+/// however loaded the machine is. The same bound covers the admission check;
+/// on a loaded machine that can time out first, and the start is repeated
+/// until it is admitted, which the check's instant answer decides, not speed.
 #[tokio::test]
 async fn a_preparation_past_the_bound_refuses_the_run_preflight_timeout_and_starts_nothing_later() {
     let dir = Dir::new();
     let (launch, mut held) = holding_launcher();
     let supervisor = preparing_supervisor(&dir, launch, Duration::from_millis(300));
 
-    let started = supervisor
-        .start(dir.request("hold late"))
-        .await
-        .expect("start");
-    assert_eq!(started.error, None, "{started:#?}");
+    let mut admitted = None;
+    for _ in 0..3000 {
+        let started = supervisor
+            .start(dir.request("hold late"))
+            .await
+            .expect("start");
+        match started.error.as_ref().map(|e| e.kind.as_str()) {
+            None => {
+                admitted = Some(started);
+                break;
+            }
+            // Refused at admission: the run made no worker and was never
+            // dispatched, so nothing was prepared or held.
+            Some("preflight_timeout") if started.worker.is_none() => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Some(other) => panic!("unexpected refusal {other}: {started:#?}"),
+        }
+    }
+    let started = admitted.expect("the start is admitted");
     assert_eq!(held.entered().await, "hold late");
     let result = finished_result(&supervisor, &started.run).await;
     assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
