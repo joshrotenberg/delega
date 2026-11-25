@@ -150,7 +150,10 @@ impl Core {
         let tx = self.tx.clone();
         let join = tokio::spawn(runner::drive(
             self.launch.clone(),
-            self.preflight.clone(),
+            runner::Preparation {
+                preflight: self.preflight.clone(),
+                deadline: self.preflight.deadline(),
+            },
             request,
             options,
             stop,

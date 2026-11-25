@@ -167,7 +167,7 @@ pub async fn run(request: Request, options: ProviderOptions) -> RunResult {
 /// Panics if called outside a Tokio runtime and the request is not refused
 /// first.
 pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
-    prepare(&request, &options).launch()
+    prepare(&request, &options).launch(CancellationToken::new())
 }
 
 /// A run whose preparation is done: refused already, or planned and ready to
@@ -239,16 +239,21 @@ impl Prepared {
     /// Start the prepared run and return its handle. A refused run's handle has
     /// its result already.
     ///
+    /// `cancel` stops the run, exactly as the handle's interrupt does. A caller
+    /// that has a stop token of its own passes it, or a child of it, so a stop
+    /// that lands while the run is being launched reaches it at once: a token
+    /// already cancelled ends the run `interrupted` before any probe or
+    /// provider process starts.
+    ///
     /// # Panics
     ///
     /// Panics if called outside a Tokio runtime and the run was not refused.
-    pub(crate) fn launch(self) -> RunHandle {
+    pub(crate) fn launch(self, cancel: CancellationToken) -> RunHandle {
         let Self {
             facts,
             progress,
             ready,
         } = self;
-        let cancel = CancellationToken::new();
         match ready {
             Ready::Refused(mut result) => {
                 progress.finished(&mut result);

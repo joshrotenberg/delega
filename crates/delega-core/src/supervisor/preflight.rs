@@ -38,9 +38,13 @@ pub(super) struct Preflight {
     /// One permit per outstanding check or preparation. The permit moves into
     /// its thread and is released when the thread ends, however it ends.
     slots: Arc<Semaphore>,
-    /// Cancelled when the supervisor shuts down or is dropped, so a `start` or
-    /// a preparation waiting for a slot or an answer is released at once.
+    /// Cancelled when the supervisor shuts down or is dropped, so a `start`
+    /// waiting for a slot or an answer is released at once. A preparation is
+    /// released by its run's stop instead.
     closed: CancellationToken,
+    /// Test only: told each time a thread has sent its answer.
+    #[cfg(test)]
+    answered: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Preflight {
@@ -66,6 +70,8 @@ impl Preflight {
             bound,
             slots: Arc::new(Semaphore::new(limits::MAX_PENDING_PREFLIGHTS)),
             closed: CancellationToken::new(),
+            #[cfg(test)]
+            answered: None,
         }
     }
 
@@ -114,7 +120,12 @@ impl Preflight {
             not_started: "checking the request could not be started",
         };
         match self
-            .on_thread(what, move || check(&request, &options), None)
+            .on_thread(
+                what,
+                move || check(&request, &options),
+                self.deadline(),
+                self.closed.cancelled(),
+            )
             .await
         {
             Ok(refusal) => refusal,
@@ -123,19 +134,31 @@ impl Preflight {
         }
     }
 
+    /// The deadline of a check or a preparation that begins now.
+    pub(super) fn deadline(&self) -> Instant {
+        Instant::now() + self.bound
+    }
+
     /// Do `work`, the preparation of a run being dispatched, on a thread of its
     /// own and wait for it, as [`run`](Self::run) does a check: in one of the
-    /// same slots and within the same bound, measured from the start of this
-    /// call. `stop` and [`close`](Self::close) release the wait at once.
+    /// same slots, and by `deadline`, which the supervisor takes from
+    /// [`deadline`](Self::deadline) when it dispatches the run.
+    ///
+    /// Only `stop`, the run's own stop token, releases the wait early.
+    /// [`close`](Self::close) does not: a shutdown releases a preparation by
+    /// cancelling the run's stop from the supervisor's task, after it has
+    /// closed the worker and discarded its queued runs, and dropping the
+    /// supervisor cancels every run's stop.
     ///
     /// Returns what `work` returned, or why it did not: a refusal, with kind
-    /// `preflight_timeout` when the bound passed, or [`Unprepared::Stopped`]. A
-    /// preparation that returns after the wait has ended is dropped on its
-    /// thread, so it starts nothing.
+    /// `preflight_timeout` when the deadline passed, or
+    /// [`Unprepared::Stopped`]. A preparation that returns after the wait has
+    /// ended, or at or after the deadline, is dropped, so it starts nothing.
     pub(super) async fn prepare<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,
         stop: &CancellationToken,
+        deadline: Instant,
     ) -> Result<T, Unprepared> {
         let what = Work {
             name: "delega-prepare",
@@ -144,7 +167,7 @@ impl Preflight {
             failed: "preparing the run failed unexpectedly",
             not_started: "preparing the run could not be started",
         };
-        self.on_thread(what, work, Some(stop))
+        self.on_thread(what, work, deadline, stop.cancelled())
             .await
             .map_err(|ended| match ended {
                 Ended::Released => Unprepared::Stopped,
@@ -152,27 +175,22 @@ impl Preflight {
             })
     }
 
-    /// Run `work` on a thread of its own in one slot, within the bound, unless
-    /// [`close`](Self::close) or `stop` releases the wait first.
+    /// Run `work` on a thread of its own in one slot, by `deadline`, unless
+    /// `released` completes first.
+    ///
+    /// `timeout_at` polls the future it bounds before its timer, so a slot or
+    /// an answer that is ready when the task is next polled after the deadline
+    /// would win. The deadline is therefore checked again once a slot is taken,
+    /// before the thread is started, and once the answer is in; a slot or an
+    /// answer at or after the deadline is a timeout.
     async fn on_thread<T: Send + 'static>(
         &self,
         what: Work,
         work: impl FnOnce() -> T + Send + 'static,
-        stop: Option<&CancellationToken>,
+        deadline: Instant,
+        released: impl Future<Output = ()>,
     ) -> Result<T, Ended> {
-        let released = async {
-            match stop {
-                Some(stop) => {
-                    tokio::select! {
-                        () = self.closed.cancelled() => {}
-                        () = stop.cancelled() => {}
-                    }
-                }
-                None => self.closed.cancelled().await,
-            }
-        };
         tokio::pin!(released);
-        let deadline = Instant::now() + self.bound;
         let acquire = self.slots.clone().acquire_owned();
         let permit = tokio::select! {
             biased;
@@ -183,7 +201,12 @@ impl Preflight {
                 Err(_) => return Err(Ended::Refused(self.timed_out(what.no_slot))),
             },
         };
+        if Instant::now() >= deadline {
+            return Err(Ended::Refused(self.timed_out(what.no_slot)));
+        }
         let (tx, rx) = oneshot::channel();
+        #[cfg(test)]
+        let answered = self.answered.clone();
         let spawned = std::thread::Builder::new()
             .name(what.name.to_string())
             .spawn(move || {
@@ -195,19 +218,35 @@ impl Preflight {
                 // A caller that stopped waiting has dropped the receiver; the
                 // answer comes back and is dropped here, on this thread.
                 let _ = tx.send(answer);
+                #[cfg(test)]
+                if let Some(answered) = answered {
+                    let _ = answered.send(());
+                }
             });
         if spawned.is_err() {
             return Err(Ended::Refused(internal(what.not_started)));
         }
-        tokio::select! {
+        let answer = tokio::select! {
             biased;
-            () = &mut released => Err(Ended::Released),
+            () = &mut released => return Err(Ended::Released),
             got = tokio::time::timeout_at(deadline, rx) => match got {
-                Ok(Ok(answer)) => Ok(answer),
-                Ok(Err(_)) => Err(Ended::Refused(internal(what.failed))),
-                Err(_) => Err(Ended::Refused(self.timed_out(what.not_done))),
+                Ok(Ok(answer)) => answer,
+                Ok(Err(_)) => return Err(Ended::Refused(internal(what.failed))),
+                Err(_) => return Err(Ended::Refused(self.timed_out(what.not_done))),
             },
+        };
+        if Instant::now() >= deadline {
+            return Err(Ended::Refused(self.timed_out(what.not_done)));
         }
+        Ok(answer)
+    }
+
+    /// Test only: send on `answered` each time a thread has sent its answer,
+    /// so a test knows the answer is waiting without polling for it.
+    #[cfg(test)]
+    pub(super) fn signal_answers(mut self, answered: std::sync::mpsc::Sender<()>) -> Self {
+        self.answered = Some(answered);
+        self
     }
 
     /// The slots, shared with every clone, so a test can take and free them
