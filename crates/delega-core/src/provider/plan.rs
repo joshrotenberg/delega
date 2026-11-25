@@ -124,7 +124,13 @@ fn build_with(
         program::resolve(request.provider, options, &parent),
         &mut problems,
     )?;
-    let assembled = prompt::assemble(request);
+    let assembled = prompt::assemble(
+        request,
+        match request.provider {
+            Provider::Claude => claude::instructions_argument_len,
+            Provider::Codex => codex::instructions_argument_len,
+        },
+    );
     let deny = match request.provider {
         Provider::Claude => {
             let deny = tolerate(claude_deny_rules(&scope, &parent, options), &mut problems)?;

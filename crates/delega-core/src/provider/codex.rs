@@ -35,8 +35,22 @@ fn effort(e: Effort) -> &'static str {
     }
 }
 
+/// A TOML basic string holding `text`. JSON string syntax is valid TOML here:
+/// `"` and `\` are escaped, as are control characters (`\n`, `\t` and the
+/// like, others as `\u00XX`); everything else is kept as UTF-8.
 fn toml_string(text: &str) -> String {
     Value::from(text).to_string()
+}
+
+/// The `-c` argument that carries the system text to Codex.
+fn instructions_argument(system: &str) -> String {
+    format!("developer_instructions={}", toml_string(system))
+}
+
+/// The length in bytes of the argument that carries `system`, after the key is
+/// added and the text is TOML-encoded.
+pub(super) fn instructions_argument_len(system: &str) -> usize {
+    instructions_argument(system).len()
 }
 
 fn sandbox(mode: Mode) -> &'static str {
@@ -83,10 +97,7 @@ pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     }
     args.push("-c".to_string());
     let instructions_index = args.len();
-    args.push(format!(
-        "developer_instructions={}",
-        toml_string(inputs.system)
-    ));
+    args.push(instructions_argument(inputs.system));
     args.push("-c".to_string());
     let mcp_index = args.len();
     args.push(String::new());

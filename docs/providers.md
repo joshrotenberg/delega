@@ -207,9 +207,12 @@ Every worker gets a fixed preamble (complete only the assignment, follow
 repository instructions, the parent conversation is unavailable, report blockers,
 do not delegate), then the request's `instructions`. They go to Claude Code in
 `--append-system-prompt` and to Codex in `developer_instructions`. If that
-argument would exceed 120 KiB, the instructions are written to standard input
-before the assignment instead, and a note says so. The prompt is always on
-standard input, never in arguments.
+argument, as passed, would exceed 120 KiB, the instructions are written to
+standard input before the assignment instead, and a note says so. The limit
+applies to the whole argument: for Claude Code the text itself, for Codex
+`developer_instructions=` followed by the text as a TOML string, where quotes,
+backslashes and control characters such as newlines are escaped. The prompt is
+always on standard input, never in arguments.
 
 ## Claude Code
 

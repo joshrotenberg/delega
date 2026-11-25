@@ -40,30 +40,36 @@ fn schema_block(schema: &serde_json::Value) -> String {
 
 /// Build the instruction text and standard input for a request.
 ///
-/// Instructions go in the system channel when that argument stays within
-/// [`ARGUMENT_LIMIT`]. Larger ones are put on standard input ahead of the
-/// assignment, which is weaker than a system instruction, and a note says so.
-pub(super) fn assemble(request: &Request) -> Assembled {
+/// Instructions go in the system channel when the argument that carries them
+/// stays within [`ARGUMENT_LIMIT`]. `argument_len` is the provider's measure of
+/// that argument: its length in bytes for a given system text, with any key and
+/// encoding the provider adds. Larger ones are put on standard input ahead of
+/// the assignment, which is weaker than a system instruction, and a note says
+/// so.
+pub(super) fn assemble(request: &Request, argument_len: fn(&str) -> usize) -> Assembled {
     let base = PREAMBLE.join("\n");
     let mut notes = Vec::new();
     let mut stdin = String::new();
     let system = match request.instructions.as_deref() {
-        Some(extra) if base.len() + 1 + extra.len() <= ARGUMENT_LIMIT => {
-            format!("{base}\n{extra}")
-        }
-        Some(extra) => {
-            stdin.push_str("Additional instructions for this assignment:\n");
-            stdin.push_str(extra);
-            stdin.push_str("\n\nAssignment:\n");
-            notes.push(format!(
-                "instructions are {} bytes, over the {} byte argument limit, so they are sent on \
-                 standard input before the assignment and not as a system instruction",
-                extra.len(),
-                ARGUMENT_LIMIT
-            ));
-            base
-        }
         None => base,
+        Some(extra) => {
+            let system = format!("{base}\n{extra}");
+            let len = argument_len(&system);
+            if len <= ARGUMENT_LIMIT {
+                system
+            } else {
+                stdin.push_str("Additional instructions for this assignment:\n");
+                stdin.push_str(extra);
+                stdin.push_str("\n\nAssignment:\n");
+                notes.push(format!(
+                    "instructions are {} bytes and the argument carrying them would be {len} \
+                     bytes, over the {ARGUMENT_LIMIT} byte argument limit, so they are sent on \
+                     standard input before the assignment and not as a system instruction",
+                    extra.len(),
+                ));
+                base
+            }
+        }
     };
     stdin.push_str(&request.prompt);
     if let Some(schema) = &request.answer_schema {
@@ -89,7 +95,7 @@ mod tests {
         .expect("schema");
         let mut request = Request::new(Provider::Codex, "do it");
         request.answer_schema = Some(schema);
-        let text = String::from_utf8(assemble(&request).stdin).expect("UTF-8");
+        let text = String::from_utf8(assemble(&request, str::len).stdin).expect("UTF-8");
         assert!(
             text.contains(
                 r#"JSON Schema: {"properties":{"a":{"minimum":1,"type":"integer"},"z":{"type":"string"}},"required":["b","a"],"type":"object"}"#

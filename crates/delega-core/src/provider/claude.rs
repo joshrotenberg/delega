@@ -410,6 +410,12 @@ pub(super) const OWNED_ENV: [(&str, &str); 3] = [
     ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
 ];
 
+/// The length in bytes of the `--append-system-prompt` argument that carries
+/// `system`, which is passed as is.
+pub(super) fn instructions_argument_len(system: &str) -> usize {
+    system.len()
+}
+
 pub(super) fn build(inputs: &Inputs<'_>) -> Result<Built, Refusal> {
     let request = inputs.request;
     let scope = inputs.scope;
