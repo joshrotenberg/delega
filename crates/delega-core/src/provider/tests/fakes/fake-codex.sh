@@ -431,6 +431,7 @@ case "$mode" in
     init
     final '"fake final answer"'
     done_ok
+    echo 'fake provider failed after success' >&2
     exit 5
     ;;
   malformed)

@@ -781,6 +781,7 @@ case "$mode" in
   success-then-exit-nonzero)
     init
     success '"fake final answer"' '[]'
+    echo 'fake provider failed after success' >&2
     exit 5
     ;;
   malformed)
