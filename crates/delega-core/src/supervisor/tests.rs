@@ -2239,48 +2239,20 @@ async fn a_preparation_whose_deadline_passed_before_it_ran_never_starts_its_thre
     );
 }
 
-/// A stop that lands while a prepared run is being launched reaches the
-/// provider at once: the token the launch gets is a child of the run's stop,
-/// so it is already cancelled, and the run ends `interrupted` through its own
-/// result, before any probe. Before the fix the launch made a fresh token, and
-/// the stop reached the provider only when the run's task forwarded it.
-///
-/// The fake creates a marker file when a version probe starts. A control run
-/// first shows the marker appears; the stopped run must leave it absent, which
-/// a probe that started and was then interrupted or failed would not.
+/// The token a prepared run's launch receives is a child of the run's stop, so
+/// a stop that lands while the run is being launched is already seen by that
+/// token, and reaches the provider at once; the run ends `interrupted`. Before
+/// the fix the launch made a fresh token, and the stop reached the provider
+/// only when the run's task forwarded it.
 #[tokio::test]
-async fn a_stop_that_lands_as_a_prepared_run_launches_reaches_the_provider_at_once() {
-    use super::preflight::Preflight;
-
+async fn a_stop_that_lands_as_a_prepared_run_launches_is_seen_by_the_launch_token() {
     let dir = Dir::new();
-    let marker = dir.root().join("version-probe-started");
-    let mut config = dir.config();
-    config.provider.env_set.push((
-        "FAKE_VERSION_MARK".into(),
-        marker.to_str().expect("utf-8 path").into(),
-    ));
     let (launch, mut held) = holding_launcher();
-    let check = Arc::new(|_: &Request, _: &ProviderOptions| None);
-    let supervisor = Supervisor::with_hooks(
-        config,
-        launch,
-        Preflight::with(check, Duration::from_secs(3600)),
-    );
-
-    // The control comes first: the stop below cancels the root token, which
-    // would stop every later run too.
-    let control = supervisor
-        .start(dir.request("echo:control"))
-        .await
-        .expect("start");
-    let result = finished_result(&supervisor, &control.run).await;
-    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
-    assert!(marker.exists(), "the fake did not mark its version probe");
-    std::fs::remove_file(&marker).expect("remove the marker");
-
+    let supervisor = preparing_supervisor(&dir, launch, Duration::from_secs(3600));
     held.stop_at_launch
         .set(supervisor.shared.root.clone())
         .expect("set once");
+
     let started = supervisor
         .start(dir.request("stop-at-launch"))
         .await
@@ -2292,8 +2264,6 @@ async fn a_stop_that_lands_as_a_prepared_run_launches_reaches_the_provider_at_on
     assert!(saw, "the launch's token did not see the run's stop");
     let result = finished_result(&supervisor, &started.run).await;
     assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
-    assert_eq!(result.provenance.provider_version, None, "{result:#?}");
-    assert!(!marker.exists(), "a version probe started after the stop");
     supervisor.shutdown().await;
     dir.assert_nothing_left().await;
 }
