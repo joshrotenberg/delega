@@ -137,25 +137,27 @@ pub fn build(args: &Args, config: &Config, file: Option<AppliedConfig>) -> Resul
         });
     }
     // A relative path that cannot be resolved against the caller's directory
-    // is refused here: left relative, the provider would resolve it against
-    // the worker's directory instead.
-    if let Err(unresolved) = profile::resolve_paths(&mut merged) {
-        return Err(Failure {
-            problems: Vec::new(),
-            facts,
-            unusable: Some(Refusal {
-                kind: "cwd_unusable".to_string(),
-                message: unresolved.to_string(),
-            }),
-        });
-    }
+    // is refused, after validation so that its problems are still reported:
+    // left relative, the provider would resolve it against the worker's
+    // directory instead.
+    let unresolved = profile::resolve_paths(&mut merged).err();
     match merged.into_request() {
-        Ok(request) => Ok(Built { request, origin }),
         Err(problems) => Err(Failure {
             problems,
             facts,
             unusable: None,
         }),
+        Ok(request) => match unresolved {
+            Some(unresolved) => Err(Failure {
+                problems: Vec::new(),
+                facts,
+                unusable: Some(Refusal {
+                    kind: "cwd_unusable".to_string(),
+                    message: unresolved.to_string(),
+                }),
+            }),
+            None => Ok(Built { request, origin }),
+        },
     }
 }
 

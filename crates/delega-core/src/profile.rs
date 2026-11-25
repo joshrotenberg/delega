@@ -75,15 +75,18 @@ fn read_opened(path: &Path, limit: usize) -> Result<String, String> {
 /// of this process: `cwd` and `permissions.directories`, whether they came from
 /// a profile or from explicit values. Without this a relative extra directory
 /// would be resolved against the worker's own working directory. An empty path
-/// is left for validation to report.
+/// is left for validation to report. Every other path, absolute or relative,
+/// goes through [`std::path::absolute`], which also normalizes it.
 ///
-/// A non-empty relative path that cannot be made absolute, because this
-/// process's working directory cannot be read, is a problem naming the field
-/// and the path. It is never left relative, where the worker's directory would
-/// give it another meaning.
+/// A relative path that cannot be made absolute, because this process's
+/// working directory cannot be read, is a problem naming the field and the
+/// path. The request is then partly resolved: that path and the ones after it
+/// stay as given. A caller must check for the problem before using the
+/// request, since the worker's directory would give a relative path another
+/// meaning.
 pub fn resolve_paths(request: &mut PartialRequest) -> Result<(), Problem> {
     let absolute = |field: String, path: &mut PathBuf| {
-        if path.as_os_str().is_empty() || path.is_absolute() {
+        if path.as_os_str().is_empty() {
             return Ok(());
         }
         match std::path::absolute(&*path) {

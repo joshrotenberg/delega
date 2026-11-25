@@ -911,6 +911,66 @@ fn a_relative_extra_directory_is_refused_not_resolved_under_cwd_when_the_callers
 }
 
 #[test]
+fn an_empty_extra_directory_is_still_invalid_request_when_the_callers_directory_is_gone() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.work.join("extra")).expect("create work/extra");
+    let work = rig.work.to_string_lossy().into_owned();
+    let file = profile(
+        &rig,
+        &format!(
+            r#"{{"schema_version":1,"provider":"claude","prompt":"x","cwd":{work:?},
+                "permissions":{{"directories":["", "extra"]}}}}"#
+        ),
+    );
+    let gone = rig.path("gone");
+    std::fs::create_dir(&gone).expect("create caller directory");
+    let out = delega_in_removed_directory(
+        &rig,
+        &gone,
+        &["run", "--dry-run", "--output", "json", "--request", &file],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let error = result_of(&out).error.expect("error");
+    assert_eq!(error.kind, "invalid_request", "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains("permissions.directories[0]: must not be empty"),
+        "{}",
+        error.message
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn an_absolute_path_with_many_dot_segments_is_normalized_before_it_is_used() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.path("shared")).expect("create shared");
+    // Over 1 KiB unnormalized: longer than a path the system takes on macOS.
+    let dots = "/.".repeat(700);
+    let cwd = format!("{}{dots}", rig.work.display());
+    let shared = format!("{}{dots}", rig.path("shared").display());
+    let value = dry_json(
+        &rig,
+        &[
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+            "-C",
+            &cwd,
+            "--add-dir",
+            &shared,
+        ],
+    );
+    assert_eq!(value["dry_run"]["cwd"], rig.work.to_string_lossy().as_ref());
+    assert_eq!(
+        value["dry_run"]["mapping"]["directories"][0],
+        rig.path("shared").to_string_lossy().as_ref()
+    );
+}
+
+#[test]
 fn a_relative_request_and_schema_path_are_read_from_the_callers_directory() {
     let rig = Rig::new();
     rig.file(
