@@ -308,6 +308,24 @@ fn a_denial_reason_is_redacted_before_its_first_sentence_is_taken() {
 }
 
 #[test]
+fn successful_tool_output_is_not_scanned_for_a_denial_reason() {
+    let output = "o".repeat(1 << 20);
+    let user = serde_json::json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": false, "content": output}
+    ]}});
+    let result = serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false, "session_id": "s",
+        "result": "done"
+    });
+    let stream = format!("{user}\n{result}\n").into_bytes();
+    let redactor = crate::provider::redact::Redactor::new(Vec::<String>::new());
+    crate::provider::redact::take_examined();
+    let parsed = claude::parse_with(&stream, &redactor);
+    assert!(parsed.denied.is_empty());
+    assert_eq!(crate::provider::redact::take_examined(), 0);
+}
+
+#[test]
 fn a_long_denial_reason_is_stored_cut_for_every_denial_that_refers_to_it() {
     use crate::provider::limits::{DENIAL_REASON_CHARS, MAX_DENIED};
     let error = "e".repeat(100_000);
