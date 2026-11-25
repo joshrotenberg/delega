@@ -179,7 +179,8 @@ that reports a different id does not replace it, whatever its outcome
 would refuse (only whitespace, over 256 bytes, holding a NUL, or starting with
 `-`) is never kept, so it never becomes the worker's session. The run's
 `session_id` is the acceptable id it also reported, if any, and otherwise
-absent; the result has a note unless the run was `ephemeral`
+absent; the result has a note with the id's length and why it was refused,
+never the id itself, unless the run was `ephemeral`
 ([api.md](api.md#the-result)).
 
 A follow-up is refused as a finished run, not an error:

@@ -748,58 +748,34 @@ fn a_session_id_at_the_resume_limit_is_kept_unchanged() {
 }
 
 #[test]
-fn the_note_for_a_refused_session_id_is_redacted_escaped_and_cut() {
-    use crate::provider::limits::REFUSED_SESSION_CHARS;
+fn a_refused_session_id_appears_in_its_note_and_mismatch_text_only_as_a_length_and_reason() {
     use crate::provider::redact::Redactor;
-    use crate::provider::settle::refused_session_note;
+    use crate::provider::settle::{refused_mismatch_text, refused_session_note};
 
-    // A configured value across the cut point, with ordinary text after it so
-    // the redacted id is still far longer than the cut.
-    let secret = "QZXJWKVPYQZXJ";
-    let redactor = Redactor::new([secret.to_string()]);
-    let before = "a".repeat(REFUSED_SESSION_CHARS - 10);
-    let long = format!("{before}{secret}{}", "b".repeat(1024));
-    let note = refused_session_note(&redactor, &long);
-    assert!(note.contains("exceeds the limit of 256"), "{note}");
-    assert!(note.contains("not kept"), "{note}");
-    let shown = note.rsplit(": ").next().expect("the id is shown last");
-    assert!(shown.ends_with("..."), "{note}");
-    assert_eq!(shown.chars().count(), REFUSED_SESSION_CHARS + 3, "{note}");
-    let chars: Vec<char> = secret.chars().collect();
-    for part in chars.windows(3) {
-        let part: String = part.iter().collect();
-        assert!(!shown.contains(&part), "{part} of the credential in {note}");
-    }
-
-    let nul = refused_session_note(&Redactor::default(), "bad\0id");
-    assert!(nul.contains("NUL"), "{nul}");
-    assert!(!nul.contains('\0') && nul.ends_with(r"bad\0id"), "{nul}");
-}
-
-#[test]
-fn escaping_a_refused_session_id_cannot_form_a_configured_value_in_the_note() {
-    use crate::provider::redact::Redactor;
-    use crate::provider::settle::refused_session_note;
-
-    // The configured value holds a backslash and an `n`; the id holds a
-    // newline, which escaping writes as those two characters.
     let configured = r"ab\ncd12";
     let redactor = Redactor::new([configured.to_string()]);
-    let note = refused_session_note(&redactor, "-ab\ncd12");
-    assert!(!note.contains(configured), "{note}");
-    assert!(note.contains("[redacted]"), "{note}");
-}
-
-#[test]
-fn a_refused_session_id_is_cut_only_between_whole_escapes() {
-    use crate::provider::limits::REFUSED_SESSION_CHARS;
-    use crate::provider::redact::Redactor;
-    use crate::provider::settle::refused_session_text;
-
-    // The newline's escape would end one past the cut.
-    let ordinary = "x".repeat(REFUSED_SESSION_CHARS - 1);
-    let shown = refused_session_text(&Redactor::default(), &format!("{ordinary}\nmore"));
-    assert_eq!(shown, format!("{ordinary}..."));
-    let shown = refused_session_text(&Redactor::default(), &format!("{ordinary}\u{1}more"));
-    assert_eq!(shown, format!("{ordinary}..."));
+    let id = format!(
+        "-sk-ant-abcdefghijklmnopqrstuvwx {configured} QZXJWKVPYQZXJ\0\n{}",
+        "z".repeat(1024)
+    );
+    let bytes = id.len();
+    // Equal to texts built from fixed words and the length alone, so no
+    // character of the id is in them.
+    let note = refused_session_note(&id);
+    assert_eq!(
+        note,
+        format!(
+            "the provider reported a session id of {bytes} bytes that session.resume would \
+             refuse (length {bytes} exceeds the limit of 256; must not contain NUL bytes; must \
+             not start with '-': it would be read as a provider option), so it was not kept"
+        )
+    );
+    let mismatch = refused_mismatch_text(&redactor, "asked-session", &id);
+    assert_eq!(
+        mismatch,
+        format!(
+            "the run asked to resume session asked-session but the provider reported a session \
+             id of {bytes} bytes that session.resume would refuse"
+        )
+    );
 }
