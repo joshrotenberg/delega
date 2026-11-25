@@ -8,8 +8,7 @@ use serde_json::{Map, Value};
 use crate::contract::result::{DeniedRequest, Usage};
 
 use super::limits::{
-    DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, DENIAL_TOOL_CHARS, MAX_DENIED, MAX_LINE_BYTES,
-    MAX_SESSION_IDS,
+    DENIAL_TARGET_CHARS, DENIAL_TOOL_CHARS, MAX_DENIED, MAX_LINE_BYTES, MAX_SESSION_IDS,
 };
 use super::progress::bounded;
 use super::redact::Redactor;
@@ -23,17 +22,18 @@ pub(super) struct Denial {
     pub tool: String,
     /// The command or path, when there is one, cut to [`DENIAL_TARGET_CHARS`].
     pub target: Option<String>,
-    /// Why the provider said it was denied, when it did.
+    /// Why the provider said it was denied, when it did, already redacted
+    /// and cut to [`DENIAL_REASON_CHARS`](super::limits::DENIAL_REASON_CHARS)
+    /// by the parser.
     pub reason: Option<String>,
 }
 
 impl Denial {
     /// The request as a result, progress and activity show it. The tool name
-    /// and the reason are provider text: each has credentials removed first
-    /// and is then cut, the tool name, joined to one line, to
-    /// [`DENIAL_TOOL_CHARS`] and the reason to [`DENIAL_REASON_CHARS`]. The
-    /// command or path is shown as the provider asked for it, cut only: it is
-    /// what the caller needs to see to decide what to grant.
+    /// is shown as [`bounded`] makes it, cut to [`DENIAL_TOOL_CHARS`]; the
+    /// reason is shown as stored. The command or path is shown as the
+    /// provider asked for it, cut only: it is what the caller needs to see to
+    /// decide what to grant.
     pub fn shown(&self, redactor: &Redactor) -> DeniedRequest {
         let tool = bounded(&self.tool, redactor, DENIAL_TOOL_CHARS);
         let mut request = match self.target.as_deref() {
@@ -41,7 +41,6 @@ impl Denial {
             _ => tool,
         };
         if let Some(reason) = self.reason.as_deref().filter(|r| !r.is_empty()) {
-            let reason = clip(&redactor.apply(reason), DENIAL_REASON_CHARS);
             request.push_str(&format!(" ({reason})"));
         }
         DeniedRequest { request }

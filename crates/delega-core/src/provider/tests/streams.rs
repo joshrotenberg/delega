@@ -243,24 +243,41 @@ fn shown(denied: &[crate::provider::stream::Denial]) -> Vec<String> {
     denied.iter().map(|d| d.shown(&redactor).request).collect()
 }
 
+/// A Claude stream with one failed tool call whose error is `error`, denied
+/// in the result as a Read of `path` by the tool `tool`, `times` times.
+fn denied_with_error(tool: &str, path: &str, error: &str, times: usize) -> Vec<u8> {
+    let user = serde_json::json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": true, "content": error}
+    ]}});
+    let denial = serde_json::json!({
+        "tool_name": tool, "tool_use_id": "t1", "tool_input": {"file_path": path}
+    });
+    let result = serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false, "session_id": "s",
+        "result": "done", "permission_denials": vec![denial; times]
+    });
+    format!("{user}\n{result}\n").into_bytes()
+}
+
 #[test]
 fn a_denied_tool_name_and_reason_have_credentials_removed_before_they_are_cut() {
     use crate::provider::limits::{DENIAL_REASON_CHARS, DENIAL_TARGET_CHARS, DENIAL_TOOL_CHARS};
     let configured = "fixture\tprivate  token";
     let redactor = crate::provider::redact::Redactor::new([configured.to_string()]);
     let key = "sk-ant-abcdefghijklmnopqrstuvwx";
-    let mut parsed = crate::provider::stream::Parsed::default();
     // Each secret starts just before its cut, so cutting first would keep
     // part of it. The configured one holds whitespace the tool name's joining
     // to one line would change.
     let tool = "t".repeat(DENIAL_TOOL_CHARS - 5);
     let target = "c".repeat(DENIAL_TARGET_CHARS - 5);
     let reason = "r".repeat(DENIAL_REASON_CHARS - 5);
-    parsed.deny(
+    let stream = denied_with_error(
         &format!("{tool} {configured}"),
-        Some(&format!("{target}/path/more")),
-        Some(&format!("{reason} {key}")),
+        &format!("{target}/path/more"),
+        &format!("{reason} {key}"),
+        1,
     );
+    let parsed = claude::parse_with(&stream, &redactor);
     let request = parsed.denied[0].shown(&redactor).request;
     assert!(!request.contains("sk-ant"), "{request}");
     assert!(!request.contains("private"), "{request}");
@@ -269,6 +286,54 @@ fn a_denied_tool_name_and_reason_have_credentials_removed_before_they_are_cut() 
         request,
         format!("{tool} [red...: {target}/path... ({reason} [red...)")
     );
+}
+
+#[test]
+fn a_denial_reason_is_redacted_before_its_first_sentence_is_taken() {
+    // The configured value holds a sentence end; taking the first sentence
+    // first would keep the part before it.
+    let configured = "fixture-private. token-value";
+    let redactor = crate::provider::redact::Redactor::new([configured.to_string()]);
+    let stream = denied_with_error(
+        "Read",
+        "/tmp/x",
+        &format!("Denied for {configured} here. More detail."),
+        1,
+    );
+    let parsed = claude::parse_with(&stream, &redactor);
+    assert_eq!(
+        parsed.denied[0].shown(&redactor).request,
+        "Read: /tmp/x (Denied for [redacted] here.)"
+    );
+}
+
+#[test]
+fn a_long_denial_reason_is_stored_cut_for_every_denial_that_refers_to_it() {
+    use crate::provider::limits::{DENIAL_REASON_CHARS, MAX_DENIED};
+    let error = "e".repeat(100_000);
+    let stream = denied_with_error("Read", "/tmp/x", &error, MAX_DENIED);
+    let parsed = claude::parse(&stream);
+    assert_eq!(parsed.denied.len(), MAX_DENIED);
+    for denial in &parsed.denied {
+        let reason = denial.reason.as_deref().expect("reason");
+        assert_eq!(reason.chars().count(), DENIAL_REASON_CHARS + 3);
+    }
+}
+
+#[test]
+fn the_shown_version_comes_from_the_whole_redacted_output() {
+    use crate::provider::program::{version_line, version_text};
+    // The configured value spans the line break, so redacting the first line
+    // alone would not find it.
+    let configured = "fake-key\nsecond-part";
+    let redactor = crate::provider::redact::Redactor::new([configured.to_string()]);
+    let stdout = format!("9.9.9 {configured}\n");
+    assert_eq!(
+        version_text(&stdout, &redactor).as_deref(),
+        Some("9.9.9 [redacted]")
+    );
+    // The hook version gate still reads the first line as printed.
+    assert_eq!(version_line(&stdout).as_deref(), Some("9.9.9 fake-key"));
 }
 
 #[test]

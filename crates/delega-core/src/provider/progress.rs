@@ -22,7 +22,7 @@
 //!   text, with credentials removed. Provider error text is free text, so it
 //!   can name anything the provider chose to say.
 //!
-//! A kind is the provider's event type with credentials removed, cut to
+//! A kind is the provider's event type, redacted and cut to
 //! [`PROGRESS_KIND_CHARS`] characters. Real types are short words, so they
 //! arrive unchanged.
 //!
@@ -60,7 +60,7 @@ pub enum ProgressEvent {
     /// The provider wrote an event.
     Provider {
         /// The provider's own event type, such as `assistant` or
-        /// `item.completed`, with credentials removed and cut to
+        /// `item.completed`, redacted and cut to
         /// [`PROGRESS_KIND_CHARS`].
         kind: String,
         /// A short description, possibly empty.
@@ -293,13 +293,15 @@ fn message_texts(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<St
         .collect()
 }
 
-/// Provider text with credentials removed, then joined to one line, then cut
-/// to `max` characters. Redaction comes first: a configured value is matched
-/// exactly as passed, so joining its whitespace first could hide it.
+/// Provider text redacted, joined to one line, redacted again, then cut to
+/// `max` characters. The redactor
+/// matches text exactly as it stands, so it runs before joining (which could
+/// break up a value written with tabs or repeated spaces) and after it (which
+/// could form one, such as a space-separated value written with a tab).
 pub(super) fn bounded(text: &str, redactor: &Redactor, max: usize) -> String {
     let redacted = redactor.apply(text);
     let one_line = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
-    clip(&one_line, max)
+    clip(&redactor.apply(&one_line), max)
 }
 
 /// How an agent message is shown: its length, never its text.
@@ -511,6 +513,24 @@ mod tests {
                 "{provider:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_configured_value_formed_by_joining_whitespace_is_redacted_in_kind_and_summary() {
+        // The value holds a space; the provider wrote a tab in its place, which
+        // joining to one line turns back into the value.
+        let redactor = Redactor::new(["fixture private-token".to_string()]);
+        let written = "fixture\tprivate-token";
+        let event = serde_json::json!({
+            "type": format!("t {written} t"),
+            "message": format!("m {written} m")
+        });
+        let out = describe_line(Provider::Codex, event.to_string().as_bytes(), &redactor);
+        assert_eq!(out[0].0, "t [redacted] t");
+        let mut error = event.clone();
+        error["type"] = serde_json::json!("error");
+        let out = describe_line(Provider::Codex, error.to_string().as_bytes(), &redactor);
+        assert_eq!(out[0].1, "m [redacted] m");
     }
 
     #[test]

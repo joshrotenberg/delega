@@ -142,13 +142,15 @@ pub(super) fn version_line(stdout: &str) -> Option<String> {
     Some(line.to_string())
 }
 
-/// The version line as a result or report holds it: with credentials removed,
-/// then trimmed, then cut to [`VERSION_CHARS`] with `...` added when cut.
-/// Redaction sees the line with its whitespace as printed, since a configured
-/// value is matched exactly, and it comes before the cut, so the cut cannot
-/// leave part of a credential the redactor no longer recognises.
-pub(super) fn version_text(line: &str, redactor: &Redactor) -> String {
-    clip(redactor.apply(line).trim(), VERSION_CHARS)
+/// The version as a result or report holds it: the whole `--version` output
+/// redacted, then its first non-blank line, trimmed and cut to
+/// [`VERSION_CHARS`] with `...` added when cut. Redacting the whole output
+/// first means a configured value is matched as printed, also one that spans a
+/// line break.
+pub(super) fn version_text(stdout: &str, redactor: &Redactor) -> Option<String> {
+    let redacted = redactor.apply(stdout);
+    let line = redacted.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(clip(line, VERSION_CHARS))
 }
 
 /// `MAJOR.MINOR.PATCH` at the start of trimmed version output.
