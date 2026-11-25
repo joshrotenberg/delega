@@ -114,7 +114,8 @@ let an open wait return, then call `wait` again with the `cursor`. A `wait` with
 `close`, `start`, `read` and `list` are not held behind open waits.
 
 Responses are compact by default. Pass `detail: "full"` to `read` only when you
-need process diagnostics, activity history or every field of the result.
+need the supervisor's diagnostics, activity history or every field of the
+result.
 
 ## Answer a permission request
 
