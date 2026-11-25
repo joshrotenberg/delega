@@ -382,7 +382,10 @@ fn exited(
             ctx,
             error(
                 "provider_exit",
-                format!("the provider reported success but exited with code {code}"),
+                format!(
+                    "the provider reported success but exited with code {code}{}",
+                    stderr_note(&report.stderr, s.redactor)
+                ),
                 Some(code),
             ),
             partial,

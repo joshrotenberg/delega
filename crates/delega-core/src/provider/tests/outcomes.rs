@@ -168,11 +168,16 @@ async fn success_then_nonzero(provider: Provider) {
     let error = result.error.expect("error");
     assert_eq!(error.kind, "provider_exit");
     assert_eq!(error.provider_exit_code, Some(5));
+    assert!(
+        error.message.contains("fake provider failed after success"),
+        "{}",
+        error.message
+    );
     assert_eq!(result.text, "fake final answer");
     rig.assert_nothing_left().await;
 }
 both!(
-    does_not_complete_when_success_is_followed_by_a_failing_exit,
+    does_not_complete_when_success_is_followed_by_a_failing_exit_and_quotes_stderr,
     success_then_nonzero
 );
 
