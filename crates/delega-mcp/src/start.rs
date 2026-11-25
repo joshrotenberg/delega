@@ -98,7 +98,8 @@ pub fn build_request(
     // made absolute against the server's own working directory, which the host
     // chooses. With an absolute `cwd`, a relative extra directory is relative to
     // it, so the worker's directory, not the server's, is what it resolves under
-    // and what a refusal names.
+    // and what a refusal names. An empty entry is left as it is, so validation
+    // refuses it as invalid instead of it becoming `cwd`.
     if let Some(cwd) = merged.cwd.clone().filter(|cwd| cwd.is_absolute())
         && let Some(dirs) = merged
             .permissions
@@ -106,7 +107,7 @@ pub fn build_request(
             .and_then(|p| p.directories.as_mut())
     {
         for dir in dirs {
-            if dir.is_relative() {
+            if dir.is_relative() && !dir.as_os_str().is_empty() {
                 *dir = cwd.join(&dir);
             }
         }

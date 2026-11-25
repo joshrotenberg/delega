@@ -50,17 +50,31 @@ pub struct Mapping {
 ///
 /// The working directory defaults to this process's. A relative `cwd`
 /// resolves against it, and a relative directory entry resolves against the
-/// working directory. Each must exist and be a directory.
+/// working directory. Each must exist and be a directory. This process's
+/// directory is read only when `cwd` is absent or relative, so an absolute
+/// `cwd` resolves even if that directory is gone.
 pub(super) fn scope(request: &Request) -> Result<Scope, Refusal> {
-    let base = std::env::current_dir().map_err(|e| {
-        Refusal::new(
-            "cwd_unusable",
-            format!("the current directory cannot be read: {e}"),
-        )
-    })?;
+    scope_from(request, std::env::current_dir)
+}
+
+/// [`scope`] with the source of this process's directory given, so a test can
+/// make it unreadable without changing the test process's own directory.
+fn scope_from(
+    request: &Request,
+    current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<Scope, Refusal> {
+    let base = || {
+        current_dir().map_err(|e| {
+            Refusal::new(
+                "cwd_unusable",
+                format!("the current directory cannot be read: {e}"),
+            )
+        })
+    };
     let requested = match &request.cwd {
-        Some(cwd) => base.join(cwd),
-        None => base,
+        Some(cwd) if cwd.is_absolute() => cwd.clone(),
+        Some(cwd) => base()?.join(cwd),
+        None => base()?,
     };
     let cwd = std::fs::canonicalize(&requested)
         .ok()
@@ -107,4 +121,42 @@ pub(super) fn scope(request: &Request) -> Result<Scope, Refusal> {
         directories,
         commands,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::PathBuf;
+
+    use crate::contract::request::{Provider, Request};
+
+    use super::scope_from;
+
+    fn unreadable() -> io::Result<PathBuf> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    #[test]
+    fn an_absolute_cwd_resolves_when_the_current_directory_cannot_be_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut request = Request::new(Provider::Codex, "p");
+        request.cwd = Some(dir.path().to_path_buf());
+        let scope = scope_from(&request, unreadable).expect("scope");
+        assert_eq!(scope.cwd, std::fs::canonicalize(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn a_missing_or_relative_cwd_is_refused_when_the_current_directory_cannot_be_read() {
+        for cwd in [None, Some(PathBuf::from("work"))] {
+            let mut request = Request::new(Provider::Codex, "p");
+            request.cwd = cwd;
+            let refusal = scope_from(&request, unreadable).expect_err("refused");
+            assert_eq!(refusal.kind, "cwd_unusable");
+            assert!(
+                refusal.message.contains("current directory cannot be read"),
+                "{}",
+                refusal.message
+            );
+        }
+    }
 }
