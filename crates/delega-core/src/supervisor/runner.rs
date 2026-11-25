@@ -1,10 +1,11 @@
 //! The task that follows one run, and the watcher that notices if it dies.
 //!
 //! The supervisor's own task never waits on a provider. Each run gets a task
-//! that starts the provider through the provider layer, waits for its one
-//! result, stops it when asked, and reports the result back. A second small
-//! task joins the first, so a panic in a run's task becomes a `failed` result
-//! for that run and touches nothing else.
+//! that prepares the run on a thread of its own, starts the provider through
+//! the provider layer, waits for its one result, stops it when asked, and
+//! reports the result back. A second small task joins the first, so a panic in
+//! a run's task becomes a `failed` result for that run and touches nothing
+//! else.
 
 use std::sync::Arc;
 
@@ -17,27 +18,50 @@ use crate::contract::request::Request;
 use crate::provider::{self, ProviderOptions, RunHandle};
 
 use super::command::Command;
+use super::preflight::Preflight;
 
-/// How a run is started. The supervisor uses the provider layer; tests that
-/// need a run's task to fail replace it.
-pub(super) type Launch = Arc<dyn Fn(Request, ProviderOptions) -> RunHandle + Send + Sync>;
+/// What starts a prepared run, called on the runtime.
+pub(super) type Go = Box<dyn FnOnce() -> RunHandle + Send>;
 
-/// The launcher that starts the provider layer's own run.
+/// How a run is prepared and started. The call itself is the preparation: it
+/// may block on the filesystem, so it runs on a thread of its own. The closure
+/// it returns starts the run, on the runtime. Dropping that closure starts
+/// nothing. The supervisor uses the provider layer; tests replace it to hold a
+/// preparation open or to make a run's task fail.
+pub(super) type Launch = Arc<dyn Fn(Request, ProviderOptions) -> Go + Send + Sync>;
+
+/// The launcher that prepares and starts the provider layer's own run.
 pub(super) fn provider_launch() -> Launch {
-    Arc::new(provider::start)
+    Arc::new(|request, options| {
+        let prepared = provider::prepare(&request, &options);
+        Box::new(move || prepared.launch())
+    })
 }
 
-/// Start the run, follow it to its result and report it. Interrupts the
-/// provider when `stop` is cancelled.
+/// Prepare the run, start it, follow it to its result and report it.
+/// Interrupts the provider when `stop` is cancelled. A run that `stop` or the
+/// bound releases while it is being prepared is reported unprepared and
+/// starts nothing.
 pub(super) async fn drive(
     launch: Launch,
+    preflight: Preflight,
     request: Request,
     options: ProviderOptions,
     stop: CancellationToken,
     tx: UnboundedSender<Command>,
     run: String,
 ) {
-    let handle = launch(request, options);
+    let go = match preflight
+        .prepare(move || launch(request, options), &stop)
+        .await
+    {
+        Ok(go) => go,
+        Err(how) => {
+            let _ = tx.send(Command::Unprepared { run, how });
+            return;
+        }
+    };
+    let handle = go();
     let interrupter = handle.interrupter();
     let mut wait = Box::pin(handle.wait());
     let result = tokio::select! {

@@ -117,8 +117,10 @@ fn go(args: &Args, executable: Option<delega_mcp::Executable>, log: &Log) -> Exi
         ..SupervisorConfig::default()
     };
     // One thread is enough: the supervisor's work is asynchronous input and
-    // output and timers, its filesystem checks run on threads of their own, and
-    // so does reading a profile for `start`.
+    // output and timers. Its filesystem work runs on threads of its own: the
+    // checks that admit a run, and preparing each run when it is dispatched,
+    // both bounded by the preflight bound. So does reading a profile for
+    // `start`.
     let runtime = match Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(err) => {

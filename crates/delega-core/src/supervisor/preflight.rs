@@ -1,11 +1,13 @@
-//! The filesystem and schema work of admitting a request, done off the
-//! supervisor's task.
+//! The filesystem and schema work of admitting a request, and of preparing a
+//! run when it is dispatched, done off the supervisor's task and off the
+//! runtime.
 //!
-//! Each check runs on an OS thread of its own. A check on a filesystem that does
-//! not answer keeps its thread until it does, so the number of checks that have
-//! started and not ended is capped at
-//! [`MAX_PENDING_PREFLIGHTS`](super::limits::MAX_PENDING_PREFLIGHTS). A check
-//! that has timed out still counts, because its thread is still there.
+//! Each check and each preparation runs on an OS thread of its own. One on a
+//! filesystem that does not answer keeps its thread until it does, so the
+//! number that have started and not ended is capped at
+//! [`MAX_PENDING_PREFLIGHTS`](super::limits::MAX_PENDING_PREFLIGHTS), checks and
+//! preparations together. One that has timed out still counts, because its
+//! thread is still there.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,17 +28,18 @@ pub(super) type Refusal = (String, String);
 /// tests replace it to hold checks open.
 type Check = Arc<dyn Fn(&Request, &ProviderOptions) -> Option<Refusal> + Send + Sync>;
 
-/// Runs request checks, at most [`limits::MAX_PENDING_PREFLIGHTS`] at a time.
-/// Cheap to clone; every clone shares the slots.
+/// Runs request checks and run preparations, at most
+/// [`limits::MAX_PENDING_PREFLIGHTS`] at a time. Cheap to clone; every clone
+/// shares the slots.
 #[derive(Clone)]
 pub(super) struct Preflight {
     check: Check,
     bound: Duration,
-    /// One permit per outstanding check. The permit moves into the check's
-    /// thread and is released when the thread ends, however it ends.
+    /// One permit per outstanding check or preparation. The permit moves into
+    /// its thread and is released when the thread ends, however it ends.
     slots: Arc<Semaphore>,
-    /// Cancelled when the supervisor shuts down or is dropped, so a `start`
-    /// waiting for a slot or an answer is released at once.
+    /// Cancelled when the supervisor shuts down or is dropped, so a `start` or
+    /// a preparation waiting for a slot or an answer is released at once.
     closed: CancellationToken,
 }
 
@@ -102,39 +105,107 @@ impl Preflight {
         if request.validate().is_err() {
             return None;
         }
+        let (request, options, check) = (request.clone(), options.clone(), self.check.clone());
+        let what = Work {
+            name: "delega-preflight",
+            no_slot: "no request check slot was free",
+            not_done: "the check did not finish",
+            failed: "checking the request failed unexpectedly",
+            not_started: "checking the request could not be started",
+        };
+        match self
+            .on_thread(what, move || check(&request, &options), None)
+            .await
+        {
+            Ok(refusal) => refusal,
+            Err(Ended::Released) => None,
+            Err(Ended::Refused(refusal)) => Some(refusal),
+        }
+    }
+
+    /// Do `work`, the preparation of a run being dispatched, on a thread of its
+    /// own and wait for it, as [`run`](Self::run) does a check: in one of the
+    /// same slots and within the same bound, measured from the start of this
+    /// call. `stop` and [`close`](Self::close) release the wait at once.
+    ///
+    /// Returns what `work` returned, or why it did not: a refusal, with kind
+    /// `preflight_timeout` when the bound passed, or [`Unprepared::Stopped`]. A
+    /// preparation that returns after the wait has ended is dropped on its
+    /// thread, so it starts nothing.
+    pub(super) async fn prepare<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+        stop: &CancellationToken,
+    ) -> Result<T, Unprepared> {
+        let what = Work {
+            name: "delega-prepare",
+            no_slot: "no slot was free to prepare the run",
+            not_done: "preparing the run did not finish",
+            failed: "preparing the run failed unexpectedly",
+            not_started: "preparing the run could not be started",
+        };
+        self.on_thread(what, work, Some(stop))
+            .await
+            .map_err(|ended| match ended {
+                Ended::Released => Unprepared::Stopped,
+                Ended::Refused(refusal) => Unprepared::Refused(refusal),
+            })
+    }
+
+    /// Run `work` on a thread of its own in one slot, within the bound, unless
+    /// [`close`](Self::close) or `stop` releases the wait first.
+    async fn on_thread<T: Send + 'static>(
+        &self,
+        what: Work,
+        work: impl FnOnce() -> T + Send + 'static,
+        stop: Option<&CancellationToken>,
+    ) -> Result<T, Ended> {
+        let released = async {
+            match stop {
+                Some(stop) => {
+                    tokio::select! {
+                        () = self.closed.cancelled() => {}
+                        () = stop.cancelled() => {}
+                    }
+                }
+                None => self.closed.cancelled().await,
+            }
+        };
+        tokio::pin!(released);
         let deadline = Instant::now() + self.bound;
         let acquire = self.slots.clone().acquire_owned();
         let permit = tokio::select! {
             biased;
-            () = self.closed.cancelled() => return None,
+            () = &mut released => return Err(Ended::Released),
             got = tokio::time::timeout_at(deadline, acquire) => match got {
                 Ok(Ok(permit)) => permit,
-                Ok(Err(_)) => return Some(internal("checking the request failed unexpectedly")),
-                Err(_) => return Some(self.timed_out("no request check slot was free")),
+                Ok(Err(_)) => return Err(Ended::Refused(internal(what.failed))),
+                Err(_) => return Err(Ended::Refused(self.timed_out(what.no_slot))),
             },
         };
-        let (request, options, check) = (request.clone(), options.clone(), self.check.clone());
         let (tx, rx) = oneshot::channel();
         let spawned = std::thread::Builder::new()
-            .name("delega-preflight".to_string())
+            .name(what.name.to_string())
             .spawn(move || {
-                let refusal = check(&request, &options);
+                let answer = work();
                 // Free the slot before the answer is sent, so a caller that has
                 // the answer never finds the slot still taken. A panic in the
-                // check drops the permit on the way out.
+                // work drops the permit on the way out.
                 drop(permit);
-                let _ = tx.send(refusal);
+                // A caller that stopped waiting has dropped the receiver; the
+                // answer comes back and is dropped here, on this thread.
+                let _ = tx.send(answer);
             });
         if spawned.is_err() {
-            return Some(internal("checking the request could not be started"));
+            return Err(Ended::Refused(internal(what.not_started)));
         }
         tokio::select! {
             biased;
-            () = self.closed.cancelled() => None,
+            () = &mut released => Err(Ended::Released),
             got = tokio::time::timeout_at(deadline, rx) => match got {
-                Ok(Ok(refusal)) => refusal,
-                Ok(Err(_)) => Some(internal("checking the request failed unexpectedly")),
-                Err(_) => Some(self.timed_out("the check did not finish")),
+                Ok(Ok(answer)) => Ok(answer),
+                Ok(Err(_)) => Err(Ended::Refused(internal(what.failed))),
+                Err(_) => Err(Ended::Refused(self.timed_out(what.not_done))),
             },
         }
     }
@@ -156,6 +227,33 @@ impl Preflight {
             ),
         )
     }
+}
+
+/// Why a dispatched run's preparation gave no answer.
+#[derive(Debug)]
+pub(super) enum Unprepared {
+    /// The run is refused before start: the bound passed (`preflight_timeout`)
+    /// or the preparation failed.
+    Refused(Refusal),
+    /// An interrupt, close or shutdown released the run while it was being
+    /// prepared.
+    Stopped,
+}
+
+/// How [`Preflight::on_thread`] ended without an answer.
+enum Ended {
+    /// The supervisor closed, or the caller's stop token fired.
+    Released,
+    Refused(Refusal),
+}
+
+/// The thread name and the messages of one kind of work.
+struct Work {
+    name: &'static str,
+    no_slot: &'static str,
+    not_done: &'static str,
+    failed: &'static str,
+    not_started: &'static str,
 }
 
 fn internal(message: &str) -> Refusal {

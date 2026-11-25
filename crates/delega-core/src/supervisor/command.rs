@@ -170,6 +170,11 @@ pub(super) enum Command {
         run: String,
         result: Box<RunResult>,
     },
+    /// A run's task gave up preparing the run, which started nothing.
+    Unprepared {
+        run: String,
+        how: super::preflight::Unprepared,
+    },
     /// A run's task ended without a result.
     Crashed {
         run: String,

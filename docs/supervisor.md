@@ -101,8 +101,8 @@ lower values from the `[mcp]` section of the
 | `wait_ceiling` | 300 s | The longest one `wait` blocks. A longer `timeout_secs` is capped and the response says what applied. |
 | `wait_default` | 30 s | `wait` with no `timeout_secs`. `list` reports it as `default_wait_secs`. |
 | `max_waits_in_flight` | 64 | Waits blocked at once. Beyond it a wait returns at once with `limit_reached` ([Answers at the limit](#wait-at-its-limit)). `list` reports `waits_in_flight`. The MCP server refuses a value above half its 128 concurrent requests. |
-| preflight bound | 10 s | A bound on `start`'s dry run. A start that runs past it can be refused, kind `preflight_timeout`. |
-| outstanding request checks | 16 | Checks running at once. A `start` beyond it waits for a slot within the preflight bound. Not in `list`. |
+| preflight bound | 10 s | A bound on `start`'s dry run, and on preparing a run when it is dispatched. A start or a dispatched run that runs past it can be refused, kind `preflight_timeout`. |
+| outstanding request checks | 16 | Checks and run preparations running at once, together. A `start` or a dispatched run beyond it waits for a slot within the preflight bound. Not in `list`. |
 | compact answer | 20000 characters | A compact read returns at most this much of the answer. |
 | compact structured answer | 16 KiB | A compact read leaves out a larger structured answer. |
 | `shutdown_bound` | 30 s | The longest `shutdown` waits for runs to settle. |
@@ -138,11 +138,21 @@ creates no worker**, so the result has no `worker`.
 A `start` still being checked when `shutdown` begins returns `Error::ShutDown`,
 or `Error::Failed` if the supervisor's task failed; neither creates a run.
 
-An admitted run starts at once if a running slot is free. The provider layer
-checks the request again when the run starts; a refusal there ends that run
-`refused` and leaves the worker.
+An admitted run starts at once if a running slot is free. When it starts, the
+provider layer prepares it again: it resolves the working directory and
+directories and reads the Claude Code settings files, managed settings
+included. That preparation runs on a thread of its own, in one of the request
+checks' slots and within the preflight bound, so a filesystem that stops
+answering after admission holds only that run, never `wait`, `interrupt`,
+`close`, `shutdown` or other runs' results. A refusal there ends that run
+`refused` and leaves the worker. A preparation that does not finish within the
+bound ends the run `refused`, kind `preflight_timeout`, with the fields of any
+refusal before start; when it returns later it starts nothing. An `interrupt`,
+`close` or `shutdown` during the preparation ends the run `interrupted` at
+once, without starting the provider. The run's time limit starts after the
+preparation.
 
-How the checks run: [`supervisor/preflight.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/preflight.rs).
+How the checks and preparations run: [`supervisor/preflight.rs`](https://github.com/joshrotenberg/delega/blob/main/crates/delega-core/src/supervisor/preflight.rs).
 
 ## Follow-ups
 

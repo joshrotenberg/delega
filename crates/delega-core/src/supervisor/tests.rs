@@ -119,11 +119,13 @@ impl Dir {
 
 fn panicking_launcher() -> super::runner::Launch {
     Arc::new(|request, options| {
-        assert!(
-            !request.prompt.starts_with("panic"),
-            "the launcher was told to panic"
-        );
-        provider::start(request, options)
+        Box::new(move || {
+            assert!(
+                !request.prompt.starts_with("panic"),
+                "the launcher was told to panic"
+            );
+            provider::start(request, options)
+        })
     })
 }
 
@@ -1771,5 +1773,278 @@ async fn a_parked_wait_whose_run_aged_out_does_not_hold_its_slot_against_the_nex
     let listed = supervisor.list().await.expect("list");
     assert_eq!(listed.limits.waits_in_flight, 0, "{listed:#?}");
     supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// Reports, when a held run's start closure is dropped, its prompt and whether
+/// it was called: a preparation that ends after its run was released must be
+/// dropped without starting anything.
+struct Tracker {
+    prompt: String,
+    launched: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, bool)>,
+}
+
+impl Drop for Tracker {
+    fn drop(&mut self) {
+        let _ = self
+            .tx
+            .send((std::mem::take(&mut self.prompt), self.launched));
+    }
+}
+
+/// A launcher whose preparation of a run whose prompt starts with `hold`
+/// reports that it has entered and then blocks on a release message. Every
+/// other run is prepared at once. Both prepare the provider layer's own run on
+/// the preparation's thread.
+struct HeldPreparations {
+    entered: tokio::sync::mpsc::UnboundedReceiver<String>,
+    /// One message lets one held preparation go on. Dropping it, as a failing
+    /// test does, lets them all go on.
+    release: std::sync::mpsc::Sender<()>,
+    /// What each held run's start closure did, when it is dropped.
+    ended: tokio::sync::mpsc::UnboundedReceiver<(String, bool)>,
+}
+
+impl HeldPreparations {
+    async fn entered(&mut self) -> String {
+        tokio::time::timeout(Duration::from_secs(60), self.entered.recv())
+            .await
+            .expect("the preparation entered within a minute")
+            .expect("the launcher is alive")
+    }
+
+    /// Let one held preparation go on and return what its start closure did.
+    async fn release_one(&mut self) -> (String, bool) {
+        self.release.send(()).expect("a preparation is held");
+        tokio::time::timeout(Duration::from_secs(60), self.ended.recv())
+            .await
+            .expect("the released preparation ended within a minute")
+            .expect("the launcher is alive")
+    }
+}
+
+fn holding_launcher() -> (super::runner::Launch, HeldPreparations) {
+    let (entered_tx, entered) = tokio::sync::mpsc::unbounded_channel();
+    let (ended_tx, ended) = tokio::sync::mpsc::unbounded_channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let launch: super::runner::Launch = Arc::new(move |request, options| {
+        let prepared = provider::prepare(&request, &options);
+        if !request.prompt.starts_with("hold") {
+            return Box::new(move || prepared.launch());
+        }
+        let _ = entered_tx.send(request.prompt.clone());
+        // An error means the test dropped the sender: go on.
+        let _ = release_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv();
+        let mut tracker = Tracker {
+            prompt: request.prompt.clone(),
+            launched: false,
+            tx: ended_tx.clone(),
+        };
+        Box::new(move || {
+            tracker.launched = true;
+            let handle = prepared.launch();
+            drop(tracker);
+            handle
+        })
+    });
+    (
+        launch,
+        HeldPreparations {
+            entered,
+            release,
+            ended,
+        },
+    )
+}
+
+/// A supervisor with `launch`, request checks that refuse nothing, and `bound`
+/// for both the checks and the preparations.
+fn preparing_supervisor(dir: &Dir, launch: super::runner::Launch, bound: Duration) -> Supervisor {
+    use super::preflight::Preflight;
+    let check = Arc::new(|_: &Request, _: &ProviderOptions| None);
+    Supervisor::with_hooks(dir.config(), launch, Preflight::with(check, bound))
+}
+
+/// The MCP server runs the supervisor on a current-thread runtime, as this
+/// test does. A run held while it is being prepared, as on a filesystem that
+/// stopped answering after admission, holds only its own thread: another run
+/// finishes, a third is interrupted, its worker closed, and `list` answers,
+/// all while the first is held. Before the fix the preparation ran on the
+/// runtime's only thread and every one of these hung.
+#[tokio::test]
+async fn a_run_held_in_preparation_does_not_stop_other_runs_results_interrupt_close_or_list() {
+    let dir = Dir::new();
+    let (launch, mut held) = holding_launcher();
+    let supervisor = preparing_supervisor(&dir, launch, Duration::from_secs(3600));
+
+    let slow = supervisor
+        .start(dir.request("hold slow"))
+        .await
+        .expect("start");
+    assert_eq!(held.entered().await, "hold slow");
+
+    let other = supervisor
+        .start(dir.request("echo:other"))
+        .await
+        .expect("start");
+    let result = finished_result(&supervisor, &other.run).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+
+    let gated = supervisor
+        .start(dir.request(&format!("gate:{}", dir.gate().display())))
+        .await
+        .expect("start");
+    dir.gate_started().await;
+    let interrupted = supervisor
+        .interrupt(Target::Run(gated.run.clone()))
+        .await
+        .expect("interrupt");
+    assert!(interrupted.settled, "{interrupted:#?}");
+    let result = finished_result(&supervisor, &gated.run).await;
+    assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
+    let closed = supervisor
+        .close(&gated.worker.expect("worker"))
+        .await
+        .expect("close");
+    assert_eq!(closed.state, WorkerState::Closed, "{closed:#?}");
+
+    let list = supervisor.list().await.expect("list");
+    assert_eq!(list.limits.running_runs, 1, "{list:#?}");
+    let read = supervisor
+        .read(Target::Run(slow.run.clone()), Detail::Compact, None, None)
+        .await
+        .expect("read");
+    assert_eq!(read.state, Some(RunState::Running), "{read:#?}");
+
+    // Released, the held run starts and completes as usual.
+    let (prompt, launched) = held.release_one().await;
+    assert_eq!(prompt, "hold slow");
+    assert!(launched, "the released preparation did not start its run");
+    let result = finished_result(&supervisor, &slow.run).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// A preparation still held when the bound passes ends its run refused with
+/// `preflight_timeout`, carrying what any refusal before start carries: no
+/// start time, no duration, a confirmed cleanup. When the preparation returns
+/// later, nothing is started. The bound is short, and the preparation is held
+/// on a message, so it passes the bound however loaded the machine is.
+#[tokio::test]
+async fn a_preparation_past_the_bound_refuses_the_run_preflight_timeout_and_starts_nothing_later() {
+    let dir = Dir::new();
+    let (launch, mut held) = holding_launcher();
+    let supervisor = preparing_supervisor(&dir, launch, Duration::from_millis(300));
+
+    let started = supervisor
+        .start(dir.request("hold late"))
+        .await
+        .expect("start");
+    assert_eq!(started.error, None, "{started:#?}");
+    assert_eq!(held.entered().await, "hold late");
+    let result = finished_result(&supervisor, &started.run).await;
+    assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
+    let error = result.error.as_ref().expect("error");
+    assert_eq!(error.kind, "preflight_timeout", "{error:?}");
+    assert!(
+        error
+            .message
+            .starts_with("preparing the run did not finish"),
+        "{error:?}"
+    );
+    assert_eq!(result.timing.started_at, None, "{result:#?}");
+    assert_eq!(result.timing.duration_ms, 0, "{result:#?}");
+    assert_eq!(result.cleanup, Cleanup::Confirmed, "{result:#?}");
+    assert_eq!(
+        result.worker.as_ref().map(|w| &w.id),
+        started.worker.as_ref()
+    );
+    let list = supervisor.list().await.expect("list");
+    assert_eq!(list.limits.running_runs, 0, "the refused run kept its slot");
+
+    let (prompt, launched) = held.release_one().await;
+    assert_eq!(prompt, "hold late");
+    assert!(
+        !launched,
+        "a preparation that returned after the bound started its run"
+    );
+    supervisor.shutdown().await;
+    dir.assert_nothing_left().await;
+}
+
+/// An interrupt, a close and a shutdown each release a run that is still being
+/// prepared: it ends `interrupted` with no start time, and its preparation,
+/// when it returns, starts nothing.
+#[tokio::test]
+async fn interrupt_close_and_shutdown_during_preparation_end_the_run_interrupted_and_start_nothing()
+{
+    let dir = Dir::new();
+    let (launch, mut held) = holding_launcher();
+    let supervisor = preparing_supervisor(&dir, launch, Duration::from_secs(3600));
+
+    let assert_interrupted = |result: &crate::contract::result::RunResult| {
+        assert_eq!(result.outcome, Outcome::Interrupted, "{result:#?}");
+        assert_eq!(result.timing.started_at, None, "{result:#?}");
+        assert_eq!(result.cleanup, Cleanup::Confirmed, "{result:#?}");
+    };
+
+    let first = supervisor
+        .start(dir.request("hold interrupt"))
+        .await
+        .expect("start");
+    assert_eq!(held.entered().await, "hold interrupt");
+    let interrupted = supervisor
+        .interrupt(Target::Run(first.run.clone()))
+        .await
+        .expect("interrupt");
+    assert!(interrupted.settled, "{interrupted:#?}");
+    assert!(!interrupted.was_queued, "{interrupted:#?}");
+    assert_interrupted(&finished_result(&supervisor, &first.run).await);
+    assert_eq!(
+        held.release_one().await,
+        ("hold interrupt".to_string(), false)
+    );
+
+    let second = supervisor
+        .start(dir.request("hold close"))
+        .await
+        .expect("start");
+    assert_eq!(held.entered().await, "hold close");
+    let closed = supervisor
+        .close(second.worker.as_deref().expect("worker"))
+        .await
+        .expect("close");
+    assert!(closed.settled, "{closed:#?}");
+    assert_eq!(closed.stopped_run.as_deref(), Some(second.run.as_str()));
+    assert_interrupted(&finished_result(&supervisor, &second.run).await);
+    assert_eq!(held.release_one().await, ("hold close".to_string(), false));
+
+    let third = supervisor
+        .start(dir.request("hold shutdown"))
+        .await
+        .expect("start");
+    assert_eq!(held.entered().await, "hold shutdown");
+    let report = supervisor.shutdown().await;
+    assert_eq!(report.runs_stopped, 1, "{report:#?}");
+    assert!(report.unsettled.is_empty(), "{report:#?}");
+    let read = supervisor
+        .read(Target::Run(third.run.clone()), Detail::Full, None, None)
+        .await
+        .expect("read");
+    let Some(ResultView::Full(result)) = read.result else {
+        panic!("{read:#?}");
+    };
+    assert_eq!(result.validate(), Ok(()), "{result:#?}");
+    assert_interrupted(&result);
+    assert_eq!(
+        held.release_one().await,
+        ("hold shutdown".to_string(), false)
+    );
     dir.assert_nothing_left().await;
 }

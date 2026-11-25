@@ -673,7 +673,9 @@ Rules:
   default; `[mcp]` can lower them. Beyond the worker limit `start` is refused
   `limit_reached`; beyond the queue limit `follow_up` is refused `queue_full`;
   beyond the running limit a run stays `queued`. Request checks share a 10 s
-  deadline (`preflight_timeout`). See
+  deadline (`preflight_timeout`), and so does preparing a run when it is
+  dispatched: a run whose preparation runs past it ends `refused`,
+  `preflight_timeout`, and starts nothing. See
   [Limits and defaults](supervisor.md#limits-and-defaults).
 - **Refusals are runs.** A refused `start` or `follow_up` returns a run id whose
   result is `refused` (`invalid_request`, `name_in_use`, `limit_reached`,

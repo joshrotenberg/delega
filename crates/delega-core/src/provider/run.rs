@@ -167,10 +167,36 @@ pub async fn run(request: Request, options: ProviderOptions) -> RunResult {
 /// Panics if called outside a Tokio runtime and the request is not refused
 /// first.
 pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
+    prepare(&request, &options).launch()
+}
+
+/// A run whose preparation is done: refused already, or planned and ready to
+/// start. Made by [`prepare`], which needs no runtime and may block on the
+/// filesystem; [`launch`](Self::launch) starts it on the runtime. Dropping it
+/// starts nothing and reports nothing.
+pub(crate) struct Prepared {
+    facts: Facts,
+    progress: Progress,
+    ready: Ready,
+}
+
+enum Ready {
+    /// Refused before start. The progress sink has not been told yet.
+    Refused(Box<RunResult>),
+    Planned {
+        plan: Box<Plan>,
+        session: Session,
+    },
+}
+
+/// The synchronous part of [`start`]: resolve the request into a plan, which
+/// canonicalizes paths and reads settings files, managed settings included. It
+/// touches neither the runtime nor the progress sink, so it can run on a thread
+/// of its own and its result can be discarded.
+pub(crate) fn prepare(request: &Request, options: &ProviderOptions) -> Prepared {
     let queued_at = SystemTime::now();
-    let mut facts = Facts::new(&request, &options, queued_at);
+    let mut facts = Facts::new(request, options, queued_at);
     let progress = Progress::new(options.progress.clone(), options.progress_text);
-    let cancel = CancellationToken::new();
     let plan = if request.provider == Provider::Claude
         && request.permissions.on_request == crate::contract::permissions::OnRequest::Ask
         && options.asks.0.is_none()
@@ -181,9 +207,9 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
             "This run cannot answer live permission requests. Use delega mcp or the Rust supervisor API, or set permissions.on_request to deny.",
         ))
     } else {
-        plan::build(&request, &options)
+        plan::build(request, options)
     };
-    match plan {
+    let ready = match plan {
         Err(refusal) => {
             let mut result = RunResult::refused_before_start(
                 facts.refusal_context(),
@@ -191,30 +217,62 @@ pub fn start(request: Request, options: ProviderOptions) -> RunHandle {
                 &refusal.message,
             );
             result.applied = facts.result_applied();
-            progress.finished(&mut result);
-            RunHandle {
-                cancel,
-                facts,
-                ready: Some(Box::new(result)),
-                join: None,
-            }
+            Ready::Refused(Box::new(result))
         }
         Ok(plan) => {
             facts.provenance.provider_executable = Some(plan.program.display().to_string());
             facts.applied = plan.applied.clone();
-            let session = request.session.clone();
-            let join = tokio::spawn(execute(
-                plan,
-                facts.clone(),
-                cancel.clone(),
-                session,
-                progress,
-            ));
-            RunHandle {
-                cancel,
-                facts,
-                ready: None,
-                join: Some(join),
+            Ready::Planned {
+                plan: Box::new(plan),
+                session: request.session.clone(),
+            }
+        }
+    };
+    Prepared {
+        facts,
+        progress,
+        ready,
+    }
+}
+
+impl Prepared {
+    /// Start the prepared run and return its handle. A refused run's handle has
+    /// its result already.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime and the run was not refused.
+    pub(crate) fn launch(self) -> RunHandle {
+        let Self {
+            facts,
+            progress,
+            ready,
+        } = self;
+        let cancel = CancellationToken::new();
+        match ready {
+            Ready::Refused(mut result) => {
+                progress.finished(&mut result);
+                RunHandle {
+                    cancel,
+                    facts,
+                    ready: Some(result),
+                    join: None,
+                }
+            }
+            Ready::Planned { plan, session } => {
+                let join = tokio::spawn(execute(
+                    *plan,
+                    facts.clone(),
+                    cancel.clone(),
+                    session,
+                    progress,
+                ));
+                RunHandle {
+                    cancel,
+                    facts,
+                    ready: None,
+                    join: Some(join),
+                }
             }
         }
     }
