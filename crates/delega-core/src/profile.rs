@@ -30,9 +30,10 @@ pub fn problem(field: &str, message: impl Into<String>) -> Problem {
 }
 
 /// Read a regular file of at most `limit` bytes as UTF-8. A device, a pipe or a
-/// directory is refused before it is opened, and the file that was opened is
-/// checked again (see [`read_opened`]), so reading cannot block or run without
-/// end. A file over the limit is refused naming the limit.
+/// directory at the path is refused before it is opened. The path is then
+/// opened without blocking and what was opened is checked again before it is
+/// read, so a pipe put in its place does not wait for a writer. A file over the
+/// limit is refused naming the limit.
 pub fn read_limited(path: &Path, limit: usize) -> Result<String, String> {
     let meta = std::fs::metadata(path).map_err(|err| err.to_string())?;
     if !meta.is_file() {
@@ -44,9 +45,10 @@ pub fn read_limited(path: &Path, limit: usize) -> Result<String, String> {
 const NOT_A_REGULAR_FILE: &str = "it is not a regular file";
 
 /// Open `path` without blocking and read it only if what was opened is a
-/// regular file. The check before opening keeps a device from being opened at
-/// all; this one covers a path replaced between that check and the open, such
-/// as by a pipe, whose blocking open would wait for a writer.
+/// regular file. The check before opening keeps a device at the path from being
+/// opened in the ordinary case; this one covers a path replaced between that
+/// check and the open, such as by a pipe, whose blocking open would wait for a
+/// writer.
 fn read_opened(path: &Path, limit: usize) -> Result<String, String> {
     use std::os::unix::fs::OpenOptionsExt;
     let flags = rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOCTTY;
@@ -471,21 +473,25 @@ mod tests {
     fn a_pipe_in_place_of_the_checked_file_is_refused_without_blocking() {
         let dir = tempfile::tempdir().expect("temp dir");
         let fifo = dir.path().join("profile.json");
-        let made = std::process::Command::new("mkfifo")
+        let made = std::process::Command::new("/usr/bin/mkfifo")
             .arg(&fifo)
-            .guarded_status();
-        if !made.is_ok_and(|s| s.success()) {
-            return;
-        }
+            .guarded_status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed: {made}");
         let (tx, rx) = std::sync::mpsc::channel();
         let path = fifo.clone();
         std::thread::spawn(move || {
             let _ = tx.send(read_opened(&path, MAX_PROFILE_BYTES));
         });
         let answer = rx.recv_timeout(std::time::Duration::from_secs(30));
-        if answer.is_err() {
-            // Release the blocked open so the thread ends, then fail.
-            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        if matches!(answer, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+            // Release an open blocked on the pipe so the thread ends. Opened
+            // without blocking, so this cannot hang if nothing is reading.
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&fifo);
         }
         let refusal = answer
             .expect("read_opened must answer within 30 s with no writer on the pipe")
