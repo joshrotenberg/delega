@@ -4,7 +4,7 @@ mod support;
 
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::result::Cleanup;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use support::{
     Guarded, PROVIDERS, Rig, assert_stop_cleanup, guarded_pipe, result_of, signal, text,
@@ -858,6 +858,97 @@ fn a_resume_that_continues_another_session_fails_with_session_mismatch() {
         assert_eq!(result.error.expect("error").kind, "session_mismatch");
         assert_eq!(result.text, "fake final answer", "{provider}");
         assert_eq!(result.session_id.as_deref(), Some("other-session"));
+        rig.assert_nothing_left();
+    }
+}
+
+/// Run `success` with the fake reporting `reported` as its session, and,
+/// with `resume`, asking to continue that session.
+fn run_reporting_session(provider: &str, reported: &str, resume: Option<&str>) -> (Rig, Output) {
+    let rig = Rig::new();
+    let name = if resume.is_some() {
+        "FAKE_RESUMED_SESSION_ID"
+    } else {
+        "FAKE_SESSION_ID"
+    };
+    let mut extra = vec!["--output", "json", "--env", name];
+    if let Some(asked) = resume {
+        extra.extend(["--resume", asked]);
+    }
+    let out = rig
+        .command()
+        .env(name, reported)
+        .args(rig.run_args(provider, "success", &extra))
+        .guarded_output()
+        .expect("run delega");
+    (rig, out)
+}
+
+/// A key the redactor knows by its shape, then enough to pass the 256-byte
+/// limit of `session.resume`.
+fn oversize_session_id() -> String {
+    format!("sk-ant-abcdefghijklmnopqrstuvwx{}", "s".repeat(1024 - 31))
+}
+
+#[test]
+fn a_reported_session_id_that_session_resume_would_refuse_is_not_published() {
+    // The fakes put the id into their JSON as it is, so `\u0000` is a NUL.
+    let nul = r"bad\u0000id";
+    for provider in PROVIDERS {
+        for (reported, why) in [
+            (oversize_session_id(), "exceeds the limit of 256"),
+            (nul.to_string(), "NUL"),
+        ] {
+            let (rig, out) = run_reporting_session(provider, &reported, None);
+            assert_eq!(out.status.code(), Some(0), "{provider}");
+            let result = result_of(&out);
+            assert_eq!(result.outcome, Outcome::Completed, "{provider}");
+            assert_eq!(result.session_id, None, "{provider}: {why}");
+            let note = result
+                .provider_notes
+                .iter()
+                .find(|n| n.contains("was not kept"))
+                .unwrap_or_else(|| panic!("{provider}: {:?}", result.provider_notes));
+            assert!(note.contains(why), "{note}");
+            assert!(!note.contains("sk-ant-"), "the id is redacted: {note}");
+            assert!(!note.contains('\0'), "a NUL is escaped: {note}");
+            assert!(note.len() < 300, "the id is cut: {note}");
+            rig.assert_nothing_left();
+        }
+    }
+}
+
+#[test]
+fn a_resume_whose_provider_reports_a_session_id_resume_would_refuse_fails_with_session_mismatch() {
+    for provider in PROVIDERS {
+        let (rig, out) =
+            run_reporting_session(provider, &oversize_session_id(), Some("asked-session"));
+        assert_eq!(out.status.code(), Some(1), "{provider}");
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Failed, "{provider}");
+        let error = result.error.expect("error");
+        assert_eq!(error.kind, "session_mismatch", "{provider}");
+        assert!(error.message.contains("asked-session"), "{}", error.message);
+        assert!(!error.message.contains("sk-ant-"), "{}", error.message);
+        assert!(error.message.len() < 300, "{}", error.message);
+        assert_eq!(result.session_id, None, "{provider}");
+        rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn a_reported_session_id_at_the_resume_limit_is_published_unchanged() {
+    let reported = "s".repeat(256);
+    for provider in PROVIDERS {
+        let (rig, out) = run_reporting_session(provider, &reported, None);
+        assert_eq!(out.status.code(), Some(0), "{provider}");
+        let result = result_of(&out);
+        assert_eq!(result.session_id.as_deref(), Some(reported.as_str()));
+        assert!(
+            !result.provider_notes.iter().any(|n| n.contains("not kept")),
+            "{:?}",
+            result.provider_notes
+        );
         rig.assert_nothing_left();
     }
 }

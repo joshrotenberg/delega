@@ -67,6 +67,60 @@ async fn a_worker_is_idle_after_its_run_and_list_shows_its_session() {
     rig.assert_nothing_left().await;
 }
 
+/// A worker whose only run reported `reported` as its session: no session in
+/// the result or the list, no follow-up offered, and a follow-up answered as
+/// for a worker with no session.
+async fn a_refused_session_id_leaves_the_worker_without_a_session(
+    provider: Provider,
+    reported: &str,
+) {
+    let rig = Rig::new();
+    let mut config = rig.config(provider);
+    for (name, value) in &mut config.provider.env_set {
+        if name == "FAKE_SESSION_ID" {
+            *value = reported.to_string();
+        }
+    }
+    let supervisor = delega_core::supervisor::Supervisor::new(config);
+    let first = supervisor
+        .start(rig.request(provider, "success"))
+        .await
+        .expect("start");
+    let worker = first.worker.expect("worker");
+    let one = result_of(&supervisor, &first.run).await;
+    assert_eq!(one.outcome, Outcome::Completed, "{provider:?}");
+    assert_eq!(one.session_id, None, "{provider:?}");
+
+    let list = supervisor.list().await.expect("list");
+    let listed = &list.workers[0];
+    assert_eq!(listed.session_id, None, "{provider:?}");
+    assert!(!listed.can_follow_up, "{provider:?}");
+
+    let refused = supervisor
+        .follow_up(&worker, "echo:more", None)
+        .await
+        .expect("follow_up answers");
+    assert_eq!(refused.outcome, Some(Outcome::Refused), "{provider:?}");
+    assert_eq!(refused.error.expect("error").kind, "no_session");
+    supervisor.shutdown().await;
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn a_worker_whose_reported_session_id_is_too_long_to_resume_has_no_session() {
+    for provider in BOTH {
+        a_refused_session_id_leaves_the_worker_without_a_session(provider, &"s".repeat(1024)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_worker_whose_reported_session_id_holds_a_nul_has_no_session() {
+    // The fakes put the id into their JSON as it is, so `\u0000` is a NUL.
+    for provider in BOTH {
+        a_refused_session_id_leaves_the_worker_without_a_session(provider, r"bad\u0000id").await;
+    }
+}
+
 #[tokio::test]
 async fn a_refused_start_is_a_finished_run_without_a_worker_that_read_returns() {
     let rig = Rig::new();

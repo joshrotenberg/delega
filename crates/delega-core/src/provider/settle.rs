@@ -38,15 +38,46 @@ const CLAUDE_UNKNOWN_SESSION: &str = "No conversation found with session ID";
 /// (seen with Codex 0.170.0).
 const CODEX_UNKNOWN_SESSION: &str = "no rollout found for thread id";
 
-/// The requested and the first other reported session, when a resumed run's
-/// stream reported any session other than the one it asked for.
-fn mismatch<'a>(s: &Settle<'a>, parsed: &'a Parsed) -> Option<(&'a str, &'a str)> {
+/// The text of a mismatch, when a resumed run's stream reported any session
+/// other than the one it asked for. A reported id that `session.resume` would
+/// refuse is never the one asked for, which passed those checks, so it counts
+/// as another session; the text gives its length, never its characters.
+fn mismatch(s: &Settle<'_>, parsed: &Parsed) -> Option<String> {
     if s.ephemeral {
         return None;
     }
     let asked = s.resume?;
-    let reported = parsed.session_ids.iter().find(|id| *id != asked)?;
-    Some((asked, reported.as_str()))
+    if let Some(reported) = parsed.session_ids.iter().find(|id| *id != asked) {
+        return Some(mismatch_text(s.redactor, asked, reported));
+    }
+    let refused = parsed.refused_session.as_deref()?;
+    Some(refused_mismatch_text(s.redactor, asked, refused))
+}
+
+/// The text of a mismatch whose reported id `session.resume` would refuse:
+/// the asked id, redacted, and the reported id's length only.
+pub(super) fn refused_mismatch_text(redactor: &Redactor, asked: &str, reported: &str) -> String {
+    redactor.apply(&format!(
+        "the run asked to resume session {asked} but the provider reported a session id of {} \
+         bytes that session.resume would refuse",
+        reported.len()
+    ))
+}
+
+/// The note for a reported session id that `session.resume` would refuse:
+/// its length and the reasons, which are fixed texts and lengths, never any of
+/// the id's characters.
+pub(super) fn refused_session_note(id: &str) -> String {
+    let why = crate::contract::validate::session_id_problems(id)
+        .iter()
+        .map(|p| p.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "the provider reported a session id of {} bytes that session.resume would refuse \
+         ({why}), so it was not kept",
+        id.len()
+    )
 }
 
 /// The text of a mismatch, with secrets removed from both ids.
@@ -81,7 +112,10 @@ fn session_not_found(
         // capture is bounded. Standard output cut at the capture limit may hide
         // a thread or a terminal event, so it does not match.
         (Provider::Codex, Terminal::None)
-            if code == 1 && parsed.session_ids.is_empty() && !report.stdout.truncated =>
+            if code == 1
+                && parsed.session_ids.is_empty()
+                && parsed.refused_session.is_none()
+                && !report.stdout.truncated =>
         {
             (matches!(kind, "provider_exit" | "provider_error") || CLASSIFIED.contains(&kind))
                 && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
@@ -319,10 +353,10 @@ pub(super) fn settle(
             RunResult::failed(ctx, detail, partial)
         }
     };
-    if let Some((asked, reported)) = mismatch(&s, parsed) {
+    if let Some(text) = mismatch(&s, parsed) {
         let kind = result.error.as_ref().map(|e| e.kind.as_str());
         if kind != Some("session_mismatch") {
-            notes.push(mismatch_text(s.redactor, asked, reported));
+            notes.push(text);
         }
     } else if s.resume.is_none() && !s.ephemeral && parsed.session_ids.len() > 1 {
         let mut note = format!(
@@ -347,6 +381,9 @@ pub(super) fn settle(
     result.session_usage = parsed.session_usage.clone();
     if !s.ephemeral {
         result.session_id = parsed.session_id.clone();
+        if let Some(id) = &parsed.refused_session {
+            result.provider_notes.push(refused_session_note(id));
+        }
     }
     result
 }
@@ -368,15 +405,9 @@ fn exited(
         Terminal::Success if code == 0 => {
             let done = completed(ctx.clone(), parsed, s.validator, notes);
             match mismatch(s, parsed) {
-                Some((asked, reported)) if done.outcome == Outcome::Completed => RunResult::failed(
-                    ctx,
-                    error(
-                        "session_mismatch",
-                        mismatch_text(s.redactor, asked, reported),
-                        Some(code),
-                    ),
-                    done.text,
-                ),
+                Some(text) if done.outcome == Outcome::Completed => {
+                    RunResult::failed(ctx, error("session_mismatch", text, Some(code)), done.text)
+                }
                 _ => done,
             }
         }

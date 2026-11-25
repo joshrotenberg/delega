@@ -129,7 +129,12 @@ in `text`. Other outcomes keep their kind and get a note naming both IDs.
 A missing ID is allowed. Ephemeral runs skip session checks. Fresh runs
 report up to 8 distinct IDs in a multiple-session note and count additional
 IDs. The result's `session_id` comes from events up to the first terminal
-event. A provider that reports the requested session missing can yield
+event. A reported ID that `session.resume` would refuse is not kept or listed;
+unless the run is ephemeral a note says so, giving the first such ID's length
+in bytes and why it was refused and no part of the ID. On resume it counts as
+a different session; when no different acceptable ID was reported, the mismatch
+text gives its length, not the ID. An
+empty ID counts as none. A provider that reports the requested session missing can yield
 `session_not_found` ([verified messages](#verified-against-the-real-cli)).
 
 | Capture limit | Effect |
