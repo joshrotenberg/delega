@@ -246,8 +246,9 @@ including the `mcp_servers` override built from MCP discovery, and, for a kept
 run, the `DELEGA_RUN_MARKER` entry it passes to the probes and the provider,
 which extends the list delega inherited. Instructions that do not fit move to
 standard input (above). `--settings` over the limit is refused as described
-under [Deny rules](#deny-rules). Anything else known when the run is planned
-is refused before anything starts with `argument_too_long`, also in a dry run;
+under [Deny rules](#deny-rules). Any other argument or environment entry
+known when the run is planned and over 120 KiB is refused before anything
+starts with `argument_too_long`, also in a dry run;
 the message names the argument and its size, never its content. Long
 `permissions.directories` and `permissions.commands` can reach it within their
 count limits. The `DELEGA_RUN_MARKER` entry is measured from the environment
