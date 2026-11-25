@@ -241,9 +241,10 @@ impl Prepared {
     ///
     /// `cancel` stops the run, exactly as the handle's interrupt does. A caller
     /// that has a stop token of its own passes it, or a child of it, so a stop
-    /// that lands while the run is being launched reaches it at once: a token
-    /// already cancelled ends the run `interrupted` before any probe or
-    /// provider process starts.
+    /// that lands while the run is being launched reaches it at once: for a
+    /// plan ready to execute, a token already cancelled ends the run
+    /// `interrupted` before any probe or provider process starts. A plan that
+    /// was refused returns its refusal whatever the token.
     ///
     /// # Panics
     ///

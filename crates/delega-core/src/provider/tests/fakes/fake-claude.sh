@@ -24,6 +24,7 @@
 # Environment (set by the test, never inherited from a real session):
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
+#   FAKE_VERSION_MARK  a file created when a --version probe starts
 #   FAKE_SESSION_ID  the session id reported when the run is not resuming one
 #   FAKE_RESUMED_SESSION_ID  the session id reported when the run is resuming
 #                    one, instead of the id it was asked to resume
@@ -149,6 +150,9 @@
 #                    sk-ant- key that runs across the 500-character clip point
 
 if [ "$1" = "--version" ]; then
+  # FAKE_VERSION_MARK names a file created as soon as a version probe starts,
+  # so a test can tell that no probe started at all.
+  [ -n "$FAKE_VERSION_MARK" ] && : > "$FAKE_VERSION_MARK"
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
   # caller while the probe runs.
   if [ -n "$FAKE_VERSION_SLEEP" ]; then

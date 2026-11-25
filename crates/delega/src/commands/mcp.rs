@@ -119,9 +119,10 @@ fn go(args: &Args, executable: Option<delega_mcp::Executable>, log: &Log) -> Exi
     // One thread for the supervisor's asynchronous input and output and
     // timers. The checks that admit a run, and building each run's plan when
     // it is dispatched, run on threads of their own within the preflight
-    // bound, and so does reading a profile for `start`. Starting the keeper
-    // and the provider's probes and process still happens on this thread, so
-    // a filesystem that stops answering there can still hold the server.
+    // bound. Reading a profile for `start` runs on a blocking thread before
+    // admission, outside that bound. Starting the keeper and the provider's
+    // probes and process still happens on this thread, so a filesystem that
+    // stops answering there can still hold the server.
     let runtime = match Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(err) => {
