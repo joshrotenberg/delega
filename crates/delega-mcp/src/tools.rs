@@ -59,7 +59,7 @@ const WAIT: &str = "Wait for a named run or worker to finish a run or need a per
 
 const READ: &str = "Read a run, or a worker's current run: the result if it has finished, \
     otherwise the state, pending interactions, partial text and recent activity. Returns at once. Compact by \
-    default; detail full adds the activity history, diagnostics and every field of the result. \
+    default; detail full adds the activity history, the supervisor's diagnostics and every field of the result. \
     A long answer is cut: page it with text_offset, using the run id and not the worker id, \
     because a worker's latest run can change between pages. The window says where it sits and \
     whether more follows.";
