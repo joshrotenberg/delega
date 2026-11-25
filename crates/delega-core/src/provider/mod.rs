@@ -38,6 +38,7 @@
 
 #![cfg(unix)]
 
+mod arguments;
 pub(crate) mod ask;
 mod claude;
 mod codex;

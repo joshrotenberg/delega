@@ -18,6 +18,7 @@ use crate::provider::{ProviderOptions, run};
 use crate::test_spawn::Guarded;
 
 mod applied;
+mod arguments;
 mod cleanup_note;
 mod deny;
 mod dry;
@@ -116,6 +117,11 @@ impl Rig {
     /// The arguments the fake received for `mcp list`.
     pub fn mcp_argv(&self) -> Vec<String> {
         split_nul(&self.read("mcp-argv"))
+    }
+
+    /// Whether a version probe of the fake ran.
+    pub fn version_probed(&self) -> bool {
+        self.record.join("version-probed").exists()
     }
 
     /// What the fake read on standard input.

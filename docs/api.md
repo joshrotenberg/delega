@@ -68,6 +68,11 @@ arguments, and the library from a struct. A partial request saved as a file is a
 A request that breaks the contract is refused `invalid_request`, with every problem listed; MCP rejects some bad arguments earlier as tool errors ([MCP](#mcp)).
 The bounds are in `crates/delega-core/src/contract/limits.rs`; `delega schema
 request` carries the ranges and list counts but not string lengths.
+A request within these bounds can still make a generated provider argument or
+environment entry longer than 120 KiB, for example many long
+`permissions.commands` with Claude Code; it is refused before start with
+`argument_too_long`, naming the argument and its size
+([Argument size](providers.md#argument-size)).
 
 ### Permissions
 
@@ -110,8 +115,11 @@ A request is checked before start and the first refusal found is reported. The
 order is in `build_with` in `crates/delega-core/src/provider/plan.rs` and, under
 the supervisor, in `crates/delega-core/src/supervisor/core/admit.rs`. After
 these checks, reading the provider's version (and, for Codex, its MCP servers)
-can end in `unsupported_provider_version` or `provider_preparation_failed`; a
-dry run does neither.
+can end in `unsupported_provider_version`, `argument_too_long` (the Codex MCP
+override built from the servers is over the per-argument limit) or
+`provider_preparation_failed`; a dry run does none of these. The first two are
+`refused` when the probes' cleanup is confirmed and `failed` with the same kind
+when it is not.
 
 ## The result
 

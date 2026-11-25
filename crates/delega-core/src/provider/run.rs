@@ -27,7 +27,7 @@ use super::plan::{self, Plan};
 use super::progress::{Progress, ProgressEvent};
 use super::refusal::Refusal;
 use super::settle::{Settle, settle};
-use super::{claude, codex, program};
+use super::{arguments, claude, codex, program};
 
 /// The note a result carries when the provider ran without a keeper.
 pub const NO_KEEPER_NOTE: &str = "cleanup ran without a keeper: a descendant that detaches \
@@ -489,6 +489,12 @@ async fn execute_steps(
         match overridden {
             Ok(text) => args[index] = text,
             Err(refusal) => return unstarted(&facts, cleanup, notes, Unstarted::Failed(refusal)),
+        }
+        // The plan checked every other argument; this one exists only now.
+        if let Err(refusal) =
+            arguments::check(&arguments::describe(&args, index), args[index].len())
+        {
+            return unstarted(&facts, cleanup, notes, Unstarted::Refused(refusal));
         }
     }
 

@@ -42,8 +42,17 @@ impl Marker {
         let mut bytes = [0u8; TOKEN_BYTES];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let inherited = std::env::var_os(MARKER_ENV).filter(|v| valid_list(v.as_bytes()));
-        Ok(Self::with_inherited(token, inherited))
+        Ok(Self::with_inherited(token, inherited()))
+    }
+
+    /// The length in bytes of the `NAME=value` environment entry a new marker
+    /// will have, given the list it inherits (see [`inherited`]). It is the
+    /// length of what [`with_inherited`](Self::with_inherited) composes.
+    pub(crate) fn entry_len(inherited: Option<&OsStr>) -> usize {
+        let outer = inherited
+            .filter(|v| !v.is_empty())
+            .map_or(0, |v| v.len() + 1);
+        MARKER_ENV.len() + 1 + outer + TOKEN_BYTES * 2
     }
 
     pub(crate) fn with_inherited(token: String, inherited: Option<OsString>) -> Self {
@@ -68,6 +77,12 @@ impl Marker {
     pub(crate) fn value(&self) -> &OsStr {
         &self.value
     }
+}
+
+/// The marker list in this process's own environment that a new marker
+/// extends, when it is a valid list.
+pub(crate) fn inherited() -> Option<OsString> {
+    std::env::var_os(MARKER_ENV).filter(|v| valid_list(v.as_bytes()))
 }
 
 /// Whether a list holds only hex elements separated by `:`.
@@ -296,6 +311,18 @@ mod tests {
         assert!(!list_has(marker.value().as_bytes(), "a"));
         let marker = Marker::with_inherited("bb".into(), None);
         assert_eq!(marker.value(), "bb");
+    }
+
+    #[test]
+    fn the_measured_entry_length_is_the_length_of_the_composed_entry() {
+        for inherited in [None, Some(""), Some("aa"), Some("aa:bb")] {
+            let marker = Marker::with_inherited(T.into(), inherited.map(OsString::from));
+            assert_eq!(
+                Marker::entry_len(inherited.map(OsStr::new)),
+                MARKER_ENV.len() + 1 + marker.value().len(),
+                "{inherited:?}"
+            );
+        }
     }
 
     #[test]

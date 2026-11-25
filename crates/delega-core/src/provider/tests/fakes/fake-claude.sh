@@ -157,6 +157,8 @@
 #                    sk-ant- key that runs across the 500-character clip point
 
 if [ "$1" = "--version" ]; then
+  # Every version probe leaves a record, so a test can tell whether one ran.
+  [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/version-probed"
   # FAKE_VERSION_SLEEP makes the version probe slow, so a test can signal the
   # caller while the probe runs.
   if [ -n "$FAKE_VERSION_SLEEP" ]; then

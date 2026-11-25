@@ -22,7 +22,7 @@ use super::options::ProviderOptions;
 use super::permissions::{Mapping, Scope};
 use super::redact::Redactor;
 use super::refusal::{Refusal, clip};
-use super::{claude, codex, native_args, permissions, program, prompt};
+use super::{arguments, claude, codex, native_args, permissions, program, prompt};
 
 /// A request resolved into a launch.
 pub(super) struct Plan {
@@ -183,6 +183,16 @@ fn build_with(
         ));
     }
     env::check_names(&options.env_pass, &options.env_set, &built.env)?;
+    // Every argument and adapter environment entry, within the one per-string
+    // limit. Codex's MCP override is still empty here and is checked once
+    // discovery has filled it in.
+    arguments::check_args(&built.args)?;
+    arguments::check_env(&built.env)?;
+    // A kept launch adds the run marker to the environment of every process it
+    // starts, probes included.
+    if options.keeper.is_some() {
+        arguments::check_marker(options.inherited_marker().as_deref())?;
+    }
     let env = env::resolve(&EnvInputs {
         provider: request.provider,
         parent: &parent,

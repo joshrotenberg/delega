@@ -9,7 +9,9 @@ use std::fmt;
 /// `native_arg_rejected`, `cwd_unusable`, `directory_unusable`,
 /// `unsupported_command`, `permissions_not_enforceable`, `provider_not_found`,
 /// `unsupported_provider_version`, `invalid_env_name`, `forbidden_env_name`,
-/// `settings_unreadable`, `deny_rules_over_limit` and `managed_mcp_exclusive`.
+/// `settings_unreadable`, `deny_rules_over_limit`, `managed_mcp_exclusive` and
+/// `argument_too_long` (a generated launch argument or environment entry over
+/// the per-argument limit; for Codex's MCP override it comes after the probes).
 ///
 /// Error kinds of started runs, besides `timed_out` and `interrupted`:
 /// `provider_error` (the provider reported failure), `provider_turn_limit` and

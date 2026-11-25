@@ -50,6 +50,14 @@ In Claude Code build mode, sandboxed commands can write in the working
 directory and in Claude Code's per-user temporary directory, except its
 per-project session folders (observed on macOS). See [Build permissions](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#build).
 
+A run whose generated provider argument or environment entry would be over
+120 KiB (for example `--allowedTools` built from many long
+`permissions.commands`) ends with `argument_too_long` before the provider
+starts, rather than failing at `exec` on Linux: `refused`, or `failed` when a
+Codex MCP override over the limit is found after probes whose cleanup could not
+be confirmed. See
+[Argument size](https://github.com/joshrotenberg/delega/blob/main/docs/providers.md#argument-size).
+
 ## Acceptance criteria
 
 These six points are the acceptance criteria for the core. Nothing else is

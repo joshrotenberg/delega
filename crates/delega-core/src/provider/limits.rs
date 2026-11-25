@@ -5,11 +5,16 @@
 
 use std::time::Duration;
 
-/// The longest instruction-bearing launch argument, in bytes. Instructions that
-/// do not fit are sent on standard input instead, and a note says so.
+/// The longest launch argument or environment entry (`NAME=value`) delega
+/// generates, in bytes: a portable cap under Linux's per-string limit
+/// (`MAX_ARG_STRLEN`, 32 pages including the terminating NUL, 128 KiB with
+/// 4 KiB pages). Instructions that do not fit are sent on standard input
+/// instead, and a note says so; any other generated argument or entry over it
+/// refuses the run with `argument_too_long` before anything starts.
 pub const ARGUMENT_LIMIT: usize = 120 * 1024;
-/// The longest generated Claude `--settings` argument, in bytes.
-pub const SETTINGS_ARGUMENT_LIMIT: usize = 120 * 1024;
+/// The longest generated Claude `--settings` argument, in bytes: the same
+/// per-argument limit, checked first so the refusal can name deny rules.
+pub const SETTINGS_ARGUMENT_LIMIT: usize = ARGUMENT_LIMIT;
 
 /// The largest Claude Code settings file read for deny rules, in bytes. A larger
 /// file, or one that is not a regular file, refuses the run.

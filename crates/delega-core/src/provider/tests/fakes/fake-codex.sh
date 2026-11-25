@@ -10,7 +10,8 @@
 # Environment (set by the test, never inherited from a real session):
 #   FAKE_RECORD_DIR  where to write argv, stdin, env names and pids
 #   FAKE_VERSION     the text printed for --version
-#   FAKE_MCP         ok (default), bad-json, failure, odd-transport, hang
+#   FAKE_MCP         ok (default), bad-json, failure, odd-transport, hang, or
+#                    file: print the contents of the file FAKE_MCP_FILE
 #   FAKE_SESSION_ID  the thread id reported when the run is not resuming one
 #   FAKE_RESUMED_SESSION_ID  the thread id reported when the run is resuming
 #                    one, instead of the id it was asked to resume
@@ -103,6 +104,8 @@
 for arg in "$@"; do
   case "$arg" in
     --version)
+      # Every version probe leaves a record, so a test can tell whether one ran.
+      [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/version-probed"
       if [ -n "$FAKE_VERSION_SLEEP" ]; then
         [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/probe-started"
         sleep "$FAKE_VERSION_SLEEP"
@@ -126,6 +129,7 @@ if [ -n "$is_mcp" ]; then
       printf '%s' '[{"name":"ambient","transport":{"type":"stdio"}},{"name":"server.with.dots","transport":{"type":"streamable_http"}}]'
       ;;
     bad-json) printf 'invalid' ;;
+    file) cat "$FAKE_MCP_FILE" ;;
     odd-transport) printf '%s' '[{"name":"x","transport":{"type":"carrier-pigeon"}}]' ;;
     failure)
       printf 'Configuration discovery failed\n' >&2
