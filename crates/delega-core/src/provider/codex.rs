@@ -35,11 +35,13 @@ fn effort(e: Effort) -> &'static str {
     }
 }
 
-/// A TOML basic string holding `text`. JSON string syntax is valid TOML here:
-/// `"` and `\` are escaped, as are control characters (`\n`, `\t` and the
-/// like, others as `\u00XX`); everything else is kept as UTF-8.
+/// A TOML basic string holding `text`, built as a JSON string. JSON escapes
+/// `"`, `\` and U+0000 to U+001F (as `\b`, `\t`, `\n`, `\f`, `\r` or `\u00XX`),
+/// all of which TOML accepts. TOML also requires U+007F to be escaped, which
+/// JSON leaves raw, so it becomes `\u007F`. Every other character is kept as
+/// UTF-8, which a TOML basic string allows.
 fn toml_string(text: &str) -> String {
-    Value::from(text).to_string()
+    Value::from(text).to_string().replace('\u{7f}', "\\u007F")
 }
 
 /// The `-c` argument that carries the system text to Codex.
@@ -491,4 +493,39 @@ pub(super) fn discovery_args() -> Vec<String> {
         .collect();
     args.extend(["mcp", "list", "--json"].map(String::from));
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toml_string;
+
+    /// Parse `value` as the right-hand side of a TOML key and return the string.
+    fn parse_back(value: &str) -> Result<String, String> {
+        let table: toml::Table =
+            toml::from_str(&format!("v={value}")).map_err(|e| e.to_string())?;
+        table["v"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("not a string: {value}"))
+    }
+
+    #[test]
+    fn toml_string_output_is_a_toml_basic_string_that_parses_back_to_the_text() {
+        let text =
+            "del\u{7f} quote\" backslash\\ newline\n tab\t nul\u{0} unit\u{1f} c1\u{85} é 日本";
+        let encoded = toml_string(text);
+        assert!(
+            encoded.starts_with('"') && encoded.ends_with('"'),
+            "{encoded}"
+        );
+        assert!(encoded.contains("\\u007F"), "{encoded}");
+        assert!(!encoded.contains('\u{7f}'), "{encoded}");
+        assert_eq!(parse_back(&encoded), Ok(text.to_string()), "{encoded}");
+    }
+
+    #[test]
+    fn toml_rejects_a_raw_del_in_a_basic_string() {
+        // The reason toml_string escapes U+007F after JSON encoding.
+        assert!(parse_back("\"a\u{7f}b\"").is_err());
+    }
 }
