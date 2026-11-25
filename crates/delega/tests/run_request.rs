@@ -9,6 +9,7 @@ use delega_core::contract::request::Provider;
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use support::{
@@ -807,6 +808,200 @@ fn relative_paths_in_a_profile_resolve_against_the_callers_directory_too() {
         .expect("run delega");
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let value: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(value["dry_run"]["cwd"], rig.work.to_string_lossy().as_ref());
+    assert_eq!(
+        value["dry_run"]["mapping"]["directories"][0],
+        rig.path("shared").to_string_lossy().as_ref()
+    );
+}
+
+/// `delega` with `args`, started by a shell that first enters `gone` and removes
+/// it, so delega's own working directory cannot be read. The test process's
+/// directory is not changed.
+fn delega_in_removed_directory(rig: &Rig, gone: &Path, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new("/bin/sh");
+    rig.configure(&mut command);
+    command
+        .arg("-c")
+        .arg(r#"cd "$1" && rmdir "$1" && shift && exec "$@""#)
+        .arg("sh")
+        .arg(gone)
+        .arg(env!("CARGO_BIN_EXE_delega"))
+        .args(args)
+        .guarded_output()
+        .expect("run delega")
+}
+
+#[test]
+fn a_relative_extra_directory_is_refused_not_resolved_under_cwd_when_the_callers_directory_is_gone()
+{
+    let rig = Rig::new();
+    // The worker's directory has a directory of the same name, so resolving the
+    // entry under it instead of refusing would succeed and grant the wrong one.
+    std::fs::create_dir(rig.work.join("extra")).expect("create work/extra");
+    let work = rig.work.to_string_lossy().into_owned();
+    let file = profile(
+        &rig,
+        &format!(
+            r#"{{"schema_version":1,"provider":"claude","prompt":"x","cwd":{work:?},
+                "permissions":{{"directories":["extra"]}}}}"#
+        ),
+    );
+    let flags: [&[&str]; 2] = [
+        &[
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+            "-C",
+            &work,
+            "--add-dir",
+            "extra",
+        ],
+        &["--request", &file],
+    ];
+    for (i, request) in flags.into_iter().enumerate() {
+        let gone = rig.path(&format!("gone-{i}"));
+        std::fs::create_dir(&gone).expect("create caller directory");
+        let mut args = vec!["run", "--dry-run", "--output", "json"];
+        args.extend_from_slice(request);
+        let out = delega_in_removed_directory(&rig, &gone, &args);
+        assert!(!gone.exists(), "the shell removed the caller's directory");
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+        let result = result_of(&out);
+        assert_eq!(result.outcome, Outcome::Refused);
+        let error = result.error.expect("error");
+        assert_eq!(error.kind, "cwd_unusable", "{}", error.message);
+        assert!(
+            error.message.contains("permissions.directories[0]")
+                && error.message.contains("extra")
+                && error.message.contains("current directory cannot be read"),
+            "{}",
+            error.message
+        );
+    }
+    // A relative cwd is refused the same way, naming it.
+    let gone = rig.path("gone-cwd");
+    std::fs::create_dir(&gone).expect("create caller directory");
+    let out = delega_in_removed_directory(
+        &rig,
+        &gone,
+        &[
+            "run",
+            "--dry-run",
+            "--output",
+            "json",
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+            "-C",
+            "work",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let error = result_of(&out).error.expect("error");
+    assert_eq!(error.kind, "cwd_unusable", "{}", error.message);
+    assert!(
+        error.message.contains("cwd: work is relative"),
+        "{}",
+        error.message
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn an_empty_extra_directory_is_still_invalid_request_when_the_callers_directory_is_gone() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.work.join("extra")).expect("create work/extra");
+    let work = rig.work.to_string_lossy().into_owned();
+    let file = profile(
+        &rig,
+        &format!(
+            r#"{{"schema_version":1,"provider":"claude","prompt":"x","cwd":{work:?},
+                "permissions":{{"directories":["", "extra"]}}}}"#
+        ),
+    );
+    let gone = rig.path("gone");
+    std::fs::create_dir(&gone).expect("create caller directory");
+    let out = delega_in_removed_directory(
+        &rig,
+        &gone,
+        &["run", "--dry-run", "--output", "json", "--request", &file],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let error = result_of(&out).error.expect("error");
+    assert_eq!(error.kind, "invalid_request", "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains("permissions.directories[0]: must not be empty"),
+        "{}",
+        error.message
+    );
+    assert!(!rig.record.join("argv").exists());
+}
+
+#[test]
+fn a_path_after_one_that_cannot_be_resolved_is_still_normalized_before_validation() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.path("shared")).expect("create shared");
+    let work = rig.work.to_string_lossy().into_owned();
+    // Over 4 KiB unnormalized, which validation refuses; normalized it is short.
+    let shared = format!("{}{}", rig.path("shared").display(), "/.".repeat(2100));
+    let gone = rig.path("gone");
+    std::fs::create_dir(&gone).expect("create caller directory");
+    let out = delega_in_removed_directory(
+        &rig,
+        &gone,
+        &[
+            "run",
+            "--dry-run",
+            "--output",
+            "json",
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+            "-C",
+            &work,
+            "--add-dir",
+            "extra",
+            "--add-dir",
+            &shared,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let error = result_of(&out).error.expect("error");
+    assert_eq!(error.kind, "cwd_unusable", "{}", error.message);
+    assert!(
+        error.message.contains("permissions.directories[0]"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn an_absolute_path_with_many_dot_segments_is_normalized_before_it_is_used() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.path("shared")).expect("create shared");
+    // Over 1 KiB unnormalized: longer than a path the system takes on macOS.
+    let dots = "/.".repeat(700);
+    let cwd = format!("{}{dots}", rig.work.display());
+    let shared = format!("{}{dots}", rig.path("shared").display());
+    let value = dry_json(
+        &rig,
+        &[
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+            "-C",
+            &cwd,
+            "--add-dir",
+            &shared,
+        ],
+    );
     assert_eq!(value["dry_run"]["cwd"], rig.work.to_string_lossy().as_ref());
     assert_eq!(
         value["dry_run"]["mapping"]["directories"][0],
