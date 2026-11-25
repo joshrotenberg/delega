@@ -899,6 +899,90 @@ both!(
     long_instructions
 );
 
+/// The preamble every worker gets, as the system text holds it.
+fn preamble() -> String {
+    let request = crate::contract::request::Request::new(Provider::Codex, "x");
+    crate::provider::prompt::assemble(&request, str::len).system
+}
+
+/// The Codex argument that carries the system text.
+fn codex_instructions_argument(argv: &[String]) -> String {
+    argv.iter()
+        .find(|a| a.starts_with("developer_instructions="))
+        .expect("developer_instructions argument")
+        .clone()
+}
+
+// Each `"` is escaped to `\"` in the TOML string Codex is given, so these
+// instructions grow by one byte per quote when encoded.
+const QUOTES: usize = 1000;
+
+#[tokio::test]
+async fn codex_instructions_that_fit_only_before_toml_encoding_go_on_stdin() {
+    use crate::provider::limits::ARGUMENT_LIMIT;
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Codex, "success");
+    let base = preamble();
+    let extra = format!(
+        "{}{}",
+        "\"".repeat(QUOTES),
+        "x".repeat(ARGUMENT_LIMIT - base.len() - 1 - QUOTES)
+    );
+    assert_eq!(base.len() + 1 + extra.len(), ARGUMENT_LIMIT);
+    request.instructions = Some(extra.clone());
+    let result = run_checked(request, rig.options(Provider::Codex)).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert!(
+        rig.stdin().contains(&extra),
+        "instructions on standard input"
+    );
+    let argv = rig.argv();
+    assert!(
+        argv.iter().all(|a| a.len() <= ARGUMENT_LIMIT),
+        "an argument is over the limit"
+    );
+    assert!(!codex_instructions_argument(&argv).contains("xxxx"));
+    assert!(
+        result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("sent on standard input")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn codex_instructions_that_fit_after_toml_encoding_stay_in_the_argument() {
+    use crate::provider::limits::ARGUMENT_LIMIT;
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Codex, "success");
+    let quotes = "\"".repeat(QUOTES);
+    let encoded_without_padding =
+        crate::provider::codex::instructions_argument_len(&format!("{}\n{quotes}", preamble()));
+    let extra = format!(
+        "{quotes}{}",
+        "x".repeat(ARGUMENT_LIMIT - encoded_without_padding)
+    );
+    request.instructions = Some(extra.clone());
+    let result = run_checked(request, rig.options(Provider::Codex)).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    let argument = codex_instructions_argument(&rig.argv());
+    assert_eq!(argument.len(), ARGUMENT_LIMIT);
+    assert!(argument.contains(&extra.replace('"', "\\\"")));
+    assert!(!rig.stdin().contains(&extra), "instructions not on stdin");
+    assert!(
+        !result
+            .provider_notes
+            .iter()
+            .any(|n| n.contains("sent on standard input")),
+        "{:?}",
+        result.provider_notes
+    );
+    rig.assert_nothing_left().await;
+}
+
 #[tokio::test]
 async fn claude_uses_the_last_assistant_text_when_the_result_has_none() {
     let rig = Rig::new();
