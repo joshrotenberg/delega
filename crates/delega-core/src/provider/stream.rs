@@ -87,8 +87,9 @@ pub(super) struct Parsed {
     /// Hashes of the distinct session ids past the bound, to count them.
     pub session_ids_omitted: std::collections::HashSet<u64>,
     /// The first session id the stream reported that `session.resume` would
-    /// refuse. It is in none of the fields above; `settle` notes it, redacted
-    /// and cut. Its length is bounded by the line limit.
+    /// refuse. It is in none of the fields above; `settle` notes it by its
+    /// length in bytes and the validation reasons, never its text. Its length
+    /// is bounded by the line limit.
     pub refused_session: Option<String>,
     /// The final answer as the provider's terminal event reported it.
     pub final_text: Option<String>,
