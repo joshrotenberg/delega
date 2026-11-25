@@ -176,9 +176,11 @@ A worker does not switch session. Its session is the one it was started to
 resume, or else the first `session_id` any of its runs reported. A later run
 that reports a different id does not replace it, whatever its outcome
 ([providers.md](providers.md#outcomes)). A reported id that `session.resume`
-would refuse (empty, over 256 bytes, holding a NUL, or starting with `-`) is not
-kept, so it never becomes the worker's session; the run's result has a note
-instead ([api.md](api.md#result)).
+would refuse (only whitespace, over 256 bytes, holding a NUL, or starting with
+`-`) is never kept, so it never becomes the worker's session. The run's
+`session_id` is the acceptable id it also reported, if any, and otherwise
+absent; the result has a note unless the run was `ephemeral`
+([api.md](api.md#the-result)).
 
 A follow-up is refused as a finished run, not an error:
 

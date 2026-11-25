@@ -57,12 +57,44 @@ fn mismatch<'a>(s: &Settle<'a>, parsed: &'a Parsed) -> Option<(&'a str, Cow<'a, 
     Some((asked, Cow::Owned(refused_session_text(s.redactor, refused))))
 }
 
-/// A reported session id that is not kept, as a note shows it: redacted as a
-/// whole first, control characters escaped, then cut to
-/// [`REFUSED_SESSION_CHARS`].
-fn refused_session_text(redactor: &Redactor, id: &str) -> String {
+/// A reported session id that is not kept, as the refusal note and the
+/// `session_mismatch` text show it: the whole raw id redacted, control
+/// characters escaped, the escaped text redacted again (escaping can form a
+/// configured value, such as a newline becoming `\n`), then cut to
+/// [`REFUSED_SESSION_CHARS`] with `...` after it. The cut keeps whole escape
+/// sequences, so it never leaves half of one.
+pub(super) fn refused_session_text(redactor: &Redactor, id: &str) -> String {
     let escaped: String = redactor.apply(id).escape_debug().collect();
-    clip(&escaped, REFUSED_SESSION_CHARS)
+    let text = redactor.apply(&escaped);
+    let mut out = String::new();
+    let mut kept = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        // One unit: a character, or a backslash and the rest of its escape
+        // (`\n`, `\\`, `\u{...}`).
+        let mut unit = String::from(c);
+        if c == '\\'
+            && let Some(next) = chars.next()
+        {
+            unit.push(next);
+            if next == 'u' && chars.peek() == Some(&'{') {
+                for d in chars.by_ref() {
+                    unit.push(d);
+                    if d == '}' {
+                        break;
+                    }
+                }
+            }
+        }
+        let n = unit.chars().count();
+        if kept + n > REFUSED_SESSION_CHARS {
+            out.push_str("...");
+            return out;
+        }
+        out.push_str(&unit);
+        kept += n;
+    }
+    out
 }
 
 /// The note for a reported session id that `session.resume` would refuse.

@@ -619,13 +619,39 @@ both!(
 
 #[tokio::test]
 async fn codex_keeps_provider_exit_for_a_missing_rollout_with_another_exit_code_or_a_thread() {
-    for mode in ["unknown-session-exit-3", "unknown-session-after-thread"] {
+    // The first case reports a thread whose id session.resume would refuse: a
+    // thread still started, so it is not session_not_found either.
+    let oversize = "t".repeat(1024);
+    for (mode, thread) in [
+        ("unknown-session-after-thread", Some(oversize.as_str())),
+        ("unknown-session-exit-3", None),
+        ("unknown-session-after-thread", None),
+    ] {
         let rig = Rig::new();
         let mut request = rig.request(Provider::Codex, mode);
         request.session.resume = Some("missing-session".into());
-        let result = run_checked(request, rig.options(Provider::Codex)).await;
+        let options = match thread {
+            Some(id) => resumed_as(&rig, Provider::Codex, id),
+            None => rig.options(Provider::Codex),
+        };
+        let result = run_checked(request, options).await;
         assert_eq!(result.outcome, Outcome::Failed, "{mode}: {result:#?}");
-        assert_eq!(result.error.expect("error").kind, "provider_exit", "{mode}");
+        assert_eq!(
+            result.error.as_ref().expect("error").kind,
+            "provider_exit",
+            "{mode}"
+        );
+        if thread.is_some() {
+            assert_eq!(result.session_id, None, "{result:#?}");
+            assert!(
+                result
+                    .provider_notes
+                    .iter()
+                    .any(|n| n.contains("not kept") && n.contains("exceeds the limit of 256")),
+                "{:?}",
+                result.provider_notes
+            );
+        }
         rig.assert_nothing_left().await;
     }
 }
