@@ -115,8 +115,11 @@ A request is checked before start and the first refusal found is reported. The
 order is in `build_with` in `crates/delega-core/src/provider/plan.rs` and, under
 the supervisor, in `crates/delega-core/src/supervisor/core/admit.rs`. After
 these checks, reading the provider's version (and, for Codex, its MCP servers)
-can end in `unsupported_provider_version` or `provider_preparation_failed`; a
-dry run does neither.
+can end in `unsupported_provider_version`, `argument_too_long` (the Codex MCP
+override built from the servers is over the per-argument limit) or
+`provider_preparation_failed`; a dry run does none of these. The first two are
+`refused` when the probes' cleanup is confirmed and `failed` with the same kind
+when it is not.
 
 ## The result
 

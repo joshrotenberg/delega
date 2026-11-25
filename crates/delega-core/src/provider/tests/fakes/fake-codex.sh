@@ -104,6 +104,8 @@
 for arg in "$@"; do
   case "$arg" in
     --version)
+      # Every version probe leaves a record, so a test can tell whether one ran.
+      [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/version-probed"
       if [ -n "$FAKE_VERSION_SLEEP" ]; then
         [ -n "$FAKE_RECORD_DIR" ] && : > "$FAKE_RECORD_DIR/probe-started"
         sleep "$FAKE_VERSION_SLEEP"

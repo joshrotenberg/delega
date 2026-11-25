@@ -188,6 +188,11 @@ fn build_with(
     // discovery has filled it in.
     arguments::check_args(&built.args)?;
     arguments::check_env(&built.env)?;
+    // A kept launch adds the run marker to the environment of every process it
+    // starts, probes included.
+    if options.keeper.is_some() {
+        arguments::check_marker(options.inherited_marker().as_deref())?;
+    }
     let env = env::resolve(&EnvInputs {
         provider: request.provider,
         parent: &parent,

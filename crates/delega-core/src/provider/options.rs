@@ -88,6 +88,10 @@ pub struct ProviderOptions {
     /// layer's, so a test decides how many chunks are dropped.
     #[cfg(test)]
     pub(crate) tap_queue_chunks: Option<usize>,
+    /// Test seam: the run-marker list a kept run would inherit, in place of
+    /// this process's own, so a test need not change its environment.
+    #[cfg(test)]
+    pub(crate) inherited_marker: Option<OsString>,
 }
 
 impl ProviderOptions {
@@ -97,6 +101,16 @@ impl ProviderOptions {
             Provider::Claude => self.claude_executable.as_ref(),
             Provider::Codex => self.codex_executable.as_ref(),
         }
+    }
+
+    /// The run-marker list a kept run extends: this process's own (see
+    /// [`crate::process::MARKER_ENV`]), which the process layer reads.
+    pub(super) fn inherited_marker(&self) -> Option<OsString> {
+        #[cfg(test)]
+        if self.inherited_marker.is_some() {
+            return self.inherited_marker.clone();
+        }
+        crate::process::inherited_marker()
     }
 
     /// The environment to inherit from.

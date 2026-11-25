@@ -68,6 +68,7 @@ async fn claude_allowed_tools_over_the_argument_limit_is_refused_before_any_proc
     let result = run_checked(request, options).await;
     assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
     assert_eq!(allowed_tools(&rig.argv()).len(), ARGUMENT_LIMIT);
+    assert!(rig.version_probed(), "the version probe leaves its record");
     rig.assert_nothing_left().await;
 
     let rig = Rig::new();
@@ -95,8 +96,103 @@ async fn claude_allowed_tools_over_the_argument_limit_is_refused_before_any_proc
         error.message
     );
     assert!(!error.message.contains("cccc"), "{}", error.message);
+    assert!(!rig.version_probed(), "no version probe ran");
     assert!(rig.pid("pid").is_none(), "no provider process ran");
     assert!(rig.argv().is_empty(), "no provider process ran");
+}
+
+#[tokio::test]
+async fn claude_command_grants_entry_over_the_argument_limit_is_refused_before_any_process() {
+    // A quote is one byte in a rule and two in the JSON grant list, so the
+    // grant entry goes over the limit while `--allowedTools` stays under it.
+    let rig = Rig::new();
+    let commands: Vec<String> = (0..20)
+        .map(|i| format!("c{i:03}{}", "\"".repeat(COMMAND_BYTES - 4)))
+        .collect();
+    let grants: usize = crate::provider::hook::GRANTS_ENV.len()
+        + 1
+        + serde_json::Value::from(commands.clone()).to_string().len();
+    assert!(grants > ARGUMENT_LIMIT, "{grants}");
+    let (request, options) = claude_request(&rig, commands);
+    assert!(
+        request.validate().is_ok(),
+        "the request is within its limits"
+    );
+    let refused = dry_run(&request, &options).expect_err("a dry run refuses too");
+    assert_eq!(refused.kind, "argument_too_long");
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "argument_too_long");
+    assert!(
+        error.message.contains(crate::provider::hook::GRANTS_ENV),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains(&format!("{grants} bytes")),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("\"\"\"\""), "{}", error.message);
+    assert!(!rig.version_probed(), "no version probe ran");
+    assert!(rig.pid("pid").is_none(), "no provider process ran");
+}
+
+/// Options for a kept Codex run that inherits a run-marker list sized so the
+/// entry the run passes is exactly `ARGUMENT_LIMIT + extra` bytes. The keeper
+/// is never started: the plan refuses first, or the test only plans.
+fn kept_options(rig: &Rig, extra: usize) -> ProviderOptions {
+    use crate::process::MARKER_ENV;
+    // `NAME=`, the inherited list, `:` and this run's 32 hex characters.
+    let overhead = MARKER_ENV.len() + 1 + 1 + 32;
+    let mut options = rig.options(Provider::Codex);
+    options.keeper = Some(crate::process::KeeperCommand::new(
+        "/nonexistent/delega-keeper",
+        ["keeper"],
+    ));
+    options.inherited_marker = Some("a".repeat(ARGUMENT_LIMIT - overhead + extra).into());
+    options
+}
+
+#[tokio::test]
+async fn an_inherited_run_marker_that_would_go_over_the_argument_limit_refuses_a_kept_run() {
+    let rig = Rig::new();
+    dry_run(
+        &rig.request(Provider::Codex, "success"),
+        &kept_options(&rig, 0),
+    )
+    .expect("a marker entry exactly at the limit is planned");
+
+    let request = rig.request(Provider::Codex, "success");
+    let options = kept_options(&rig, 1);
+    let refused = dry_run(&request, &options).expect_err("a dry run refuses too");
+    assert_eq!(refused.kind, "argument_too_long");
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Refused, "{result:#?}");
+    let error = result.error.expect("error");
+    assert_eq!(error.kind, "argument_too_long");
+    assert!(
+        error.message.contains(crate::process::MARKER_ENV),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains(&format!("{} bytes", ARGUMENT_LIMIT + 1)),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("aaaa"), "{}", error.message);
+    assert!(!rig.version_probed(), "no version probe ran");
+    assert!(rig.pid("pid").is_none(), "no provider process ran");
+
+    // Without a keeper no marker is added, so the same inheritance is fine.
+    let mut options = kept_options(&rig, 1);
+    options.keeper = None;
+    dry_run(&rig.request(Provider::Codex, "success"), &options)
+        .expect("an unkept run passes no marker");
 }
 
 /// Options whose fake Codex lists one stdio MCP server with a name that makes

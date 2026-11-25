@@ -6,8 +6,9 @@
 use std::time::Duration;
 
 /// The longest launch argument or environment entry (`NAME=value`) delega
-/// generates, in bytes. It stays under Linux's 128 KiB per-string limit
-/// (`MAX_ARG_STRLEN`). Instructions that do not fit are sent on standard input
+/// generates, in bytes: a portable cap under Linux's per-string limit
+/// (`MAX_ARG_STRLEN`, 32 pages including the terminating NUL, 128 KiB with
+/// 4 KiB pages). Instructions that do not fit are sent on standard input
 /// instead, and a note says so; any other generated argument or entry over it
 /// refuses the run with `argument_too_long` before anything starts.
 pub const ARGUMENT_LIMIT: usize = 120 * 1024;

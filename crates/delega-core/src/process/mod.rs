@@ -664,6 +664,7 @@ pub use capture::Captured;
 pub use handle::{Interrupter, ProcessHandle, run};
 pub use keeper::{KeeperCommand, keeper_main};
 pub use marker::MARKER_ENV;
+pub(crate) use marker::{Marker, inherited as inherited_marker};
 pub use owner::{
     FINAL_CENSUS_UNPROVEN_REASON, FREEZE_INCOMPLETE_REASON, KEEPER_LOST_REASON,
     KEEPER_UNPROVEN_REASON, LATE_LISTING_REASON, NO_REAP_ACK_REASON, NO_SUBREAPER_REASON,

@@ -106,7 +106,7 @@ See [Outcomes](api.md#outcomes) for the shared contract and
 | `failed` | Provider error event or result (`provider_error`, or `provider_turn_limit` or `provider_budget_limit` when Claude Code names a limit, or, when the failure says so, `provider_usage_limit`, `provider_auth`, `provider_billing`, `provider_capacity`, `provider_model_unavailable`, `provider_context_exhausted` or `provider_content_policy`, see [Provider failure kinds](#provider-failure-kinds)), non-zero exit, with or without a success event before it (`provider_exit`, with a bounded, redacted excerpt of standard error when it has any text, see [Text from the provider](#text-from-the-provider)), no terminal event and a clean exit (`no_final_message`), output that was not events (`malformed_output`), success with no answer text, `answer_not_json`, a resumed run that would otherwise have completed but whose stream reported another session than `session.resume` (`session_mismatch`; any other outcome stands with a note), a resumed run whose session the provider could not find (`session_not_found`), a failed preparation step, a failure to start. |
 | `timed_out` | The time limit passed. `text` holds any partial answer. |
 | `interrupted` | `interrupt()` was called, or the handle or future was dropped. |
-| `refused` before start | See steps 1 and 2 above. `timing.started_at` is absent. |
+| `refused` before start | See steps 1 to 3 above. `timing.started_at` is absent. A refusal at step 2 or 3 (`unsupported_provider_version`, `argument_too_long`) is `failed` with the same kind when the probes' cleanup is not confirmed. |
 | `refused` after start | The run stopped because of a denial, by the rule below. Kind `permission_denied`. |
 
 After start, `permission_denied` requires a terminal failure attributable
@@ -148,7 +148,9 @@ See `crates/delega-core/src/provider/settle.rs`.
 `permissions_not_enforceable`, `permissions_not_supported`, `provider_not_found`,
 `unsupported_provider_version`, `invalid_env_name`,
 `forbidden_env_name`, `settings_unreadable`, `deny_rules_over_limit`,
-`managed_mcp_exclusive`, `argument_too_long` (all refused before start);
+`managed_mcp_exclusive`, `argument_too_long` (all refused before start;
+`argument_too_long` for the Codex MCP override, found after the probes, is
+`failed` with that kind when the probes' cleanup is not confirmed);
 `provider_error`, `provider_turn_limit`, `provider_budget_limit`, `provider_usage_limit`,
 `provider_auth`, `provider_billing`, `provider_capacity`,
 `provider_model_unavailable`, `provider_context_exhausted`, `provider_content_policy`, `provider_exit`, `no_final_message`, `malformed_output`, `answer_not_json`,
@@ -233,19 +235,25 @@ always on standard input, never in arguments.
 
 ### Argument size
 
-On Linux a single argument or environment entry (`NAME=value`) of 128 KiB or
-more fails at `exec` with `E2BIG`; macOS has only a total of 1 MiB. Every
-argument and environment entry delega generates for a provider launch is held
-to 120 KiB: Claude Code's `--allowedTools`, `--settings` and the other options,
-the command-grant entry `DELEGA_EXACT_BASH_GRANTS`, and Codex's `-c` settings,
-including the `mcp_servers` override built from MCP discovery. Instructions
-that do not fit move to standard input (above). `--settings` over the limit is
-refused as described under [Deny rules](#deny-rules). Anything else over it is
-refused before the provider starts with `argument_too_long`; the message names
-the argument and its size, never its content. Long
-`permissions.directories` and `permissions.commands` can reach it within their
-count limits, and the Codex override checked after discovery can reach it with
-many or long server names.
+On Linux a single argument or environment entry (`NAME=value`), with its
+terminating NUL, must fit in `MAX_ARG_STRLEN`, which is 32 pages (128 KiB with
+4 KiB pages); a longer one fails at `exec` with `E2BIG`. macOS has only a
+total of 1 MiB. delega's portable cap is 120 KiB per string. Every argument
+and environment entry delega generates for a provider launch is held to it:
+Claude Code's `--allowedTools`, `--settings` and the other options, the
+command-grant entry `DELEGA_EXACT_BASH_GRANTS`, Codex's `-c` settings,
+including the `mcp_servers` override built from MCP discovery, and, for a kept
+run, the `DELEGA_RUN_MARKER` entry it passes to the probes and the provider,
+which extends the list delega inherited. Instructions that do not fit move to
+standard input (above). `--settings` over the limit is refused as described
+under [Deny rules](#deny-rules). Anything else over it is refused before
+anything starts with `argument_too_long`, also in a dry run; the message names
+the argument and its size, never its content. Long `permissions.directories`
+and `permissions.commands` can reach it within their count limits. The Codex
+override is checked after discovery (step 3 of the
+[Run sequence](#run-sequence)) and can reach it with many or long server names;
+the run is then `refused` when the probes' cleanup is confirmed and `failed`
+with `argument_too_long` when it is not, and the provider never starts.
 
 ## Claude Code
 

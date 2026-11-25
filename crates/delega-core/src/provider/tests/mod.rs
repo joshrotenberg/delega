@@ -119,6 +119,11 @@ impl Rig {
         split_nul(&self.read("mcp-argv"))
     }
 
+    /// Whether a version probe of the fake ran.
+    pub fn version_probed(&self) -> bool {
+        self.record.join("version-probed").exists()
+    }
+
     /// What the fake read on standard input.
     pub fn stdin(&self) -> String {
         String::from_utf8_lossy(&self.read("stdin")).into_owned()

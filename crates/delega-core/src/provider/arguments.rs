@@ -1,13 +1,16 @@
 //! The per-argument size check on what delega generates for a provider launch.
 //!
 //! On Linux every single argument and every single environment entry
-//! (`NAME=value`) must be shorter than `MAX_ARG_STRLEN` (128 KiB), or `exec`
-//! fails with `E2BIG`. delega checks each one it generates against
-//! [`ARGUMENT_LIMIT`] before anything starts, and refuses with
-//! [`TOO_LONG`] rather than let the run fail to start.
+//! (`NAME=value`), with its terminating NUL, must fit in `MAX_ARG_STRLEN`, 32
+//! pages (128 KiB with 4 KiB pages), or `exec` fails with `E2BIG`. delega
+//! checks each one it generates against [`ARGUMENT_LIMIT`] before anything
+//! starts, and refuses with [`TOO_LONG`] rather than let the run fail to
+//! start. A kept run also adds the run marker to every process it starts, so
+//! that entry is checked too.
 
 use super::limits::ARGUMENT_LIMIT;
 use super::refusal::Refusal;
+use crate::process::{MARKER_ENV, Marker};
 
 /// The refusal kind for a generated argument or environment entry over
 /// [`ARGUMENT_LIMIT`].
@@ -16,6 +19,16 @@ pub(super) const TOO_LONG: &str = "argument_too_long";
 /// Refuse when the argument or environment entry `what` is `len` bytes, over
 /// [`ARGUMENT_LIMIT`]. `what` names it and never holds its content.
 pub(super) fn check(what: &str, len: usize) -> Result<(), Refusal> {
+    check_with(
+        what,
+        len,
+        "use fewer or shorter permissions.directories, permissions.commands or other inputs \
+         it is built from",
+    )
+}
+
+/// [`check`] with the advice the message ends with.
+fn check_with(what: &str, len: usize, advice: &str) -> Result<(), Refusal> {
     if len <= ARGUMENT_LIMIT {
         return Ok(());
     }
@@ -23,10 +36,23 @@ pub(super) fn check(what: &str, len: usize) -> Result<(), Refusal> {
         TOO_LONG,
         format!(
             "{what} would be {len} bytes, over the {ARGUMENT_LIMIT} byte limit for one launch \
-             argument or environment entry; use fewer or shorter permissions.directories, \
-             permissions.commands or other inputs it is built from"
+             argument or environment entry; {advice}"
         ),
     ))
+}
+
+/// Refuse when the run marker a kept run adds to every process it starts
+/// would be over [`ARGUMENT_LIMIT`]. It extends the list `inherited` from this
+/// process's environment, so nested kept runs lengthen it.
+pub(super) fn check_marker(inherited: Option<&std::ffi::OsStr>) -> Result<(), Refusal> {
+    check_with(
+        &format!("the environment entry {MARKER_ENV}"),
+        Marker::entry_len(inherited),
+        &format!(
+            "it extends the {MARKER_ENV} list this process inherited, which each nested kept \
+             run lengthens; start delega from an environment without it"
+        ),
+    )
 }
 
 /// Refuse when any launch argument is over [`ARGUMENT_LIMIT`].
