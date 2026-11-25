@@ -917,11 +917,14 @@ pub(super) fn parse_with(bytes: &[u8], redactor: &Redactor) -> Parsed {
                     if let Some(id) = id {
                         result_at.insert(id.to_string(), seq);
                     }
-                    if let (true, Some(id), Some(reason)) = (
-                        is_error,
-                        id,
-                        block.get("content").and_then(|c| error_reason(c, redactor)),
-                    ) && reasons.len() < MAX_REASONS
+                    // The reason is read and redacted only for a failed tool
+                    // result that can still be kept, so successful output is
+                    // never scanned.
+                    if is_error
+                        && let Some(id) = id
+                        && reasons.len() < MAX_REASONS
+                        && let Some(reason) =
+                            block.get("content").and_then(|c| error_reason(c, redactor))
                     {
                         reasons.insert(id.to_string(), reason);
                     }
