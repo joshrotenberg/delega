@@ -61,7 +61,7 @@ struct ToolInfo {
 
 /// Bare words a skill may put in code that are not schema properties, enum
 /// values, tools, arguments or command names.
-const OTHER_WORDS: [&str; 8] = [
+const OTHER_WORDS: [&str; 9] = [
     // Worker states, from the States rule in docs/api.md.
     "queued",
     "running",
@@ -74,6 +74,9 @@ const OTHER_WORDS: [&str; 8] = [
     // The error kinds of a configuration file that cannot be used (docs/api.md).
     "config_unreadable",
     "config_invalid",
+    // The error kind of a run whose generated launch argument is over the
+    // per-argument limit (docs/providers.md, Argument size).
+    "argument_too_long",
 ];
 
 /// A flag of one command.
