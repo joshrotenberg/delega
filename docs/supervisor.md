@@ -175,7 +175,10 @@ It resumes the worker's session (as `session.resume`), read when the run starts.
 A worker does not switch session. Its session is the one it was started to
 resume, or else the first `session_id` any of its runs reported. A later run
 that reports a different id does not replace it, whatever its outcome
-([providers.md](providers.md#outcomes)).
+([providers.md](providers.md#outcomes)). A reported id that `session.resume`
+would refuse (empty, over 256 bytes, holding a NUL, or starting with `-`) is not
+kept, so it never becomes the worker's session; the run's result has a note
+instead ([api.md](api.md#result)).
 
 A follow-up is refused as a finished run, not an error:
 
@@ -183,7 +186,7 @@ A follow-up is refused as a finished run, not an error:
 | --- | --- |
 | `worker_closed` | The worker is closed. |
 | `queue_full` | The worker's queue is full. |
-| `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one. A follow-up can return `queued` and later end `no_session`. |
+| `no_session` | The worker was started `ephemeral`, or has no session: none was given with `session.resume` and no run reported one that `session.resume` would accept. A follow-up can return `queued` and later end `no_session`. |
 | `invalid_request` | The follow-up's request fails validation (for example its prompt or `timeout_secs`). |
 
 A response that says a run is `finished` carries its `outcome` and `error`. An

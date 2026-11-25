@@ -694,3 +694,74 @@ fn claude_denial_with_no_errors_is_judged_by_its_result_text() {
     );
     assert!(!other.stopped_by_denial);
 }
+
+/// Ids `session.resume` refuses, as they appear inside a JSON string: one past
+/// its byte limit, one holding a NUL, and one that reads as an option.
+fn refused_session_ids() -> Vec<String> {
+    vec![
+        "s".repeat(1024),
+        r"bad\u0000id".to_string(),
+        "-x".to_string(),
+    ]
+}
+
+#[test]
+fn a_claude_session_id_that_session_resume_would_refuse_is_not_kept() {
+    for id in refused_session_ids() {
+        let parsed = claude::parse(&lines(&[
+            &format!(r#"{{"type":"system","subtype":"init","session_id":"{id}"}}"#),
+            &format!(
+                r#"{{"type":"result","subtype":"success","is_error":false,"session_id":"{id}","result":"ok"}}"#
+            ),
+        ]));
+        assert_eq!(parsed.terminal, Terminal::Success);
+        assert_eq!(parsed.session_id, None, "{id}");
+        assert!(parsed.session_ids.is_empty(), "{id}");
+        assert!(parsed.refused_session.is_some(), "{id}");
+    }
+}
+
+#[test]
+fn a_codex_thread_id_that_session_resume_would_refuse_is_not_kept() {
+    for id in refused_session_ids() {
+        let parsed = codex::parse(&lines(&[
+            &format!(r#"{{"type":"thread.started","thread_id":"{id}"}}"#),
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            // A late report of a refused id is not counted either.
+            &format!(r#"{{"type":"thread.started","thread_id":"{id}"}}"#),
+        ]));
+        assert_eq!(parsed.session_id, None, "{id}");
+        assert!(parsed.session_ids.is_empty(), "{id}");
+        assert!(parsed.refused_session.is_some(), "{id}");
+    }
+}
+
+#[test]
+fn a_session_id_at_the_resume_limit_is_kept_unchanged() {
+    let id = "s".repeat(256);
+    let parsed = codex::parse(&lines(&[&format!(
+        r#"{{"type":"thread.started","thread_id":"{id}"}}"#
+    )]));
+    assert_eq!(parsed.session_id.as_deref(), Some(id.as_str()));
+    assert_eq!(parsed.session_ids, vec![id]);
+    assert_eq!(parsed.refused_session, None);
+}
+
+#[test]
+fn the_note_for_a_refused_session_id_is_redacted_escaped_and_cut() {
+    use crate::provider::limits::REFUSED_SESSION_CHARS;
+    use crate::provider::redact::Redactor;
+    use crate::provider::settle::refused_session_note;
+
+    let long = format!("sk-ant-abcdefghijklmnopqrstuvwx{}", "s".repeat(1024));
+    let note = refused_session_note(&Redactor::default(), &long);
+    assert!(note.contains("exceeds the limit of 256"), "{note}");
+    assert!(note.contains("not kept"), "{note}");
+    assert!(!note.contains("sk-ant-"), "{note}");
+    let shown = note.rsplit(": ").next().expect("the id is shown last");
+    assert!(shown.chars().count() <= REFUSED_SESSION_CHARS + 3, "{note}");
+
+    let nul = refused_session_note(&Redactor::default(), "bad\0id");
+    assert!(nul.contains("NUL"), "{nul}");
+    assert!(!nul.contains('\0') && nul.ends_with(r"bad\0id"), "{nul}");
+}

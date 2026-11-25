@@ -86,6 +86,10 @@ pub(super) struct Parsed {
     pub session_ids: Vec<String>,
     /// Hashes of the distinct session ids past the bound, to count them.
     pub session_ids_omitted: std::collections::HashSet<u64>,
+    /// The first session id the stream reported that `session.resume` would
+    /// refuse. It is in none of the fields above; `settle` notes it, redacted
+    /// and cut. Its length is bounded by the line limit.
+    pub refused_session: Option<String>,
     /// The final answer as the provider's terminal event reported it.
     pub final_text: Option<String>,
     /// The last assistant message seen, a fallback when the terminal event
@@ -129,8 +133,21 @@ impl Parsed {
     /// Record a session id the stream reported before its first terminal
     /// event: it becomes the run's session id.
     pub fn saw_session(&mut self, id: &str) {
+        if self.refuse_session(id) {
+            return;
+        }
         self.session_id = Some(id.to_string());
         self.saw_late_session(id);
+    }
+
+    /// Whether `id` is one `session.resume` would refuse, so it cannot be
+    /// resumed and is not kept. The first such id is remembered for a note.
+    fn refuse_session(&mut self, id: &str) -> bool {
+        if crate::contract::validate::session_id_problems(id).is_empty() {
+            return false;
+        }
+        self.refused_session.get_or_insert_with(|| id.to_string());
+        true
     }
 
     /// Record a session id the stream reported after its first terminal
@@ -138,7 +155,7 @@ impl Parsed {
     /// change the run's session id, which the first terminal event decided.
     pub fn saw_late_session(&mut self, id: &str) {
         use std::hash::{Hash, Hasher};
-        if self.session_ids.iter().any(|s| s == id) {
+        if self.refuse_session(id) || self.session_ids.iter().any(|s| s == id) {
             return;
         }
         if self.session_ids.len() < MAX_SESSION_IDS {

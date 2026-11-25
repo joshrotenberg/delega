@@ -270,6 +270,15 @@ fn validate_session(problems: &mut Vec<Problem>, session: &Session) {
     }
 }
 
+/// What `session.resume` would refuse in `id`, by the same checks a request
+/// gets. A session id a provider reports is kept only when this is empty, so
+/// every kept id can be resumed.
+pub(crate) fn session_id_problems(id: &str) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    check_identifier(&mut problems, "session.resume", id);
+    problems
+}
+
 /// A value that may become a provider argument: not empty, bounded, free of
 /// NUL, and not starting with `-` so it cannot be read as an option.
 fn check_identifier(problems: &mut Vec<Problem>, field: &str, value: &str) {

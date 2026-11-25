@@ -1,5 +1,7 @@
 //! From a finished provider process and its parsed stream to the one result.
 
+use std::borrow::Cow;
+
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -10,8 +12,8 @@ use crate::process::{Captured, Ending, ProcessReport};
 
 use super::facts::Facts;
 use super::limits::{
-    MAX_STDERR_BYTES, MIN_REDACTED_VALUE_CHARS, PROVIDER_MESSAGE_CHARS, STDERR_CUT_START_BYTES,
-    STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS,
+    MAX_STDERR_BYTES, MIN_REDACTED_VALUE_CHARS, PROVIDER_MESSAGE_CHARS, REFUSED_SESSION_CHARS,
+    STDERR_CUT_START_BYTES, STDERR_EXCERPT_CHARS, STDERR_SCAN_BYTES, VALIDATION_MESSAGE_CHARS,
 };
 use super::redact::{MASK, Redactor};
 use super::refusal::clip;
@@ -39,14 +41,42 @@ const CLAUDE_UNKNOWN_SESSION: &str = "No conversation found with session ID";
 const CODEX_UNKNOWN_SESSION: &str = "no rollout found for thread id";
 
 /// The requested and the first other reported session, when a resumed run's
-/// stream reported any session other than the one it asked for.
-fn mismatch<'a>(s: &Settle<'a>, parsed: &'a Parsed) -> Option<(&'a str, &'a str)> {
+/// stream reported any session other than the one it asked for. A reported id
+/// that `session.resume` would refuse is never the one asked for, which passed
+/// those checks, so it counts as another session, shown as
+/// [`refused_session_text`] gives it.
+fn mismatch<'a>(s: &Settle<'a>, parsed: &'a Parsed) -> Option<(&'a str, Cow<'a, str>)> {
     if s.ephemeral {
         return None;
     }
     let asked = s.resume?;
-    let reported = parsed.session_ids.iter().find(|id| *id != asked)?;
-    Some((asked, reported.as_str()))
+    if let Some(reported) = parsed.session_ids.iter().find(|id| *id != asked) {
+        return Some((asked, Cow::Borrowed(reported.as_str())));
+    }
+    let refused = parsed.refused_session.as_deref()?;
+    Some((asked, Cow::Owned(refused_session_text(s.redactor, refused))))
+}
+
+/// A reported session id that is not kept, as a note shows it: redacted as a
+/// whole first, control characters escaped, then cut to
+/// [`REFUSED_SESSION_CHARS`].
+fn refused_session_text(redactor: &Redactor, id: &str) -> String {
+    let escaped: String = redactor.apply(id).escape_debug().collect();
+    clip(&escaped, REFUSED_SESSION_CHARS)
+}
+
+/// The note for a reported session id that `session.resume` would refuse.
+pub(super) fn refused_session_note(redactor: &Redactor, id: &str) -> String {
+    let why = crate::contract::validate::session_id_problems(id)
+        .iter()
+        .map(|p| p.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "the provider reported a session id that session.resume would refuse ({why}), so it \
+         was not kept: {}",
+        refused_session_text(redactor, id)
+    )
 }
 
 /// The text of a mismatch, with secrets removed from both ids.
@@ -81,7 +111,10 @@ fn session_not_found(
         // capture is bounded. Standard output cut at the capture limit may hide
         // a thread or a terminal event, so it does not match.
         (Provider::Codex, Terminal::None)
-            if code == 1 && parsed.session_ids.is_empty() && !report.stdout.truncated =>
+            if code == 1
+                && parsed.session_ids.is_empty()
+                && parsed.refused_session.is_none()
+                && !report.stdout.truncated =>
         {
             (matches!(kind, "provider_exit" | "provider_error") || CLASSIFIED.contains(&kind))
                 && String::from_utf8_lossy(&report.stderr.bytes).contains(CODEX_UNKNOWN_SESSION)
@@ -322,7 +355,7 @@ pub(super) fn settle(
     if let Some((asked, reported)) = mismatch(&s, parsed) {
         let kind = result.error.as_ref().map(|e| e.kind.as_str());
         if kind != Some("session_mismatch") {
-            notes.push(mismatch_text(s.redactor, asked, reported));
+            notes.push(mismatch_text(s.redactor, asked, &reported));
         }
     } else if s.resume.is_none() && !s.ephemeral && parsed.session_ids.len() > 1 {
         let mut note = format!(
@@ -347,6 +380,11 @@ pub(super) fn settle(
     result.session_usage = parsed.session_usage.clone();
     if !s.ephemeral {
         result.session_id = parsed.session_id.clone();
+        if let Some(id) = &parsed.refused_session {
+            result
+                .provider_notes
+                .push(refused_session_note(s.redactor, id));
+        }
     }
     result
 }
@@ -372,7 +410,7 @@ fn exited(
                     ctx,
                     error(
                         "session_mismatch",
-                        mismatch_text(s.redactor, asked, reported),
+                        mismatch_text(s.redactor, asked, &reported),
                         Some(code),
                     ),
                     done.text,

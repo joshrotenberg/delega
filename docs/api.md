@@ -139,7 +139,7 @@ One versioned JSON object, the same from every surface.
 | `permissions` | `mode` applied; `denied`, the denials delega recognised (for Codex, commands Codex marks declined), up to a cap; `asked`, the live requests with their redacted input summary, decision, reason and whether the response was written. |
 | `provider_notes` | Where the provider did not do what the request asked, or did it differently. |
 | `applied` | What delega applied, as names, counts, paths and digests. See [`applied`](#applied). |
-| `session_id` | The provider's session id, for `resume`. |
+| `session_id` | The provider's session id, for `resume`. A reported id that `session.resume` would refuse (empty, over 256 bytes, holding a NUL, or starting with `-`) is not kept: `session_id` is absent and `provider_notes` says an id was reported but not kept, with the id redacted and cut to 80 characters. On a resumed run such an id counts as another session than the one asked for (`session_mismatch`). |
 | `usage` | This run's own tokens in, out, cached, reasoning, and `cost_usd`, each when known. See [Usage](#usage). |
 | `session_usage` | The provider's totals for the session through this run, when reported. |
 | `timing` | Queued, started and finished times, duration, and `timeout_secs`. |

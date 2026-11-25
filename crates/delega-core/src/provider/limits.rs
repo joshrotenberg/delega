@@ -111,3 +111,7 @@ pub const PROGRESS_TEXT_CHARS: usize = 4_000;
 /// How many distinct session ids one run's stream is recorded as reporting.
 /// More are not recorded; two are enough to tell the run changed session.
 pub const MAX_SESSION_IDS: usize = 8;
+
+/// Longest reported session id shown in a note when it is not kept because
+/// `session.resume` would refuse it, in characters, after redaction.
+pub const REFUSED_SESSION_CHARS: usize = 80;
