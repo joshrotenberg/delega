@@ -79,11 +79,11 @@ fn read_opened(path: &Path, limit: usize) -> Result<String, String> {
 /// goes through [`std::path::absolute`], which also normalizes it.
 ///
 /// A relative path that cannot be made absolute, because this process's
-/// working directory cannot be read, is a problem naming the field and the
-/// path. The request is then partly resolved: that path and the ones after it
-/// stay as given. A caller must check for the problem before using the
-/// request, since the worker's directory would give a relative path another
-/// meaning.
+/// working directory cannot be read, stays as given, and the first such path
+/// is returned as a problem naming the field and the path. Every other path is
+/// still resolved, so validation sees them normalized. A caller must check for
+/// the problem before using the request, since the worker's directory would
+/// give a relative path another meaning.
 pub fn resolve_paths(request: &mut PartialRequest) -> Result<(), Problem> {
     let absolute = |field: String, path: &mut PathBuf| {
         if path.as_os_str().is_empty() {
@@ -103,8 +103,9 @@ pub fn resolve_paths(request: &mut PartialRequest) -> Result<(), Problem> {
             )),
         }
     };
+    let mut first = Ok(());
     if let Some(cwd) = &mut request.cwd {
-        absolute("cwd".to_string(), cwd)?;
+        first = first.and(absolute("cwd".to_string(), cwd));
     }
     if let Some(dirs) = request
         .permissions
@@ -112,10 +113,11 @@ pub fn resolve_paths(request: &mut PartialRequest) -> Result<(), Problem> {
         .and_then(|p| p.directories.as_mut())
     {
         for (i, dir) in dirs.iter_mut().enumerate() {
-            absolute(format!("permissions.directories[{i}]"), dir)?;
+            let resolved = absolute(format!("permissions.directories[{i}]"), dir);
+            first = first.and(resolved);
         }
     }
-    Ok(())
+    first
 }
 
 /// How much of a profile's parse error a problem repeats.

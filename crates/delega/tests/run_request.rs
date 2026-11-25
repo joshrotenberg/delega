@@ -943,6 +943,45 @@ fn an_empty_extra_directory_is_still_invalid_request_when_the_callers_directory_
 }
 
 #[test]
+fn a_path_after_one_that_cannot_be_resolved_is_still_normalized_before_validation() {
+    let rig = Rig::new();
+    std::fs::create_dir(rig.path("shared")).expect("create shared");
+    let work = rig.work.to_string_lossy().into_owned();
+    // Over 4 KiB unnormalized, which validation refuses; normalized it is short.
+    let shared = format!("{}{}", rig.path("shared").display(), "/.".repeat(2100));
+    let gone = rig.path("gone");
+    std::fs::create_dir(&gone).expect("create caller directory");
+    let out = delega_in_removed_directory(
+        &rig,
+        &gone,
+        &[
+            "run",
+            "--dry-run",
+            "--output",
+            "json",
+            "--provider",
+            "claude",
+            "-p",
+            "x",
+            "-C",
+            &work,
+            "--add-dir",
+            "extra",
+            "--add-dir",
+            &shared,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let error = result_of(&out).error.expect("error");
+    assert_eq!(error.kind, "cwd_unusable", "{}", error.message);
+    assert!(
+        error.message.contains("permissions.directories[0]"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn an_absolute_path_with_many_dot_segments_is_normalized_before_it_is_used() {
     let rig = Rig::new();
     std::fs::create_dir(rig.path("shared")).expect("create shared");
