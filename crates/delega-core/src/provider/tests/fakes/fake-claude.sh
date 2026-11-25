@@ -40,6 +40,10 @@
 # modelUsage the session's totals through this run, which are the run's figures
 # times the turn.
 #
+# Modes about progress:
+#   odd-kinds        a successful run that first writes an event whose type is
+#                    "leak=" and an sk-ant- key, and one whose type is 500 "k"
+#
 # Modes about sessions:
 #   unknown-session  what Claude Code 2.1.329 does when --resume names a
 #                    session that does not exist: one `result` event with
@@ -489,6 +493,12 @@ case "$mode" in
     sleep 0.3
     rm -f "$trace_dir/run.$$"
     success "\"answered $mode sid=$sid\"" '[]'
+    ;;
+  odd-kinds)
+    init
+    emit '{"type":"leak=sk-ant-abcdefghijklmnopqrstuvwx"}'
+    emit "{\"type\":\"$(head -c 500 /dev/zero | tr '\0' k)\"}"
+    success '"fake final answer"' '[]'
     ;;
   secret-message)
     # Agent messages that hold a secret and an oversize text.

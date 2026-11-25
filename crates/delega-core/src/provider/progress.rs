@@ -22,6 +22,10 @@
 //!   text, with credentials removed. Provider error text is free text, so it
 //!   can name anything the provider chose to say.
 //!
+//! A kind is the provider's event type with credentials removed, cut to
+//! [`PROGRESS_KIND_CHARS`] characters. Real types are short words, so they
+//! arrive unchanged.
+//!
 //! A [`ProgressEvent::Denied`] carries the request exactly as the result lists
 //! it in `permissions.denied`, which includes the denied command or path.
 
@@ -35,7 +39,9 @@ use crate::contract::request::Provider;
 use crate::contract::result::RunResult;
 use crate::process::OutputTap;
 
-use super::limits::{MAX_LINE_BYTES, PROGRESS_SUMMARY_CHARS, PROGRESS_TEXT_CHARS};
+use super::limits::{
+    MAX_LINE_BYTES, PROGRESS_KIND_CHARS, PROGRESS_SUMMARY_CHARS, PROGRESS_TEXT_CHARS,
+};
 use super::redact::Redactor;
 use super::refusal::clip;
 use super::stream::str_field;
@@ -53,7 +59,8 @@ pub enum ProgressEvent {
     /// The provider wrote an event.
     Provider {
         /// The provider's own event type, such as `assistant` or
-        /// `item.completed`.
+        /// `item.completed`, with credentials removed and cut to
+        /// [`PROGRESS_KIND_CHARS`].
         kind: String,
         /// A short description, possibly empty.
         summary: String,
@@ -217,7 +224,8 @@ impl Framer {
 }
 
 /// The events one output line stands for. A line that is not a JSON object
-/// stands for none.
+/// stands for none. Kinds are matched as the provider wrote them and only then
+/// redacted and cut, like summaries.
 fn describe_line(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<(String, String)> {
     let Ok(Value::Object(event)) = serde_json::from_slice::<Value>(line.trim_ascii()) else {
         return Vec::new();
@@ -228,7 +236,12 @@ fn describe_line(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<(S
     };
     described
         .into_iter()
-        .map(|(kind, summary)| (kind, short(&summary, redactor)))
+        .map(|(kind, summary)| {
+            (
+                bounded(&kind, redactor, PROGRESS_KIND_CHARS),
+                bounded(&summary, redactor, PROGRESS_SUMMARY_CHARS),
+            )
+        })
         .collect()
 }
 
@@ -265,10 +278,10 @@ fn message_texts(provider: Provider, line: &[u8], redactor: &Redactor) -> Vec<St
         .collect()
 }
 
-/// One line, with credentials removed, cut to the summary length.
-fn short(text: &str, redactor: &Redactor) -> String {
+/// One line, with credentials removed, cut to `max` characters.
+fn bounded(text: &str, redactor: &Redactor, max: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    clip(&redactor.apply(&one_line), PROGRESS_SUMMARY_CHARS)
+    clip(&redactor.apply(&one_line), max)
 }
 
 /// How an agent message is shown: its length, never its text.
@@ -457,6 +470,58 @@ mod tests {
         });
         let out = describe_line(Provider::Claude, secret.to_string().as_bytes(), &redactor);
         assert!(!out[0].1.contains("sk-ant-"), "{out:?}");
+    }
+
+    #[test]
+    fn an_event_type_is_cut_and_has_credentials_removed_in_the_kind() {
+        let redactor = Redactor::default();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let secret = serde_json::json!({"type": "leak=sk-ant-abcdefghijklmnopqrstuvwx"});
+            let out = describe_line(provider, secret.to_string().as_bytes(), &redactor);
+            assert_eq!(out[0].0, "leak=[redacted]", "{out:?}");
+
+            let long = serde_json::json!({"type": "k".repeat(MAX_LINE_BYTES / 2)});
+            let out = describe_line(provider, long.to_string().as_bytes(), &redactor);
+            assert_eq!(
+                out[0].0,
+                format!("{}...", "k".repeat(PROGRESS_KIND_CHARS)),
+                "{provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_event_types_are_reported_unchanged_as_kinds() {
+        let redactor = Redactor::default();
+        let claude = [
+            "assistant",
+            "user",
+            "system",
+            "result",
+            "error",
+            "rate_limit_event",
+            "stream_event",
+        ];
+        for kind in claude {
+            let event = serde_json::json!({"type": kind});
+            let out = describe_line(Provider::Claude, event.to_string().as_bytes(), &redactor);
+            assert_eq!(out[0].0, kind);
+        }
+        let codex = [
+            "thread.started",
+            "turn.started",
+            "item.started",
+            "item.updated",
+            "item.completed",
+            "turn.completed",
+            "turn.failed",
+            "error",
+        ];
+        for kind in codex {
+            let event = serde_json::json!({"type": kind});
+            let out = describe_line(Provider::Codex, event.to_string().as_bytes(), &redactor);
+            assert_eq!(out[0].0, kind);
+        }
     }
 
     #[test]

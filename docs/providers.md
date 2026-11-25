@@ -51,9 +51,11 @@ requiring the command guard can report `unsupported_provider_version`.
    (each must exist). Look up the executable. For Claude Code, read the user's
    deny rules and check for exclusive managed MCP. Any refusal at this stage
    leaves the provider unstarted.
-2. Run `<executable> --version` (5 s). The first line, up to 100 characters, is
-   `provenance.provider_version`. For Claude Code with `permissions.commands`
-   granted, a version below 2.1.325 or an unreadable one is `refused` with kind
+2. Run `<executable> --version` (5 s). The first line, redacted (see
+   [Text from the provider](#text-from-the-provider)) and then cut to 100
+   characters, is `provenance.provider_version`; doctor reports the same text.
+   The version gate reads the line as printed. For Claude Code with
+   `permissions.commands` granted, a version below 2.1.325 or an unreadable one is `refused` with kind
    `unsupported_provider_version`, or `failed` with that kind when the probe's
    processes could not be confirmed stopped.
 3. Codex only: run `<executable> --disable ... mcp list --json` (10 s) and build
@@ -77,7 +79,7 @@ activity and partial answers.
 | Event | Contents |
 | --- | --- |
 | `Started` | The provider is about to start. |
-| `Provider { kind, summary }` | Provider event type and a short summary, such as message length, tool name, item type and status, or up to 80 characters of redacted error text. |
+| `Provider { kind, summary }` | Provider event type, redacted and cut to 40 characters, and a short summary, such as message length, tool name, item type and status, or up to 80 characters of redacted error text. |
 | `Message { text }` | With `progress_text` enabled, redacted agent text up to 4,000 characters after its `Provider` event. Off by default and in `delega run`; enabled by the supervisor. |
 | `Denied { request }` | An entry from `permissions.denied`, including command or path, reported after provider exit. |
 | `Dropped { chunks }` | Number of output chunks missed by the tap, also in `provider_notes`. |
@@ -172,10 +174,10 @@ See [Claude Code stream](#stream) and [Codex stream](#stream-1).
 
 ### Text from the provider
 
-Provider errors and progress text replace common credential shapes and passed
-values of provider or [secret-looking variables](#environment-policy) with
-`[redacted]`. Values shorter than 6 characters are excluded from value
-matching. Recognised shapes include API keys, forge and Slack tokens, AWS
+Provider errors, progress kinds and text, and the `--version` line replace
+common credential shapes and passed values of provider or
+[secret-looking variables](#environment-policy) with `[redacted]`. Values
+shorter than 6 characters are excluded from value matching. Recognised shapes include API keys, forge and Slack tokens, AWS
 access key IDs, JWTs, Bearer tokens and private key blocks. Answer text and
 denied commands or paths are shown as provided, subject to capture limits.
 
@@ -184,6 +186,8 @@ denied commands or paths are shown as provided, subject to capture limits.
 | 64 KiB | Standard error captured from the end. |
 | 8 KiB, then 300 characters | Redacted standard error excerpt from the end, joined to one line. A character cut adds `... `. If capture was cut and no excerpt remains, the error says so. |
 | 500 characters | Redacted provider error message from the start. |
+| 100 characters | Redacted first line of `--version` output, from the start. |
+| 40 characters | Redacted provider event type in a progress kind, from the start. A cut adds `...`. |
 
 Credential matching is heuristic. A credential cut by the capture limit with
 more than 8 KiB remaining in capture, or a private key with overlapping

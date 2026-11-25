@@ -92,6 +92,9 @@ pub const NATIVE_FLAG_NAME_CHARS: usize = 40;
 
 /// Longest message text in a progress event summary, in characters.
 pub const PROGRESS_SUMMARY_CHARS: usize = 80;
+/// Longest provider event type in a progress event's kind, in characters. Real
+/// types are short dotted words such as `item.completed`.
+pub const PROGRESS_KIND_CHARS: usize = 40;
 
 /// Longest agent message text in a [`ProgressEvent::Message`](super::ProgressEvent::Message),
 /// in characters. Sent only when

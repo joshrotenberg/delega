@@ -635,7 +635,7 @@
           ]
         },
         "version": {
-          "description": "The first line of `--version` output, or null when there was none.",
+          "description": "The first line of `--version` output with credentials removed and cut\nto 100 characters, or null when there was none.",
           "type": [
             "string",
             "null"

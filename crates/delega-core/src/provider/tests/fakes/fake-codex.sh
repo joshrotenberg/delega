@@ -20,6 +20,10 @@
 # through this turn, here 100 in, 10 cached, 7 out and 3 reasoning per turn,
 # times the turn.
 #
+# Modes about progress:
+#   odd-kinds        a successful run that first writes an event whose type is
+#                    "leak=" and an sk-ant- key, and one whose type is 500 "k"
+#
 # Modes about sessions:
 #   unknown-session  what Codex 0.170.0 does when `resume` names a thread that
 #                    does not exist: nothing on standard output, the line
@@ -233,6 +237,13 @@ case "$mode" in
     sleep 0.3
     rm -f "$trace_dir/run.$$"
     final "\"answered $mode sid=$sid\""
+    done_ok
+    ;;
+  odd-kinds)
+    init
+    emit '{"type":"leak=sk-ant-abcdefghijklmnopqrstuvwx"}'
+    emit "{\"type\":\"$(head -c 500 /dev/zero | tr '\0' k)\"}"
+    final '"fake final answer"'
     done_ok
     ;;
   secret-message)

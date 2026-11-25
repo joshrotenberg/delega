@@ -6,6 +6,7 @@ mod support;
 use delega_core::contract::outcome::Outcome;
 use delega_core::contract::permissions::Mode;
 use delega_core::contract::request::Provider;
+use delega_core::provider::limits::PROGRESS_KIND_CHARS;
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
@@ -669,6 +670,28 @@ fn progress_lines_go_to_stderr_and_stdout_is_unchanged() {
         );
         rig.assert_nothing_left();
         progress_rig.assert_nothing_left();
+    }
+}
+
+#[test]
+fn progress_shows_an_event_type_redacted_and_cut() {
+    for provider in PROVIDERS {
+        let rig = Rig::new();
+        let out = rig.run(provider, "odd-kinds", &["--progress"]);
+        assert_eq!(out.status.code(), Some(0), "{provider}");
+        let err = text(&out.stderr);
+        assert!(!err.contains("sk-ant-"), "{provider}: {err}");
+        assert!(
+            err.lines().any(|l| l == "progress: leak=[redacted]"),
+            "{provider}: {err}"
+        );
+        let cut = format!("progress: {}...", "k".repeat(PROGRESS_KIND_CHARS));
+        assert!(err.lines().any(|l| l == cut), "{provider}: {err}");
+        assert!(
+            !err.contains(&"k".repeat(PROGRESS_KIND_CHARS + 1)),
+            "{provider}: {err}"
+        );
+        rig.assert_nothing_left();
     }
 }
 

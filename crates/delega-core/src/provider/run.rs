@@ -438,10 +438,14 @@ async fn execute_steps(
         return unstarted(&facts, cleanup, notes, Unstarted::TimedOut);
     }
     let version = match version_report.ending {
-        Ending::Exited { code: 0 } => program::version_text(&version_report.stdout.text()),
+        Ending::Exited { code: 0 } => program::version_line(&version_report.stdout.text()),
         _ => None,
     };
-    facts.provenance.provider_version = version.clone();
+    // The version is parsed from the line as the provider printed it and
+    // stored with credentials removed, like other provider text.
+    facts.provenance.provider_version = version
+        .as_deref()
+        .map(|line| program::version_text(line, &plan.redactor));
     if plan.needs_hook_version {
         let supported = version
             .as_deref()

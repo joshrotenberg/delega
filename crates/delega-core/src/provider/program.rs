@@ -7,6 +7,7 @@ use crate::contract::request::Provider;
 
 use super::limits::VERSION_CHARS;
 use super::options::ProviderOptions;
+use super::redact::Redactor;
 use super::refusal::{Refusal, clip};
 
 /// The environment variable that names the executable of a provider.
@@ -133,10 +134,19 @@ pub(super) fn find_tool(name: &str, path: Option<&std::ffi::OsStr>, cwd: &Path) 
         .find(|candidate| is_executable(candidate))
 }
 
-/// The first line of `--version` output, cut to a bound.
-pub(super) fn version_text(stdout: &str) -> Option<String> {
+/// The first line of `--version` output as the provider printed it. The hook
+/// version gate parses this line; what is stored or shown is
+/// [`version_text`].
+pub(super) fn version_line(stdout: &str) -> Option<String> {
     let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
-    Some(clip(line, VERSION_CHARS))
+    Some(line.to_string())
+}
+
+/// The version line as a result or report holds it: with credentials removed,
+/// then cut to [`VERSION_CHARS`]. Redacting before the cut means the cut cannot
+/// leave part of a credential the redactor no longer recognises.
+pub(super) fn version_text(line: &str, redactor: &Redactor) -> String {
+    clip(&redactor.apply(line), VERSION_CHARS)
 }
 
 /// `MAJOR.MINOR.PATCH` at the start of trimmed version output.

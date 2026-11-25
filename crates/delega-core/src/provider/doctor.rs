@@ -229,7 +229,8 @@ pub struct ProviderCheck {
     /// configuration file), `PATH`, or `option` when a library caller set
     /// `ProviderOptions::executable`.
     pub executable_source: Option<String>,
-    /// The first line of `--version` output, or null when there was none.
+    /// The first line of `--version` output with credentials removed and cut
+    /// to 100 characters, or null when there was none.
     pub version: Option<String>,
     /// For Claude Code, whether the command hook interface is available. Null
     /// for Codex, which has no minimum version.
@@ -416,17 +417,21 @@ async fn probe_version(plan: &Plan, found: &mut ProviderCheck, problems: &mut Ve
         )),
     };
     let probed = failure.is_none();
+    let mut line = None;
     if let Some(problem) = failure {
         problems.push(problem);
     } else {
-        found.version = program::version_text(&report.stdout.text());
+        // Judged on the line as printed, shown with credentials removed.
+        line = program::version_line(&report.stdout.text());
+        found.version = line
+            .as_deref()
+            .map(|l| program::version_text(l, &plan.redactor));
     }
     if plan.provider != Provider::Claude {
         return;
     }
     let (a, b, c) = MIN_CLAUDE_HOOK_VERSION;
-    let available = found
-        .version
+    let available = line
         .as_deref()
         .and_then(program::parse_version)
         .is_some_and(|v| v >= MIN_CLAUDE_HOOK_VERSION);
