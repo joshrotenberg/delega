@@ -15,6 +15,7 @@ use crate::contract::result::Usage;
 use super::hook::{GRANTS_ENV, HookCommand};
 use super::launch::{Built, Elide, Inputs};
 use super::limits::{DENIAL_REASON_CHARS, HOOK_TIMEOUT_SECS, MAX_REASONS, SETTINGS_ARGUMENT_LIMIT};
+use super::redact::Redactor;
 use super::refusal::{Refusal, clip};
 use super::stream::{Parsed, Terminal, cost, count, for_each_event, non_empty, str_field};
 
@@ -820,7 +821,11 @@ fn mentions_denial(error: &str, denied_tools: &[String]) -> bool {
 }
 
 /// The first sentence of a tool error, as a short reason.
-fn error_reason(content: &Value) -> Option<String> {
+///
+/// The whole error text is redacted before the sentence is taken
+/// and cut to [`DENIAL_REASON_CHARS`], so the reason is stored once, already
+/// redacted and short, however many denials refer to it.
+fn error_reason(content: &Value, redactor: &Redactor) -> Option<String> {
     let text = match content {
         Value::String(s) => s.clone(),
         Value::Array(blocks) => blocks
@@ -830,14 +835,22 @@ fn error_reason(content: &Value) -> Option<String> {
             .collect(),
         _ => return None,
     };
+    let text = redactor.apply(&text);
     let sentence_end = text.find(". ").map_or(text.len(), |i| i + 1);
     let line_end = text.find('\n').unwrap_or(text.len());
     let reason = text[..sentence_end.min(line_end)].trim();
     (!reason.is_empty()).then(|| clip(reason, DENIAL_REASON_CHARS))
 }
 
-/// Reduce the output stream to a [`Parsed`].
+/// [`parse_with`] with no configured values, for tests of the stream shapes.
+#[cfg(test)]
 pub(super) fn parse(bytes: &[u8]) -> Parsed {
+    parse_with(bytes, &Redactor::default())
+}
+
+/// Reduce the output stream to a [`Parsed`]. Denial reasons are redacted with
+/// `redactor` (see [`error_reason`]).
+pub(super) fn parse_with(bytes: &[u8], redactor: &Redactor) -> Parsed {
     let mut parsed = Parsed::default();
     let mut reasons: HashMap<String, String> = HashMap::new();
     // Event positions: when each tool call's result arrived, and when the last
@@ -904,9 +917,14 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     if let Some(id) = id {
                         result_at.insert(id.to_string(), seq);
                     }
-                    if let (true, Some(id), Some(reason)) =
-                        (is_error, id, block.get("content").and_then(error_reason))
+                    // The reason is read and redacted only for a failed tool
+                    // result that can still be kept, so successful output is
+                    // never scanned.
+                    if is_error
+                        && let Some(id) = id
                         && reasons.len() < MAX_REASONS
+                        && let Some(reason) =
+                            block.get("content").and_then(|c| error_reason(c, redactor))
                     {
                         reasons.insert(id.to_string(), reason);
                     }
@@ -976,7 +994,7 @@ pub(super) fn parse(bytes: &[u8]) -> Parsed {
                     .denied
                     .iter()
                     .map(|d| {
-                        d.request
+                        d.tool
                             .split([':', ' '])
                             .next()
                             .unwrap_or_default()

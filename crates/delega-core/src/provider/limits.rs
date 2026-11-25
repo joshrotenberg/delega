@@ -49,6 +49,8 @@ pub const MAX_STDERR_BYTES: usize = 64 * 1024;
 pub const STDERR_EXCERPT_CHARS: usize = 300;
 /// Longest error message taken from a provider event, in characters.
 pub const PROVIDER_MESSAGE_CHARS: usize = 500;
+/// Longest tool name shown in a denied request, in characters.
+pub const DENIAL_TOOL_CHARS: usize = 100;
 /// Longest target (command, path) kept in a denied request, in characters.
 pub const DENIAL_TARGET_CHARS: usize = 500;
 /// Most denied requests recorded. Later ones are counted in a note.
@@ -92,6 +94,9 @@ pub const NATIVE_FLAG_NAME_CHARS: usize = 40;
 
 /// Longest message text in a progress event summary, in characters.
 pub const PROGRESS_SUMMARY_CHARS: usize = 80;
+/// Longest provider event type in a progress event's kind, in characters. Real
+/// types are short dotted words such as `item.completed`.
+pub const PROGRESS_KIND_CHARS: usize = 40;
 
 /// Longest agent message text in a [`ProgressEvent::Message`](super::ProgressEvent::Message),
 /// in characters. Sent only when

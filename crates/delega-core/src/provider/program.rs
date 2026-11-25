@@ -7,6 +7,7 @@ use crate::contract::request::Provider;
 
 use super::limits::VERSION_CHARS;
 use super::options::ProviderOptions;
+use super::redact::Redactor;
 use super::refusal::{Refusal, clip};
 
 /// The environment variable that names the executable of a provider.
@@ -133,9 +134,22 @@ pub(super) fn find_tool(name: &str, path: Option<&std::ffi::OsStr>, cwd: &Path) 
         .find(|candidate| is_executable(candidate))
 }
 
-/// The first line of `--version` output, cut to a bound.
-pub(super) fn version_text(stdout: &str) -> Option<String> {
-    let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+/// The first non-blank line of `--version` output, exactly as the provider
+/// printed it, surrounding whitespace included. The hook version gate parses
+/// this line; what is stored or shown is [`version_text`].
+pub(super) fn version_line(stdout: &str) -> Option<String> {
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
+    Some(line.to_string())
+}
+
+/// The version as a result or report holds it: the whole `--version` output
+/// redacted, then its first non-blank line, trimmed and cut to
+/// [`VERSION_CHARS`] with `...` added when cut. Redacting the whole output
+/// first means a configured value is matched as printed, also one that spans a
+/// line break.
+pub(super) fn version_text(stdout: &str, redactor: &Redactor) -> Option<String> {
+    let redacted = redactor.apply(stdout);
+    let line = redacted.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(clip(line, VERSION_CHARS))
 }
 

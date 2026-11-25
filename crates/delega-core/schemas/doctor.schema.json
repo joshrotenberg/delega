@@ -635,7 +635,7 @@
           ]
         },
         "version": {
-          "description": "The first line of `--version` output, or null when there was none.",
+          "description": "The first non-blank line of the redacted `--version` output, trimmed\nand cut to 100 characters with `...` appended when cut, or null when\nthere was none.",
           "type": [
             "string",
             "null"

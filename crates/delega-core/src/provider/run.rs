@@ -437,11 +437,16 @@ async fn execute_steps(
     if budget().is_zero() {
         return unstarted(&facts, cleanup, notes, Unstarted::TimedOut);
     }
-    let version = match version_report.ending {
-        Ending::Exited { code: 0 } => program::version_text(&version_report.stdout.text()),
+    let stdout = match version_report.ending {
+        Ending::Exited { code: 0 } => Some(version_report.stdout.text()),
         _ => None,
     };
-    facts.provenance.provider_version = version.clone();
+    // The version is parsed from the line as the provider printed it and
+    // stored with credentials removed, like other provider text.
+    let version = stdout.as_deref().and_then(program::version_line);
+    facts.provenance.provider_version = stdout
+        .as_deref()
+        .and_then(|s| program::version_text(s, &plan.redactor));
     if plan.needs_hook_version {
         let supported = version
             .as_deref()
@@ -548,17 +553,19 @@ async fn execute_steps(
     }
 
     let mut parsed = match plan.provider {
-        Provider::Claude => claude::parse(&report.stdout.bytes),
+        Provider::Claude => claude::parse_with(&report.stdout.bytes, &plan.redactor),
         Provider::Codex => codex::parse(&report.stdout.bytes),
     };
     if plan.asks.is_some() {
         for denial in &mut parsed.denied {
-            let tool = denial.request.split([':', ' ']).next().unwrap_or_default();
-            denial.request = if super::claude::BUILTINS.contains(&tool) {
+            let tool = denial.tool.split([':', ' ']).next().unwrap_or_default();
+            denial.tool = if super::claude::BUILTINS.contains(&tool) {
                 tool.to_owned()
             } else {
                 "unknown tool".to_owned()
             };
+            denial.target = None;
+            denial.reason = None;
         }
     }
     let cleanup = merge_cleanup(cleanup, report.cleanup.clone());

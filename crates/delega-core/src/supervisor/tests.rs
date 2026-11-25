@@ -271,6 +271,7 @@ fn the_activity_ring_drops_the_oldest_and_counts_them() {
             ProgressEvent::Provider {
                 kind: "assistant".to_string(),
                 summary: format!("n={n}"),
+                system: false,
             },
             &cursor,
         );
@@ -306,6 +307,7 @@ fn no_activity_entry_appears_at_or_below_a_cursor_already_returned() {
                         ProgressEvent::Provider {
                             kind: "assistant".to_string(),
                             summary: String::new(),
+                            system: false,
                         },
                         &cursor,
                     );
@@ -1354,6 +1356,7 @@ fn provider_event(kind: &str, summary: &str) -> ProgressEvent {
     ProgressEvent::Provider {
         kind: kind.to_string(),
         summary: summary.to_string(),
+        system: kind == "system",
     }
 }
 
@@ -1419,6 +1422,28 @@ fn a_reader_with_a_cursor_from_before_or_during_a_run_of_system_events_gets_the_
         entries.last().map(|e| e.cursor),
         Some(cursor.load(Ordering::SeqCst)),
         "the coalesced entry carries the newest cursor"
+    );
+}
+
+#[test]
+fn an_event_shown_as_system_whose_type_was_not_exactly_system_is_not_merged() {
+    let activity = Activity::default();
+    let cursor = AtomicU64::new(0);
+    activity.record(provider_event("system", ""), &cursor);
+    // A provider type of " system " is shown as `system` but is another type.
+    activity.record(
+        ProgressEvent::Provider {
+            kind: "system".to_string(),
+            summary: String::new(),
+            system: false,
+        },
+        &cursor,
+    );
+    activity.record(provider_event("system", ""), &cursor);
+    let pair = |k: &str, s: &str| (k.to_string(), s.to_string());
+    assert_eq!(
+        kinds_and_summaries(&activity),
+        vec![pair("system", ""), pair("system", ""), pair("system", "")]
     );
 }
 

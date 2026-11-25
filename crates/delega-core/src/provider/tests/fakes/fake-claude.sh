@@ -40,6 +40,14 @@
 # modelUsage the session's totals through this run, which are the run's figures
 # times the turn.
 #
+# Modes about progress:
+#   odd-kinds        a successful run that first writes an event whose type is
+#                    "leak=" and an sk-ant- key, and one whose type is 500 "k"
+#   odd-denial       a successful run with one denial whose tool name is
+#                    "Tool", an sk-ant- key and 150 "x", whose path is
+#                    /tmp/denied-path, and whose tool result gives a reason
+#                    holding the key
+#
 # Modes about sessions:
 #   unknown-session  what Claude Code 2.1.329 does when --resume names a
 #                    session that does not exist: one `result` event with
@@ -489,6 +497,19 @@ case "$mode" in
     sleep 0.3
     rm -f "$trace_dir/run.$$"
     success "\"answered $mode sid=$sid\"" '[]'
+    ;;
+  odd-denial)
+    init
+    key=sk-ant-abcdefghijklmnopqrstuvwx
+    tool="Tool $key $(head -c 150 /dev/zero | tr '\0' x)"
+    emit "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"is_error\":true,\"content\":\"Denied with $key here. More detail.\"}]}}"
+    success '"done"' "[{\"tool_name\":\"$tool\",\"tool_use_id\":\"t1\",\"tool_input\":{\"file_path\":\"/tmp/denied-path\"}}]"
+    ;;
+  odd-kinds)
+    init
+    emit '{"type":"leak=sk-ant-abcdefghijklmnopqrstuvwx"}'
+    emit "{\"type\":\"$(head -c 500 /dev/zero | tr '\0' k)\"}"
+    success '"fake final answer"' '[]'
     ;;
   secret-message)
     # Agent messages that hold a secret and an oversize text.

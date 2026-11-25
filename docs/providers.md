@@ -51,10 +51,13 @@ requiring the command guard can report `unsupported_provider_version`.
    (each must exist). Look up the executable. For Claude Code, read the user's
    deny rules and check for exclusive managed MCP. Any refusal at this stage
    leaves the provider unstarted.
-2. Run `<executable> --version` (5 s). The first line, up to 100 characters, is
-   `provenance.provider_version`. For Claude Code with `permissions.commands`
-   granted, a version below 2.1.325 or an unreadable one is `refused` with kind
-   `unsupported_provider_version`, or `failed` with that kind when the probe's
+2. Run `<executable> --version` (5 s). The output is redacted (see
+   [Text from the provider](#text-from-the-provider)), and its first
+   non-blank line, trimmed and cut to 100 characters with `...` appended when
+   cut, is `provenance.provider_version`; doctor reports the same text. The
+   version gate reads the first non-blank line as printed. For Claude Code
+   with `permissions.commands` granted, a version below 2.1.325 or an
+   unreadable one is `refused` with kind `unsupported_provider_version`, or `failed` with that kind when the probe's
    processes could not be confirmed stopped.
 3. Codex only: run `<executable> --disable ... mcp list --json` (10 s) and build
    an override that disables every server it lists. A failure, invalid JSON or a
@@ -77,7 +80,7 @@ activity and partial answers.
 | Event | Contents |
 | --- | --- |
 | `Started` | The provider is about to start. |
-| `Provider { kind, summary }` | Provider event type and a short summary, such as message length, tool name, item type and status, or up to 80 characters of redacted error text. |
+| `Provider { kind, summary, system }` | Provider event type, redacted and cut to 40 characters; a short summary, such as message length, tool name, item type and status, or up to 80 characters of redacted error text; and `system`, true only when the provider's type was exactly `system` (the supervisor merges runs of those). A caller that only shows text can match `Provider { kind, summary, .. }`. |
 | `Message { text }` | With `progress_text` enabled, redacted agent text up to 4,000 characters after its `Provider` event. Off by default and in `delega run`; enabled by the supervisor. |
 | `Denied { request }` | An entry from `permissions.denied`, including command or path, reported after provider exit. |
 | `Dropped { chunks }` | Number of output chunks missed by the tap, also in `provider_notes`. |
@@ -172,18 +175,27 @@ See [Claude Code stream](#stream) and [Codex stream](#stream-1).
 
 ### Text from the provider
 
-Provider errors and progress text replace common credential shapes and passed
-values of provider or [secret-looking variables](#environment-policy) with
-`[redacted]`. Values shorter than 6 characters are excluded from value
-matching. Recognised shapes include API keys, forge and Slack tokens, AWS
-access key IDs, JWTs, Bearer tokens and private key blocks. Answer text and
-denied commands or paths are shown as provided, subject to capture limits.
+The redactor replaces two things with `[redacted]`: the values of passed
+provider or [secret-looking variables](#environment-policy), when 6 characters
+or longer, and strings with a common credential shape (API keys, forge and
+Slack tokens, AWS access key IDs, JWTs, Bearer tokens and private key blocks).
+It finds them as they appear in the text it is given, and runs on provider
+errors, progress kinds and text, the tool name and reason of a denied request,
+and the `--version` output before they are cut; kinds, summaries and tool names
+are redacted again after their whitespace is joined to one line, and a denial
+reason is redacted whole before its first sentence or line is taken. It is not
+a defense against a provider that encodes, splits or otherwise rewrites a
+value: such a value is shown as written. Answer text and denied commands or
+paths are not redacted; they are shown as provided, subject to capture limits.
 
 | Limit | What you see |
 | --- | --- |
 | 64 KiB | Standard error captured from the end. |
 | 8 KiB, then 300 characters | Redacted standard error excerpt from the end, joined to one line. A character cut adds `... `. If capture was cut and no excerpt remains, the error says so. |
 | 500 characters | Redacted provider error message from the start. |
+| 100 characters | First non-blank line of the redacted `--version` output, trimmed, from the start. A cut adds `...`. |
+| 40 characters | Redacted provider event type in a progress kind, joined to one line, from the start. A cut adds `...`. |
+| 100, 500 and 300 characters | Redacted tool name (joined to one line), unredacted command or path, and redacted reason of a denied request, each from the start. A cut adds `...`. |
 
 Credential matching is heuristic. A credential cut by the capture limit with
 more than 8 KiB remaining in capture, or a private key with overlapping

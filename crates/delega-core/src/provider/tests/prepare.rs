@@ -230,6 +230,94 @@ async fn claude_without_commands_does_not_need_a_known_version() {
     rig.assert_nothing_left().await;
 }
 
+async fn a_credential_in_the_version_line_is_redacted_in_the_result(provider: Provider) {
+    let rig = Rig::new();
+    let mut options = rig.options(provider);
+    options.env_set.push((
+        "FAKE_VERSION".into(),
+        "9.9.9 key sk-ant-abcdefghijklmnopqrstuvwx".into(),
+    ));
+    let result = run_checked(rig.request(provider, "success"), options).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert_eq!(
+        result.provenance.provider_version.as_deref(),
+        Some("9.9.9 key [redacted]")
+    );
+    rig.assert_nothing_left().await;
+}
+both!(
+    version_line_credential_is_redacted,
+    a_credential_in_the_version_line_is_redacted_in_the_result
+);
+
+async fn a_configured_value_with_outer_whitespace_is_redacted_in_the_version(provider: Provider) {
+    let owned = match provider {
+        Provider::Claude => "ANTHROPIC_API_KEY",
+        Provider::Codex => "OPENAI_API_KEY",
+    };
+    // The value begins and ends with a space, so it is found only in the line
+    // as printed, before any trimming.
+    let value = " fake-key-value-1 ";
+    for (printed, stored) in [
+        (format!("9.9.9{value}"), "9.9.9[redacted]"),
+        (format!("{value}9.9.9"), "[redacted]9.9.9"),
+    ] {
+        let rig = Rig::new();
+        let mut options = rig.options(provider);
+        options.env_set.push((owned.into(), value.into()));
+        options
+            .env_set
+            .push(("FAKE_VERSION".into(), printed.clone()));
+        let result = run_checked(rig.request(provider, "success"), options).await;
+        assert_eq!(
+            result.provenance.provider_version.as_deref(),
+            Some(stored),
+            "{printed:?}"
+        );
+        rig.assert_nothing_left().await;
+    }
+}
+both!(
+    version_line_outer_whitespace_value_is_redacted,
+    a_configured_value_with_outer_whitespace_is_redacted_in_the_version
+);
+
+#[tokio::test]
+async fn a_version_line_is_redacted_before_it_is_cut_so_no_part_of_a_key_is_kept() {
+    let rig = Rig::new();
+    let mut options = rig.options(Provider::Claude);
+    // The key starts 90 characters in and runs across the 100-character cut.
+    let line = format!("2.1.400 {} sk-ant-abcdefghijklmnopqrstuvwx", "a".repeat(81));
+    options.env_set.push(("FAKE_VERSION".into(), line));
+    let result = run_checked(rig.request(Provider::Claude, "success"), options).await;
+    let stored = result.provenance.provider_version.expect("version");
+    assert!(!stored.contains("sk-ant"), "{stored}");
+    assert!(!stored.contains("abcdefghij"), "{stored}");
+    assert!(stored.ends_with("[redacted]"), "{stored}");
+    rig.assert_nothing_left().await;
+}
+
+#[tokio::test]
+async fn the_hook_version_gate_reads_the_version_line_before_redaction() {
+    // An environment value equal to the version text is removed from the
+    // stored line; the gate must still read the version the provider printed.
+    let rig = Rig::new();
+    let mut request = rig.request(Provider::Claude, "success");
+    request.permissions.commands = vec!["cargo test".into()];
+    let mut options = rig.options(Provider::Claude);
+    options.hook = Some(hook());
+    options
+        .env_set
+        .push(("MY_SERVICE_API_TOKEN".into(), "2.1.400".into()));
+    let result = run_checked(request, options).await;
+    assert_eq!(result.outcome, Outcome::Completed, "{result:#?}");
+    assert_eq!(
+        result.provenance.provider_version.as_deref(),
+        Some("[redacted] (Claude Code)")
+    );
+    rig.assert_nothing_left().await;
+}
+
 #[tokio::test]
 async fn claude_command_with_a_wildcard_is_refused() {
     let rig = Rig::new();

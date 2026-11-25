@@ -268,9 +268,11 @@ pub(super) fn settle(
             s.max_output_bytes
         ));
     }
-    let ctx = s
-        .facts
-        .run_context(cleanup, timing(s.facts, report), parsed.denied.clone());
+    let ctx = s.facts.run_context(
+        cleanup,
+        timing(s.facts, report),
+        parsed.denied.iter().map(|d| d.shown(s.redactor)).collect(),
+    );
     let partial = parsed.partial_text();
     let had_result = matches!(parsed.terminal, Terminal::Success);
 
